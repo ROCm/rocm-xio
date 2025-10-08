@@ -1,0 +1,16 @@
+spellchecker: aspell
+matrix:
+- name: markdown
+  aspell:
+    lang: en
+  sources:
+  - '**/*.md'
+  pipeline:
+  - pyspelling.filters.markdown
+  dictionary:
+    wordlists:
+    - .wordlist.txt
+    output: wordlist.dic
+    encoding: utf-8
+  default_encoding: utf-8
+  expect_match: true
