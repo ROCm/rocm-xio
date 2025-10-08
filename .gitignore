@@ -3,3 +3,6 @@
 
 # Python venv directories
 .venv/
+
+# cmake build directories
+build/
