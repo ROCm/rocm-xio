@@ -1,0 +1,29 @@
+name: build-check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**.hip'
+
+jobs:
+  build-check:
+    name: build-check for rocm-axiio
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code.
+      uses: actions/checkout@v5.0.0
+    - name: clang-format lint
+      uses: DoozyX/clang-format-lint-action@v0.18.2
+      with:
+        source: 'endpoints'
+        extensions: 'c,h,cpp,hip'
+        clangFormatVersion: 18
+        style: file
+    - name: Perform a build of the code
+      uses: threeal/cmake-action@v2.1.0
+      with:
+        source-dir: endpoints
+        build-dir: endpoints/build
