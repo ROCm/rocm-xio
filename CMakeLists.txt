@@ -43,10 +43,20 @@ if(NOT "${GPU_RUNTIME}" IN_LIST GPU_RUNTIMES)
 endif()
 
 # Find all the .hip files
-file(GLOB HIP_SRC_FILES test-ep/*.hip)
+file(GLOB_RECURSE HIP_SRC_FILES endpoints/*.hip)
 message(STATUS "The value of HIP_SRC_FILES is: ${HIP_SRC_FILES}")
 
-# Create an object library for now
-add_library(${CMAKE_PROJECT_NAME}-objects OBJECT
-  ${HIP_SRC_FILES}
-)
+add_library(${CMAKE_PROJECT_NAME}
+  SHARED
+  ${HIP_SRC_FILES})
+
+target_include_directories(${CMAKE_PROJECT_NAME}
+  PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+install(TARGETS
+  ${CMAKE_PROJECT_NAME}
+  LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib
+  ARCHIVE DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/lib
+  PUBLIC_HEADER DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_subdirectory(tester)

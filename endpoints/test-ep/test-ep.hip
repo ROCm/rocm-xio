@@ -4,11 +4,7 @@
  */
 
 #include <hip/hip_runtime.h>
-
-#define SQE_MAGIC 0xde
-
-typedef long long sqeType;
-typedef long cqeType;
+#include "test-ep.h"
 
 __host__ __device__ sqeType sqeRead(sqeType *sqeAddress) {
 
