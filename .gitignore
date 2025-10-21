@@ -3,3 +3,11 @@
 
 # Python venv directories
 .venv/
+
+# cmake build directories
+build/
+
+# Artifact folders
+include/
+lib/
+bin/
