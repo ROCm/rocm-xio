@@ -6,3 +6,8 @@
 
 # cmake build directories
 build/
+
+# Artifact folders
+include/
+lib/
+bin/

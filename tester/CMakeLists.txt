@@ -47,10 +47,21 @@ file(GLOB HIP_SRC_FILES src/*.hip)
 file(GLOB SRC_FILES src/*.cpp)
 
 # Create a axiio-tester executable
-add_executable(${CMAKE_PROJECT_NAME}
+add_executable(${PROJECT_NAME}
   ${SRC_FILES}
   ${HIP_SRC_FILES}
 )
+
+# Add librocm-axxio library
+find_library(LIBROCM_AXIIO
+  rocm-axiio
+  ../lib)
+if (LIBROCM_AXIIO)
+    message(STATUS "Found librocm-axiio: ${LIBROCM_AXIIO}")
+else()
+    message(FATAL_ERROR "librocm-axiio not found!")
+endif()
+include_directories(../include)
 
 # Find the libraries and packages we need
 find_package(CLI11 2.4.1 REQUIRED)
@@ -62,3 +73,6 @@ else()
     message(FATAL_ERROR "CLI11 not found!")
 endif()
 
+install(TARGETS
+  ${PROJECT_NAME} DESTINATION
+  ${CMAKE_SOURCE_DIR}/bin)
