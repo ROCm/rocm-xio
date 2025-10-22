@@ -10,41 +10,45 @@
 
 #include "axiio.h"
 
-static void accelFunction(int *sq, int *cq) {
+__global__ void accelKernel(unsigned sqeIterations,
+                            sqeType *sqeAddr,
+                            cqeType *cqeAddr)
+{
+  testEndpoint(sqeIterations,
+               sqeAddr,
+               cqeAddr);
+}
+
+static void accelFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
+
   std::cout << "Hello from accelFunction!" << std::endl;
 
-  time_t current_time;
-  int cq_local;
+  accelKernel<<<1, 1, 0, 0>>> (1, sqeAddr, cqeAddr);
 
-  current_time = time(NULL);
-  *sq = (int)current_time;
-  while (cq_local != *sq)
-    cq_local = *cq;
   std::cout << "Hello from accelFunction!" << std::endl;
 }
 
-static void epFunction(int *sq, int *cq) {
+static void epFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
   std::cout << "Hello from epFunction!" << std::endl;
 
-  int sq_local = *sq;
-  *cq = sq_local;
 }
 
 static int run() {
 
-  int *sq, *cq;
+  sqeType *sqEntry;
+  cqeType *cqEntry;
   unsigned int flags = 0;
-  HIP_CHECK(hipHostMalloc(&sq, sizeof(int), flags));
-  HIP_CHECK(hipHostMalloc(&cq, sizeof(int), flags));
+  HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
+  HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
 
-  std::thread accelThread(accelFunction, sq, cq);
-  std::thread epThread(epFunction, sq, cq);
+  std::thread accelThread(accelFunction, sqEntry, cqEntry);
+  std::thread epThread(epFunction, sqEntry, cqEntry);
 
   accelThread.join();
   epThread.join();
 
-  HIP_CHECK(hipFreeHost(sq));
-  HIP_CHECK(hipFreeHost(cq));
+  HIP_CHECK(hipFreeHost(sqEntry));
+  HIP_CHECK(hipFreeHost(cqEntry));
 
   return 0;
 }
