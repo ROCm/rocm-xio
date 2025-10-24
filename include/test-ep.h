@@ -11,4 +11,8 @@
 typedef long long sqeType;
 typedef long cqeType;
 
+__host__ __device__ void testEndpoint(unsigned sqeIterations,
+				      sqeType *sqeAddr,
+				      cqeType *cqeAddr);
+
 #endif //AXIIO_TEST_ENDPOINT_H
