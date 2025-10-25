@@ -84,7 +84,7 @@ __host__ __device__ void testEndpoint(unsigned sqeIterations,
 	sqeType sqeLocal = 0xbeefdead;
 	cqeType cqeLocal;
 
-	while (sqeLocal != 0xF0F0F0F0)
+	while (sqeLocal != 0xf0f0f0f0)
 	{
 		sqeLocal = sqePoll(sqeLocal, sqeAddr);
 		cqeLocal = cqeGenFromSqe(sqeLocal);
@@ -92,9 +92,15 @@ __host__ __device__ void testEndpoint(unsigned sqeIterations,
 	}
 }
 
+__host__ unsigned long long int wall_clock64() {
+	return 0;
+}
+
 __host__ __device__ void driveTestEndpoint(unsigned sqeIterations,
 				      sqeType *sqeAddr,
-				      cqeType *cqeAddr) {
+					  cqeType *cqeAddr,
+					  unsigned long long int *start_time,
+					  unsigned long long int *end_time) {
 	
 	sqeType sqeLocal = 0xbeefdead;
 	cqeType cqeData;
@@ -102,10 +108,12 @@ __host__ __device__ void driveTestEndpoint(unsigned sqeIterations,
 
 	while (sqeCount < sqeIterations)
 	{
+		start_time[sqeCount] = wall_clock64();
 		sqeWrite(sqeLocal, sqeAddr);
 		cqeData = cqePoll(cqeData, cqeAddr);
+		end_time[sqeCount] = wall_clock64();
 		sqeCount++;
 		sqeLocal = 0xbeefdead + sqeCount;
 	}
-	sqeWrite(0xF0F0F0F0, sqeAddr);
+	sqeWrite(0xf0f0f0f0, sqeAddr);
 }

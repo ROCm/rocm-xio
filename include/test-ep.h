@@ -6,17 +6,21 @@
 #ifndef AXIIO_TEST_ENDPOINT_H
 #define AXIIO_TEST_ENDPOINT_H
 
+#include <hip/hip_runtime.h>
+
 #define TEST_EP_SQE_MAGIC 0xde
 
 typedef long long sqeType;
 typedef long cqeType;
 
 __host__ __device__ void testEndpoint(unsigned sqeIterations,
-				      sqeType *sqeAddr,
-				      cqeType *cqeAddr);
+				    sqeType *sqeAddr,
+				    cqeType *cqeAddr);
 
 __host__ __device__ void driveTestEndpoint(unsigned sqeIterations,
 									  sqeType *sqeAddr,
-									  cqeType *cqeAddr);
+									  cqeType *cqeAddr, 
+									  unsigned long long int *start_time,
+									  unsigned long long int *end_time);
 
 #endif //AXIIO_TEST_ENDPOINT_H
