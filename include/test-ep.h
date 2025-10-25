@@ -15,4 +15,8 @@ __host__ __device__ void testEndpoint(unsigned sqeIterations,
 				      sqeType *sqeAddr,
 				      cqeType *cqeAddr);
 
+__host__ __device__ void driveTestEndpoint(unsigned sqeIterations,
+									  sqeType *sqeAddr,
+									  cqeType *cqeAddr);
+
 #endif //AXIIO_TEST_ENDPOINT_H

@@ -10,7 +10,7 @@
 
 #include "axiio.h"
 
-__global__ void accelKernel(unsigned sqeIterations,
+__global__ void epKernel(unsigned sqeIterations,
                             sqeType *sqeAddr,
                             cqeType *cqeAddr)
 {
@@ -18,19 +18,26 @@ __global__ void accelKernel(unsigned sqeIterations,
                sqeAddr,
                cqeAddr);
 }
+__global__ void accelKernel(unsigned sqeIterations,
+                            sqeType *sqeAddr,
+                            cqeType *cqeAddr)
+{
+  driveTestEndpoint(sqeIterations,
+               sqeAddr,
+               cqeAddr);
+}
 
 static void accelFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
 
   std::cout << "Hello from accelFunction!" << std::endl;
-
   accelKernel<<<1, 1, 0, 0>>> (1, sqeAddr, cqeAddr);
-
-  std::cout << "Hello from accelFunction!" << std::endl;
+  std::cout << "Bye from accelFunction!" << std::endl;
 }
 
 static void epFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
   std::cout << "Hello from epFunction!" << std::endl;
-
+  epKernel<<<1, 1, 0, 0>>>(1, sqeAddr, cqeAddr);
+  std::cout << "Bye from epFunction!" << std::endl;
 }
 
 static int run() {
