@@ -8,6 +8,11 @@
 build/
 
 # Artifact folders
-include/
 lib/
 bin/
+
+#VS Code directory
+.vscode
+
+#rocprof directory
+stebates-*/
