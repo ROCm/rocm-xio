@@ -10,14 +10,14 @@
 
 #include "axiio.h"
 
-__global__ void epKernel(unsigned sqeIterations,
+/*__global__ void epKernel(unsigned sqeIterations,
                             sqeType *sqeAddr,
                             cqeType *cqeAddr)
 {
   testEndpoint(sqeIterations,
                sqeAddr,
                cqeAddr);
-}
+}*/
 
 __global__ void accelKernel(unsigned sqeIterations,
                             sqeType *sqeAddr,
@@ -31,7 +31,7 @@ __global__ void accelKernel(unsigned sqeIterations,
                start_time, end_time);
 }
 
-static void accelFunction(unsigned sqeIterations,
+static void accelFunction(hipStream_t stream, unsigned sqeIterations,
   sqeType *sqeAddr, cqeType *cqeAddr,
                           unsigned long long int *start_time,
                           unsigned long long int *end_time) {
@@ -42,9 +42,10 @@ static void accelFunction(unsigned sqeIterations,
   std::cout << "Bye from accelFunction!" << std::endl;
 }
 
-static void epFunction(unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
+static void epFunction(hipStream_t stream, unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
   std::cout << "Hello from epFunction!" << std::endl;
-  epKernel<<<1, 1, 0, 0>>>(sqeIterations, sqeAddr, cqeAddr);
+  //epKernel<<<1, 1, 0, stream>>>(sqeIterations, sqeAddr, cqeAddr);
+  testEndpoint(sqeIterations, sqeAddr, cqeAddr);
   std::cout << "Bye from epFunction!" << std::endl;
 }
 
@@ -54,31 +55,36 @@ static int run(unsigned iters) {
   cqeType *cqEntry;
   unsigned long long int *start_time, *hstart_time;
   unsigned long long int *end_time, *hend_time;
-  unsigned int flags = 0;
+  unsigned int flags = hipHostAllocUncached;
 
-  HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
-  HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
+  hipStream_t stream1, stream2;
+  HIP_CHECK(hipStreamCreate(&stream1));
+  HIP_CHECK(hipStreamCreate(&stream2));
+
+  HIP_CHECK(hipHostAlloc(&sqEntry, sizeof(sqeType), flags));
+  HIP_CHECK(hipHostAlloc(&cqEntry, sizeof(cqeType), flags));
   // allocate device timers
-  HIP_CHECK(hipMalloc(&start_time, iters * sizeof(long long int)));
-  HIP_CHECK(hipMalloc(&end_time, iters * sizeof(long long int)));
+  HIP_CHECK(hipMalloc(&start_time, iters * sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&end_time, iters * sizeof(unsigned long long int)));
 
-  std::thread accelThread(accelFunction, iters, sqEntry, cqEntry,
+  std::thread accelThread(accelFunction, stream1, iters, sqEntry, cqEntry,
                           start_time, end_time);
-  std::thread epThread(epFunction, iters, sqEntry, cqEntry);
+  std::thread epThread(epFunction, stream2, iters, sqEntry, cqEntry);
 
   accelThread.join();
   epThread.join();
 
-  //HIP_CHECK(hipDeviceSynchronize());
-  hstart_time = (unsigned long long int *)malloc(iters * sizeof(long long int));
-  hend_time = (unsigned long long int *)malloc(iters * sizeof(long long int));
+  HIP_CHECK(hipDeviceSynchronize());
+  hstart_time = (unsigned long long int *)malloc(iters * sizeof(unsigned long long int));
+  hend_time = (unsigned long long int *)malloc(iters * sizeof(unsigned long long int));
 
-  HIP_CHECK(hipMemcpy(hstart_time, start_time, iters * sizeof(long long int), hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(hend_time, end_time, iters * sizeof(long long int), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(hstart_time, start_time, iters * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(hend_time, end_time, iters * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
 
   for (unsigned i = 0; i < iters; i++) {
     std::cout << "Iteration " << i << ": Start time: " << hstart_time[i]
-              << ", End time: " << hend_time[i] << std::endl;
+              << ", End time: " << hend_time[i] << ", Duration: " 
+              << hend_time[i]-hstart_time[i] << std::endl;
   }
 
   free(hstart_time);
@@ -96,17 +102,50 @@ int main(int argc, char **argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
   argv = app.ensure_utf8(argv);
 
-  std::string endpoint;
   unsigned nIterations;
-  app.add_option("-e, --endpoint", endpoint,
-                 "The endpoint to be tested.");
   app.add_option("-n, --iterations", nIterations,
                  "Number of iterations to run the test.")
-      ->default_val(1000)
+      ->default_val(128)
       ->check(CLI::PositiveNumber);
   CLI11_PARSE(app, argc, argv);
 
+  /*
+  * Get information on all the GPUs in the system and the specific GPU(s) 
+  * chosen to run tests on.
+  */
+  int deviceCount;
+  int wallClkRate = 0; //in kilohertz
+  HIP_CHECK(hipGetDeviceCount(&deviceCount));
+  std::cout << "Number of devices: " << deviceCount << std::endl;
+
+  for (int deviceId = 0; deviceId < deviceCount; ++deviceId) {
+        hipDeviceProp_t deviceProp;
+        HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
+        std::cout << "Device " << deviceId+1 << ":" << std::endl << " Properties:" << std::endl;
+        std::cout << "  Name: " << deviceProp.name << std::endl;
+        std::cout << "  Total Global Memory: " << deviceProp.totalGlobalMem / (1024 * 1024) << " MiB" << std::endl;
+        std::cout << "  Shared Memory per Block: " << deviceProp.sharedMemPerBlock / 1024 << " KiB" << std::endl;
+        std::cout << "  Registers per Block: " << deviceProp.regsPerBlock << std::endl;
+        std::cout << "  Warp Size: " << deviceProp.warpSize << std::endl;
+        std::cout << "  Max Threads per Block: " << deviceProp.maxThreadsPerBlock << std::endl;
+        std::cout << "  Max Threads per Multiprocessor: " << deviceProp.maxThreadsPerMultiProcessor << std::endl;
+        std::cout << "  Number of Multiprocessors: " << deviceProp.multiProcessorCount << std::endl;
+        std::cout << "  Max Threads Dimensions: ["
+                << deviceProp.maxThreadsDim[0] << ", "
+                << deviceProp.maxThreadsDim[1] << ", "
+                << deviceProp.maxThreadsDim[2] << "]" << std::endl;
+        std::cout << "  Max Grid Size: ["
+                << deviceProp.maxGridSize[0] << ", "
+                << deviceProp.maxGridSize[1] << ", "
+                << deviceProp.maxGridSize[2] << "]" << std::endl;
+        std::cout << std::endl;
+        HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
+        hipDeviceAttributeWallClockRate,
+        deviceId));
+        std::cout << "  Wall Clock Freq: " << wallClkRate << "KHz" << std::endl;
+    }
+
   run(nIterations);
 
-  return 0;
+  return EXIT_SUCCESS;
 }

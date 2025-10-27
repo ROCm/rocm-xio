@@ -26,3 +26,13 @@ ar rcsD lib/librocm-axiio.a test-ep.o
 hipcc axiio-tester.o lib/librocm-axiio.a -o bin/axiio-tester -fgpu-rdc
 unbuffer /opt/rocm-7.0.2/lib/llvm/bin/llvm-objdump --demangle --disassemble-all lib/librocm-axiio.a | less -R
 ```
+
+## Additional Useful Information
+
+On MI300X, the host allocation should be always `UNCACHED`. I think a 
+`__threadfence()` should work for MI300X.
+ 
+I learned last week the hard way again that you do not have fine-grain memory
+on Radeon GPUs unless you set `HSA_FORCE_FINE_GRAIN_PCIE=1`.
+
+ 

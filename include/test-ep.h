@@ -8,16 +8,14 @@
 
 #include <hip/hip_runtime.h>
 
-#define TEST_EP_SQE_MAGIC 0xde
-
 typedef long long sqeType;
 typedef long cqeType;
 
-__host__ __device__ void testEndpoint(unsigned sqeIterations,
+__host__ void testEndpoint(unsigned sqeIterations,
 				    sqeType *sqeAddr,
 				    cqeType *cqeAddr);
 
-__host__ __device__ void driveTestEndpoint(unsigned sqeIterations,
+__device__ void driveTestEndpoint(unsigned sqeIterations,
 									  sqeType *sqeAddr,
 									  cqeType *cqeAddr, 
 									  unsigned long long int *start_time,
