@@ -84,7 +84,7 @@ __host__ __device__ sqeType cqeGenFromSqe(sqeType sqeData) {
 	return cqeNew;
 }
 
-__host__  void emulateTestEndpoint(unsigned sqeIterations,
+__device__ __host__  void emulateTestEndpoint(unsigned sqeIterations,
 				      sqeType *sqeAddr,
 				      cqeType *cqeAddr) {
 	
