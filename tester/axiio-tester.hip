@@ -45,7 +45,7 @@ static void accelFunction(hipStream_t stream, unsigned sqeIterations,
 static void epFunction(hipStream_t stream, unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
   std::cout << "Hello from epFunction!" << std::endl;
   //epKernel<<<1, 1, 0, stream>>>(sqeIterations, sqeAddr, cqeAddr);
-  testEndpoint(sqeIterations, sqeAddr, cqeAddr);
+  emulateTestEndpoint(sqeIterations, sqeAddr, cqeAddr);
   std::cout << "Bye from epFunction!" << std::endl;
 }
 
