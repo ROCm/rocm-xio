@@ -11,7 +11,7 @@
 typedef long long sqeType;
 typedef long cqeType;
 
-__host__ __device__ void emulateTestEndpoint(unsigned sqeIterations,
+__host__  void emulateTestEndpoint(unsigned sqeIterations,
 				    sqeType *sqeAddr,
 				    cqeType *cqeAddr);
 

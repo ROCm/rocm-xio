@@ -1,48 +1,67 @@
-# Makefile for building librocm-axiio with static linking
+# Makefile for building librocm-axiio.a
 
+  # The top-level target
 TARGET := rocm-axiio
-LIBTARGET := lib$(TARGET).a
-TESTER := axiio-tester
 
+  # Define the recursive wildcard function
+  # $1: list of directories to search in
+  # $2: list of patterns to match
+rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) \
+	$(filter $(subst *,%,$2),$d))
+
+  # Directories
 INCLUDE_DIR := include
 BIN_DIR := bin
 LIB_DIR := lib
 
-TESTER := $(BIN_DIR)/$(TESTER)
-LIBTARGET := $(LIB_DIR)/$(LIBTARGET)	
+  # Build targets
+LIBTARGET := ${LIB_DIR}/lib$(TARGET).a
+TESTER := ${BIN_DIR}/axiio-tester
+default: $(LIBTARGET)
+all: $(LIBTARGET) $(TESTER)
 
-all: $(TESTER) $(LIBTARGET)
+  # HIP variables
+HIP_INCLUDE_DIR  ?= /opt/rocm/include
+HIPCXX ?= /opt/rocm/bin/hipcc
 
-# HIP variables
-ROCM_INSTALL_DIR := /opt/rocm
-HIP_INCLUDE_DIR  := $(ROCM_INSTALL_DIR)/include
-HIPCXX ?= $(ROCM_INSTALL_DIR)/bin/hipcc
+  # Tool variables
 AR ?= ar
+OBJDUMP ?= /opt/rocm/lib/llvm/bin/llvm-objdump
+CLANGXX ?= /opt/rocm/llvm/bin/clang++
 
-# Include directories
+  # Include directories
 INCLUDE_DIR := include
 
-# Common variables and flags
-CXX_STD   := c++17
-CXXFLAGS  ?= -fgpu-rdc -Wall -Wextra -I$(INCLUDE_DIR)
-CXXFLAGS += -Wno-unused-parameter
+  # Library header files
+LIB_HEADERS := $(call rwildcard, $(INCLUDE_DIR), *.h)
+LIB_SOURCES := $(call rwildcard, endpoints, *.hip)
+
+# CXX variables and flags
+CXX_STD := c++17
+override CXXFLAGS  += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
 
 $(LIBTARGET): $(LIB_DIR)/$(TARGET).o
-	$(AR) rcsD $@ $^
+	$(AR) rcsD $@ $<
 
 $(TESTER): $(TESTER).o $(LIBTARGET)
-	$(HIPCXX) $(CXXFLAGS) -o $@ $^
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^
 
-$(TESTER).o: tester/axiio-tester.hip
-	$(HIPCXX) $(CXXFLAGS) -c -o $@ $^
+$(TESTER).o: tester/axiio-tester.hip $(LIB_HEADERS)
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
 
-$(LIB_DIR)/$(TARGET).o: endpoints/test-ep/test-ep.hip
-	$(HIPCXX) $(CXXFLAGS) -c -o $@ $^
+$(LIB_DIR)/$(TARGET).o: $(LIB_SOURCES) $(LIB_HEADERS)
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
 
-asm:
-	unbuffer /opt/rocm-7.0.2/lib/llvm/bin/llvm-objdump --demangle --disassemble-all lib/librocm-axiio.a | less -R
+asm: $(LIBTARGET)
+	unbuffer $(OBJDUMP) \
+	  --demangle --disassemble-all $< | less -R
+
+list:
+	@echo "Supported GPUs:"
+	@$(CLANGXX) --target=amdgcn --print-supported-cpus 2>&1 | \
+		grep -E gfx[1-9] | sort -t'x' -k2,2n | sed 's/^[ \t]*/  /'
 
 clean:
 	$(RM) $(LIBTARGET) $(TESTER).o $(TESTER) $(LIB_DIR)/$(TARGET).o
 
-.PHONY: all clean asm
+.PHONY: all default clean asm list

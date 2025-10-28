@@ -10,90 +10,68 @@
 
 __host__ __device__ sqeType sqeRead(volatile sqeType *sqeAddress)
 {
-
-	sqeType sqeData;
-
-	sqeData = *sqeAddress;
-
-	return sqeData;
+	return *sqeAddress;
 }
 
 __host__ __device__ sqeType cqeRead(volatile cqeType *cqeAddress)
 {
-
-	cqeType cqeData;
-
-	cqeData = *cqeAddress;
-
-	return cqeData;
+	return *cqeAddress;
 }
 
 __host__ __device__ void sqeWrite(sqeType sqeData, sqeType *sqeAddress)
 {
 	*sqeAddress = sqeData;
 #ifdef __HIP_DEVICE_COMPILE__
-	__threadfence();
+	__threadfence_system();
 #endif // __HIP_DEVICE_COMPILE__
 }
 
 __host__ __device__ void cqeWrite(cqeType cqeData, cqeType *cqeAddress)
 {
-
 	*cqeAddress = cqeData;
 #ifdef __HIP_DEVICE_COMPILE__
-	__threadfence();
+	__threadfence_system();
 #endif // __HIP_DEVICE_COMPILE__	
 }
 
-__host__ __device__ sqeType sqePoll(sqeType sqeLast, sqeType
-									*sqeAddress)
+__host__ __device__ sqeType sqePoll(sqeType sqeLast,
+	volatile sqeType *sqeAddress)
 {
-	volatile sqeType sqeNew;
-
-	while (true)
-	{
+	sqeType sqeNew;
+	while (true) {
 		sqeNew = sqeRead(sqeAddress);
-		if (sqeNew && sqeNew != sqeLast)
-		{
+		if (sqeNew != sqeLast)
 			return sqeNew;
-		}
 	}
 }
 
-__host__ __device__ cqeType cqePoll(cqeType cqeLast, cqeType
-									*cqeAddress)
+__host__ __device__ cqeType cqePoll(cqeType cqeLast,
+	volatile cqeType *cqeAddress)
 {
-	volatile cqeType cqeNew;
-
-	while (true)
-	{
+	cqeType cqeNew;
+	while (true) {
 		cqeNew = cqeRead(cqeAddress);
-		if (cqeNew && cqeNew != cqeLast)
-		{
+		if (cqeNew != cqeLast)
 			return cqeNew;
-		}
 	}
 }
 
 __host__ __device__ sqeType cqeGenFromSqe(sqeType sqeData) {
-
-	cqeType cqeNew;
-
-	cqeNew = ~(cqeType)sqeData;
-
-	return cqeNew;
+	return ~(cqeType)sqeData;
 }
 
-__device__ __host__  void emulateTestEndpoint(unsigned sqeIterations,
+ __host__  void emulateTestEndpoint(unsigned sqeIterations,
 				      sqeType *sqeAddr,
 				      cqeType *cqeAddr) {
 	
-	sqeType sqeOld, sqeNew = 0xbeefdead;
+	volatile sqeType sqeNew = 0xbeefdead;
+	sqeType sqeOld=0xf000f000;
 	cqeType cqeLocal;
 
 	while (sqeNew != 0xf0f0f0f0)
 	{
-		sqeNew = sqeRead(sqeAddr);
+		sqeNew = sqePoll(sqeOld, sqeAddr);
+	    //std::cout << std::hex << sqeOld << ": " << sqeNew << std::endl; 
 		cqeLocal = cqeGenFromSqe(sqeNew);
 		cqeWrite(cqeLocal, cqeAddr);
 	}
@@ -117,7 +95,7 @@ __device__ void driveTestEndpoint(unsigned sqeIterations,
 	{
 		start_time[sqeCount] = wall_clock64();
 		sqeWrite(sqeLocal, sqeAddr);
-	    //cqeLocal = cqePoll(cqeLocal, cqeAddr);
+	    cqeLocal = cqePoll(cqeLocal, cqeAddr);
 		end_time[sqeCount] = wall_clock64();
 		sqeCount++;
 		sqeLocal = 0xbeefdeaf + sqeCount;
