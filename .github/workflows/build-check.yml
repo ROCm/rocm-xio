@@ -7,6 +7,9 @@ on:
       - main
     paths:
       - '**.hip'
+      - '**.cpp'
+      - '**.h'
+      - Makefile
 
 jobs:
   build-check:
@@ -15,15 +18,27 @@ jobs:
     steps:
     - name: Check out code.
       uses: actions/checkout@v5.0.0
-    - name: clang-format lint
-      uses: DoozyX/clang-format-lint-action@v0.18.2
-      with:
-        source: 'endpoints'
-        extensions: 'c,h,cpp,hip'
-        clangFormatVersion: 18
-        style: file
-    - name: Perform a build of the code
-      uses: threeal/cmake-action@v2.1.0
-      with:
-        source-dir: endpoints
-        build-dir: endpoints/build
+    - name: Install rocm
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          expect \
+          hipcc \
+          libcli11-dev \
+          libstdc++-14-dev
+    - name: List supported GPUs.
+      run: |
+        make list
+      env:
+        CLANGXX: /usr/bin/clang++
+    - name: Compile code.
+      run: |
+        mkdir bin
+        mkdir lib
+        make CXXFLAGS+="--offload-arch=gfx942:xnack+" all
+      env:
+        HIPCXX: /usr/bin/hipcc
+        HIP_INCLUDE_DIR: /usr/include
+    - name: Run tester application.
+      run: |
+        ./bin/axiio-tester -h

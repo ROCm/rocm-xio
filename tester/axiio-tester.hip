@@ -55,14 +55,14 @@ static int run(unsigned iters) {
   cqeType *cqEntry;
   unsigned long long int *start_time, *hstart_time;
   unsigned long long int *end_time, *hend_time;
-  unsigned int flags = hipHostAllocUncached;
+  unsigned int flags = 0;
 
   hipStream_t stream1, stream2;
   HIP_CHECK(hipStreamCreate(&stream1));
   HIP_CHECK(hipStreamCreate(&stream2));
 
-  HIP_CHECK(hipHostAlloc(&sqEntry, sizeof(sqeType), flags));
-  HIP_CHECK(hipHostAlloc(&cqEntry, sizeof(cqeType), flags));
+  HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
+  HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
   // allocate device timers
   HIP_CHECK(hipMalloc(&start_time, iters * sizeof(unsigned long long int)));
   HIP_CHECK(hipMalloc(&end_time, iters * sizeof(unsigned long long int)));
@@ -82,7 +82,8 @@ static int run(unsigned iters) {
   HIP_CHECK(hipMemcpy(hend_time, end_time, iters * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
 
   for (unsigned i = 0; i < iters; i++) {
-    std::cout << "Iteration " << i << ": Start time: " << hstart_time[i]
+    std::cout << std::dec << "Iteration " << i << 
+    ": Start time: " << hstart_time[i]
               << ", End time: " << hend_time[i] << ", Duration: " 
               << hend_time[i]-hstart_time[i] << std::endl;
   }
@@ -91,8 +92,8 @@ static int run(unsigned iters) {
   free(hend_time);
   HIP_CHECK(hipFree(start_time));
   HIP_CHECK(hipFree(end_time));
-  HIP_CHECK(hipFreeHost(sqEntry));
-  HIP_CHECK(hipFreeHost(cqEntry));
+  HIP_CHECK(hipHostFree(sqEntry));
+  HIP_CHECK(hipHostFree(cqEntry));
 
   return 0;
 }
