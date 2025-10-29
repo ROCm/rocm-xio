@@ -6,7 +6,7 @@
 #include <iostream>
 
 #include <hip/hip_runtime.h>
-#include "test-ep.h"
+#include <axiio.h>
 
 __host__ __device__ sqeType sqeRead(volatile sqeType *sqeAddress)
 {
@@ -60,9 +60,9 @@ __host__ __device__ sqeType cqeGenFromSqe(sqeType sqeData) {
 	return ~(cqeType)sqeData;
 }
 
- __host__  void emulateTestEndpoint(unsigned sqeIterations,
-				      sqeType *sqeAddr,
-				      cqeType *cqeAddr) {
+ __host__ __device__ void axiioEndPoint::emulateEndpoint(
+	unsigned sqeIterations,
+	sqeType *sqeAddr, cqeType *cqeAddr) {
 	
 	volatile sqeType sqeNew = 0xbeefdead;
 	sqeType sqeOld=0xf000f000;
@@ -81,11 +81,11 @@ __host__ unsigned long long int wall_clock64() {
 	return 0;
 }
 
-__device__ void driveTestEndpoint(unsigned sqeIterations,
-				      sqeType *sqeAddr,
-					  cqeType *cqeAddr,
-					  unsigned long long int *start_time,
-					  unsigned long long int *end_time) {
+__device__ void axiioEndPoint::driveEndpoint(
+	unsigned sqeIterations, sqeType *sqeAddr,
+	cqeType *cqeAddr,
+	unsigned long long int *start_time,
+	unsigned long long int *end_time) {
 	
 	sqeType sqeLocal = 0xdeadbeef;
 	cqeType cqeLocal = 0xdeadbeef;
@@ -102,3 +102,4 @@ __device__ void driveTestEndpoint(unsigned sqeIterations,
 	}
 	sqeWrite(0xf0f0f0f0, sqeAddr);
 }
+

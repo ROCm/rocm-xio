@@ -29,12 +29,13 @@ AR ?= ar
 OBJDUMP ?= /opt/rocm/lib/llvm/bin/llvm-objdump
 CLANGXX ?= /opt/rocm/llvm/bin/clang++
 
-  # Include directories
+  # Project directories
 INCLUDE_DIR := include
+ENDPOINTS_DIR := endpoints
 
   # Library header files
-LIB_HEADERS := $(call rwildcard, $(INCLUDE_DIR), *.h)
-LIB_SOURCES := $(call rwildcard, endpoints, *.hip)
+LIB_HEADERS := $(call rwildcard, $(INCLUDE_DIR) $(ENDPOINTS_DIR), *.h)
+LIB_SOURCES := $(call rwildcard, $(ENDPOINTS_DIR), *.hip)
 
 # CXX variables and flags
 CXX_STD := c++17
