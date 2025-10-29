@@ -40,16 +40,22 @@ LIB_SOURCES := $(call rwildcard, endpoints, *.hip)
 CXX_STD := c++17
 override CXXFLAGS  += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
 
+$(BIN_DIR):
+	@mkdir -p $(BIN_DIR)
+
+$(LIB_DIR):
+	@mkdir -p $(LIB_DIR)
+
 $(LIBTARGET): $(LIB_DIR)/$(TARGET).o
 	$(AR) rcsD $@ $<
 
 $(TESTER): $(TESTER).o $(LIBTARGET)
 	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^
 
-$(TESTER).o: tester/axiio-tester.hip $(LIB_HEADERS)
+$(TESTER).o: tester/axiio-tester.hip $(LIB_HEADERS) $(BIN_DIR)
 	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
 
-$(LIB_DIR)/$(TARGET).o: $(LIB_SOURCES) $(LIB_HEADERS)
+$(LIB_DIR)/$(TARGET).o: $(LIB_SOURCES) $(LIB_HEADERS) $(LIB_DIR)
 	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
 
 asm: $(LIBTARGET)
@@ -62,6 +68,7 @@ list:
 		grep -E gfx[1-9] | sort -t'x' -k2,2n | sed 's/^[ \t]*/  /'
 
 clean:
-	$(RM) $(LIBTARGET) $(TESTER).o $(TESTER) $(LIB_DIR)/$(TARGET).o
+	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(LIBTARGET) $(TESTER).o \
+		$(TESTER) $(LIB_DIR)/$(TARGET).o
 
 .PHONY: all default clean asm list
