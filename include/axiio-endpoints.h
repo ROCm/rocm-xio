@@ -15,8 +15,7 @@ class axiioEndPoint {
 public:
     __device__ void driveEndpoint(unsigned, sqeType *, cqeType *,
         unsigned long long int *, unsigned long long int *);
-    __host__ __device__ void emulateEndpoint(unsigned, sqeType *,
-        cqeType *);
+    __host__ __device__ void emulateEndpoint(unsigned, sqeType *, cqeType *);
 };
 
 #endif // AXIIO_ENDPOINTS_H
