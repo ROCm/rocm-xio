@@ -19,34 +19,38 @@
                cqeAddr);
 }*/
 
-__global__ void accelKernel(unsigned sqeIterations,
+__global__ void accelKernel(axiioEndPoint *endPoint,
+  unsigned sqeIterations,
                             sqeType *sqeAddr,
                             cqeType *cqeAddr,
                             unsigned long long int *start_time,
                             unsigned long long int *end_time)
 {
-  driveTestEndpoint(sqeIterations,
+  endPoint->driveEndpoint(sqeIterations,
                sqeAddr,
                cqeAddr,
                start_time, end_time);
 }
 
-static void accelFunction(hipStream_t stream, unsigned sqeIterations,
-  sqeType *sqeAddr, cqeType *cqeAddr,
-                          unsigned long long int *start_time,
-                          unsigned long long int *end_time) {
+static void accelFunction(axiioEndPoint *endPoint, hipStream_t stream,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
+  unsigned long long int *start_time, unsigned long long int *end_time) {
 
   std::cout << "Hello from accelFunction!" << std::endl;
-  accelKernel<<<1, 1, 0, 0>>> (sqeIterations, sqeAddr, cqeAddr,
-                                start_time, end_time);
+  accelKernel<<<1, 1, 0, 0>>> (endPoint, sqeIterations, sqeAddr,
+    cqeAddr, start_time, end_time);
   std::cout << "Bye from accelFunction!" << std::endl;
+
 }
 
-static void epFunction(hipStream_t stream, unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
+static void epFunction(axiioEndPoint *endPoint, hipStream_t stream,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
+
   std::cout << "Hello from epFunction!" << std::endl;
   //epKernel<<<1, 1, 0, stream>>>(sqeIterations, sqeAddr, cqeAddr);
-  emulateTestEndpoint(sqeIterations, sqeAddr, cqeAddr);
+  endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
   std::cout << "Bye from epFunction!" << std::endl;
+
 }
 
 static int run(unsigned iters) {
@@ -56,6 +60,8 @@ static int run(unsigned iters) {
   unsigned long long int *start_time, *hstart_time;
   unsigned long long int *end_time, *hend_time;
   unsigned int flags = 0;
+
+  axiioEndPoint endPoint;
 
   hipStream_t stream1, stream2;
   HIP_CHECK(hipStreamCreate(&stream1));
@@ -67,14 +73,15 @@ static int run(unsigned iters) {
   HIP_CHECK(hipMalloc(&start_time, iters * sizeof(unsigned long long int)));
   HIP_CHECK(hipMalloc(&end_time, iters * sizeof(unsigned long long int)));
 
-  std::thread accelThread(accelFunction, stream1, iters, sqEntry, cqEntry,
-                          start_time, end_time);
-  std::thread epThread(epFunction, stream2, iters, sqEntry, cqEntry);
+  std::thread accelThread(accelFunction, &endPoint, stream1, iters,
+    sqEntry, cqEntry, start_time, end_time);
+  std::thread epThread(epFunction, &endPoint, stream2, iters, sqEntry,
+    cqEntry);
 
   accelThread.join();
   epThread.join();
-
   HIP_CHECK(hipDeviceSynchronize());
+
   hstart_time = (unsigned long long int *)malloc(iters * sizeof(unsigned long long int));
   hend_time = (unsigned long long int *)malloc(iters * sizeof(unsigned long long int));
 
