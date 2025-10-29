@@ -10,44 +10,34 @@
 
 #include "axiio.h"
 
-/*__global__ void epKernel(unsigned sqeIterations,
-                            sqeType *sqeAddr,
-                            cqeType *cqeAddr)
+__global__ void emulateEndpointKernel(axiioEndPoint *endPoint,
+  unsigned sqeIterations,sqeType *sqeAddr, cqeType *cqeAddr)
 {
-  testEndpoint(sqeIterations,
-               sqeAddr,
-               cqeAddr);
-}*/
-
-__global__ void accelKernel(axiioEndPoint *endPoint,
-  unsigned sqeIterations,
-                            sqeType *sqeAddr,
-                            cqeType *cqeAddr,
-                            unsigned long long int *start_time,
-                            unsigned long long int *end_time)
-{
-  endPoint->driveEndpoint(sqeIterations,
-               sqeAddr,
-               cqeAddr,
-               start_time, end_time);
+  endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
 }
 
-static void accelFunction(axiioEndPoint *endPoint, hipStream_t stream,
+__global__ void driveEndpointKernel(axiioEndPoint *endPoint,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
+  unsigned long long int *start_time, unsigned long long int *end_time)
+{
+  endPoint->driveEndpoint(sqeIterations, sqeAddr, cqeAddr, start_time,
+    end_time);
+}
+
+static void driveFunction(axiioEndPoint *endPoint, hipStream_t stream,
   unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
   unsigned long long int *start_time, unsigned long long int *end_time) {
 
-  std::cout << "Hello from accelFunction!" << std::endl;
-  accelKernel<<<1, 1, 0, 0>>> (endPoint, sqeIterations, sqeAddr,
+  driveEndpointKernel<<<1, 1, 0, 0>>> (endPoint, sqeIterations, sqeAddr,
     cqeAddr, start_time, end_time);
-  std::cout << "Bye from accelFunction!" << std::endl;
 
 }
 
-static void epFunction(axiioEndPoint *endPoint, hipStream_t stream,
+static void emulateFunction(axiioEndPoint *endPoint, hipStream_t stream,
   unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
 
-  std::cout << "Hello from epFunction!" << std::endl;
-  //epKernel<<<1, 1, 0, stream>>>(sqeIterations, sqeAddr, cqeAddr);
+  //emulateEndpointKernel<<<1, 1, 0, stream>>>(endPoint, sqeIterations, sqeAddr,
+  //  cqeAddr);
   endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
   std::cout << "Bye from epFunction!" << std::endl;
 
@@ -73,13 +63,13 @@ static int run(unsigned iters) {
   HIP_CHECK(hipMalloc(&start_time, iters * sizeof(unsigned long long int)));
   HIP_CHECK(hipMalloc(&end_time, iters * sizeof(unsigned long long int)));
 
-  std::thread accelThread(accelFunction, &endPoint, stream1, iters,
+  std::thread driveThread(driveFunction, &endPoint, stream1, iters,
     sqEntry, cqEntry, start_time, end_time);
-  std::thread epThread(epFunction, &endPoint, stream2, iters, sqEntry,
-    cqEntry);
+  std::thread emulateThread(emulateFunction, &endPoint, stream2, iters,
+    sqEntry, cqEntry);
 
-  accelThread.join();
-  epThread.join();
+  driveThread.join();
+  emulateThread.join();
   HIP_CHECK(hipDeviceSynchronize());
 
   hstart_time = (unsigned long long int *)malloc(iters * sizeof(unsigned long long int));
