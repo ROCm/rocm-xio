@@ -30,11 +30,11 @@
                 << deviceProp.maxGridSize[0] << ", "
                 << deviceProp.maxGridSize[1] << ", "
                 << deviceProp.maxGridSize[2] << "]" << std::endl;
-        std::cout << std::endl;
+        std::cout << "  Max Clock Frequency (Multiprocessor): " << deviceProp.clockRate << " KHz" << std::endl;
         int wallClkRate;
         HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
         hipDeviceAttributeWallClockRate,
         deviceId));
-        std::cout << "  Wall Clock Freq: " << wallClkRate << "KHz" << std::endl;
+        std::cout << "  Wall Clock Frequency (Constant): " << wallClkRate << " KHz" << std::endl;
     }
 }

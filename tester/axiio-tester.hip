@@ -77,10 +77,11 @@ static int run(unsigned iters) {
   HIP_CHECK(hipMemcpy(hstart_time, start_time, iters * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(hend_time, end_time, iters * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
 
+  std::cout << "Results:" << std::endl;
   for (unsigned i = 0; i < iters; i++) {
-    std::cout << std::dec << "Iteration " << i << 
+    std::cout << std::dec << "  Iteration " << i <<
     ": Start time: " << hstart_time[i]
-              << ", End time: " << hend_time[i] << ", Duration: " 
+              << ", End time: " << hend_time[i] << ", Duration: "
               << hend_time[i]-hstart_time[i] << std::endl;
   }
 
@@ -104,6 +105,12 @@ int main(int argc, char **argv) {
                  "Number of iterations to run the test.")
       ->default_val(128)
       ->check(CLI::PositiveNumber);
+
+  bool printDeviceInfo = false;
+  app.add_flag("-i, --info", printDeviceInfo,
+               "Print information about GPUs in the system.")
+      ->default_val(false);
+
   CLI11_PARSE(app, argc, argv);
 
   /*
@@ -111,6 +118,9 @@ int main(int argc, char **argv) {
   * chosen to run tests on.
   */
 
+  if (printDeviceInfo) {
+    axxioPrintDeviceInfo();
+  }
 
   run(nIterations);
 
