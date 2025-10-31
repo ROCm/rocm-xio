@@ -3,52 +3,114 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <CLI/CLI.hpp>
-#include <thread>
 #include <time.h>
+
+#include <iomanip>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include <hip/hip_runtime.h>
+
+#include <CLI/CLI.hpp>
 
 #include "axiio.h"
 
-__global__ void accelKernel(unsigned sqeIterations,
-                            sqeType *sqeAddr,
-                            cqeType *cqeAddr)
+// Type aliases for queue entries
+typedef axiioEndPoint::sqeType sqeType;
+typedef axiioEndPoint::cqeType cqeType;
+
+typedef struct {
+  unsigned nIterations;
+  bool printDeviceInfo;
+  bool genHistogram;
+  bool beVerbose;
+} cmdLineArgs;
+
+typedef struct {
+  unsigned long long int *startTime;
+  unsigned long long int *endTime;
+} testStats;
+
+typedef struct {
+  cmdLineArgs args;
+  testStats stats;
+} testConfig;
+
+__global__ void emulateEndpointKernel(axiioEndPoint *endPoint,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr)
 {
-  testEndpoint(sqeIterations,
-               sqeAddr,
-               cqeAddr);
+  endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
 }
 
-static void accelFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
-
-  std::cout << "Hello from accelFunction!" << std::endl;
-
-  accelKernel<<<1, 1, 0, 0>>> (1, sqeAddr, cqeAddr);
-
-  std::cout << "Hello from accelFunction!" << std::endl;
+__global__ void driveEndpointKernel(axiioEndPoint *endPoint,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
+  unsigned long long int *startTime, unsigned long long int *endTime)
+{
+  endPoint->driveEndpoint(sqeIterations, sqeAddr, cqeAddr, startTime,
+    endTime);
 }
 
-static void epFunction(sqeType *sqeAddr, cqeType *cqeAddr) {
-  std::cout << "Hello from epFunction!" << std::endl;
+static void driveFunction(axiioEndPoint *endPoint, hipStream_t stream,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
+  unsigned long long int *startTime, unsigned long long int *endTime) {
+
+  driveEndpointKernel<<<1, 1, 0, 0>>> (endPoint, sqeIterations, sqeAddr,
+    cqeAddr, startTime, endTime);
 
 }
 
-static int run() {
+static void emulateFunction(axiioEndPoint *endPoint, hipStream_t stream,
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
+
+  //emulateEndpointKernel<<<1, 1, 0, stream>>>(endPoint, sqeIterations, sqeAddr,
+  //  cqeAddr);
+  endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
+
+}
+
+static int run(testConfig *config) {
 
   sqeType *sqEntry;
   cqeType *cqEntry;
+  unsigned long long int *d_startTime;
+  unsigned long long int *d_endTime;
   unsigned int flags = 0;
+
+  axiioEndPoint endPoint;
+
+  hipStream_t stream1, stream2;
+  HIP_CHECK(hipStreamCreate(&stream1));
+  HIP_CHECK(hipStreamCreate(&stream2));
+
   HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
   HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
+  // allocate device timers
+  HIP_CHECK(hipMalloc(&d_startTime,
+    config->args.nIterations * sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&d_endTime,
+    config->args.nIterations * sizeof(unsigned long long int)));
 
-  std::thread accelThread(accelFunction, sqEntry, cqEntry);
-  std::thread epThread(epFunction, sqEntry, cqEntry);
+  std::thread driveThread(driveFunction, &endPoint, stream1,
+    config->args.nIterations, sqEntry, cqEntry, d_startTime, d_endTime);
+  std::thread emulateThread(emulateFunction, &endPoint, stream2,
+    config->args.nIterations, sqEntry, cqEntry);
 
-  accelThread.join();
-  epThread.join();
+  driveThread.join();
+  emulateThread.join();
+  HIP_CHECK(hipDeviceSynchronize());
 
-  HIP_CHECK(hipFreeHost(sqEntry));
-  HIP_CHECK(hipFreeHost(cqEntry));
+  HIP_CHECK(hipMemcpy(config->stats.startTime, d_startTime,
+    config->args.nIterations * sizeof(unsigned long long int),
+    hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(config->stats.endTime, d_endTime,
+    config->args.nIterations * sizeof(unsigned long long int),
+    hipMemcpyDeviceToHost));
+
+  HIP_CHECK(hipFree(d_startTime));
+  HIP_CHECK(hipFree(d_endTime));
+  HIP_CHECK(hipHostFree(sqEntry));
+  HIP_CHECK(hipHostFree(cqEntry));
 
   return 0;
 }
@@ -58,12 +120,94 @@ int main(int argc, char **argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
   argv = app.ensure_utf8(argv);
 
-  std::string endpoint = "none";
-  app.add_option("-e,--endpoint", endpoint,
-                 "The endpoint to be tested.");
+  testConfig config = {};
+  config.args.printDeviceInfo = false;
+  config.args.genHistogram = false;
+  config.args.beVerbose = false;
+
+  app.add_option("-n, --iterations", config.args.nIterations,
+                 "Number of iterations to run the test.")
+      ->default_val(128)
+      ->check(CLI::PositiveNumber);
+
+  app.add_flag("-i, --info", config.args.printDeviceInfo,
+               "Print information about GPUs in the system.")
+      ->default_val(false);
+
+  app.add_flag("--histogram", config.args.genHistogram,
+               "Generate histogram of iteration runtimes.")
+      ->default_val(false);
+
+  app.add_flag("-v, --verbose", config.args.beVerbose,
+               "Print detailed per-iteration timing results.")
+      ->default_val(false);
+
   CLI11_PARSE(app, argc, argv);
 
-  run();
+  /*
+  * Get information on all the GPUs in the system and the specific GPU(s)
+  * chosen to run tests on.
+  */
 
-  return 0;
+  if (config.args.printDeviceInfo) {
+    axxioPrintDeviceInfo();
+  }
+
+  // Allocate host memory for timing arrays
+  config.stats.startTime = (unsigned long long int *)malloc(
+    config.args.nIterations * sizeof(unsigned long long int));
+  config.stats.endTime = (unsigned long long int *)malloc(
+    config.args.nIterations * sizeof(unsigned long long int));
+
+  run(&config);
+
+  // Get wall clock frequency for nanosecond calculation
+  int wallClkRate;
+  HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
+    hipDeviceAttributeWallClockRate, 0));
+
+  // Collect duration values for histogram and statistics
+  std::vector<double> durations;
+  durations.reserve(config.args.nIterations);
+
+  // Calculate width needed for iteration number
+  int iterWidth = std::to_string(config.args.nIterations - 1).length();
+
+  // Print detailed results if verbose
+  if (config.args.beVerbose) {
+    std::cout << "Results:" << std::endl;
+  }
+
+  for (unsigned i = 0; i < config.args.nIterations; i++) {
+    unsigned long long int duration =
+      config.stats.endTime[i] - config.stats.startTime[i];
+    double duration_ns =
+      (double)duration * 1000000.0 / (double)wallClkRate;
+    durations.push_back(duration_ns);
+
+    if (config.args.beVerbose) {
+      std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i
+                << ": Start Tick: " << std::setw(13)
+                << config.stats.startTime[i]
+                << ", End Tick: " << std::setw(13)
+                << config.stats.endTime[i]
+                << ", Duration: " << std::setw(4) << duration
+                << ", Runtime: " << std::setw(6) << std::fixed
+                << std::setprecision(0) << duration_ns << " ns"
+                << std::endl;
+    }
+  }
+
+  // Generate histogram and statistics if requested
+  if (config.args.genHistogram && config.args.nIterations > 0) {
+    axxioPrintHistogram(durations, config.args.nIterations);
+  } else if (config.args.nIterations > 0) {
+    // Always print statistics even without histogram
+    axxioPrintStatistics(durations);
+  }
+
+  free(config.stats.startTime);
+  free(config.stats.endTime);
+
+  return EXIT_SUCCESS;
 }
