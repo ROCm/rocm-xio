@@ -7,7 +7,12 @@
 #include <cstring>
 
 #include <hip/hip_runtime.h>
+#include "test-ep.h"
 #include <axiio.h>
+
+// Type aliases for convenience (types defined in test-ep.h)
+typedef axiioEndPoint::sqeType sqeType;
+typedef axiioEndPoint::cqeType cqeType;
 
 // Helper function to compare sqeType structs
 __host__ __device__ bool sqeEqual(const sqeType *a, const sqeType *b)
