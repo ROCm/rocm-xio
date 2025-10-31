@@ -7,6 +7,7 @@
 #define AXIIO_HELPERS_H
 
 #include <hip/hip_runtime.h>
+#include <vector>
 
 #define HIP_CHECK(expression)                  \
 {                                              \
@@ -22,5 +23,7 @@
 }
 
 void axxioPrintDeviceInfo();
+void axxioPrintHistogram(const std::vector<double>& durations,
+                         unsigned nIterations);
 
 #endif //AXIIO_HELPERS_H
