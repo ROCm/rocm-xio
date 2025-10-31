@@ -16,7 +16,7 @@ UseTab: Never
 ContinuationIndentWidth: 2
 ConstructorInitializerIndentWidth: 2
 IndentCaseLabels: true
-IndentPPDirectives: BeforeHash
+IndentPPDirectives: AfterHash
 IndentWrappedFunctionNames: false
 NamespaceIndentation: None
 
@@ -52,7 +52,7 @@ AlignConsecutiveMacros: None
 AlignEscapedNewlines: Right
 AlignOperands: Align
 AlignTrailingComments: true
-PointerAlignment: Right
+PointerAlignment: Left
 DerivePointerAlignment: false
 
 # Breaks
