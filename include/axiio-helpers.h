@@ -6,8 +6,10 @@
 #ifndef AXIIO_HELPERS_H
 #define AXIIO_HELPERS_H
 
-#include <hip/hip_runtime.h>
+#include <iostream>
 #include <vector>
+
+#include <hip/hip_runtime.h>
 
 #define HIP_CHECK(expression)                  \
 {                                              \

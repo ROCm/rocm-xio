@@ -3,13 +3,16 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <CLI/CLI.hpp>
+#include <time.h>
+
 #include <iomanip>
 #include <string>
 #include <thread>
 #include <vector>
-#include <time.h>
+
 #include <hip/hip_runtime.h>
+
+#include <CLI/CLI.hpp>
 
 #include "axiio.h"
 
@@ -35,7 +38,7 @@ typedef struct {
 } testConfig;
 
 __global__ void emulateEndpointKernel(axiioEndPoint *endPoint,
-  unsigned sqeIterations,sqeType *sqeAddr, cqeType *cqeAddr)
+  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr)
 {
   endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
 }
@@ -83,20 +86,26 @@ static int run(testConfig *config) {
   HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
   HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
   // allocate device timers
-  HIP_CHECK(hipMalloc(&d_startTime, config->args.nIterations * sizeof(unsigned long long int)));
-  HIP_CHECK(hipMalloc(&d_endTime, config->args.nIterations * sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&d_startTime,
+    config->args.nIterations * sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&d_endTime,
+    config->args.nIterations * sizeof(unsigned long long int)));
 
-  std::thread driveThread(driveFunction, &endPoint, stream1, config->args.nIterations,
-    sqEntry, cqEntry, d_startTime, d_endTime);
-  std::thread emulateThread(emulateFunction, &endPoint, stream2, config->args.nIterations,
-    sqEntry, cqEntry);
+  std::thread driveThread(driveFunction, &endPoint, stream1,
+    config->args.nIterations, sqEntry, cqEntry, d_startTime, d_endTime);
+  std::thread emulateThread(emulateFunction, &endPoint, stream2,
+    config->args.nIterations, sqEntry, cqEntry);
 
   driveThread.join();
   emulateThread.join();
   HIP_CHECK(hipDeviceSynchronize());
 
-  HIP_CHECK(hipMemcpy(config->stats.startTime, d_startTime, config->args.nIterations * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(config->stats.endTime, d_endTime, config->args.nIterations * sizeof(unsigned long long int), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(config->stats.startTime, d_startTime,
+    config->args.nIterations * sizeof(unsigned long long int),
+    hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(config->stats.endTime, d_endTime,
+    config->args.nIterations * sizeof(unsigned long long int),
+    hipMemcpyDeviceToHost));
 
   HIP_CHECK(hipFree(d_startTime));
   HIP_CHECK(hipFree(d_endTime));
@@ -145,8 +154,10 @@ int main(int argc, char **argv) {
   }
 
   // Allocate host memory for timing arrays
-  config.stats.startTime = (unsigned long long int *)malloc(config.args.nIterations * sizeof(unsigned long long int));
-  config.stats.endTime = (unsigned long long int *)malloc(config.args.nIterations * sizeof(unsigned long long int));
+  config.stats.startTime = (unsigned long long int *)malloc(
+    config.args.nIterations * sizeof(unsigned long long int));
+  config.stats.endTime = (unsigned long long int *)malloc(
+    config.args.nIterations * sizeof(unsigned long long int));
 
   run(&config);
 
@@ -158,30 +169,35 @@ int main(int argc, char **argv) {
   // Collect duration values for histogram and statistics
   std::vector<double> durations;
   durations.reserve(config.args.nIterations);
-  
+
   // Calculate width needed for iteration number
   int iterWidth = std::to_string(config.args.nIterations - 1).length();
-  
+
   // Print detailed results if verbose
   if (config.args.beVerbose) {
     std::cout << "Results:" << std::endl;
   }
-  
+
   for (unsigned i = 0; i < config.args.nIterations; i++) {
-    unsigned long long int duration = config.stats.endTime[i] - config.stats.startTime[i];
-    double duration_ns = (double)duration * 1000000.0 / (double)wallClkRate;
+    unsigned long long int duration =
+      config.stats.endTime[i] - config.stats.startTime[i];
+    double duration_ns =
+      (double)duration * 1000000.0 / (double)wallClkRate;
     durations.push_back(duration_ns);
-    
+
     if (config.args.beVerbose) {
-      std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i <<
-      ": Start Tick: " << std::setw(13) << config.stats.startTime[i]
-                << ", End Tick: " << std::setw(13) << config.stats.endTime[i] 
-                << ", Duration: " << std::setw(4) << duration 
-                << ", Runtime: " << std::setw(6) << std::fixed << std::setprecision(0) 
-                << duration_ns << " ns" << std::endl;
+      std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i
+                << ": Start Tick: " << std::setw(13)
+                << config.stats.startTime[i]
+                << ", End Tick: " << std::setw(13)
+                << config.stats.endTime[i]
+                << ", Duration: " << std::setw(4) << duration
+                << ", Runtime: " << std::setw(6) << std::fixed
+                << std::setprecision(0) << duration_ns << " ns"
+                << std::endl;
     }
   }
-  
+
   // Generate histogram and statistics if requested
   if (config.args.genHistogram && config.args.nIterations > 0) {
     axxioPrintHistogram(durations, config.args.nIterations);
