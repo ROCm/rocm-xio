@@ -39,7 +39,6 @@ static void emulateFunction(axiioEndPoint *endPoint, hipStream_t stream,
   //emulateEndpointKernel<<<1, 1, 0, stream>>>(endPoint, sqeIterations, sqeAddr,
   //  cqeAddr);
   endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
-  std::cout << "Bye from epFunction!" << std::endl;
 
 }
 
