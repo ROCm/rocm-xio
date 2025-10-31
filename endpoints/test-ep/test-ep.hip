@@ -4,18 +4,44 @@
  */
 
 #include <iostream>
+#include <cstring>
 
 #include <hip/hip_runtime.h>
 #include <axiio.h>
 
-__host__ __device__ sqeType sqeRead(volatile sqeType *sqeAddress)
+// Helper function to compare sqeType structs
+__host__ __device__ bool sqeEqual(const sqeType *a, const sqeType *b)
 {
-	return *sqeAddress;
+	return (a->dataPayload == b->dataPayload &&
+	        a->entryId == b->entryId &&
+	        a->magicID == b->magicID);
 }
 
-__host__ __device__ sqeType cqeRead(volatile cqeType *cqeAddress)
+// Helper function to compare cqeType structs
+__host__ __device__ bool cqeEqual(const cqeType *a, const cqeType *b)
 {
-	return *cqeAddress;
+	return (a->dataPayload == b->dataPayload &&
+	        a->entryId == b->entryId &&
+	        a->magicID == b->magicID);
+}
+
+__host__ __device__ sqeType sqeRead(volatile sqeType *sqeAddress)
+{
+	sqeType result;
+	result.magicID = sqeAddress->magicID;
+	result.entryId = sqeAddress->entryId;
+	result.timeStamp = sqeAddress->timeStamp;
+	result.dataPayload = sqeAddress->dataPayload;
+	return result;
+}
+
+__host__ __device__ cqeType cqeRead(volatile cqeType *cqeAddress)
+{
+	cqeType result;
+	result.magicID = cqeAddress->magicID;
+	result.entryId = cqeAddress->entryId;
+	result.dataPayload = cqeAddress->dataPayload;
+	return result;
 }
 
 __host__ __device__ void sqeWrite(sqeType sqeData, sqeType *sqeAddress)
@@ -40,7 +66,8 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
 	sqeType sqeNew;
 	while (true) {
 		sqeNew = sqeRead(sqeAddress);
-		if (sqeNew != sqeLast)
+		if (sqeNew.magicID == TEST_EP_MAGIC_ID &&
+		    !sqeEqual(&sqeNew, &sqeLast))
 			return sqeNew;
 	}
 }
@@ -51,29 +78,35 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 	cqeType cqeNew;
 	while (true) {
 		cqeNew = cqeRead(cqeAddress);
-		if (cqeNew != cqeLast)
+		if (cqeNew.magicID == TEST_EP_MAGIC_ID &&
+		    !cqeEqual(&cqeNew, &cqeLast))
 			return cqeNew;
 	}
 }
 
-__host__ __device__ sqeType cqeGenFromSqe(sqeType sqeData) {
-	return ~(cqeType)sqeData;
+__host__ __device__ cqeType cqeGenFromSqe(const sqeType *sqeData) {
+	cqeType result;
+	result.magicID = TEST_EP_MAGIC_ID;
+	result.entryId = sqeData->entryId;
+	result.dataPayload = ~sqeData->dataPayload;
+	return result;
 }
 
  __host__ __device__ void axiioEndPoint::emulateEndpoint(
 	unsigned sqeIterations,
 	sqeType *sqeAddr, cqeType *cqeAddr) {
-	
-	volatile sqeType sqeNew = 0xbeefdead;
-	sqeType sqeOld=0xf000f000;
+
+	sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, 0xbeefdead, {0}};
+	sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, 0xf000f000, {0}};
+	sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
 	cqeType cqeLocal;
 
-	while (sqeNew != 0xf0f0f0f0)
+	while (!sqeEqual(&sqeNew, &sqeStop))
 	{
 		sqeNew = sqePoll(sqeOld, sqeAddr);
-	    //std::cout << std::hex << sqeOld << ": " << sqeNew << std::endl; 
-		cqeLocal = cqeGenFromSqe(sqeNew);
+		cqeLocal = cqeGenFromSqe(&sqeNew);
 		cqeWrite(cqeLocal, cqeAddr);
+		sqeOld = sqeNew;
 	}
 }
 
@@ -84,22 +117,24 @@ __host__ unsigned long long int wall_clock64() {
 __device__ void axiioEndPoint::driveEndpoint(
 	unsigned sqeIterations, sqeType *sqeAddr,
 	cqeType *cqeAddr,
-	unsigned long long int *start_time,
-	unsigned long long int *end_time) {
-	
-	sqeType sqeLocal = 0xdeadbeef;
-	cqeType cqeLocal = 0xdeadbeef;
+	unsigned long long int *startTime,
+	unsigned long long int *endTime) {
+
+	sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
+	cqeType cqeLocal = {TEST_EP_MAGIC_ID, 0, 0xdeadbeef, {0}};
+	sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
 	unsigned sqeCount = 0;
 
 	while (sqeCount < sqeIterations)
 	{
-		start_time[sqeCount] = wall_clock64();
+		sqeLocal.entryId = sqeCount;
+		startTime[sqeCount] = wall_clock64();
 		sqeWrite(sqeLocal, sqeAddr);
-	    cqeLocal = cqePoll(cqeLocal, cqeAddr);
-		end_time[sqeCount] = wall_clock64();
+		cqeLocal = cqePoll(cqeLocal, cqeAddr);
+		endTime[sqeCount] = wall_clock64();
 		sqeCount++;
-		sqeLocal = 0xbeefdeaf + sqeCount;
+		sqeLocal.dataPayload = 0xbeefdeaf + sqeCount;
 	}
-	sqeWrite(0xf0f0f0f0, sqeAddr);
+	sqeWrite(sqeStop, sqeAddr);
 }
 
