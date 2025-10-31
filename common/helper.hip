@@ -47,9 +47,8 @@
     }
 }
 
-void axxioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations) {
-  if (durations.empty() || nIterations == 0) {
+void axxioPrintStatistics(const std::vector<double>& durations) {
+  if (durations.empty()) {
     return;
   }
 
@@ -66,6 +65,28 @@ void axxioPrintHistogram(const std::vector<double>& durations,
   }
   variance /= durations.size();
   double stddev = std::sqrt(variance);
+
+  // Print statistics
+  std::cout << "\nStatistics:" << std::endl;
+  std::cout << "  Minimum:          " << std::setw(10) << std::fixed
+            << std::setprecision(2) << minVal << " ns" << std::endl;
+  std::cout << "  Maximum:          " << std::setw(10) << std::fixed
+            << std::setprecision(2) << maxVal << " ns" << std::endl;
+  std::cout << "  Average:          " << std::setw(10) << std::fixed
+            << std::setprecision(2) << avg << " ns" << std::endl;
+  std::cout << "  Standard Dev:     " << std::setw(10) << std::fixed
+            << std::setprecision(2) << stddev << " ns" << std::endl;
+}
+
+void axxioPrintHistogram(const std::vector<double>& durations,
+                         unsigned nIterations) {
+  if (durations.empty() || nIterations == 0) {
+    return;
+  }
+
+  // Get min/max for histogram binning
+  double minVal = *std::min_element(durations.begin(), durations.end());
+  double maxVal = *std::max_element(durations.begin(), durations.end());
 
   if (maxVal == minVal) {
     // All values are the same
@@ -141,13 +162,5 @@ void axxioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  std::cout << "\nStatistics:" << std::endl;
-  std::cout << "  Minimum:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << minVal << " ns" << std::endl;
-  std::cout << "  Maximum:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << maxVal << " ns" << std::endl;
-  std::cout << "  Average:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << avg << " ns" << std::endl;
-  std::cout << "  Standard Dev:     " << std::setw(10) << std::fixed
-            << std::setprecision(2) << stddev << " ns" << std::endl;
+  axxioPrintStatistics(durations);
 }

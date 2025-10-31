@@ -21,6 +21,7 @@ typedef struct {
   unsigned nIterations;
   bool printDeviceInfo;
   bool genHistogram;
+  bool beVerbose;
 } cmdLineArgs;
 
 typedef struct {
@@ -113,6 +114,7 @@ int main(int argc, char **argv) {
   testConfig config = {};
   config.args.printDeviceInfo = false;
   config.args.genHistogram = false;
+  config.args.beVerbose = false;
 
   app.add_option("-n, --iterations", config.args.nIterations,
                  "Number of iterations to run the test.")
@@ -125,6 +127,10 @@ int main(int argc, char **argv) {
 
   app.add_flag("--histogram", config.args.genHistogram,
                "Generate histogram of iteration runtimes.")
+      ->default_val(false);
+
+  app.add_flag("-v, --verbose", config.args.beVerbose,
+               "Print detailed per-iteration timing results.")
       ->default_val(false);
 
   CLI11_PARSE(app, argc, argv);
@@ -149,30 +155,39 @@ int main(int argc, char **argv) {
   HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
     hipDeviceAttributeWallClockRate, 0));
 
-  std::cout << "Results:" << std::endl;
+  // Collect duration values for histogram and statistics
+  std::vector<double> durations;
+  durations.reserve(config.args.nIterations);
   
   // Calculate width needed for iteration number
   int iterWidth = std::to_string(config.args.nIterations - 1).length();
   
-  // Collect duration values for histogram and statistics
-  std::vector<double> durations;
-  durations.reserve(config.args.nIterations);
+  // Print detailed results if verbose
+  if (config.args.beVerbose) {
+    std::cout << "Results:" << std::endl;
+  }
   
   for (unsigned i = 0; i < config.args.nIterations; i++) {
     unsigned long long int duration = config.stats.endTime[i] - config.stats.startTime[i];
     double duration_ns = (double)duration * 1000000.0 / (double)wallClkRate;
     durations.push_back(duration_ns);
-    std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i <<
-    ": Start Tick: " << std::setw(13) << config.stats.startTime[i]
-              << ", End Tick: " << std::setw(13) << config.stats.endTime[i] 
-              << ", Duration: " << std::setw(4) << duration 
-              << ", Runtime: " << std::setw(6) << std::fixed << std::setprecision(0) 
-              << duration_ns << " ns" << std::endl;
+    
+    if (config.args.beVerbose) {
+      std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i <<
+      ": Start Tick: " << std::setw(13) << config.stats.startTime[i]
+                << ", End Tick: " << std::setw(13) << config.stats.endTime[i] 
+                << ", Duration: " << std::setw(4) << duration 
+                << ", Runtime: " << std::setw(6) << std::fixed << std::setprecision(0) 
+                << duration_ns << " ns" << std::endl;
+    }
   }
   
   // Generate histogram and statistics if requested
   if (config.args.genHistogram && config.args.nIterations > 0) {
     axxioPrintHistogram(durations, config.args.nIterations);
+  } else if (config.args.nIterations > 0) {
+    // Always print statistics even without histogram
+    axxioPrintStatistics(durations);
   }
 
   free(config.stats.startTime);
