@@ -18,8 +18,8 @@ BUILD_DIR ?= build
 # Build targets
 LIBTARGET := ${LIB_DIR}/lib$(TARGET).a
 TESTER := ${BIN_DIR}/axiio-tester
-default: $(LIBTARGET)
-all: $(LIBTARGET) $(TESTER)
+default: build_info $(LIBTARGET)
+all: build_info $(LIBTARGET) $(TESTER)
 
 # HIP variables
 HIP_INCLUDE_DIR  ?= /opt/rocm/include
@@ -44,8 +44,25 @@ LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
 TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.hip=.o)
 
+# GPU architecture
+OFFLOAD_ARCH ?=
+DETECTED_ARCH := $(shell command -v rocminfo >/dev/null 2>&1 && \
+  rocminfo 2>/dev/null | grep -o "gfx[0-9a-f]*" | head -1 || echo "")
+ifneq ($(OFFLOAD_ARCH),)
+  OFFLOAD_ARCH_FLAG := --offload-arch=$(OFFLOAD_ARCH)
+  OFFLOAD_ARCH_MSG := $(OFFLOAD_ARCH) (specified)
+else
+  OFFLOAD_ARCH_FLAG :=
+  ifneq ($(DETECTED_ARCH),)
+    OFFLOAD_ARCH_MSG := $(DETECTED_ARCH) (auto-detected)
+  else
+    OFFLOAD_ARCH_MSG := default (hipcc auto-detect)
+  endif
+endif
+
 # CXX variables and flags
-override CXXFLAGS  += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
+override CXXFLAGS += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
+override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
@@ -55,6 +72,10 @@ $(LIB_DIR):
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
+
+.PHONY: build_info
+build_info:
+	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
 $(LIBTARGET): $(LIB_OBJECTS) $(LIB_HEADERS) | $(LIB_DIR)
 	$(AR) rcsD $@ $(LIB_OBJECTS)
@@ -78,4 +99,4 @@ list:
 clean:
 	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR)
 
-.PHONY: all default clean asm list
+.PHONY: all default clean asm list build_info

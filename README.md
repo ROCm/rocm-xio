@@ -14,10 +14,34 @@ list of supported devices we can issue IO too is given in the
 The [tools](./tools) directory contains a number of tools that are (add more
 content here).
 
-## Manual Build Steps
+## Building
 
-The following steps seem to work. So, for now, I am recording them here while I
-sort out the cmake issues.
+### Prerequisites
+
+- ROCm installation with `hipcc` compiler
+- `rocminfo` utility (recommended for automatic GPU architecture detection)
+
+If `rocminfo` is not installed, the build system will fall back to hipcc's
+default GPU architecture detection.
+
+### Building with Make
+
+Simply run:
+
+```bash
+make all
+```
+
+The Makefile will automatically detect your GPU architecture and display it
+during the build. You can also specify a target architecture manually:
+
+```bash
+make OFFLOAD_ARCH=gfx1100 all
+```
+
+### Manual Build Steps
+
+The following steps can also be used for manual builds:
 
 ```bash
 hipcc --offload-arch=native -xhip -c endpoints/test-ep/test-ep.hip -o test-ep.o -fgpu-rdc -I include/
@@ -26,8 +50,6 @@ ar rcsD lib/librocm-axiio.a test-ep.o
 hipcc axiio-tester.o lib/librocm-axiio.a -o bin/axiio-tester -fgpu-rdc
 unbuffer /opt/rocm-7.0.2/lib/llvm/bin/llvm-objdump --demangle --disassemble-all lib/librocm-axiio.a | less -R
 ```
-
-Or now you can run `make all`.
 
 ## Additional Useful Information
 
