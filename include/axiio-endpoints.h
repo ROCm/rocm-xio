@@ -8,8 +8,25 @@
 
 #include <hip/hip_runtime.h>
 
-typedef long long sqeType;
-typedef long cqeType;
+// Magic ID for test-ep queue entries
+#define TEST_EP_MAGIC_ID 0xF0
+
+// Submission Queue Entry - 64 bytes
+typedef struct __attribute__((packed)) {
+    uint8_t magicID;         // 1 byte
+    uint16_t entryId;        // 2 bytes
+    uint64_t timeStamp;      // 8 bytes
+    uint64_t dataPayload;    // 8 bytes
+    uint8_t padField[45];    // 45 bytes (total: 64 bytes)
+} sqeType;
+
+// Completion Queue Entry - 16 bytes
+typedef struct __attribute__((packed)) {
+    uint8_t magicID;         // 1 byte
+    uint16_t entryId;        // 2 bytes
+    uint64_t dataPayload;    // 8 bytes
+    uint8_t padField[5];     // 5 bytes (total: 16 bytes)
+} cqeType;
 
 class axiioEndPoint {
 public:
