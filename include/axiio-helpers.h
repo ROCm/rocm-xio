@@ -23,6 +23,7 @@
 }
 
 void axxioPrintDeviceInfo();
+void axxioPrintStatistics(const std::vector<double>& durations);
 void axxioPrintHistogram(const std::vector<double>& durations,
                          unsigned nIterations);
 
