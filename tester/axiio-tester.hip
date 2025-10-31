@@ -4,6 +4,8 @@
  */
 
 #include <CLI/CLI.hpp>
+#include <iomanip>
+#include <string>
 #include <thread>
 #include <time.h>
 #include <hip/hip_runtime.h>
@@ -140,13 +142,19 @@ int main(int argc, char **argv) {
     hipDeviceAttributeWallClockRate, 0));
 
   std::cout << "Results:" << std::endl;
+  
+  // Calculate width needed for iteration number
+  int iterWidth = std::to_string(config.args.nIterations - 1).length();
+  
   for (unsigned i = 0; i < config.args.nIterations; i++) {
     unsigned long long int duration = config.stats.endTime[i] - config.stats.startTime[i];
     double duration_ns = (double)duration * 1000000.0 / (double)wallClkRate;
-    std::cout << std::dec << "  Iteration " << i <<
-    ": Start time: " << config.stats.startTime[i]
-              << ", End time: " << config.stats.endTime[i] << ", Duration: "
-              << duration << ", Runtime: " << duration_ns << " ns" << std::endl;
+    std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i <<
+    ": Start Tick: " << std::setw(13) << config.stats.startTime[i]
+              << ", End Tick: " << std::setw(13) << config.stats.endTime[i] 
+              << ", Duration: " << std::setw(4) << duration 
+              << ", Runtime: " << std::setw(6) << std::fixed << std::setprecision(0) 
+              << duration_ns << " ns" << std::endl;
   }
 
   free(config.stats.startTime);
