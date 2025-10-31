@@ -21,4 +21,6 @@
     }                                          \
 }
 
+void axxioPrintDeviceInfo();
+
 #endif //AXIIO_HELPERS_H
