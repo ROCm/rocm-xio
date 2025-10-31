@@ -10,6 +10,10 @@
 
 #include "axiio.h"
 
+// Type aliases for queue entries
+typedef axiioEndPoint::sqeType sqeType;
+typedef axiioEndPoint::cqeType cqeType;
+
 typedef struct {
   unsigned nIterations;
   bool printDeviceInfo;

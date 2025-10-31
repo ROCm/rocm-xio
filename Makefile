@@ -63,6 +63,7 @@ endif
 # CXX variables and flags
 override CXXFLAGS += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
 override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
+override CXXFLAGS += -I$(ENDPOINTS_DIR)/test-ep
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
