@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef TEST_EP_TYPES_H
-#define TEST_EP_TYPES_H
+#ifndef TEST_EP_H
+#define TEST_EP_H
+
+#include <cstdint>
 
 #include <hip/hip_runtime.h>
 
@@ -57,5 +59,5 @@ struct cqeType_s {
     uint8_t padField[AXIIO_CQE_PAD_SIZE];
 } __attribute__((packed));
 
-#endif // TEST_EP_TYPES_H
+#endif // TEST_EP_H
 

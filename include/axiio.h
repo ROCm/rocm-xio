@@ -6,9 +6,9 @@
 #ifndef AXIIO_H
 #define AXIIO_H
 
-#include <iostream>
 #include <hip/hip_runtime.h>
-#include "axiio-helpers.h"
-#include "axiio-endpoints.h"
 
-#endif //AXIIO_H
+#include "axiio-endpoints.h"
+#include "axiio-helpers.h"
+
+#endif // AXIIO_H
