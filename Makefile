@@ -36,9 +36,33 @@ ENDPOINTS_DIR := endpoints
 COMMON_DIR := common
 TESTER_DIR := tester
 
+# Automatically discover all available endpoints from subdirectories
+VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
+
+# Generated files
+ENDPOINT_REGISTRY_GEN := $(INCLUDE_DIR)/axiio-endpoint-registry-gen.h
+
+# External headers
+EXTERNAL_HEADERS_DIR := $(INCLUDE_DIR)/external
+NVME_KERNEL_HEADERS := $(EXTERNAL_HEADERS_DIR)/linux-nvme.h $(EXTERNAL_HEADERS_DIR)/linux-nvme_ioctl.h
+RDMA_HEADERS_DIR := $(EXTERNAL_HEADERS_DIR)/rdma
+RDMA_HEADERS := $(RDMA_HEADERS_DIR)/ib_user_verbs.h \
+                $(RDMA_HEADERS_DIR)/mlx/mlx5dv.h \
+                $(RDMA_HEADERS_DIR)/bnxt/bnxt_re_abi.h \
+                $(RDMA_HEADERS_DIR)/ionic/ionic.h \
+                $(RDMA_HEADERS_DIR)/pvrdma/pvrdma.h
+
+# Auto-generated vendor-specific RDMA headers
+RDMA_VENDOR_HEADERS := $(ENDPOINTS_DIR)/rdma-ep/mlx/mlx5-rdma.h \
+                       $(ENDPOINTS_DIR)/rdma-ep/bnxt/bnxt-rdma.h \
+                       $(ENDPOINTS_DIR)/rdma-ep/ionic/ionic-rdma.h \
+                       $(ENDPOINTS_DIR)/rdma-ep/pvrdma/pvrdma-rdma.h
+
 # Find all source files with .hip extension
 LIB_HEADERS := $(call rwildcard,$(INCLUDE_DIR) $(ENDPOINTS_DIR),*.h)
-LIB_SOURCES := $(call rwildcard,$(ENDPOINTS_DIR) $(COMMON_DIR),*.hip)
+# Build all endpoints (automatically find all .hip files)
+LIB_SOURCES := $(call rwildcard,$(COMMON_DIR),*.hip) \
+               $(call rwildcard,$(ENDPOINTS_DIR),*.hip)
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 
 # Tester source file
@@ -64,7 +88,8 @@ endif
 # CXX variables and flags
 override CXXFLAGS += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
 override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
-override CXXFLAGS += -I$(ENDPOINTS_DIR)/test-ep
+# Add include paths for all discovered endpoints
+override CXXFLAGS += $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep))
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
@@ -79,15 +104,69 @@ $(BUILD_DIR):
 build_info:
 	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
+# Generate endpoint registry from discovered endpoints
+$(ENDPOINT_REGISTRY_GEN): scripts/generate-endpoint-registry.sh | $(INCLUDE_DIR)
+	@echo "Generating endpoint registry from: $(VALID_ENDPOINTS)"
+	@./scripts/generate-endpoint-registry.sh $(ENDPOINTS_DIR) $@
+
+# Download NVMe headers from Linux kernel
+$(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
+	@echo "Fetching NVMe headers from Linux kernel repository..."
+	@./scripts/fetch-nvme-headers.sh $(EXTERNAL_HEADERS_DIR)
+	@echo "Generated external headers: $(NVME_KERNEL_HEADERS)"
+
+.PHONY: fetch-nvme-headers
+fetch-nvme-headers: $(NVME_KERNEL_HEADERS)
+	@echo ""
+	@echo "NVMe kernel headers downloaded to $(EXTERNAL_HEADERS_DIR)/"
+	@echo "These are for reference only - the nvme-ep definitions are in endpoints/nvme-ep/nvme-ep.h"
+
+# Download RDMA headers from rdma-core repository
+$(RDMA_HEADERS): scripts/fetch-rdma-headers.sh
+	@echo "Fetching RDMA provider headers from rdma-core repository..."
+	@./scripts/fetch-rdma-headers.sh $(RDMA_HEADERS_DIR)
+	@echo "Generated RDMA headers in $(RDMA_HEADERS_DIR)/"
+
+# Generate vendor-specific RDMA headers from downloaded headers
+$(RDMA_VENDOR_HEADERS): $(RDMA_HEADERS) scripts/generate-rdma-vendor-headers.sh
+	@echo "Generating vendor-specific RDMA headers..."
+	@./scripts/generate-rdma-vendor-headers.sh $(RDMA_HEADERS_DIR) $(ENDPOINTS_DIR)/rdma-ep
+
+.PHONY: fetch-rdma-headers
+fetch-rdma-headers: $(RDMA_HEADERS) $(RDMA_VENDOR_HEADERS)
+	@echo ""
+	@echo "RDMA provider headers downloaded to $(RDMA_HEADERS_DIR)/"
+	@echo "These are for reference only - the rdma-ep definitions are in endpoints/rdma-ep/rdma-ep.h"
+	@echo "Vendor-specific headers auto-generated: mlx/, bnxt/, ionic/, pvrdma/"
+
+.PHONY: fetch-external-headers
+fetch-external-headers: fetch-nvme-headers fetch-rdma-headers
+	@echo ""
+	@echo "All external headers downloaded successfully"
+
 $(LIBTARGET): $(LIB_OBJECTS) $(LIB_HEADERS) | $(LIB_DIR)
 	$(AR) rcsD $@ $(LIB_OBJECTS)
 
 $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
 	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^
 
-$(BUILD_DIR)/%.o: %.hip | $(BUILD_DIR)
+# Make RDMA endpoint depend on vendor headers
+$(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
+
+# Make all object files depend on generated registry
+$(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
+	$(eval ENDPOINT_DEFINE := $(call get_endpoint_define,$<))
+	$(HIPCXX) $(CXXFLAGS) $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -c -o $@ $<
+
+# Function to determine which endpoint define to use based on source path
+# $1: source file path
+define get_endpoint_define
+$(if $(findstring /test-ep/,$1),-DAXIIO_ENDPOINT_TEST,\
+$(if $(findstring /nvme-ep/,$1),-DAXIIO_ENDPOINT_NVME,\
+$(if $(findstring /sdma-ep/,$1),-DAXIIO_ENDPOINT_SDMA,\
+$(if $(findstring /rdma-ep/,$1),-DAXIIO_ENDPOINT_RDMA,))))
+endef
 
 asm: $(LIBTARGET)
 	unbuffer $(OBJDUMP) \
@@ -99,7 +178,11 @@ list:
 		grep -E gfx[1-9] | sort -t'x' -k2,2n | sed 's/^[ \t]*/  /'
 
 clean:
-	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR)
+	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR) $(ENDPOINT_REGISTRY_GEN)
+
+clean-external:
+	@$(RM) -rf $(EXTERNAL_HEADERS_DIR)
+	@echo "Removed external headers. Run 'make fetch-nvme-headers' to re-download."
 
 # Linting targets
 lint: lint-format
@@ -120,6 +203,7 @@ lint-format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
+		-not -path './include/external/*' \
 		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
 		&& echo "✓ All files pass clang-format check" \
 		|| (echo "✗ Formatting issues found. Run 'make format' to fix." && exit 1)
@@ -136,6 +220,7 @@ format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
+		-not -path './include/external/*' \
 		| xargs $(CLANG_FORMAT) -i --style=file
 	@echo "✓ Formatting complete"
 
