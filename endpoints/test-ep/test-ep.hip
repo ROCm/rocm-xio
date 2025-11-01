@@ -8,13 +8,19 @@
 
 #include <hip/hip_runtime.h>
 
-#include <axiio.h>
-
+#include "axiio-endpoints.h"
 #include "test-ep.h"
 
-// Type aliases for convenience (types defined in test-ep.h)
-typedef axiioEndPoint::sqeType sqeType;
-typedef axiioEndPoint::cqeType cqeType;
+// Namespace all test-ep implementation to avoid conflicts
+namespace test_ep {
+
+// Use types from test-ep.h
+typedef sqeType_s sqeType;
+typedef cqeType_s cqeType;
+
+// Verify that the queue entry sizes match test-ep expectations
+static_assert(sizeof(sqeType) == TEST_EP_SQE_SIZE, "test-ep SQE size mismatch");
+static_assert(sizeof(cqeType) == TEST_EP_CQE_SIZE, "test-ep CQE size mismatch");
 
 // Helper function to compare sqeType structs
 __host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b) {
@@ -87,43 +93,54 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
   return result;
 }
 
-__host__ __device__ void axiioEndPoint::emulateEndpoint(unsigned sqeIterations,
-                                                        sqeType* sqeAddr,
-                                                        cqeType* cqeAddr) {
-  sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, 0xbeefdead, {0}};
-  sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, 0xf000f000, {0}};
-  sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
-  cqeType cqeLocal;
+__host__ __device__ unsigned long long int wall_clock64() {
+#ifdef __HIP_DEVICE_COMPILE__
+  return __builtin_readcyclecounter();
+#else
+  return 0;
+#endif
+}
 
-  while (!sqeEqual(&sqeNew, &sqeStop)) {
-    sqeNew = sqePoll(sqeOld, sqeAddr);
-    cqeLocal = cqeGenFromSqe(&sqeNew);
-    cqeWrite(cqeLocal, cqeAddr);
+} // namespace test_ep
+
+// Export test-ep functions for runtime dispatch
+extern "C" {
+
+__host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
+                                                 sqeType_s* sqeAddr,
+                                                 cqeType_s* cqeAddr) {
+  test_ep::sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, 0xbeefdead, {0}};
+  test_ep::sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, 0xf000f000, {0}};
+  test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
+  test_ep::cqeType cqeLocal;
+
+  while (!test_ep::sqeEqual(&sqeNew, &sqeStop)) {
+    sqeNew = test_ep::sqePoll(sqeOld, (volatile test_ep::sqeType*)sqeAddr);
+    cqeLocal = test_ep::cqeGenFromSqe(&sqeNew);
+    test_ep::cqeWrite(cqeLocal, (test_ep::cqeType*)cqeAddr);
     sqeOld = sqeNew;
   }
 }
 
-__host__ unsigned long long int wall_clock64() {
-  return 0;
-}
-
-__device__ void axiioEndPoint::driveEndpoint(unsigned sqeIterations,
-                                             sqeType* sqeAddr, cqeType* cqeAddr,
-                                             unsigned long long int* startTime,
-                                             unsigned long long int* endTime) {
-  sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
-  cqeType cqeLocal = {TEST_EP_MAGIC_ID, 0, 0xdeadbeef, {0}};
-  sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
+__device__ void test_ep_driveEndpoint(unsigned sqeIterations,
+                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+                                      unsigned long long int* startTime,
+                                      unsigned long long int* endTime) {
+  test_ep::sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
+  test_ep::cqeType cqeLocal = {TEST_EP_MAGIC_ID, 0, 0xdeadbeef, {0}};
+  test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
   unsigned sqeCount = 0;
 
   while (sqeCount < sqeIterations) {
     sqeLocal.entryId = sqeCount;
     startTime[sqeCount] = wall_clock64();
-    sqeWrite(sqeLocal, sqeAddr);
-    cqeLocal = cqePoll(cqeLocal, cqeAddr);
+    test_ep::sqeWrite(sqeLocal, (test_ep::sqeType*)sqeAddr);
+    cqeLocal = test_ep::cqePoll(cqeLocal, (volatile test_ep::cqeType*)cqeAddr);
     endTime[sqeCount] = wall_clock64();
     sqeCount++;
     sqeLocal.dataPayload = 0xbeefdeaf + sqeCount;
   }
-  sqeWrite(sqeStop, sqeAddr);
+  test_ep::sqeWrite(sqeStop, (test_ep::sqeType*)sqeAddr);
 }
+
+} // extern "C"
