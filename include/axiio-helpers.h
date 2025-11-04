@@ -11,22 +11,18 @@
 
 #include <hip/hip_runtime.h>
 
-#define HIP_CHECK(expression)                  \
-{                                              \
-    const hipError_t status = expression;      \
-    if(status != hipSuccess)                   \
-    {                                          \
-        std::cerr << "HIP error "              \
-                  << status << ": "            \
-                  << hipGetErrorString(status) \
-                  << " at " << __FILE__ << ":" \
-                  << __LINE__ << std::endl;    \
-    }                                          \
-}
+#define HIP_CHECK(expression)                                                  \
+  {                                                                            \
+    const hipError_t status = expression;                                      \
+    if (status != hipSuccess) {                                                \
+      std::cerr << "HIP error " << status << ": " << hipGetErrorString(status) \
+                << " at " << __FILE__ << ":" << __LINE__ << std::endl;         \
+    }                                                                          \
+  }
 
 void axxioPrintDeviceInfo();
 void axxioPrintStatistics(const std::vector<double>& durations);
 void axxioPrintHistogram(const std::vector<double>& durations,
                          unsigned nIterations);
 
-#endif //AXIIO_HELPERS_H
+#endif // AXIIO_HELPERS_H

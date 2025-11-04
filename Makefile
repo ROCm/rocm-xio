@@ -29,6 +29,7 @@ HIPCXX ?= /opt/rocm/bin/hipcc
 AR ?= ar
 OBJDUMP ?= /opt/rocm/lib/llvm/bin/llvm-objdump
 CLANGXX ?= /opt/rocm/llvm/bin/clang++
+CLANG_FORMAT ?= clang-format
 
 # Project directories
 ENDPOINTS_DIR := endpoints
@@ -100,4 +101,42 @@ list:
 clean:
 	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR)
 
-.PHONY: all default clean asm list build_info
+# Linting targets
+lint: lint-format
+
+# Check code formatting with clang-format (matches GitHub CI workflow)
+# Uses DoozyX/clang-format-lint-action v0.18.2 compatible behavior
+lint-format:
+	@echo "Checking code formatting with clang-format..."
+	@if ! command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		echo "Error: clang-format not found. Install with:"; \
+		echo "  sudo apt-get install clang-format"; \
+		echo "Or set CLANG_FORMAT variable to the correct path."; \
+		exit 1; \
+	fi
+	@echo "Using $(CLANG_FORMAT): $$($(CLANG_FORMAT) --version | head -1)"
+	@$(CLANG_FORMAT) --version >/dev/null 2>&1 || (echo "Error: clang-format failed to run" && exit 1)
+	@find . -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' -o -name '*.hip' \) \
+		-not -path './build/*' \
+		-not -path './.git/*' \
+		-not -path './stebates-*/*' \
+		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
+		&& echo "✓ All files pass clang-format check" \
+		|| (echo "✗ Formatting issues found. Run 'make format' to fix." && exit 1)
+
+# Automatically fix formatting issues
+format:
+	@echo "Formatting code with clang-format..."
+	@if ! command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		echo "Error: clang-format not found. Install with:"; \
+		echo "  sudo apt-get install clang-format"; \
+		exit 1; \
+	fi
+	@find . -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' -o -name '*.hip' \) \
+		-not -path './build/*' \
+		-not -path './.git/*' \
+		-not -path './stebates-*/*' \
+		| xargs $(CLANG_FORMAT) -i --style=file
+	@echo "✓ Formatting complete"
+
+.PHONY: all default clean asm list build_info lint lint-format format
