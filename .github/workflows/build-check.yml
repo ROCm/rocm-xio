@@ -45,9 +45,9 @@ jobs:
     - name: Perform clang linting.
       uses: DoozyX/clang-format-lint-action@v0.18.2
       with:
-        files: '**/*.{cpp,h,hpp,c,cc,hip}'
-        config: .clang-format
-        check-only: true
-        verbose: true
-        format-only: false
-        fix: false
+        source: '.'
+        exclude: './build ./stebates-*'
+        extensions: 'cpp,h,hpp,c,cc,hip'
+        clangFormatVersion: 18
+        style: file
+        inplace: false

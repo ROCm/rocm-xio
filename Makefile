@@ -104,7 +104,8 @@ clean:
 # Linting targets
 lint: lint-format
 
-# Check code formatting with clang-format (matches GitHub CI)
+# Check code formatting with clang-format (matches GitHub CI workflow)
+# Uses DoozyX/clang-format-lint-action v0.18.2 compatible behavior
 lint-format:
 	@echo "Checking code formatting with clang-format..."
 	@if ! command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
