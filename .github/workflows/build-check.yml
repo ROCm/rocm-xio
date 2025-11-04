@@ -42,3 +42,12 @@ jobs:
     - name: Run tester application.
       run: |
         ./bin/axiio-tester -h
+    - name: Perform clang linting.
+      uses: DoozyX/clang-format-lint-action@v0.18.2
+      with:
+        source: '.'
+        exclude: './build ./stebates-*'
+        extensions: 'cpp,h,hpp,c,cc,hip'
+        clangFormatVersion: 18
+        style: file
+        inplace: false

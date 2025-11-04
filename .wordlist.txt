@@ -19,6 +19,7 @@ amd
 ar
 atlassian
 axiio
+clang
 cmake
 cpu
 demangle
