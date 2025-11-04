@@ -97,6 +97,12 @@ override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
 # Add include paths for all discovered endpoints
 override CXXFLAGS += $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep))
 
+# NVMe doorbell ringing mode
+# Set GPU_DIRECT_DOORBELL=1 to enable GPU-direct doorbell writes (GDA-style)
+# Default is 1 (GPU-direct mode with proper GDA implementation)
+GPU_DIRECT_DOORBELL ?= 1
+override CXXFLAGS += -DGPU_DIRECT_DOORBELL=$(GPU_DIRECT_DOORBELL)
+
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
@@ -159,7 +165,9 @@ $(LIBTARGET): $(LIB_OBJECTS) $(LIB_HEADERS) | $(LIB_DIR)
 	$(AR) rcsD $@ $(LIB_OBJECTS)
 
 $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
-	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^ -lhsa-runtime64
+
+# Note: -lhsa-runtime64 is required for GPU doorbell HSA memory lock
 
 # Make RDMA endpoint depend on vendor headers
 $(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
