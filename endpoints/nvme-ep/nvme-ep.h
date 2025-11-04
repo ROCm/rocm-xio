@@ -10,8 +10,9 @@
 
 #include <hip/hip_runtime.h>
 
-// For sqeType_s and cqeType_s definitions
-#include "axiio-endpoints.h"
+// Forward declarations (actual definitions are in axiio-endpoints.h)
+struct sqeType_s;
+struct cqeType_s;
 
 /*
  * NVMe Definitions for AxIIO nvme-ep Endpoint
@@ -279,8 +280,10 @@ __host__ __device__ static inline uint8_t nvme_cqe_status_type(
 // For buffers > page size, PRP2 contains either:
 //   - Address of next page (if buffer spans 2 pages)
 //   - Address of PRP list (if buffer spans > 2 pages)
-__host__ __device__ static inline void nvme_calculate_prps(
-  uint64_t buffer_addr, uint32_t buffer_size, uint64_t* prp1, uint64_t* prp2) {
+__host__ __device__ static inline void nvme_calculate_prps(uint64_t buffer_addr,
+                                                           uint32_t buffer_size,
+                                                           uint64_t* prp1,
+                                                           uint64_t* prp2) {
   *prp1 = buffer_addr;
   *prp2 = 0;
 
@@ -381,14 +384,12 @@ __host__ __device__ static inline bool nvme_verify_pattern(
         expected = 0xFF;
         break;
 
-      case NVME_PATTERN_RANDOM:
-        {
-          uint64_t seed = offset + i;
-          seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;
-          seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
-          expected = (uint8_t)((seed ^ (seed >> 31)) & 0xFF);
-        }
-        break;
+      case NVME_PATTERN_RANDOM: {
+        uint64_t seed = offset + i;
+        seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
+        expected = (uint8_t)((seed ^ (seed >> 31)) & 0xFF);
+      } break;
 
       case NVME_PATTERN_BLOCK_ID:
         expected = (uint8_t)((offset >> ((i % sizeof(uint64_t)) * 8)) & 0xFF);

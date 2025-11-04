@@ -5,6 +5,18 @@ lib/
 *.o
 *.a
 
+# Kernel module build artifacts
+kernel-module/*.ko
+kernel-module/*.mod
+kernel-module/*.mod.c
+kernel-module/*.mod.o
+kernel-module/.*.cmd
+kernel-module/Module.symvers
+kernel-module/modules.order
+kernel-module/.tmp_versions/
+kernel-module/test_axiio_ioctl
+kernel-module/test_gpu_doorbell
+
 # Generated files
 include/axiio-endpoint-registry-gen.h
 common/endpoint-dispatch.hip
@@ -28,3 +40,20 @@ endpoints/rdma-ep/pvrdma/pvrdma-rdma.h
 
 # Compilation database
 compile_commands.json
+
+# Test binaries and temporary files
+test_dma_alloc
+test_dma_alloc_v2
+test_nvme_complete
+test_nvme_complete_v2
+test_nvme_complete_v3
+check_ioctl_define
+tester/check-nvme-status
+tester/dump-queue-test
+*.log
+
+# Emacs temporary files
+\#*\#
+
+# Reference materials (external)
+reference/

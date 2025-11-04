@@ -5,9 +5,55 @@
 This repository contains the source code for a ROCm library that provides
 an API for Accelerator-Initiated IO (AxIIO) for AMD GPU `__device__` code.
 
+This library enables AMD GPUs to perform **direct I/O operations** to hardware devices (NVMe SSDs, RDMA NICs, SDMA engines) without CPU intervention, achieving sub-microsecond latencies.
+
 This library targets a number of devices which we refer to as end-points. The
 list of supported devices we can issue IO too is given in the
 [endpoints](./endpoints) sub-folder.
+
+## Quick Reference
+
+### Build and Run (3 Steps)
+
+```bash
+# 1. Install ROCm (if not already installed)
+sudo apt install rocm-hip-sdk rocminfo libcli11-dev
+
+# 2. Build
+make all
+
+# 3. Run with GPU + NVMe
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 100 --verbose
+```
+
+### Key Command Line Arguments
+
+| Use Case | Command |
+|----------|---------|
+| **Test with real NVMe** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0` |
+| **CPU-only mode** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only` |
+| **Use kernel module** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --use-kernel-module` |
+| **Performance test** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 10000 --histogram` |
+| **List endpoints** | `./bin/axiio-tester -e` |
+| **Emulated test** | `./bin/axiio-tester -n 100 --verbose` |
+
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Quick Reference](#quick-reference)
+- [Endpoints](#endpoints)
+- [Prerequisites](#prerequisites)
+  - [Installing ROCm](#installing-rocm)
+  - [Environment Variables](#environment-variables-for-radeon-gpus)
+- [Building](#building)
+- [Testing](#testing)
+- [Running with GPU Against Real NVMe SSD](#running-with-gpu-against-real-nvme-ssd)
+  - [Three Methods](#three-methods-for-gpu-nvme-io)
+  - [Command Line Arguments](#command-line-arguments-reference)
+  - [Complete Usage Examples](#complete-usage-examples)
+  - [Troubleshooting](#troubleshooting-gpu-nvme-issues)
+- [Additional Information](#additional-useful-information)
 
 ## Endpoints
 
@@ -30,10 +76,12 @@ Each endpoint provides its own queue entry formats and IO semantics.
 
 ### Listing Available Endpoints
 
-To see all available endpoints and which one is currently compiled:
+To see all available endpoints:
 
 ```bash
 ./bin/axiio-tester --list-endpoints
+# or
+./bin/axiio-tester -e
 ```
 
 Output:
@@ -42,38 +90,30 @@ Available endpoints:
   test-ep - Test endpoint for development/testing
   nvme-ep - NVMe endpoint for NVM Express command simulation
   sdma-ep - AMD SDMA Engine endpoint
+  rdma-ep - RDMA endpoint for InfiniBand/RoCE
 
-Currently compiled endpoint: test-ep
-
-To build with a different endpoint, use:
-  make ENDPOINT=<endpoint-name>
+All endpoints are built into the binary.
 ```
 
-### Selecting an Endpoint at Build Time
+### Selecting an Endpoint at Runtime
 
-Endpoints are selected at compile time using the `ENDPOINT` Makefile variable.
-Only one endpoint can be active per build.
+**All endpoints are now built automatically** and selected at runtime using the `--endpoint` or `-e` flag:
 
-Build with the default endpoint (test-ep):
 ```bash
-make all
+# Use test endpoint (default)
+./bin/axiio-tester -n 100
+
+# Use NVMe endpoint
+./bin/axiio-tester --endpoint nvme-ep -n 100
+
+# Use NVMe endpoint with real hardware
+sudo ./bin/axiio-tester --endpoint nvme-ep --nvme-device /dev/nvme0
+
+# The endpoint is auto-selected when using --nvme-device
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0  # Uses nvme-ep automatically
 ```
 
-Build with a specific endpoint:
-```bash
-make ENDPOINT=nvme-ep all
-```
-
-Clean and rebuild with a different endpoint:
-```bash
-make clean
-make ENDPOINT=nvme-ep all
-```
-
-When you run the tester, it will display which endpoint is active:
-```
-Using endpoint: nvme-ep
-```
+The build system compiles all endpoints and uses static dispatch to route operations to the correct endpoint at runtime.
 
 ### Adding a New Endpoint
 
@@ -145,8 +185,58 @@ content here).
 - **ROCm installation** with `hipcc` compiler (version 5.0 or later recommended)
 - **rocminfo** utility (recommended for automatic GPU architecture detection)
 - **libcli11-dev** - Command line parser library for C++11
+- **AMD GPU** (Radeon RX series or MI-series accelerator)
+- **NVMe SSD** (for real hardware testing)
 
-### Installing Prerequisites
+### Installing ROCm
+
+If ROCm is not installed on your system, install it using the following steps:
+
+#### For Native Linux
+
+```bash
+# Add ROCm repository (for Ubuntu/Debian)
+wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+
+# For Ubuntu 24.04 (Noble)
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.2 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+
+# For Ubuntu 22.04 (Jammy)
+# echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+
+# Update and install ROCm
+sudo apt update
+sudo apt install rocm-hip-sdk rocminfo libcli11-dev
+
+# Verify installation
+which hipcc
+hipcc --version
+```
+
+#### For WSL2 (Windows Subsystem for Linux)
+
+**WSL2 requires special setup.** See the comprehensive guide: **[WSL_INSTALLATION.md](WSL_INSTALLATION.md)**
+
+Quick summary for WSL2:
+```bash
+# Set repository priority (required for WSL)
+cat << 'EOF' | sudo tee /etc/apt/preferences.d/rocm-pin-600
+Package: *
+Pin: release o=repo.radeon.com
+Pin-Priority: 600
+EOF
+
+# Install ROCm and dependencies
+sudo apt update
+sudo apt install rocm-hip-sdk rocminfo libcli11-dev g++ libstdc++-14-dev
+
+# Build with explicit GPU architecture (required in WSL)
+make OFFLOAD_ARCH=gfx1100 all  # Adjust for your GPU
+```
+
+For other Linux distributions, see the [official ROCm installation guide](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
+
+### Installing Other Prerequisites
 
 You can check and install all prerequisites automatically:
 
@@ -191,6 +281,8 @@ source ~/.bashrc
 
 ### Quick Start
 
+**Note**: The build system now compiles **all endpoints** automatically (test-ep, nvme-ep, sdma-ep, rdma-ep) and uses dynamic dispatch at runtime. You no longer need to specify a single endpoint at build time.
+
 If `rocminfo` is not installed, the build system will fall back to hipcc's
 default GPU architecture detection.
 
@@ -202,12 +294,43 @@ Simply run:
 make all
 ```
 
+This will:
+- Build all available endpoints (test-ep, nvme-ep, sdma-ep, rdma-ep)
+- Generate endpoint registry and dispatch code
+- Download required external headers (RDMA, NVMe reference)
+- Create `lib/librocm-axiio.a` library
+- Build `bin/axiio-tester` executable
+
 The Makefile will automatically detect your GPU architecture and display it
 during the build. You can also specify a target architecture manually:
 
 ```bash
 make OFFLOAD_ARCH=gfx1100 all
 ```
+
+### Build Configuration Options
+
+```bash
+# Build with CPU-hybrid doorbell mode (instead of GPU-direct)
+make GPU_DIRECT_DOORBELL=0 all
+
+# Build for specific GPU architecture
+make OFFLOAD_ARCH=gfx90a all
+
+# Build for specific GPU (REQUIRED in WSL2)
+make OFFLOAD_ARCH=gfx1100 all  # RX 7000 series (RDNA3)
+make OFFLOAD_ARCH=gfx1030 all  # RX 6000 series (RDNA2)
+make OFFLOAD_ARCH=gfx942 all   # MI300 series
+
+# Build with parallel jobs
+make -j$(nproc) all
+
+# Clean and rebuild
+make clean
+make all
+```
+
+**Note for WSL2 Users**: You MUST specify `OFFLOAD_ARCH` explicitly because GPU auto-detection doesn't work in WSL. See [WSL_INSTALLATION.md](WSL_INSTALLATION.md) for architecture codes.
 
 ### Manual Build Steps
 
@@ -368,6 +491,366 @@ See comprehensive documentation:
 - Use on test systems only
 - Have backups
 - Monitor system logs (`dmesg`)
+
+## Running with GPU Against Real NVMe SSD
+
+This section provides comprehensive instructions for running `axiio-tester` with an AMD GPU performing direct I/O operations to a real NVMe SSD.
+
+### Quick Start
+
+The simplest way to run with real NVMe hardware:
+
+```bash
+# Set required environment variable (for Radeon GPUs)
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+# Run with automatic device setup
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --iterations 100 \
+  --verbose
+```
+
+### Three Methods for GPU-NVMe I/O
+
+#### Method 1: Kernel Module Integration (Recommended)
+
+**Best for**: Production use, stability, and true GPU-direct I/O
+
+The kernel module (`/dev/nvme-axiio`) provides DMA-safe memory and proper queue management.
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --use-kernel-module \
+  --nvme-queue-id 63 \
+  --iterations 100 \
+  --transfer-size 4096 \
+  --lba-range-gib 1 \
+  --access-pattern random \
+  --nvme-nsid 1 \
+  --verbose
+```
+
+**Features**:
+- HSA memory locking for GPU-direct doorbell writes
+- Proper DMA addresses for NVMe controller
+- Avoids conflicts with kernel NVMe driver
+- TRUE GPU-direct I/O (no CPU intervention)
+
+#### Method 2: Direct Device Access (Lightweight)
+
+**Best for**: Testing, debugging, quick experiments
+
+Direct device access with automatic address discovery.
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --iterations 100 \
+  --transfer-size 4096 \
+  --lba-range-gib 1 \
+  --access-pattern random \
+  --nvme-nsid 1 \
+  --verbose
+```
+
+**Features**:
+- Automatic queue creation via ioctl
+- No kernel module required
+- Lightweight queue management
+- May use CPU-hybrid mode for doorbell
+
+#### Method 3: CPU-Only Mode (No GPU Atomics)
+
+**Best for**: Systems without PCIe atomics, debugging GPU issues
+
+CPU generates NVMe commands; GPU is optional.
+
+```bash
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --cpu-only \
+  --iterations 100 \
+  --transfer-size 4096 \
+  --lba-range-gib 1 \
+  --access-pattern sequential \
+  --nvme-nsid 1 \
+  --verbose
+```
+
+**Features**:
+- No PCIe atomics required
+- Works on any system with NVMe
+- Useful for benchmarking CPU vs GPU
+
+### Command Line Arguments Reference
+
+#### Essential Arguments
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--nvme-device` | Path to NVMe device | `/dev/nvme0` | - |
+| `--iterations` | Number of I/O operations | `100` | 128 |
+| `--verbose` | Enable detailed output | flag | false |
+
+#### Hardware Control
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--use-kernel-module` | Use `/dev/nvme-axiio` kernel module | flag | false |
+| `--nvme-queue-id` | Queue ID (high IDs avoid kernel conflicts) | `63` | 63 |
+| `--cpu-only` | CPU command generation (no GPU atomics) | flag | false |
+| `--real-hardware` | Enable real hardware mode | flag | false |
+
+#### I/O Parameters
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--transfer-size` | Transfer size in bytes | `4096` | 4096 |
+| `--lba-range-gib` | LBA range to test in GiB | `10` | 1 |
+| `--access-pattern` | Access pattern | `random`, `sequential` | random |
+| `--nvme-nsid` | NVMe namespace ID | `1` | 1 |
+
+#### Queue Configuration
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--submit-queue-len` | Submission queue length | `1024` | 1024 |
+| `--complete-queue-len` | Completion queue length | `512` | 512 |
+
+#### Data Buffer Options
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--use-data-buffers` | Enable data buffer testing | flag | false |
+| `--data-buffer-size` | Data buffer size in bytes | `1048576` | 1MB |
+| `--nvme-block-size` | NVMe block size | `512`, `4096` | 512 |
+| `--test-pattern` | Data pattern | `random`, `zeros`, `ones`, `sequential`, `block_id` | sequential |
+
+#### Output Control
+
+| Argument | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `--histogram` | Generate performance histogram | flag | false |
+| `-e, --endpoint` | Select endpoint or list available | `nvme-ep`, `test-ep` | test-ep |
+| `-m, --memory` | Memory type | `host`, `device` | host |
+
+### Complete Usage Examples
+
+#### Example 1: Basic Functionality Test
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  -n 10 \
+  --verbose
+```
+
+#### Example 2: Performance Testing with Histogram
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --iterations 10000 \
+  --transfer-size 8192 \
+  --lba-range-gib 10 \
+  --access-pattern random \
+  --histogram
+```
+
+#### Example 3: Data Integrity Testing
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --use-data-buffers \
+  --data-buffer-size 1048576 \
+  --nvme-block-size 512 \
+  --test-pattern random \
+  --iterations 1000 \
+  --verbose
+```
+
+#### Example 4: Sequential I/O Benchmark
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --transfer-size 131072 \
+  --access-pattern sequential \
+  --lba-range-gib 100 \
+  --iterations 5000 \
+  --histogram
+```
+
+#### Example 5: Testing with Kernel Module (GPU-Direct)
+
+```bash
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+# Load kernel module first (if available)
+sudo modprobe nvme-axiio
+
+sudo ./bin/axiio-tester \
+  --nvme-device /dev/nvme0 \
+  --use-kernel-module \
+  --nvme-queue-id 63 \
+  --iterations 1000 \
+  --transfer-size 4096 \
+  --verbose
+```
+
+### Identifying Your NVMe Device
+
+To find available NVMe devices:
+
+```bash
+# List all NVMe devices
+ls -l /dev/nvme*
+
+# Get detailed NVMe information
+sudo nvme list
+
+# Check device capacity and namespace
+lsblk -o NAME,SIZE,TYPE,MODEL | grep nvme
+
+# View NVMe device information
+sudo nvme id-ctrl /dev/nvme0
+
+# List namespaces
+sudo nvme list-ns /dev/nvme0
+```
+
+### Testing Progression (Recommended Order)
+
+Start with these steps to verify functionality:
+
+```bash
+# 1. List available endpoints
+./bin/axiio-tester -e
+
+# 2. Test basic functionality (emulated, no hardware)
+./bin/axiio-tester -n 10 --verbose
+
+# 3. Test with CPU-only mode (validates NVMe access)
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only -n 10 --verbose
+
+# 4. Test with GPU (requires PCIe atomics)
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 100 --verbose
+
+# 5. Performance benchmarking
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 10000 --histogram
+```
+
+### GPU Doorbell Modes
+
+The build system supports two doorbell modes (controlled by `GPU_DIRECT_DOORBELL` in Makefile):
+
+#### GPU-Direct Mode (Default: `GPU_DIRECT_DOORBELL=1`)
+
+GPU writes directly to NVMe doorbell registers:
+- **Latency**: < 1 microsecond per batch
+- **Performance**: Maximum throughput
+- **Requirements**: HSA memory locking, kernel module support
+
+```bash
+# Build with GPU-direct mode (default)
+make all
+
+# Or explicitly
+make GPU_DIRECT_DOORBELL=1 all
+```
+
+#### CPU-Hybrid Mode (`GPU_DIRECT_DOORBELL=0`)
+
+GPU generates commands, CPU rings doorbell:
+- **Latency**: ~100 nanoseconds overhead
+- **Compatibility**: Works on more systems
+- **Requirements**: Standard /dev/mem access
+
+```bash
+# Build with CPU-hybrid mode
+make GPU_DIRECT_DOORBELL=0 all
+```
+
+### Important Notes
+
+1. **Root Privileges**: Required for direct hardware access (`sudo` or `CAP_SYS_RAWIO`)
+2. **Environment Variable**: Must set `HSA_FORCE_FINE_GRAIN_PCIE=1` for Radeon GPUs
+3. **Queue IDs**: Use high queue IDs (50-65) to avoid kernel driver conflicts
+4. **PCIe Atomics**: Required for GPU mode; use `--cpu-only` if unavailable
+5. **Data Safety**: Test on non-production drives or backup data first
+
+### Troubleshooting GPU-NVMe Issues
+
+#### Issue: "PCIe atomics not enabled"
+
+```bash
+# Solution 1: Use CPU-only mode
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only
+
+# Solution 2: Enable PCIe atomics in BIOS/VM settings
+# (Requires system configuration changes)
+```
+
+#### Issue: "Failed to map doorbell"
+
+```bash
+# Check if kernel module is loaded
+lsmod | grep nvme
+
+# Try direct device access without kernel module
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --verbose
+```
+
+#### Issue: "Queue creation failed"
+
+```bash
+# Try a different queue ID
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --nvme-queue-id 50
+
+# Or use auto-detection (default behavior)
+sudo ./bin/axiio-tester --nvme-device /dev/nvme0
+```
+
+#### Issue: GPU page faults
+
+```bash
+# Verify environment variable
+echo $HSA_FORCE_FINE_GRAIN_PCIE
+
+# Set if not already set
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
+# Check dmesg for errors
+sudo dmesg | tail -50
+```
+
+### Performance Expectations
+
+Typical performance numbers on modern hardware:
+
+| Configuration | IOPS | Latency | Notes |
+|--------------|------|---------|-------|
+| GPU-Direct (kernel module) | 1M+ | < 1 μs | True GPU-direct |
+| CPU-Hybrid | 500K+ | ~1-2 μs | CPU doorbell overhead |
+| CPU-Only | 100K+ | ~5-10 μs | No GPU involvement |
+
+*Actual performance depends on NVMe drive, GPU, and system configuration.*
 
 ## Additional Useful Information
 
