@@ -23,40 +23,36 @@ void axxioPrintDeviceInfo() {
   for (int deviceId = 0; deviceId < deviceCount; ++deviceId) {
     hipDeviceProp_t deviceProp;
     HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
-    std::cout << "Device " << deviceId+1 << ":" << std::endl
+    std::cout << "Device " << deviceId + 1 << ":" << std::endl
               << " Properties:" << std::endl;
     std::cout << "  Name: " << deviceProp.name << std::endl;
     std::cout << "  Total Global Memory: "
-              << deviceProp.totalGlobalMem / (1024 * 1024)
-              << " MiB" << std::endl;
+              << deviceProp.totalGlobalMem / (1024 * 1024) << " MiB"
+              << std::endl;
     std::cout << "  Shared Memory per Block: "
-              << deviceProp.sharedMemPerBlock / 1024
-              << " KiB" << std::endl;
-    std::cout << "  Registers per Block: "
-              << deviceProp.regsPerBlock << std::endl;
+              << deviceProp.sharedMemPerBlock / 1024 << " KiB" << std::endl;
+    std::cout << "  Registers per Block: " << deviceProp.regsPerBlock
+              << std::endl;
     std::cout << "  Warp Size: " << deviceProp.warpSize << std::endl;
-    std::cout << "  Max Threads per Block: "
-              << deviceProp.maxThreadsPerBlock << std::endl;
+    std::cout << "  Max Threads per Block: " << deviceProp.maxThreadsPerBlock
+              << std::endl;
     std::cout << "  Max Threads per Multiprocessor: "
               << deviceProp.maxThreadsPerMultiProcessor << std::endl;
     std::cout << "  Number of Multiprocessors: "
               << deviceProp.multiProcessorCount << std::endl;
-    std::cout << "  Max Threads Dimensions: ["
-              << deviceProp.maxThreadsDim[0] << ", "
-              << deviceProp.maxThreadsDim[1] << ", "
+    std::cout << "  Max Threads Dimensions: [" << deviceProp.maxThreadsDim[0]
+              << ", " << deviceProp.maxThreadsDim[1] << ", "
               << deviceProp.maxThreadsDim[2] << "]" << std::endl;
-    std::cout << "  Max Grid Size: ["
-              << deviceProp.maxGridSize[0] << ", "
-              << deviceProp.maxGridSize[1] << ", "
-              << deviceProp.maxGridSize[2] << "]" << std::endl;
+    std::cout << "  Max Grid Size: [" << deviceProp.maxGridSize[0] << ", "
+              << deviceProp.maxGridSize[1] << ", " << deviceProp.maxGridSize[2]
+              << "]" << std::endl;
     std::cout << "  Max Clock Frequency (Multiprocessor): "
               << deviceProp.clockRate << " KHz" << std::endl;
     int wallClkRate;
     HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
-      hipDeviceAttributeWallClockRate,
-      deviceId));
-    std::cout << "  Wall Clock Frequency (Constant): "
-              << wallClkRate << " KHz" << std::endl;
+                                    hipDeviceAttributeWallClockRate, deviceId));
+    std::cout << "  Wall Clock Frequency (Constant): " << wallClkRate << " KHz"
+              << std::endl;
   }
 }
 
@@ -69,7 +65,8 @@ void axxioPrintStatistics(const std::vector<double>& durations) {
   double minVal = *std::min_element(durations.begin(), durations.end());
   double maxVal = *std::max_element(durations.begin(), durations.end());
   double sum = 0.0;
-  for (double d : durations) sum += d;
+  for (double d : durations)
+    sum += d;
   double avg = sum / durations.size();
 
   double variance = 0.0;
@@ -118,7 +115,7 @@ void axxioPrintHistogram(const std::vector<double>& durations,
     // Create quantile-based bin boundaries
     // to ensure each bin has at least one value
     std::vector<double> binEdges;
-    binEdges.push_back(sortedData[0]);  // Start with minimum
+    binEdges.push_back(sortedData[0]); // Start with minimum
 
     // Calculate target number of samples per bin
     double samplesPerBin = (double)n / numBins;
@@ -147,7 +144,7 @@ void axxioPrintHistogram(const std::vector<double>& durations,
     for (double d : durations) {
       for (int i = 0; i < numBins; i++) {
         if (d >= binEdges[i] && (d < binEdges[i + 1] ||
-            (i == numBins - 1 && d <= binEdges[i + 1]))) {
+                                 (i == numBins - 1 && d <= binEdges[i + 1]))) {
           bins[i]++;
           break;
         }
