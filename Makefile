@@ -41,6 +41,7 @@ VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
 
 # Generated files
 ENDPOINT_REGISTRY_GEN := $(INCLUDE_DIR)/axiio-endpoint-registry-gen.h
+ENDPOINT_DISPATCH_GEN := $(COMMON_DIR)/endpoint-dispatch.hip
 
 # External headers
 EXTERNAL_HEADERS_DIR := $(INCLUDE_DIR)/external
@@ -61,9 +62,14 @@ RDMA_VENDOR_HEADERS := $(ENDPOINTS_DIR)/rdma-ep/mlx/mlx5-rdma.h \
 # Find all source files with .hip extension
 LIB_HEADERS := $(call rwildcard,$(INCLUDE_DIR) $(ENDPOINTS_DIR),*.h)
 # Build all endpoints (automatically find all .hip files)
-LIB_SOURCES := $(call rwildcard,$(COMMON_DIR),*.hip) \
+# Note: rwildcard only finds existing files, so we exclude endpoint-dispatch.hip
+LIB_SOURCES := $(filter-out $(ENDPOINT_DISPATCH_GEN),$(call rwildcard,$(COMMON_DIR),*.hip)) \
                $(call rwildcard,$(ENDPOINTS_DIR),*.hip)
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
+
+# Add the generated endpoint-dispatch object explicitly
+ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/common/endpoint-dispatch.o
+LIB_OBJECTS += $(ENDPOINT_DISPATCH_OBJ)
 
 # Tester source file
 TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
@@ -101,13 +107,18 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 .PHONY: build_info
-build_info:
+build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN)
 	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
 # Generate endpoint registry from discovered endpoints
 $(ENDPOINT_REGISTRY_GEN): scripts/generate-endpoint-registry.sh | $(INCLUDE_DIR)
 	@echo "Generating endpoint registry from: $(VALID_ENDPOINTS)"
 	@./scripts/generate-endpoint-registry.sh $(ENDPOINTS_DIR) $@
+
+# Generate endpoint dispatch from discovered endpoints
+$(ENDPOINT_DISPATCH_GEN): scripts/generate-endpoint-dispatch.sh | $(COMMON_DIR)
+	@echo "Generating endpoint dispatch from: $(VALID_ENDPOINTS)"
+	@./scripts/generate-endpoint-dispatch.sh $(ENDPOINTS_DIR) $@
 
 # Download NVMe headers from Linux kernel
 $(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
@@ -152,6 +163,9 @@ $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
 
 # Make RDMA endpoint depend on vendor headers
 $(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
+
+# Make endpoint-dispatch.o depend on the generated dispatch file
+$(ENDPOINT_DISPATCH_OBJ): $(ENDPOINT_DISPATCH_GEN)
 
 # Make all object files depend on generated registry
 $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)

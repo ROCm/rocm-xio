@@ -314,6 +314,61 @@ If tests fail with GPU page faults:
 4. **Check GPU info**: Run `rocminfo` to verify GPU is detected correctly
 5. **Update ROCm**: Ensure you have a compatible ROCm version
 
+### Testing with Real NVMe Hardware
+
+The `axiio-tester` supports testing with real NVMe hardware by directly mapping
+physical memory addresses of NVMe queues and doorbells. This enables testing
+GPU-to-NVMe interactions without emulation.
+
+#### Prerequisites
+
+- Root privileges or `CAP_SYS_RAWIO` capability
+- Access to `/dev/mem` (may require `iomem=relaxed` kernel parameter)
+- NVMe device (physical or QEMU-emulated)
+- NVMe queue addresses (doorbell, SQ base, CQ base)
+
+#### Quick Start
+
+```bash
+# Discover NVMe addresses
+sudo ./scripts/discover-nvme-addresses.sh
+
+# Run test with real hardware
+sudo ./bin/axiio-tester \
+  --endpoint nvme-ep \
+  --real-hardware \
+  --nvme-doorbell 0xfeb01000 \
+  --nvme-sq-base 0xfeb10000 \
+  --nvme-cq-base 0xfeb20000 \
+  --nvme-sq-size 4096 \
+  --nvme-cq-size 4096 \
+  --iterations 10 \
+  --verbose
+```
+
+#### Testing with QEMU
+
+```bash
+# Run automated QEMU setup script
+sudo ./scripts/test-nvme-qemu.sh
+```
+
+#### Documentation
+
+See comprehensive documentation:
+- [`docs/NVME_HARDWARE_TESTING.md`](docs/NVME_HARDWARE_TESTING.md) - Complete guide
+- [`docs/NVME_TESTING_SUMMARY.md`](docs/NVME_TESTING_SUMMARY.md) - Implementation details
+
+#### Safety Warnings
+
+⚠️ **Direct hardware access can crash your system or corrupt data!**
+
+- Test in QEMU first before real hardware
+- Verify all addresses are correct
+- Use on test systems only
+- Have backups
+- Monitor system logs (`dmesg`)
+
 ## Additional Useful Information
 
 On MI300X, the host allocation should be always `UNCACHED`. I think a
@@ -325,7 +380,7 @@ on Radeon GPUs unless you set `HSA_FORCE_FINE_GRAIN_PCIE=1`.
 
 Coarse-grained memory basically means that a change at a memory location might
 only become visible to the CPU once the kernel finishes. Fine-grained means
-that changes to memory should be visible 'immediatly' (with immediately being
+that changes to memory should be visible 'immediately' (with immediately being
 obviously the wrong term, but basically not just at the end of the kernel
 runtime). So its about visibility and cache coherence. As is often the case
 there is a good [Confluence page][ref-mem-grain] by Joseph Greathouse on this
