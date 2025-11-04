@@ -28,8 +28,8 @@ typedef struct {
 } cmdLineArgs;
 
 typedef struct {
-  unsigned long long int *startTime;
-  unsigned long long int *endTime;
+  unsigned long long int* startTime;
+  unsigned long long int* endTime;
 } testStats;
 
 typedef struct {
@@ -37,44 +37,42 @@ typedef struct {
   testStats stats;
 } testConfig;
 
-__global__ void emulateEndpointKernel(axiioEndPoint *endPoint,
-  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr)
-{
+__global__ void emulateEndpointKernel(axiioEndPoint* endPoint,
+                                      unsigned sqeIterations, sqeType* sqeAddr,
+                                      cqeType* cqeAddr) {
   endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
 }
 
-__global__ void driveEndpointKernel(axiioEndPoint *endPoint,
-  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
-  unsigned long long int *startTime, unsigned long long int *endTime)
-{
-  endPoint->driveEndpoint(sqeIterations, sqeAddr, cqeAddr, startTime,
-    endTime);
+__global__ void driveEndpointKernel(axiioEndPoint* endPoint,
+                                    unsigned sqeIterations, sqeType* sqeAddr,
+                                    cqeType* cqeAddr,
+                                    unsigned long long int* startTime,
+                                    unsigned long long int* endTime) {
+  endPoint->driveEndpoint(sqeIterations, sqeAddr, cqeAddr, startTime, endTime);
 }
 
-static void driveFunction(axiioEndPoint *endPoint, hipStream_t stream,
-  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr,
-  unsigned long long int *startTime, unsigned long long int *endTime) {
-
-  driveEndpointKernel<<<1, 1, 0, 0>>> (endPoint, sqeIterations, sqeAddr,
-    cqeAddr, startTime, endTime);
-
+static void driveFunction(axiioEndPoint* endPoint, hipStream_t stream,
+                          unsigned sqeIterations, sqeType* sqeAddr,
+                          cqeType* cqeAddr, unsigned long long int* startTime,
+                          unsigned long long int* endTime) {
+  driveEndpointKernel<<<1, 1, 0, 0>>>(endPoint, sqeIterations, sqeAddr, cqeAddr,
+                                      startTime, endTime);
 }
 
-static void emulateFunction(axiioEndPoint *endPoint, hipStream_t stream,
-  unsigned sqeIterations, sqeType *sqeAddr, cqeType *cqeAddr) {
-
-  //emulateEndpointKernel<<<1, 1, 0, stream>>>(endPoint, sqeIterations, sqeAddr,
-  //  cqeAddr);
+static void emulateFunction(axiioEndPoint* endPoint, hipStream_t stream,
+                            unsigned sqeIterations, sqeType* sqeAddr,
+                            cqeType* cqeAddr) {
+  // emulateEndpointKernel<<<1, 1, 0, stream>>>(endPoint, sqeIterations,
+  // sqeAddr,
+  //   cqeAddr);
   endPoint->emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
-
 }
 
-static int run(testConfig *config) {
-
-  sqeType *sqEntry;
-  cqeType *cqEntry;
-  unsigned long long int *d_startTime;
-  unsigned long long int *d_endTime;
+static int run(testConfig* config) {
+  sqeType* sqEntry;
+  cqeType* cqEntry;
+  unsigned long long int* d_startTime;
+  unsigned long long int* d_endTime;
   unsigned int flags = 0;
 
   axiioEndPoint endPoint;
@@ -86,26 +84,27 @@ static int run(testConfig *config) {
   HIP_CHECK(hipHostMalloc(&sqEntry, sizeof(sqeType), flags));
   HIP_CHECK(hipHostMalloc(&cqEntry, sizeof(cqeType), flags));
   // allocate device timers
-  HIP_CHECK(hipMalloc(&d_startTime,
-    config->args.nIterations * sizeof(unsigned long long int)));
-  HIP_CHECK(hipMalloc(&d_endTime,
-    config->args.nIterations * sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&d_startTime, config->args.nIterations *
+                                      sizeof(unsigned long long int)));
+  HIP_CHECK(hipMalloc(&d_endTime, config->args.nIterations *
+                                    sizeof(unsigned long long int)));
 
   std::thread driveThread(driveFunction, &endPoint, stream1,
-    config->args.nIterations, sqEntry, cqEntry, d_startTime, d_endTime);
+                          config->args.nIterations, sqEntry, cqEntry,
+                          d_startTime, d_endTime);
   std::thread emulateThread(emulateFunction, &endPoint, stream2,
-    config->args.nIterations, sqEntry, cqEntry);
+                            config->args.nIterations, sqEntry, cqEntry);
 
   driveThread.join();
   emulateThread.join();
   HIP_CHECK(hipDeviceSynchronize());
 
   HIP_CHECK(hipMemcpy(config->stats.startTime, d_startTime,
-    config->args.nIterations * sizeof(unsigned long long int),
-    hipMemcpyDeviceToHost));
+                      config->args.nIterations * sizeof(unsigned long long int),
+                      hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(config->stats.endTime, d_endTime,
-    config->args.nIterations * sizeof(unsigned long long int),
-    hipMemcpyDeviceToHost));
+                      config->args.nIterations * sizeof(unsigned long long int),
+                      hipMemcpyDeviceToHost));
 
   HIP_CHECK(hipFree(d_startTime));
   HIP_CHECK(hipFree(d_endTime));
@@ -115,8 +114,7 @@ static int run(testConfig *config) {
   return 0;
 }
 
-int main(int argc, char **argv) {
-
+int main(int argc, char** argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
   argv = app.ensure_utf8(argv);
 
@@ -125,46 +123,50 @@ int main(int argc, char **argv) {
   config.args.genHistogram = false;
   config.args.beVerbose = false;
 
-  app.add_option("-n, --iterations", config.args.nIterations,
-                 "Number of iterations to run the test.")
-      ->default_val(128)
-      ->check(CLI::PositiveNumber);
+  app
+    .add_option("-n, --iterations", config.args.nIterations,
+                "Number of iterations to run the test.")
+    ->default_val(128)
+    ->check(CLI::PositiveNumber);
 
-  app.add_flag("-i, --info", config.args.printDeviceInfo,
-               "Print information about GPUs in the system.")
-      ->default_val(false);
+  app
+    .add_flag("-i, --info", config.args.printDeviceInfo,
+              "Print information about GPUs in the system.")
+    ->default_val(false);
 
-  app.add_flag("--histogram", config.args.genHistogram,
-               "Generate histogram of iteration runtimes.")
-      ->default_val(false);
+  app
+    .add_flag("--histogram", config.args.genHistogram,
+              "Generate histogram of iteration runtimes.")
+    ->default_val(false);
 
-  app.add_flag("-v, --verbose", config.args.beVerbose,
-               "Print detailed per-iteration timing results.")
-      ->default_val(false);
+  app
+    .add_flag("-v, --verbose", config.args.beVerbose,
+              "Print detailed per-iteration timing results.")
+    ->default_val(false);
 
   CLI11_PARSE(app, argc, argv);
 
   /*
-  * Get information on all the GPUs in the system and the specific GPU(s)
-  * chosen to run tests on.
-  */
+   * Get information on all the GPUs in the system and the specific GPU(s)
+   * chosen to run tests on.
+   */
 
   if (config.args.printDeviceInfo) {
     axxioPrintDeviceInfo();
   }
 
   // Allocate host memory for timing arrays
-  config.stats.startTime = (unsigned long long int *)malloc(
+  config.stats.startTime = (unsigned long long int*)malloc(
     config.args.nIterations * sizeof(unsigned long long int));
-  config.stats.endTime = (unsigned long long int *)malloc(
+  config.stats.endTime = (unsigned long long int*)malloc(
     config.args.nIterations * sizeof(unsigned long long int));
 
   run(&config);
 
   // Get wall clock frequency for nanosecond calculation
   int wallClkRate;
-  HIP_CHECK(hipDeviceGetAttribute(&wallClkRate,
-    hipDeviceAttributeWallClockRate, 0));
+  HIP_CHECK(
+    hipDeviceGetAttribute(&wallClkRate, hipDeviceAttributeWallClockRate, 0));
 
   // Collect duration values for histogram and statistics
   std::vector<double> durations;
@@ -179,22 +181,18 @@ int main(int argc, char **argv) {
   }
 
   for (unsigned i = 0; i < config.args.nIterations; i++) {
-    unsigned long long int duration =
-      config.stats.endTime[i] - config.stats.startTime[i];
-    double duration_ns =
-      (double)duration * 1000000.0 / (double)wallClkRate;
+    unsigned long long int duration = config.stats.endTime[i] -
+                                      config.stats.startTime[i];
+    double duration_ns = (double)duration * 1000000.0 / (double)wallClkRate;
     durations.push_back(duration_ns);
 
     if (config.args.beVerbose) {
       std::cout << std::dec << "  Iter: " << std::setw(iterWidth) << i
                 << ": Start Tick: " << std::setw(13)
-                << config.stats.startTime[i]
-                << ", End Tick: " << std::setw(13)
-                << config.stats.endTime[i]
-                << ", Duration: " << std::setw(4) << duration
-                << ", Runtime: " << std::setw(6) << std::fixed
-                << std::setprecision(0) << duration_ns << " ns"
-                << std::endl;
+                << config.stats.startTime[i] << ", End Tick: " << std::setw(13)
+                << config.stats.endTime[i] << ", Duration: " << std::setw(4)
+                << duration << ", Runtime: " << std::setw(6) << std::fixed
+                << std::setprecision(0) << duration_ns << " ns" << std::endl;
     }
   }
 
