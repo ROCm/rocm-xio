@@ -16,7 +16,7 @@ UseTab: Never
 ContinuationIndentWidth: 2
 ConstructorInitializerIndentWidth: 2
 IndentCaseLabels: true
-IndentPPDirectives: AfterHash
+IndentPPDirectives: None
 IndentWrappedFunctionNames: false
 NamespaceIndentation: None
 

@@ -15,11 +15,11 @@
 
 // Configurable queue entry sizes for test endpoint
 #ifndef AXIIO_SQE_SIZE_TEST_EP
-  #define AXIIO_SQE_SIZE_TEST_EP 64
+#define AXIIO_SQE_SIZE_TEST_EP 64
 #endif
 
 #ifndef AXIIO_CQE_SIZE_TEST_EP
-  #define AXIIO_CQE_SIZE_TEST_EP 16
+#define AXIIO_CQE_SIZE_TEST_EP 16
 #endif
 
 // Calculate padding sizes for test endpoint
