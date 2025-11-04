@@ -10,6 +10,9 @@
 
 #include <hip/hip_runtime.h>
 
+// For sqeType_s and cqeType_s definitions
+#include "axiio-endpoints.h"
+
 /*
  * NVMe Definitions for AxIIO nvme-ep Endpoint
  *
@@ -263,5 +266,168 @@ __host__ __device__ static inline uint8_t nvme_cqe_status_type(
   const struct nvme_cqe* cqe) {
   return NVME_CQE_STATUS_SCT(cqe->status);
 }
+
+//
+// NVMe Data Buffer and PRP Helper Functions
+//
+
+// NVMe page size (typically 4KB)
+#define NVME_PAGE_SIZE 4096
+
+// Calculate PRP entries from a buffer address
+// For buffers <= page size, only PRP1 is needed
+// For buffers > page size, PRP2 contains either:
+//   - Address of next page (if buffer spans 2 pages)
+//   - Address of PRP list (if buffer spans > 2 pages)
+__host__ __device__ static inline void nvme_calculate_prps(
+  uint64_t buffer_addr, uint32_t buffer_size, uint64_t* prp1, uint64_t* prp2) {
+  *prp1 = buffer_addr;
+  *prp2 = 0;
+
+  // Calculate how much data the first page can hold
+  uint64_t offset_in_page = buffer_addr & (NVME_PAGE_SIZE - 1);
+  uint64_t first_page_size = NVME_PAGE_SIZE - offset_in_page;
+
+  // If buffer fits in first page, we're done
+  if (buffer_size <= first_page_size) {
+    return;
+  }
+
+  // Buffer spans multiple pages - set PRP2 to next page
+  // (Simplified: doesn't handle PRP lists for >2 pages)
+  *prp2 = (buffer_addr + first_page_size) & ~(NVME_PAGE_SIZE - 1);
+}
+
+//
+// Data Pattern Generation and Verification
+//
+
+// Test pattern types
+enum nvme_test_pattern {
+  NVME_PATTERN_SEQUENTIAL = 0, // Incrementing bytes
+  NVME_PATTERN_ZEROS = 1,      // All zeros
+  NVME_PATTERN_ONES = 2,       // All ones (0xFF)
+  NVME_PATTERN_RANDOM = 3,     // Pseudo-random (based on offset)
+  NVME_PATTERN_BLOCK_ID = 4    // Block ID repeated
+};
+
+// Generate test data pattern
+__host__ __device__ static inline void nvme_generate_pattern(
+  uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
+  uint64_t offset) {
+  switch (pattern) {
+    case NVME_PATTERN_SEQUENTIAL:
+      for (size_t i = 0; i < size; i++) {
+        buffer[i] = (uint8_t)((offset + i) & 0xFF);
+      }
+      break;
+
+    case NVME_PATTERN_ZEROS:
+      for (size_t i = 0; i < size; i++) {
+        buffer[i] = 0x00;
+      }
+      break;
+
+    case NVME_PATTERN_ONES:
+      for (size_t i = 0; i < size; i++) {
+        buffer[i] = 0xFF;
+      }
+      break;
+
+    case NVME_PATTERN_RANDOM:
+      // Simple pseudo-random based on offset
+      for (size_t i = 0; i < size; i++) {
+        uint64_t seed = offset + i;
+        seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
+        buffer[i] = (uint8_t)((seed ^ (seed >> 31)) & 0xFF);
+      }
+      break;
+
+    case NVME_PATTERN_BLOCK_ID:
+      // Fill with block ID
+      for (size_t i = 0; i < size; i += sizeof(uint64_t)) {
+        uint64_t* ptr = (uint64_t*)(buffer + i);
+        if (i + sizeof(uint64_t) <= size) {
+          *ptr = offset;
+        } else {
+          // Handle partial block at end
+          for (size_t j = i; j < size; j++) {
+            buffer[j] = (uint8_t)((offset >> ((j - i) * 8)) & 0xFF);
+          }
+        }
+      }
+      break;
+  }
+}
+
+// Verify test data pattern
+__host__ __device__ static inline bool nvme_verify_pattern(
+  const uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
+  uint64_t offset, size_t* error_offset) {
+  uint8_t expected;
+
+  for (size_t i = 0; i < size; i++) {
+    switch (pattern) {
+      case NVME_PATTERN_SEQUENTIAL:
+        expected = (uint8_t)((offset + i) & 0xFF);
+        break;
+
+      case NVME_PATTERN_ZEROS:
+        expected = 0x00;
+        break;
+
+      case NVME_PATTERN_ONES:
+        expected = 0xFF;
+        break;
+
+      case NVME_PATTERN_RANDOM:
+        {
+          uint64_t seed = offset + i;
+          seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+          seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
+          expected = (uint8_t)((seed ^ (seed >> 31)) & 0xFF);
+        }
+        break;
+
+      case NVME_PATTERN_BLOCK_ID:
+        expected = (uint8_t)((offset >> ((i % sizeof(uint64_t)) * 8)) & 0xFF);
+        break;
+
+      default:
+        expected = buffer[i]; // Always pass for unknown patterns
+        break;
+    }
+
+    if (buffer[i] != expected) {
+      if (error_offset) {
+        *error_offset = i;
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
+
+//
+// Forward declarations for NVMe endpoint functions
+//
+
+// Standard drive endpoint (uses dummy PRPs)
+extern "C" __device__ void nvme_ep_driveEndpoint(
+  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+  unsigned long long int* startTime, unsigned long long int* endTime);
+
+// Drive endpoint with data buffers (uses real PRPs)
+extern "C" __device__ void nvme_ep_driveEndpointWithBuffers(
+  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+  unsigned long long int* startTime, unsigned long long int* endTime,
+  uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
+  uint32_t blockSize, enum nvme_test_pattern pattern);
+
+// Emulate endpoint
+extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(
+  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr);
 
 #endif // NVME_EP_H

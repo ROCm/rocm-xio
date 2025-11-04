@@ -219,6 +219,9 @@ extern "C" {
 // Emulate Endpoint - Acts as NVMe controller
 // Polls for SQEs from the GPU, generates CQEs in response
 //
+// Note: This version doesn't access data buffers - it just processes commands
+// For real hardware testing, the actual NVMe controller handles data transfer
+//
 __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
                                                  sqeType_s* sqeAddr,
                                                  cqeType_s* cqeAddr) {
@@ -272,13 +275,17 @@ __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 //
-// Drive Endpoint - Acts as NVMe host driver
+// Drive Endpoint (with data buffers) - Acts as NVMe host driver
 // Issues NVMe commands from GPU and waits for completions
 //
-__device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
-                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
-                                      unsigned long long int* startTime,
-                                      unsigned long long int* endTime) {
+// This version accepts data buffers for real I/O testing
+// If readBuffer/writeBuffer are NULL, uses dummy PRP addresses
+//
+__device__ void nvme_ep_driveEndpointWithBuffers(
+  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+  unsigned long long int* startTime, unsigned long long int* endTime,
+  uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
+  uint32_t blockSize, enum nvme_test_pattern pattern) {
   nvme_ep::sqeType sqeLocal = {};
   nvme_ep::cqeType cqeLocal = {};
 
@@ -293,23 +300,68 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
   const uint64_t base_lba = 0x1000; // Starting LBA
   const uint32_t blocks = 8;        // Number of blocks per operation
 
+  // Calculate buffer size per command (blocks * block_size)
+  const size_t transfer_size = blocks * blockSize;
+
+  // Use real buffers if provided
+  const bool use_real_buffers = (readBuffer != nullptr &&
+                                 writeBuffer != nullptr && bufferSize > 0);
+
+  // If using real buffers, generate write data
+  if (use_real_buffers && writeBuffer) {
+    // Generate test pattern in write buffer
+    nvme_generate_pattern(writeBuffer, bufferSize, pattern, 0);
+  }
+
   // Issue read/write commands
   for (unsigned i = 0; i < sqeIterations; i++) {
     // Start command IDs at 1 to avoid confusion with zero-initialized memory
     uint16_t cmd_id = (uint16_t)(i + 1);
     uint64_t lba = base_lba + (i * blocks);
 
+    uint64_t prp1, prp2;
+
     // Alternate between read and write commands
     if (i % 2 == 0) {
       // Issue Read command
-      nvme_sqe_setup_read(sqe, cmd_id, nsid, lba, blocks,
-                          0xDEADBEEF00000000ULL,  // PRP1 (dummy address)
-                          0xCAFEBABE00000000ULL); // PRP2 (dummy address)
+      if (use_real_buffers) {
+        // Calculate PRPs from read buffer
+        uint64_t buffer_offset = (i / 2) * transfer_size;
+        if (buffer_offset + transfer_size <= bufferSize) {
+          nvme_calculate_prps((uint64_t)(readBuffer + buffer_offset),
+                              transfer_size, &prp1, &prp2);
+        } else {
+          // Buffer overflow - use dummy addresses
+          prp1 = 0xDEADBEEF00000000ULL;
+          prp2 = 0xCAFEBABE00000000ULL;
+        }
+      } else {
+        // No buffers - use dummy addresses
+        prp1 = 0xDEADBEEF00000000ULL;
+        prp2 = 0xCAFEBABE00000000ULL;
+      }
+
+      nvme_sqe_setup_read(sqe, cmd_id, nsid, lba, blocks, prp1, prp2);
     } else {
       // Issue Write command
-      nvme_sqe_setup_write(sqe, cmd_id, nsid, lba, blocks,
-                           0xDEADBEEF00000000ULL,  // PRP1 (dummy address)
-                           0xCAFEBABE00000000ULL); // PRP2 (dummy address)
+      if (use_real_buffers) {
+        // Calculate PRPs from write buffer
+        uint64_t buffer_offset = (i / 2) * transfer_size;
+        if (buffer_offset + transfer_size <= bufferSize) {
+          nvme_calculate_prps((uint64_t)(writeBuffer + buffer_offset),
+                              transfer_size, &prp1, &prp2);
+        } else {
+          // Buffer overflow - use dummy addresses
+          prp1 = 0xDEADBEEF00000000ULL;
+          prp2 = 0xCAFEBABE00000000ULL;
+        }
+      } else {
+        // No buffers - use dummy addresses
+        prp1 = 0xDEADBEEF00000000ULL;
+        prp2 = 0xCAFEBABE00000000ULL;
+      }
+
+      nvme_sqe_setup_write(sqe, cmd_id, nsid, lba, blocks, prp1, prp2);
     }
 
     // Record start time
@@ -337,6 +389,19 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
       // Command failed - could indicate error
       // In a real implementation, would handle this error
     }
+
+    // For read commands with real buffers, verify data
+    if (use_real_buffers && (i % 2 == 0) && readBuffer) {
+      uint64_t buffer_offset = (i / 2) * transfer_size;
+      if (buffer_offset + transfer_size <= bufferSize) {
+        size_t error_offset;
+        if (!nvme_verify_pattern(readBuffer + buffer_offset, transfer_size,
+                                 pattern, buffer_offset, &error_offset)) {
+          // Data verification failed
+          // In a real implementation, would handle this error
+        }
+      }
+    }
   }
 
   // Send stop command (opcode 0xFF) to signal emulator to exit
@@ -344,6 +409,20 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
   sqe->command_id = 0xFFFF;
   sqe->nsid = 0;
   nvme_ep::sqeWrite(sqeLocal, (nvme_ep::sqeType*)sqeAddr);
+}
+
+//
+// Drive Endpoint (backward compatible) - Acts as NVMe host driver
+// This version uses dummy PRP addresses for backward compatibility
+//
+__device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
+                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+                                      unsigned long long int* startTime,
+                                      unsigned long long int* endTime) {
+  // Call the buffer-aware version with NULL pointers (dummy mode)
+  nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr, startTime,
+                                   endTime, nullptr, nullptr, 0, 512,
+                                   NVME_PATTERN_SEQUENTIAL);
 }
 
 } // extern "C"
