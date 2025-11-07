@@ -378,12 +378,13 @@ static int run(testConfig* config, EndpointType endpointType,
   // Allocate queue memory based on mode
   size_t sqSize, cqSize;
 
-  if (kernel_ctx && kernel_ctx->mem_fd != -2) {
-    // CPU-HYBRID MODE with correct DMA addresses!
+  if (kernel_ctx && (kernel_ctx->mem_fd != -2 || config->args.useRealHardware)) {
+    // CPU-HYBRID MODE with DUAL ALLOCATION for real hardware!
     // - Kernel DMA memory: Used by NVMe controller (correct bus addresses)
     // - hipHostMalloc memory: Used by GPU (accessible by GPU)
+    // - Data buffers: NVME_AXIIO_ALLOC_DMA (IOMMU-mapped for passthrough)
     // - CPU copies GPU commands to kernel DMA memory
-    std::cout << "Using CPU-HYBRID mode with kernel module's DMA addresses"
+    std::cout << "Using CPU-HYBRID mode with DUAL ALLOCATION"
               << std::endl;
 
     sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
@@ -435,8 +436,9 @@ static int run(testConfig* config, EndpointType endpointType,
 
     mappedPhysical = false; // Not directly mapped physical memory
 
-  } else if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+  } else if (kernel_ctx && kernel_ctx->mem_fd == -2 && !config->args.useRealHardware) {
     // GDA MODE - GPU writes directly to kernel DMA memory!
+    // (Only for emulated devices - real hardware uses CPU-HYBRID for data buffers)
     std::cout << "Using GPU-DIRECT (GDA) mode - TRUE GPU-direct I/O!"
               << std::endl;
 
@@ -771,20 +773,41 @@ std::endl; #endif
       std::cout << "NSID: " << config->args.nsid << std::endl;
       std::cout << "Iterations: " << config->args.nIterations << std::endl;
 
-      // Allocate data buffer for reads (host memory for DMA)
+      // Allocate data buffer for reads
+      // DUAL ALLOCATION STRATEGY:
+      // - Data buffer: kernel module DMA (IOMMU-mapped for NVMe)
+      // - Commands: hipHostMalloc (GPU-accessible, already allocated)
       void* data_buffer = nullptr;
       size_t buffer_size = config->args.transferSize;
-      HIP_CHECK(hipHostMalloc(&data_buffer, buffer_size, hipHostMallocDefault));
+      uint64_t data_buffer_phys = 0;
 
-      // Get physical address of data buffer
-      uint64_t data_buffer_phys = virt_to_phys(data_buffer);
-      if (data_buffer_phys == 0) {
-        std::cerr << "Error: Failed to get physical address of data buffer"
+      if (kernel_ctx) {
+        // Use kernel module DMA allocation - proper IOMMU-mapped address
+        std::cout << "\n=== Allocating Data Buffer via Kernel Module ==="
                   << std::endl;
-        return EXIT_FAILURE;
+        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd, buffer_size,
+                                               &data_buffer_phys) < 0) {
+          std::cerr << "Error: Failed to allocate DMA buffer via kernel module"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+        std::cout << "✅ Using kernel DMA buffer (IOMMU-mapped for passthrough)"
+                  << std::endl;
+        std::cout << "   Data buffer DMA address: 0x" << std::hex
+                  << data_buffer_phys << std::dec << std::endl;
+      } else {
+        // Fallback: hipHostMalloc + virt_to_phys (old method)
+        HIP_CHECK(
+          hipHostMalloc(&data_buffer, buffer_size, hipHostMallocDefault));
+        data_buffer_phys = virt_to_phys(data_buffer);
+        if (data_buffer_phys == 0) {
+          std::cerr << "Error: Failed to get physical address of data buffer"
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+        std::cout << "Data buffer physical address: 0x" << std::hex
+                  << data_buffer_phys << std::dec << std::endl;
       }
-      std::cout << "Data buffer physical address: 0x" << std::hex
-                << data_buffer_phys << std::dec << std::endl;
 
       // Calculate max LBA based on LBA range and transfer size
       // Assume 512-byte logical block size

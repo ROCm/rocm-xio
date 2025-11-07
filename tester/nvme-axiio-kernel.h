@@ -238,6 +238,44 @@ static inline int axiio_kernel_map_queues(KernelModuleContext* ctx,
   return 0;
 }
 
+/*
+ * Allocate DMA-coherent buffer through kernel module
+ * Returns proper IOMMU-mapped physical address for passthrough hardware
+ */
+static inline int axiio_alloc_dma_buffer(int axiio_fd, size_t size,
+                                         uint64_t* dma_addr_out,
+                                         void** cpu_ptr_out = nullptr) {
+  if (axiio_fd < 0) {
+    std::cerr << "Error: Invalid axiio_fd" << std::endl;
+    return -1;
+  }
+
+  nvme_axiio_dma_buffer dma_buf;
+  memset(&dma_buf, 0, sizeof(dma_buf));
+  dma_buf.size = size;
+
+  if (ioctl(axiio_fd, NVME_AXIIO_ALLOC_DMA, &dma_buf) < 0) {
+    perror("NVME_AXIIO_ALLOC_DMA failed");
+    return -1;
+  }
+
+  std::cout << "✓ DMA buffer allocated via kernel module" << std::endl;
+  std::cout << "  Size: " << size << " bytes" << std::endl;
+  std::cout << "  DMA address (for NVMe): 0x" << std::hex << dma_buf.dma_addr
+            << std::dec << std::endl;
+  std::cout << "  Kernel virtual: 0x" << std::hex << dma_buf.virt_addr
+            << std::dec << std::endl;
+
+  *dma_addr_out = dma_buf.dma_addr;
+  if (cpu_ptr_out) {
+    // Note: virt_addr is kernel virtual, not userspace accessible
+    // For now, we don't need CPU access to the data buffer
+    *cpu_ptr_out = nullptr;
+  }
+
+  return 0;
+}
+
 } // namespace nvme_axiio
 
 #endif // NVME_AXIIO_KERNEL_H
