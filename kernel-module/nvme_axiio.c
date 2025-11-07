@@ -79,7 +79,7 @@ struct axiio_file_ctx {
 
   /* Data buffer allocations */
   struct list_head dma_buffers; /* List of allocated DMA buffers */
-  struct mutex dma_lock;         /* Protect DMA buffer list */
+  struct mutex dma_lock;        /* Protect DMA buffer list */
 };
 
 /*
@@ -215,7 +215,7 @@ static int axiio_release(struct inode* inode, struct file* filp) {
       list_for_each_entry_safe(entry, tmp, &ctx->dma_buffers, list) {
         pr_info("nvme_axiio: Freeing DMA buffer (size=%zu)\n", entry->size);
         dma_free_coherent(&ctx->pci_dev->dev, entry->size, entry->virt_addr,
-                         entry->dma_addr);
+                          entry->dma_addr);
         list_del(&entry->list);
         kfree(entry);
       }
@@ -515,7 +515,7 @@ static int axiio_ioctl_get_gpu_doorbell(
  * Allocates DMA-coherent memory for data transfers
  */
 static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
-                                  struct nvme_axiio_dma_buffer __user* uinfo) {
+                                 struct nvme_axiio_dma_buffer __user* uinfo) {
   struct nvme_axiio_dma_buffer info;
   void* virt_addr;
   dma_addr_t dma_addr;
@@ -532,7 +532,7 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
 
   /* Allocate DMA-coherent memory */
   virt_addr = dma_alloc_coherent(&ctx->pci_dev->dev, info.size, &dma_addr,
-                                GFP_KERNEL);
+                                 GFP_KERNEL);
   if (!virt_addr) {
     pr_err("nvme_axiio: Failed to allocate DMA buffer\n");
     return -ENOMEM;
@@ -548,7 +548,7 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
       entry->virt_addr = virt_addr;
       entry->dma_addr = dma_addr;
       entry->size = info.size;
-      
+
       mutex_lock(&ctx->dma_lock);
       list_add_tail(&entry->list, &ctx->dma_buffers);
       mutex_unlock(&ctx->dma_lock);
@@ -639,8 +639,8 @@ static long axiio_ioctl(struct file* filp, unsigned int cmd,
       return -ENOTTY;
 
     case NVME_AXIIO_ALLOC_DMA:
-      return axiio_ioctl_alloc_dma(
-        ctx, (struct nvme_axiio_dma_buffer __user*)arg);
+      return axiio_ioctl_alloc_dma(ctx,
+                                   (struct nvme_axiio_dma_buffer __user*)arg);
 
     case NVME_AXIIO_GET_DEVICE_INFO:
       /* TODO: Implement device info query */

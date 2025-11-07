@@ -22,39 +22,13 @@ jobs:
           build-essential \
           libcli11-dev \
           pciutils \
-          libc6-dev
+          rocm-hip-sdk
 
-    - name: Install ROCm
+   - name: Verify ROCm installation
       run: |
-        ROCM_VERSION="7.1"
-        
-        wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/rocm.gpg > /dev/null
-        
-        # Try Ubuntu 24.04 packages first
-        echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
-        sudo apt-get update
-        
-        if ! sudo apt-get install -y rocm-hip-sdk rocm-device-libs 2>/dev/null; then
-          echo "Ubuntu 24.04 packages not available, trying Ubuntu 22.04..."
-          sudo rm /etc/apt/sources.list.d/rocm.list
-          echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          sudo apt-get update
-          sudo apt-get install -y rocm-hip-sdk rocm-device-libs || {
-            echo "Warning: ROCm installation failed, trying distribution packages..."
-            sudo apt-get install -y hip-dev hipcc || echo "Note: Limited ROCm features"
-          }
-        fi
-        
-        echo "/opt/rocm/bin" >> $GITHUB_PATH
-        echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-        
-        echo "ROCm ${ROCM_VERSION} installation complete"
-
-    - name: Verify ROCm installation
-      run: |
-        which hipcc
+        which hipcc || (echo "ERROR: hipcc not found in PATH" && exit 1)
         hipcc --version
-
+        
     - name: Build axiio-tester
       run: |
         make clean
