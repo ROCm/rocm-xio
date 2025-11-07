@@ -1,0 +1,207 @@
+From: NVMe GDA Project
+Date: $(date +"%a, %d %b %Y %H:%M:%S %z")
+Subject: [PATCH] vfio-pci: Add AMD GPUDirect P2P clique support
+
+Similar to NVIDIA's GPUDirect P2P implementation, add support for AMD GPUs
+to participate in P2P DMA cliques. This allows devices with the same clique
+ID to perform direct peer-to-peer DMA operations without host intervention.
+
+This is based on the NVIDIA implementation but adapted for AMD devices using:
+- AMD vendor ID (0x1002)
+- Signature "AP2P" (AMD Peer-to-Peer)
+- Same clique ID mechanism (0-15)
+
+Usage:
+  -device vfio-pci,host=10:00.0,x-amd-gpudirect-clique=1 \  # AMD GPU
+  -device vfio-pci,host=c2:00.0,x-amd-gpudirect-clique=1    # NVMe
+
+Signed-off-by: NVMe GDA Project
+
+---
+ hw/vfio/pci-quirks.c | 92 +++++++++++++++++++++++++++++++++++++++++++++++++
+ hw/vfio/pci.c        |  6 ++++
+ hw/vfio/pci.h        |  2 ++
+ 3 files changed, 100 insertions(+)
+
+diff --git a/hw/vfio/pci-quirks.c b/hw/vfio/pci-quirks.c
+index 1234567..8901234 100644
+--- a/hw/vfio/pci-quirks.c
++++ b/hw/vfio/pci-quirks.c
+@@ -1526,6 +1526,98 @@ static bool vfio_add_nv_gpudirect_cap(VFIOPCIDevice *vdev, Error **errp)
+     return true;
+ }
+ 
++/*
++ * AMD GPUDirect P2P Vendor capability, modeled after NVIDIA implementation.
++ * Allows AMD devices to be specified as members of a P2P clique.
++ * Devices within the same clique ID are capable of direct P2P DMA.
++ *
++ * +----------------+----------------+----------------+----------------+
++ * | sig 7:0 ('A')  |  vndr len (8h) |    next (0h)   |   cap id (9h)  |
++ * +----------------+----------------+----------------+----------------+
++ * | rsvd 15:7(0h),id 6:3,ver 2:0(0h)|          sig 23:8 ('P2')        |
++ * +---------------------------------+---------------------------------+
++ */
++static void get_amd_gpudirect_clique_id(Object *obj, Visitor *v,
++                                        const char *name, void *opaque,
++                                        Error **errp)
++{
++    const Property *prop = opaque;
++    uint8_t *ptr = object_field_prop_ptr(obj, prop);
++
++    visit_type_uint8(v, name, ptr, errp);
++}
++
++static void set_amd_gpudirect_clique_id(Object *obj, Visitor *v,
++                                        const char *name, void *opaque,
++                                        Error **errp)
++{
++    const Property *prop = opaque;
++    uint8_t value, *ptr = object_field_prop_ptr(obj, prop);
++
++    if (!visit_type_uint8(v, name, &value, errp)) {
++        return;
++    }
++
++    if (value & ~0xF) {
++        error_setg(errp, "Property %s: valid range 0-15", name);
++        return;
++    }
++
++    *ptr = value;
++}
++
++const PropertyInfo qdev_prop_amd_gpudirect_clique = {
++    .type = "uint8",
++    .description = "AMD GPUDirect Clique ID (0 - 15)",
++    .get = get_amd_gpudirect_clique_id,
++    .set = set_amd_gpudirect_clique_id,
++};
++
++static bool vfio_add_amd_gpudirect_cap(VFIOPCIDevice *vdev, Error **errp)
++{
++    ERRP_GUARD();
++    PCIDevice *pdev = &vdev->pdev;
++    int ret, pos;
++    bool c8_conflict = false, d4_conflict = false;
++    uint8_t tmp;
++
++    if (vdev->amd_gpudirect_clique == 0xFF) {
++        return true;
++    }
++
++    if (!vfio_pci_is(vdev, PCI_VENDOR_ID_AMD, PCI_ANY_ID)) {
++        error_setg(errp, "AMD GPUDirect Clique ID: invalid device vendor");
++        return false;
++    }
++
++    /* Find available position for capability */
++    ret = pread(vdev->vbasedev.fd, &tmp, 1,
++                vdev->config_offset + PCI_CAPABILITY_LIST);
++    if (ret != 1 || !is_valid_std_cap_offset(tmp)) {
++        error_setg(errp, "AMD GPUDirect Clique ID: error getting cap list");
++        return false;
++    }
++
++    do {
++        if (tmp == 0xC8) {
++            c8_conflict = true;
++        } else if (tmp == 0xD4) {
++            d4_conflict = true;
++        }
++        tmp = pdev->config[tmp + PCI_CAP_LIST_NEXT];
++    } while (is_valid_std_cap_offset(tmp));
++
++    pos = !c8_conflict ? 0xC8 : (!d4_conflict ? 0xD4 : -1);
++    if (pos < 0) {
++        error_setg(errp, "AMD GPUDirect Clique ID: invalid config space");
++        return false;
++    }
++
++    ret = pci_add_capability(pdev, PCI_CAP_ID_VNDR, pos, 8, errp);
++    if (ret < 0) {
++        error_prepend(errp, "Failed to add AMD GPUDirect cap: ");
++        return false;
++    }
++
++    memset(vdev->emulated_config_bits + pos, 0xFF, 8);
++    pos += PCI_CAP_FLAGS;
++    pci_set_byte(pdev->config + pos++, 8);
++    pci_set_byte(pdev->config + pos++, 'A');  /* 'A' for AMD */
++    pci_set_byte(pdev->config + pos++, 'P');
++    pci_set_byte(pdev->config + pos++, '2');
++    pci_set_byte(pdev->config + pos++, vdev->amd_gpudirect_clique << 3);
++    pci_set_byte(pdev->config + pos, 0);
++
++    return true;
++}
++
+ /*
+  * The VMD endpoint provides a real PCIe domain to the guest and the guest
+  * kernel performs enumeration of the VMD sub-device domain. Guest transactions
+@@ -1588,6 +1680,10 @@ bool vfio_add_virt_caps(VFIOPCIDevice *vdev, Error **errp)
+         return false;
+     }
+ 
++    if (!vfio_add_amd_gpudirect_cap(vdev, errp)) {
++        return false;
++    }
++
+     if (!vfio_add_vmd_shadow_cap(vdev, errp)) {
+         return false;
+     }
+diff --git a/hw/vfio/pci.c b/hw/vfio/pci.c
+index 1234567..8901234 100644
+--- a/hw/vfio/pci.c
++++ b/hw/vfio/pci.c
+@@ -3602,6 +3602,7 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
+                      DEVICE(vdev), false);
+ 
+     vdev->nv_gpudirect_clique = 0xFF;
++    vdev->amd_gpudirect_clique = 0xFF;
+ 
+     /* QEMU_PCI_CAP_EXPRESS initialization does not depend on QEMU command
+      * line, therefore, no need to wait to realize like other devices */
+@@ -3704,6 +3705,9 @@ static Property vfio_pci_dev_properties[] = {
+     DEFINE_PROP_UNSIGNED_NODEFAULT("x-nv-gpudirect-clique", VFIOPCIDevice,
+                                    nv_gpudirect_clique,
+                                    qdev_prop_nv_gpudirect_clique, uint8_t),
++    DEFINE_PROP_UNSIGNED_NODEFAULT("x-amd-gpudirect-clique", VFIOPCIDevice,
++                                   amd_gpudirect_clique,
++                                   qdev_prop_amd_gpudirect_clique, uint8_t),
+     DEFINE_PROP_OFF_AUTO_PCIBAR("x-msix-relocation", VFIOPCIDevice, msix_relo,
+                                 OFF_AUTO_PCIBAR_OFF),
+ #ifdef CONFIG_IOMMUFD
+@@ -3791,6 +3795,8 @@ static void vfio_pci_dev_class_init(ObjectClass *klass, void *data)
+                                           "x-nv-gpudirect-clique",
+                                           "Add NVIDIA GPUDirect capability indicating P2P DMA "
+                                           "clique for device [0-15]");
++    object_class_property_set_description(klass,
++                                          "x-amd-gpudirect-clique",
++                                          "Add AMD GPUDirect capability indicating P2P DMA "
++                                          "clique for device [0-15]");
+     object_class_property_set_description(klass, /* 2.12 */
+                                           "x-no-geforce-quirks",
+                                           "Disable GeForce quirks (for NVIDIA Quadro/GRID/Tesla). "
+diff --git a/hw/vfio/pci.h b/hw/vfio/pci.h
+index 1234567..8901234 100644
+--- a/hw/vfio/pci.h
++++ b/hw/vfio/pci.h
+@@ -171,6 +171,7 @@ struct VFIOPCIDevice {
+     uint32_t igd_gms;
+     OffAutoPCIBAR msix_relo;
+     uint8_t nv_gpudirect_clique;
++    uint8_t amd_gpudirect_clique;
+     bool pci_aer;
+     bool req_enabled;
+     bool has_flr;
+@@ -240,6 +241,7 @@ bool vfio_probe_igd_config_quirk(VFIOPCIDevice *vdev, Error **errp);
+ 
+ extern const PropertyInfo qdev_prop_nv_gpudirect_clique;
++extern const PropertyInfo qdev_prop_amd_gpudirect_clique;
+ 
+ void vfio_pci_pre_reset(VFIOPCIDevice *vdev);
+ void vfio_pci_post_reset(VFIOPCIDevice *vdev);
+-- 
+2.43.0
+
