@@ -1,0 +1,212 @@
+name: Test NVMe with axiio-tester
+
+on:
+  push:
+    branches: [ main, dev/*, nvme-ep ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test-nvme-endpoints:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libcli11-dev \
+          pciutils \
+          rocm-hip-sdk
+
+   - name: Verify ROCm installation
+      run: |
+        which hipcc || (echo "ERROR: hipcc not found in PATH" && exit 1)
+        hipcc --version
+        
+    - name: Build axiio-tester
+      run: |
+        make clean
+        make all
+        ls -lh bin/axiio-tester
+
+    - name: Test all endpoints (emulated mode)
+      run: |
+        echo "=========================================="
+        echo "Testing All Endpoints (Emulated Mode)"
+        echo "=========================================="
+        echo ""
+        
+        # Test each endpoint
+        for ep in test-ep nvme-ep sdma-ep rdma-ep; do
+          echo "Testing $ep..."
+          ./bin/axiio-tester --endpoint $ep --iterations 10 --submit-queue-len 16
+          echo ""
+        done
+        
+        echo "✓ All endpoints working correctly"
+
+    - name: Test NVMe endpoint performance
+      run: |
+        echo "=========================================="
+        echo "NVMe Endpoint Performance Testing"
+        echo "=========================================="
+        echo ""
+        
+        # Test different queue sizes
+        for qsize in 8 16 32 64; do
+          echo "Queue size: $qsize"
+          ./bin/axiio-tester --endpoint nvme-ep --iterations 20 \
+            --submit-queue-len $qsize --complete-queue-len $qsize
+          echo ""
+        done
+        
+        echo "✓ Performance tests completed"
+
+    - name: Verify test scripts exist
+      run: |
+        echo "Checking test scripts..."
+        ls -lh scripts/test-nvme-*.sh docs/NVME_*.md
+        
+        # Verify scripts are executable
+        for script in scripts/test-nvme-*.sh; do
+          if [ -x "$script" ]; then
+            echo "✓ $script is executable"
+          else
+            echo "✗ $script is not executable!"
+            exit 1
+          fi
+        done
+        
+        # Test help output
+        ./scripts/test-nvme-local.sh --help | head -20
+        ./scripts/test-nvme-io.sh --help | head -20
+
+    - name: Test axiio-tester CLI options
+      run: |
+        echo "=========================================="
+        echo "Testing axiio-tester CLI"
+        echo "=========================================="
+        echo ""
+        
+        # Test help shows all options
+        if ./bin/axiio-tester --help | grep -q "real-hardware"; then
+          echo "✓ Help shows --real-hardware option"
+        else
+          echo "✗ Help missing --real-hardware option!"
+          exit 1
+        fi
+        
+        if ./bin/axiio-tester --help | grep -q "nvme-doorbell"; then
+          echo "✓ Help shows --nvme-doorbell option"
+        else
+          echo "✗ Help missing --nvme-doorbell option!"
+          exit 1
+        fi
+        
+        # Test parameter validation
+        if ./bin/axiio-tester --real-hardware 2>&1 | grep -q "requires all of the following"; then
+          echo "✓ Parameter validation works"
+        else
+          echo "✗ Parameter validation failed!"
+          exit 1
+        fi
+        
+        echo ""
+        echo "✓ All CLI tests passed"
+
+    - name: Stress test
+      run: |
+        echo "=========================================="
+        echo "Stress Testing"
+        echo "=========================================="
+        echo ""
+        
+        # High iteration count
+        echo "Test 1: High iteration count (100 iterations)"
+        ./bin/axiio-tester --endpoint nvme-ep --iterations 100
+        
+        # Large queue
+        echo ""
+        echo "Test 2: Large queue (128 entries)"
+        ./bin/axiio-tester --endpoint nvme-ep --iterations 20 \
+          --submit-queue-len 128 --complete-queue-len 128
+        
+        echo ""
+        echo "✓ Stress tests completed"
+
+  test-documentation:
+    runs-on: ubuntu-24.04
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Verify NVMe documentation exists
+      run: |
+        echo "Checking NVMe documentation..."
+        
+        # Check that documentation files exist
+        test -f docs/NVME_DRIVER_UNBINDING.md || exit 1
+        test -f docs/NVME_HARDWARE_TESTING.md || exit 1
+        test -f docs/NVME_TESTING_SUMMARY.md || exit 1
+        
+        # Check for key sections
+        grep -q "Runtime Unbinding" docs/NVME_DRIVER_UNBINDING.md || exit 1
+        grep -q "QEMU" docs/NVME_DRIVER_UNBINDING.md || exit 1
+        grep -q "VFIO" docs/NVME_DRIVER_UNBINDING.md || exit 1
+        
+        echo "✓ All NVMe documentation present"
+
+  test-cross-platform:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libcli11-dev \
+          libc6-dev \
+          pciutils
+
+    - name: Check for required system headers
+      run: |
+        echo "Checking for required system headers..."
+        
+        # Use compiler to check for headers
+        echo "#include <fcntl.h>" | gcc -E - > /dev/null 2>&1 && echo "✓ Found: fcntl.h" || exit 1
+        echo "#include <sys/mman.h>" | gcc -E - > /dev/null 2>&1 && echo "✓ Found: sys/mman.h" || exit 1
+        echo "#include <unistd.h>" | gcc -E - > /dev/null 2>&1 && echo "✓ Found: unistd.h" || exit 1
+        
+        # Check /dev/mem exists
+        test -c /dev/mem && echo "✓ /dev/mem exists" || echo "⚠ /dev/mem not available (expected in containers)"
+        
+        echo "✓ Required headers present"
+
+    - name: Verify scripts are executable
+      run: |
+        # Check script permissions
+        for script in scripts/test-nvme-*.sh scripts/*generate*.sh; do
+          if [ -f "$script" ]; then
+            if [ -x "$script" ]; then
+              echo "✓ $script is executable"
+            else
+              echo "✗ $script is not executable!"
+              exit 1
+            fi
+          fi
+        done
+
