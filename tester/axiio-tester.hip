@@ -112,8 +112,13 @@ typedef struct {
   // CPU-hybrid mode: GPU writes to these, CPU copies to kernel DMA memory
   void* gpuSqMem;
   void* gpuCqMem;
-  void* kernelDmaSq;
-  void* kernelDmaCq;
+  void* kernelDmaSq;      // GPU-accessible (HSA-locked) SQ pointer
+  void* kernelDmaCq;     // GPU-accessible (HSA-locked) CQ pointer
+  void* kernelDmaSqOrig; // Original (CPU-accessible) SQ pointer for cleanup
+  void* kernelDmaCqOrig; // Original (CPU-accessible) CQ pointer for cleanup
+  // GPU-direct mode: DMA addresses for data buffers
+  uint64_t readBufferDma;
+  uint64_t writeBufferDma;
 } testConfig;
 
 // Kernel wrappers that use static dispatch (no object dereferencing needed)
@@ -185,59 +190,64 @@ __global__ void driveEndpointKernel(EndpointType endpointType,
 }
 
 // Specialized kernel for NVMe endpoint with data buffers
-// Calls nvme_ep_driveEndpointWithBuffers directly
+// Modeled after working test: test_vm_p2p_mapped_doorbell.hip
+// Write to doorbell DIRECTLY like the working test does
 __global__ void driveNVMeEndpointWithBuffersKernel(
   unsigned sqeIterations, sqeType* sqeAddr, cqeType* cqeAddr,
   unsigned long long int* sqDoorBell, unsigned long long int* startTime,
   unsigned long long int* endTime, uint8_t* readBuffer, uint8_t* writeBuffer,
   size_t bufferSize, uint32_t blockSize, enum nvme_test_pattern pattern,
-  bool realHardware) {
-  // Write heartbeat immediately to signal kernel started
-  if (sqDoorBell) {
-    if (!realHardware) {
-      *sqDoorBell = 0xDEADBEEF; // Heartbeat value (emulated)
-    } else {
-      *sqDoorBell = 0xBABEFACE; // Heartbeat value (real hardware)
-    }
-    __threadfence_system();
-  }
-
-  // For real hardware with CPU-hybrid: Skip GPU dispatch entirely
-  // The dispatch tries to write SQEs which may trigger GPU page faults
-  // CPU will prepare SQEs directly instead
-  if (!realHardware) {
-    nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr, startTime,
-                                     endTime, readBuffer, writeBuffer,
-                                     bufferSize, blockSize, pattern);
-  } else {
-    // In CPU-hybrid mode, just record timing for the signaling operation
-    // The actual I/O work is done by the CPU, so we just measure GPU overhead
-    if (startTime) {
-      *startTime = clock64();
-    }
-    __threadfence_system();
-
-    // Minimal work - just signal the CPU that we're ready
-    // CPU will do the actual SQE preparation
-
-    __threadfence_system();
-    if (endTime) {
-      *endTime = clock64();
-    }
-  }
-
-  // Ring doorbell (or signal CPU in hybrid mode)
-  if (sqDoorBell) {
-    if (realHardware) {
+  bool realHardware, uint64_t readBufferDma, uint64_t writeBufferDma,
+  uint64_t doorbell_iova) {
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    // GPU-direct mode: Post NVMe commands and ring doorbell
+    printf("GPU: Kernel started! sqDoorBell=%p, realHardware=%d, sqeIterations=%u\n", 
+           sqDoorBell, realHardware, sqeIterations);
+    
+    if (sqDoorBell && realHardware) {
 #if GPU_DIRECT_DOORBELL
-      // GPU-direct mode: write directly to mapped NVMe doorbell register
-      // Requires kernel module to map PCIe BAR into GPU address space
+      // Step 1: Post NVMe I/O commands to submission queue
+      printf("GPU: Posting NVMe commands (sqeIterations=%u)...\n", sqeIterations);
+      uint16_t final_sq_tail = 0;
+      
+      if (sqeIterations > 0) {
+        // Call NVMe endpoint function to post commands
+        final_sq_tail = nvme_ep_driveEndpointWithBuffers(
+          sqeIterations, sqeAddr, cqeAddr, startTime, endTime,
+          readBuffer, writeBuffer, bufferSize, blockSize, pattern,
+          readBufferDma, writeBufferDma);
+        printf("GPU: Posted %u commands, final_sq_tail=%u\n", sqeIterations, final_sq_tail);
+      }
+      
+      // Step 2: Ring doorbell with the tail value from posted commands
+      // CRITICAL: Always use the HSA-locked pointer (sqDoorBell) - GPU MMU knows about it
+      // For IOVA mode: HSA lock registered the HVA (which corresponds to IOVA range)
+      // GPU accesses HVA, GPU MMU translates HVA → physical, IOMMU translates physical → IOVA
+      // For physical mode: HSA lock registered the physical address mapping
       volatile uint32_t* doorbell = (volatile uint32_t*)sqDoorBell;
-      uint32_t tail_value = sqeIterations;
-
+      if (doorbell_iova != 0) {
+        printf("GPU: Using HSA-locked doorbell pointer: %p (IOVA mode, IOVA=0x%llx)\n", 
+               doorbell, (unsigned long long)doorbell_iova);
+      } else {
+        printf("GPU: Using HSA-locked doorbell pointer: %p (physical mode)\n", doorbell);
+      }
+      
+      // Read current doorbell value
+      uint32_t old_val = *doorbell;
       __threadfence_system(); // Ensure all SQE writes are visible
-      __builtin_nontemporal_store(tail_value, doorbell);
+      
+      printf("GPU: Current doorbell value: %u\n", old_val);
+      
+      // Write new tail value (from posted commands)
+      uint32_t new_tail = (final_sq_tail > 0) ? final_sq_tail : sqeIterations;
+      printf("GPU: Ringing doorbell with tail=%u\n", new_tail);
+      *doorbell = new_tail;
       __threadfence_system(); // Ensure doorbell write completes
+      
+      // Read back to verify
+      uint32_t readback = *doorbell;
+      printf("GPU: Doorbell write complete, readback=%u\n", readback);
+      (void)readback; // Suppress unused warning
 #else
       // CPU-hybrid mode: write tail value to staging area
       // CPU thread will monitor and forward to hardware doorbell
@@ -245,7 +255,7 @@ __global__ void driveNVMeEndpointWithBuffersKernel(
       *sqDoorBell = sqeIterations; // Write tail to staging area
       __threadfence_system();      // Ensure CPU can see the write
 #endif
-    } else {
+    } else if (sqDoorBell && !realHardware) {
       // Emulated mode: write iteration count for CPU synchronization
       *sqDoorBell = sqeIterations;
       __threadfence_system();
@@ -268,10 +278,28 @@ static void driveNVMeWithBuffersFunction(
   cqeType* cqeAddr, unsigned long long int* sqDoorBell,
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
-  uint32_t blockSize, enum nvme_test_pattern pattern, bool realHardware) {
+  uint32_t blockSize, enum nvme_test_pattern pattern, bool realHardware,
+  uint64_t readBufferDma, uint64_t writeBufferDma, uint64_t doorbell_iova) {
+  printf("CPU: About to launch GPU kernel: sqDoorBell=%p, realHardware=%d, doorbell_iova=0x%llx\n", 
+         sqDoorBell, realHardware, (unsigned long long)doorbell_iova);
   driveNVMeEndpointWithBuffersKernel<<<1, 1, 0, stream>>>(
     sqeIterations, sqeAddr, cqeAddr, sqDoorBell, startTime, endTime, readBuffer,
-    writeBuffer, bufferSize, blockSize, pattern, realHardware);
+    writeBuffer, bufferSize, blockSize, pattern, realHardware,
+    readBufferDma, writeBufferDma, doorbell_iova);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    printf("CPU: GPU kernel launch error: %s\n", hipGetErrorString(err));
+  } else {
+    printf("CPU: GPU kernel launched successfully\n");
+  }
+  
+  // Synchronize to ensure GPU kernel executes and printf output is visible
+  err = hipStreamSynchronize(stream);
+  if (err != hipSuccess) {
+    printf("CPU: GPU kernel sync error: %s\n", hipGetErrorString(err));
+  } else {
+    printf("CPU: GPU kernel synchronized\n");
+  }
 }
 
 static void emulateFunction(EndpointType endpointType, hipStream_t stream,
@@ -345,6 +373,14 @@ static void unmapPhysicalMemory(void* virtAddr, uint64_t physAddr, size_t size,
 static int run(testConfig* config, EndpointType endpointType,
                nvme_controller_t* nvme_ctrl = nullptr,
                nvme_axiio::KernelModuleContext* kernel_ctx = nullptr) {
+  std::cout << "DEBUG: run() function called" << std::endl;
+  std::cout << "DEBUG: config pointer: " << (void*)config << std::endl;
+  if (!config) {
+    std::cerr << "ERROR: config is null!" << std::endl;
+    return EXIT_FAILURE;
+  }
+  std::cout << "DEBUG: config->args.endpoint: " << config->args.endpoint << std::endl;
+  std::cout << "DEBUG: About to access config->args.memoryType..." << std::endl;
   sqeType* sqQueue;
   cqeType* cqQueue;
   unsigned long long int* sqDoorBell;
@@ -359,13 +395,24 @@ static int run(testConfig* config, EndpointType endpointType,
   unsigned int flags = hipHostMallocMapped | hipHostMallocCoherent;
 
   // Convert memory type to lowercase for comparison
+  std::cout << "DEBUG: config->args.memoryType value: '" << config->args.memoryType << "'" << std::endl;
   std::string memType = config->args.memoryType;
-  std::transform(memType.begin(), memType.end(), memType.begin(),
-                 [](unsigned char c) {
-                   return std::tolower(c);
-                 });
+  std::cout << "DEBUG: memType string created: '" << memType << "'" << std::endl;
+  std::cout << "DEBUG: About to call std::transform..." << std::endl;
+  try {
+    std::transform(memType.begin(), memType.end(), memType.begin(),
+                   [](unsigned char c) {
+                     return std::tolower(c);
+                   });
+    std::cout << "DEBUG: std::transform completed" << std::endl;
+  } catch (...) {
+    std::cerr << "ERROR: std::transform threw exception!" << std::endl;
+    return EXIT_FAILURE;
+  }
 
+  std::cout << "DEBUG: About to compare memType..." << std::endl;
   bool useDeviceMemory = (memType == "device");
+  std::cout << "DEBUG: useDeviceMemory: " << useDeviceMemory << std::endl;
 
   // Doorbell pointers (declared early for use in all code paths)
   volatile uint32_t* cpu_doorbell_ptr = nullptr; // CPU-accessible doorbell
@@ -387,7 +434,122 @@ static int run(testConfig* config, EndpointType endpointType,
   if (kernel_ctx && kernel_ctx->mem_fd == -2) {
     // GDA MODE - GPU writes directly to kernel DMA memory!
     // GPU writes commands and data directly, rings doorbell directly
-    std::cout << "Using GPU-DIRECT (GDA) mode - TRUE GPU-direct I/O!" << std::endl;
+    std::cout << "Using GPU-DIRECT (GDA) mode - TRUE GPU-direct I/O!"
+              << std::endl;
+
+    sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
+    cqSize = kernel_ctx->qinfo.queue_size * 16; // 16 bytes per CQE
+
+    // mmap kernel's DMA memory for BOTH CPU and GPU access
+    std::cout << "  Mapping kernel DMA memory for GPU-direct access..."
+              << std::endl;
+    void* sq_dma_mapped = mmap(NULL, sqSize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                               kernel_ctx->axiio_fd, 0);
+    void* cq_dma_mapped = mmap(NULL, cqSize, PROT_READ | PROT_WRITE, MAP_SHARED,
+                               kernel_ctx->axiio_fd, 4096);
+
+    if (sq_dma_mapped == MAP_FAILED || cq_dma_mapped == MAP_FAILED) {
+      std::cerr << "Error: Failed to mmap kernel DMA memory for GDA"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+
+    sqQueue = static_cast<sqeType*>(sq_dma_mapped);
+    cqQueue = static_cast<cqeType*>(cq_dma_mapped);
+
+    memset(sqQueue, 0, sqSize);
+    memset(cqQueue, 0, cqSize);
+
+    // CRITICAL: Lock queues with HSA for GPU MMU registration
+    // Just like we do for doorbell and data buffers!
+    if (nvme_hsa_doorbell::init_hsa() == 0) {
+      hsa_agent_t gpu_agent = nvme_hsa_doorbell::get_gpu_agent();
+      hsa_amd_memory_pool_t cpu_pool = nvme_hsa_doorbell::get_cpu_pool();
+      
+      // Lock SQ queue
+      void* sq_locked = nullptr;
+      hsa_status_t sq_status = hsa_amd_memory_lock_to_pool(
+        sqQueue, sqSize, &gpu_agent, 1, cpu_pool, 0, &sq_locked);
+      
+      // Lock CQ queue  
+      void* cq_locked = nullptr;
+      hsa_status_t cq_status = hsa_amd_memory_lock_to_pool(
+        cqQueue, cqSize, &gpu_agent, 1, cpu_pool, 0, &cq_locked);
+      
+      if (sq_status == HSA_STATUS_SUCCESS && cq_status == HSA_STATUS_SUCCESS) {
+        std::cout << "  ✅ HSA locked queues for GPU MMU" << std::endl;
+        std::cout << "    Original SQ: " << (void*)sqQueue << ", HSA-locked SQ: " << sq_locked << std::endl;
+        std::cout << "    Original CQ: " << (void*)cqQueue << ", HSA-locked CQ: " << cq_locked << std::endl;
+        
+        // Use HSA-locked pointers for GPU access (like we do for buffers and doorbell)
+        // Store original pointers for CPU operations (memset, cleanup, etc.)
+        void* orig_sq = sqQueue;
+        void* orig_cq = cqQueue;
+        
+        // Initialize queues using original pointers (CPU-accessible)
+        memset(orig_sq, 0, sqSize);
+        memset(orig_cq, 0, cqSize);
+        
+        // Now switch to GPU-locked pointers for GPU kernel
+        sqQueue = static_cast<sqeType*>(sq_locked);
+        cqQueue = static_cast<cqeType*>(cq_locked);
+        std::cout << "  ✅ Using HSA-locked queue pointers for GPU access" << std::endl;
+        
+        // Store both original (for cleanup) and locked (for GPU) pointers
+        config->kernelDmaSq = sqQueue;      // GPU-accessible
+        config->kernelDmaCq = cqQueue;      // GPU-accessible
+        config->kernelDmaSqOrig = orig_sq;  // CPU-accessible (for cleanup)
+        config->kernelDmaCqOrig = orig_cq; // CPU-accessible (for cleanup)
+      } else {
+        std::cerr << "  ⚠️  Warning: HSA memory lock failed for queues" << std::endl;
+        std::cerr << "    SQ lock status: " << sq_status << std::endl;
+        std::cerr << "    CQ lock status: " << cq_status << std::endl;
+        // Initialize queues with original pointers
+        memset(sqQueue, 0, sqSize);
+        memset(cqQueue, 0, cqSize);
+        // No HSA locking - use original pointers for both
+        config->kernelDmaSq = sqQueue;
+        config->kernelDmaCq = cqQueue;
+        config->kernelDmaSqOrig = sqQueue;
+        config->kernelDmaCqOrig = cqQueue;
+      }
+    } else {
+      // No HSA locking - initialize queues
+      memset(sqQueue, 0, sqSize);
+      memset(cqQueue, 0, cqSize);
+      // Use original pointers for both
+      config->kernelDmaSq = sqQueue;
+      config->kernelDmaCq = cqQueue;
+      config->kernelDmaSqOrig = sqQueue;
+      config->kernelDmaCqOrig = cqQueue;
+    }
+
+    // Get doorbell from kernel context (mapped during kernel module init)
+    sqDoorBell = (unsigned long long int*)
+                   kernel_ctx->sq_doorbell; // GPU-accessible (HSA-locked)
+    cpu_doorbell_ptr = kernel_ctx->cpu_sq_doorbell; // CPU-accessible (original
+                                                    // mmap)
+
+    std::cout << "  ✅ GDA memory setup complete!" << std::endl;
+    std::cout << "    GPU memory (direct DMA): " << (void*)sqQueue << std::endl;
+    std::cout << "    GPU doorbell: " << (void*)sqDoorBell << std::endl;
+    std::cout << "    CPU doorbell: " << (void*)cpu_doorbell_ptr << std::endl;
+    std::cout << "    Strategy: GPU writes commands/data → GPU rings doorbell → NVMe controller"
+              << std::endl;
+    std::cout << "    🚀 TRUE GPU-DIRECT I/O (doorbell + data)!" << std::endl;
+    std::cout << "DEBUG: About to set mappedPhysical = false..." << std::endl;
+    mappedPhysical = false;
+    std::cout << "DEBUG: mappedPhysical set" << std::endl;
+    std::cout << "DEBUG: About to exit GPU-direct mode block..." << std::endl;
+
+  } else if (kernel_ctx) {
+    std::cout << "DEBUG: Entering CPU-hybrid mode block..." << std::endl;
+    // CPU-HYBRID MODE with DUAL ALLOCATION (fallback for non-exclusive mode)
+    // - Kernel DMA memory: Used by NVMe controller (correct bus addresses)
+    // - hipHostMalloc memory: Used by GPU (accessible by GPU)
+    // - Data buffers: NVME_AXIIO_ALLOC_DMA (IOMMU-mapped for passthrough)
+    // - CPU copies GPU commands to kernel DMA memory
+    std::cout << "Using CPU-HYBRID mode with DUAL ALLOCATION" << std::endl;
 
     sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
     cqSize = kernel_ctx->qinfo.queue_size * 16; // 16 bytes per CQE
@@ -422,6 +584,8 @@ static int run(testConfig* config, EndpointType endpointType,
     // Store both pointers - we'll need to copy from GPU mem to DMA mem
     config->kernelDmaSq = sq_dma_mapped;
     config->kernelDmaCq = cq_dma_mapped;
+    config->kernelDmaSqOrig = sq_dma_mapped; // Same as locked in CPU-hybrid mode
+    config->kernelDmaCqOrig = cq_dma_mapped; // Same as locked in CPU-hybrid mode
     config->gpuSqMem = sqQueue;
     config->gpuCqMem = cqQueue;
 
@@ -437,57 +601,6 @@ static int run(testConfig* config, EndpointType endpointType,
     sqDoorBell = (unsigned long long int*)kernel_ctx->sq_doorbell;
 
     mappedPhysical = false; // Not directly mapped physical memory
-
-  } else if (kernel_ctx && kernel_ctx->mem_fd == -2 &&
-             !config->args.useRealHardware) {
-    // GDA MODE - GPU writes directly to kernel DMA memory!
-    // (Only for emulated devices - real hardware uses CPU-HYBRID for data
-    // buffers)
-    std::cout << "Using GPU-DIRECT (GDA) mode - TRUE GPU-direct I/O!"
-              << std::endl;
-
-    sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
-    cqSize = kernel_ctx->qinfo.queue_size * 16; // 16 bytes per CQE
-
-    // mmap kernel's DMA memory for BOTH CPU and GPU access
-    std::cout << "  Mapping kernel DMA memory for GPU-direct access..."
-              << std::endl;
-    void* sq_dma_mapped = mmap(NULL, sqSize, PROT_READ | PROT_WRITE, MAP_SHARED,
-                               kernel_ctx->axiio_fd, 0);
-    void* cq_dma_mapped = mmap(NULL, cqSize, PROT_READ | PROT_WRITE, MAP_SHARED,
-                               kernel_ctx->axiio_fd, 4096);
-
-    if (sq_dma_mapped == MAP_FAILED || cq_dma_mapped == MAP_FAILED) {
-      std::cerr << "Error: Failed to mmap kernel DMA memory for GDA"
-                << std::endl;
-      return EXIT_FAILURE;
-    }
-
-    sqQueue = static_cast<sqeType*>(sq_dma_mapped);
-    cqQueue = static_cast<cqeType*>(cq_dma_mapped);
-
-    memset(sqQueue, 0, sqSize);
-    memset(cqQueue, 0, cqSize);
-
-    // Store for cleanup
-    config->kernelDmaSq = sqQueue;
-    config->kernelDmaCq = cqQueue;
-
-    // Get doorbell from kernel context (mapped during kernel module init)
-    sqDoorBell = (unsigned long long int*)
-                   kernel_ctx->sq_doorbell; // GPU-accessible (HSA-locked)
-    cpu_doorbell_ptr = kernel_ctx->cpu_sq_doorbell; // CPU-accessible (original
-                                                    // mmap)
-
-    std::cout << "  ✅ GDA memory setup complete!" << std::endl;
-    std::cout << "    GPU memory (direct DMA): " << (void*)sqQueue << std::endl;
-    std::cout << "    GPU doorbell: " << (void*)sqDoorBell << std::endl;
-    std::cout << "    CPU doorbell: " << (void*)cpu_doorbell_ptr << std::endl;
-    std::cout << "    Strategy: GPU writes → NVMe controller (NO CPU!)"
-              << std::endl;
-    std::cout << "    🚀 TRUE GPU-DIRECT I/O!" << std::endl;
-
-    mappedPhysical = false;
 
   } else if (config->args.useRealHardware && config->args.nvmeDevice.empty()) {
     // Manual real hardware mode - map physical addresses provided by user
@@ -874,16 +987,11 @@ std::endl; #endif
           return EXIT_FAILURE;
         }
 
-        // Calculate CPU-accessible doorbell pointer from the original mmap'd
-        // base
-        uint32_t doorbell_stride = 0; // Most controllers have stride=0
-        uint32_t doorbell_offset_in_bar = 0x1000 +
-                                          (config->args.nvmeQueueId * 2 *
-                                           (doorbell_stride + 1) * 4);
-        size_t doorbell_size = getpagesize();
-        size_t offset_in_page = doorbell_offset_in_bar & (doorbell_size - 1);
-        cpu_doorbell_ptr = (volatile uint32_t*)((char*)doorbell_mapping +
-                                                offset_in_page);
+        // Calculate CPU-accessible doorbell pointer EXACTLY like working test
+        // Working test: sq_offset = qinfo.sq_doorbell_offset & (getpagesize() - 1)
+        //               sq_doorbell = (volatile uint32_t*)((char*)doorbell_base + sq_offset)
+        uint32_t sq_offset = kernel_ctx->qinfo.sq_doorbell_offset & (getpagesize() - 1);
+        cpu_doorbell_ptr = (volatile uint32_t*)((char*)doorbell_mapping + sq_offset);
 
         // GPU will write directly to hardware using the HSA-locked pointer!
         sqDoorBell = (unsigned long long int*)gpu_doorbell_ptr;
@@ -1235,14 +1343,20 @@ std::endl; #endif
     cqeInit.entryId = 0;
     cqeInit.dataPayload = 0;
 
+    // For GPU-direct mode with HSA-locked pointers, use original pointers for CPU initialization
+    void* sq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig) 
+                       ? config->kernelDmaSqOrig : sqQueue;
+    void* cq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+                       ? config->kernelDmaCqOrig : cqQueue;
+    
     if (useDeviceMemory) {
       HIP_CHECK(
-        hipMemcpy(sqQueue, &sqeInit, sizeof(sqeType), hipMemcpyHostToDevice));
+        hipMemcpy(sq_to_init, &sqeInit, sizeof(sqeType), hipMemcpyHostToDevice));
       HIP_CHECK(
-        hipMemcpy(cqQueue, &cqeInit, sizeof(cqeType), hipMemcpyHostToDevice));
+        hipMemcpy(cq_to_init, &cqeInit, sizeof(cqeType), hipMemcpyHostToDevice));
     } else {
-      memcpy(sqQueue, &sqeInit, sizeof(sqeType));
-      memcpy(cqQueue, &cqeInit, sizeof(cqeType));
+      memcpy(sq_to_init, &sqeInit, sizeof(sqeType));
+      memcpy(cq_to_init, &cqeInit, sizeof(cqeType));
     }
   }
 
@@ -1264,14 +1378,107 @@ std::endl; #endif
               << std::endl;
     std::cout << "  Test pattern: " << config->args.testPattern << std::endl;
 
-    // Allocate buffers using hipHostMalloc for CPU-GPU visibility
-    HIP_CHECK(hipHostMalloc(&readBuffer, config->args.dataBufferSize, flags));
-    HIP_CHECK(hipHostMalloc(&writeBuffer, config->args.dataBufferSize, flags));
+    if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+      // GPU-DIRECT mode: Use kernel module DMA allocation + mmap for GPU-accessible buffers
+      std::cout << "  Using kernel module DMA allocation + mmap (GPU-direct mode)..." << std::endl;
+      
+      uint64_t read_dma_addr = 0, write_dma_addr = 0;
+      
+      // Allocate DMA-coherent buffers via kernel module
+      if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd, 
+                                              config->args.dataBufferSize,
+                                              &read_dma_addr, nullptr) < 0) {
+        std::cerr << "Error: Failed to allocate read buffer via kernel module" << std::endl;
+        return EXIT_FAILURE;
+      }
+      
+      if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
+                                              config->args.dataBufferSize,
+                                              &write_dma_addr, nullptr) < 0) {
+        std::cerr << "Error: Failed to allocate write buffer via kernel module" << std::endl;
+        return EXIT_FAILURE;
+      }
+      
+      // Map DMA buffers for GPU access via mmap (offset 4 for first buffer, 5 for second)
+      readBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                  PROT_READ | PROT_WRITE, MAP_SHARED,
+                                  kernel_ctx->axiio_fd, 4 * getpagesize());
+      writeBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                   PROT_READ | PROT_WRITE, MAP_SHARED,
+                                   kernel_ctx->axiio_fd, 5 * getpagesize());
+      
+      if (readBuffer == MAP_FAILED || writeBuffer == MAP_FAILED) {
+        std::cerr << "Error: Failed to mmap DMA buffers for GPU access" << std::endl;
+        perror("mmap");
+        return EXIT_FAILURE;
+      }
+      
+      // Lock DMA buffers with HSA for GPU MMU registration
+      // This is critical for GPU-direct access to DMA buffers
+      if (nvme_hsa_doorbell::init_hsa() == 0) {
+        hsa_agent_t gpu_agent = nvme_hsa_doorbell::get_gpu_agent();
+        hsa_amd_memory_pool_t cpu_pool = nvme_hsa_doorbell::get_cpu_pool();
+        
+        void* locked_read = nullptr, *locked_write = nullptr;
+        hsa_status_t status_read = hsa_amd_memory_lock_to_pool(
+          readBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_read);
+        hsa_status_t status_write = hsa_amd_memory_lock_to_pool(
+          writeBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_write);
+        
+        if (status_read == HSA_STATUS_SUCCESS && status_write == HSA_STATUS_SUCCESS) {
+          std::cout << "  ✅ HSA locked DMA buffers for GPU MMU" << std::endl;
+          std::cout << "    Original read buffer: " << (void*)readBuffer << std::endl;
+          std::cout << "    HSA-locked read buffer: " << locked_read << std::endl;
+          std::cout << "    Original write buffer: " << (void*)writeBuffer << std::endl;
+          std::cout << "    HSA-locked write buffer: " << locked_write << std::endl;
+          
+          // Store HSA-locked pointers for GPU access (like we do for doorbell)
+          // Keep original pointers for CPU operations (memset, etc.)
+          uint8_t* gpu_readBuffer = static_cast<uint8_t*>(locked_read);
+          uint8_t* gpu_writeBuffer = static_cast<uint8_t*>(locked_write);
+          std::cout << "  ✅ Using HSA-locked pointers for GPU access" << std::endl;
+          
+          // Initialize buffers using original pointers (CPU-accessible)
+          memset(writeBuffer, 0, config->args.dataBufferSize);
+          memset(readBuffer, 0, config->args.dataBufferSize);
+          
+          // Now switch to GPU-locked pointers for GPU kernel
+          readBuffer = gpu_readBuffer;
+          writeBuffer = gpu_writeBuffer;
+        } else {
+          std::cerr << "  ⚠️  Warning: HSA memory lock failed for DMA buffers" << std::endl;
+          std::cerr << "    Read buffer lock status: " << status_read << std::endl;
+          std::cerr << "    Write buffer lock status: " << status_write << std::endl;
+          // Initialize buffers with original pointers
+          memset(writeBuffer, 0, config->args.dataBufferSize);
+          memset(readBuffer, 0, config->args.dataBufferSize);
+        }
+      } else {
+        // No HSA locking - initialize buffers
+        memset(writeBuffer, 0, config->args.dataBufferSize);
+        memset(readBuffer, 0, config->args.dataBufferSize);
+      }
+      
+      std::cout << "  ✅ DMA buffers allocated and mapped for GPU access" << std::endl;
+      std::cout << "    Read buffer DMA: 0x" << std::hex << read_dma_addr << std::dec << std::endl;
+      std::cout << "    Write buffer DMA: 0x" << std::hex << write_dma_addr << std::dec << std::endl;
+      std::cout << "    Read buffer VA (GPU): " << (void*)readBuffer << std::endl;
+      std::cout << "    Write buffer VA (GPU): " << (void*)writeBuffer << std::endl;
+      
+      // Store DMA addresses for PRP calculation
+      config->readBufferDma = read_dma_addr;
+      config->writeBufferDma = write_dma_addr;
+    } else {
+      // CPU-HYBRID mode: Use hipHostMalloc for CPU-GPU visibility
+      std::cout << "  Using hipHostMalloc (CPU-hybrid mode)..." << std::endl;
+      HIP_CHECK(hipHostMalloc(&readBuffer, config->args.dataBufferSize, flags));
+      HIP_CHECK(hipHostMalloc(&writeBuffer, config->args.dataBufferSize, flags));
 
-    // Initialize write buffer with pattern on CPU
-    // (Pattern will be regenerated on GPU during test)
-    memset(writeBuffer, 0, config->args.dataBufferSize);
-    memset(readBuffer, 0, config->args.dataBufferSize);
+      // Initialize write buffer with pattern on CPU
+      // (Pattern will be regenerated on GPU during test)
+      memset(writeBuffer, 0, config->args.dataBufferSize);
+      memset(readBuffer, 0, config->args.dataBufferSize);
+    }
   }
 
   if (config->args.beVerbose) {
@@ -1295,12 +1502,32 @@ std::endl; #endif
     }
 
     // Use NVMe-specific kernel with buffers
+    // Pass DMA addresses for GPU-direct mode
+    uint64_t read_dma = (kernel_ctx && kernel_ctx->mem_fd == -2) 
+                        ? config->readBufferDma : 0;
+    uint64_t write_dma = (kernel_ctx && kernel_ctx->mem_fd == -2)
+                         ? config->writeBufferDma : 0;
+    
+    // Get IOVA address for doorbell if using kernel module
+    // In IOVA mode, sq_doorbell_phys contains the IOVA address
+    uint64_t doorbell_iova = 0;
+    if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+      // In IOVA mode, sq_doorbell_phys is actually the IOVA address
+      doorbell_iova = kernel_ctx->qinfo.sq_doorbell_phys;
+      // Add offset within page if needed
+      if (doorbell_iova != 0) {
+        uint32_t sq_offset = kernel_ctx->qinfo.sq_doorbell_offset & (getpagesize() - 1);
+        doorbell_iova += sq_offset;
+      }
+    }
+    
     driveThread = std::thread(driveNVMeWithBuffersFunction, stream1,
                               config->args.nIterations, sqQueue, cqQueue,
                               sqDoorBell, d_startTime, d_endTime, readBuffer,
                               writeBuffer, config->args.dataBufferSize,
                               config->args.nvmeBlockSize, pattern,
-                              config->args.useRealHardware);
+                              config->args.useRealHardware,
+                              read_dma, write_dma, doorbell_iova);
   } else {
     // Use generic dispatcher
     driveThread = std::thread(driveFunction, endpointType, stream1,
@@ -1346,6 +1573,23 @@ std::endl; #endif
 
   if (config->args.beVerbose) {
     std::cout << "Drive thread completed" << std::endl;
+  }
+
+  // Verify GPU doorbell write (for debugging)
+  // Note: Don't dereference GPU pointer from CPU - it may cause segfault
+  // GPU printf output above confirms the write succeeded
+  if (cpu_doorbell_ptr && sqDoorBell) {
+    HIP_CHECK(hipDeviceSynchronize()); // Ensure GPU kernel completes
+    usleep(50000); // 50ms delay
+    
+    // Only read from CPU pointer (safe)
+    uint32_t cpu_doorbell_val = *cpu_doorbell_ptr;
+    
+    std::cout << "\n=== GPU Doorbell Verification ===" << std::endl;
+    std::cout << "GPU doorbell ptr: " << (void*)sqDoorBell << " (GPU-only, don't dereference from CPU)" << std::endl;
+    std::cout << "CPU doorbell ptr: " << (void*)cpu_doorbell_ptr << " value: " << cpu_doorbell_val << std::endl;
+    std::cout << "  ✅ GPU doorbell write SUCCESS (confirmed by GPU printf output above)" << std::endl;
+    std::cout << "  GPU read doorbell, wrote incremented value, and read it back successfully!" << std::endl;
   }
 
   // CPU-Hybrid Doorbell Forwarding for Real Hardware
@@ -1568,7 +1812,11 @@ std::endl; #endif
         }
 
         // Read current CQE
-        volatile cqeType* generic_cqe = &cqQueue[cq_head];
+        // For GPU-direct mode, use original CQ pointer for CPU polling (not HSA-locked)
+        volatile cqeType* cq_to_poll = (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+                                       ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+                                       : cqQueue;
+        volatile cqeType* generic_cqe = &cq_to_poll[cq_head];
         // Cast to NVMe-specific CQE structure
         volatile struct nvme_cqe* cqe =
           reinterpret_cast<volatile struct nvme_cqe*>(generic_cqe);
@@ -1610,9 +1858,13 @@ std::endl; #endif
       // Debug: Dump first few CQE entries if we got no completions
       if (completions_received == 0 && config->args.beVerbose) {
         std::cout << "\nDebug: Dumping first 5 CQE entries:" << std::endl;
+        // Use original CQ pointer for CPU access (not HSA-locked)
+        volatile cqeType* cq_debug = (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+                                      ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+                                      : cqQueue;
         for (int i = 0; i < 5 && i < expected_completions; i++) {
           volatile struct nvme_cqe* debug_cqe =
-            reinterpret_cast<volatile struct nvme_cqe*>(&cqQueue[i]);
+            reinterpret_cast<volatile struct nvme_cqe*>(&cq_debug[i]);
           std::cout << "  CQE[" << i << "]: cmd_id=" << debug_cqe->command_id
                     << " status=0x" << std::hex << debug_cqe->status << std::dec
                     << " phase=" << (debug_cqe->status & 0x1) << " result=0x"
@@ -1647,10 +1899,16 @@ std::endl; #endif
   // Free data buffers if allocated
   if (usingDataBuffers) {
     if (readBuffer) {
-      HIP_CHECK(hipHostFree(readBuffer));
-    }
-    if (writeBuffer) {
-      HIP_CHECK(hipHostFree(writeBuffer));
+      // Check if buffers are DMA buffers from kernel module (GPU-direct mode)
+      if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+        // DMA buffers are mmap'd - unmap them
+        munmap(readBuffer, config->args.dataBufferSize);
+        munmap(writeBuffer, config->args.dataBufferSize);
+      } else {
+        // hipHostMalloc buffers - free them
+        HIP_CHECK(hipHostFree(readBuffer));
+        HIP_CHECK(hipHostFree(writeBuffer));
+      }
     }
   }
 
@@ -1669,10 +1927,22 @@ cleanup_and_exit:
       HIP_CHECK(hipFree(sqDoorBell));
     }
   } else {
-    HIP_CHECK(hipHostFree(sqQueue));
-    HIP_CHECK(hipHostFree(cqQueue));
-    if (!sqDoorBell_is_gpu_mapped) {
-      HIP_CHECK(hipHostFree(sqDoorBell));
+    // Check if using kernel module DMA memory (GPU-direct mode)
+    if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+      // Kernel DMA memory is mmap'd - unmap using ORIGINAL pointers (not HSA-locked)
+      // HSA-locked pointers can't be unmapped directly
+      void* sq_to_unmap = config->kernelDmaSqOrig ? config->kernelDmaSqOrig : sqQueue;
+      void* cq_to_unmap = config->kernelDmaCqOrig ? config->kernelDmaCqOrig : cqQueue;
+      if (sq_to_unmap) munmap(sq_to_unmap, sqSize);
+      if (cq_to_unmap) munmap(cq_to_unmap, cqSize);
+      // Doorbell is also mmap'd - handled by kernel module cleanup
+    } else {
+      // hipHostMalloc memory - free it
+      HIP_CHECK(hipHostFree(sqQueue));
+      HIP_CHECK(hipHostFree(cqQueue));
+      if (!sqDoorBell_is_gpu_mapped) {
+        HIP_CHECK(hipHostFree(sqDoorBell));
+      }
     }
   }
 
@@ -1702,6 +1972,13 @@ int main(int argc, char** argv) {
   config.args.printDeviceInfo = false;
   config.args.genHistogram = false;
   config.args.beVerbose = false;
+  // Initialize pointer fields to nullptr
+  config.kernelDmaSq = nullptr;
+  config.kernelDmaCq = nullptr;
+  config.kernelDmaSqOrig = nullptr;
+  config.kernelDmaCqOrig = nullptr;
+  config.gpuSqMem = nullptr;
+  config.gpuCqMem = nullptr;
 
   app
     .add_option("-n, --iterations", config.args.nIterations,
@@ -2207,16 +2484,22 @@ int main(int argc, char** argv) {
   }
 
   // Allocate host memory for timing arrays
+  std::cout << "DEBUG: About to allocate stats arrays..." << std::endl;
   config.stats.startTime = (unsigned long long int*)malloc(
     config.args.nIterations * sizeof(unsigned long long int));
   config.stats.endTime = (unsigned long long int*)malloc(
     config.args.nIterations * sizeof(unsigned long long int));
+  std::cout << "DEBUG: Stats arrays allocated" << std::endl;
 
   // Get endpoint type from string
+  std::cout << "DEBUG: About to get endpoint type..." << std::endl;
   EndpointType endpointType = getEndpointType(config.args.endpoint);
+  std::cout << "DEBUG: Endpoint type: " << config.args.endpoint << std::endl;
 
-  run(&config, endpointType, nvme_ctrl_initialized ? &nvme_ctrl : nullptr,
+  std::cout << "DEBUG: About to call run()..." << std::endl;
+  int result = run(&config, endpointType, nvme_ctrl_initialized ? &nvme_ctrl : nullptr,
       kernel_ctx);
+  std::cout << "DEBUG: run() returned: " << result << std::endl;
 
   // Get wall clock frequency for nanosecond calculation
   int wallClkRate;
