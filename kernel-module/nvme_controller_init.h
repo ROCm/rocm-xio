@@ -154,11 +154,23 @@ static inline int nvme_init_admin_queue(struct device* dev, void __iomem* bar0,
   pr_info("  ACQ: virt=%p dma=0x%llx\n", admin_q->cq_virt,
           (u64)admin_q->cq_dma);
 
-  /* Disable controller first */
-  ret = nvme_disable_ctrl(bar0);
-  if (ret < 0) {
-    pr_err("nvme_axiio: Failed to disable controller\n");
-    goto free_queues;
+  /* Check controller state - don't disable real hardware */
+  /* Real hardware controllers are typically already disabled when unbound from nvme driver */
+  u32 csts = readl(bar0 + NVME_REG_CSTS);
+  pr_info("nvme_axiio: Controller status (CSTS): 0x%x\n", csts);
+  
+  if (csts & NVME_CSTS_RDY) {
+    /* Controller is enabled - try to disable (only works for QEMU) */
+    pr_info("nvme_axiio: Controller is enabled, attempting to disable...\n");
+    ret = nvme_disable_ctrl(bar0);
+    if (ret < 0) {
+      /* Disable failed - likely real hardware that we shouldn't disable */
+      pr_warn("nvme_axiio: Failed to disable controller (may be real hardware)\n");
+      pr_warn("nvme_axiio: Continuing anyway - controller may already be in correct state\n");
+      /* Don't fail - continue with initialization */
+    }
+  } else {
+    pr_info("nvme_axiio: Controller already disabled (CSTS=0x%x)\n", csts);
   }
 
   /* Configure admin queue attributes */

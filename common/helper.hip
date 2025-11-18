@@ -76,16 +76,43 @@ void axxioPrintStatistics(const std::vector<double>& durations) {
   variance /= durations.size();
   double stddev = std::sqrt(variance);
 
-  // Print statistics
+  // Print statistics - choose appropriate unit based on average
+  // Use ms if >= 1 ms, us if >= 1 us, otherwise ns
+  double min_display, max_display, avg_display, stddev_display;
+  const char* time_unit;
+  
+  if (avg >= 1000000.0) {
+    // Use milliseconds
+    min_display = minVal / 1000000.0;
+    max_display = maxVal / 1000000.0;
+    avg_display = avg / 1000000.0;
+    stddev_display = stddev / 1000000.0;
+    time_unit = " ms";
+  } else if (avg >= 1000.0) {
+    // Use microseconds
+    min_display = minVal / 1000.0;
+    max_display = maxVal / 1000.0;
+    avg_display = avg / 1000.0;
+    stddev_display = stddev / 1000.0;
+    time_unit = " us";
+  } else {
+    // Use nanoseconds
+    min_display = minVal;
+    max_display = maxVal;
+    avg_display = avg;
+    stddev_display = stddev;
+    time_unit = " ns";
+  }
+  
   std::cout << "\nStatistics:" << std::endl;
   std::cout << "  Minimum:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << minVal << " ns" << std::endl;
+            << std::setprecision(2) << min_display << time_unit << std::endl;
   std::cout << "  Maximum:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << maxVal << " ns" << std::endl;
+            << std::setprecision(2) << max_display << time_unit << std::endl;
   std::cout << "  Average:          " << std::setw(10) << std::fixed
-            << std::setprecision(2) << avg << " ns" << std::endl;
+            << std::setprecision(2) << avg_display << time_unit << std::endl;
   std::cout << "  Standard Dev:     " << std::setw(10) << std::fixed
-            << std::setprecision(2) << stddev << " ns" << std::endl;
+            << std::setprecision(2) << stddev_display << time_unit << std::endl;
 }
 
 void axxioPrintHistogram(const std::vector<double>& durations,
@@ -154,13 +181,39 @@ void axxioPrintHistogram(const std::vector<double>& durations,
     // Find max count for scaling
     int maxCount = *std::max_element(bins.begin(), bins.end());
 
+    // Choose appropriate unit based on average: ms if >= 1 ms, us if >= 1 us, otherwise ns
+    double avg = (minVal + maxVal) / 2.0;
+    double edge1, edge2;
+    const char* time_unit;
+    
+    if (avg >= 1000000.0) {
+      // Use milliseconds
+      time_unit = " ms";
+    } else if (avg >= 1000.0) {
+      // Use microseconds
+      time_unit = " us";
+    } else {
+      // Use nanoseconds
+      time_unit = " ns";
+    }
+    
     // Print histogram
-    std::cout << "\nHistogram (Runtime in ns):" << std::endl;
+    std::cout << "\nHistogram (Runtime in" << time_unit << "):" << std::endl;
     const int barWidth = 60;
     for (int i = 0; i < numBins; i++) {
+      if (avg >= 1000000.0) {
+        edge1 = binEdges[i] / 1000000.0;
+        edge2 = binEdges[i + 1] / 1000000.0;
+      } else if (avg >= 1000.0) {
+        edge1 = binEdges[i] / 1000.0;
+        edge2 = binEdges[i + 1] / 1000.0;
+      } else {
+        edge1 = binEdges[i];
+        edge2 = binEdges[i + 1];
+      }
       std::cout << "  [" << std::setw(8) << std::fixed << std::setprecision(1)
-                << binEdges[i] << " - " << std::setw(8) << std::fixed
-                << std::setprecision(1) << binEdges[i + 1] << "): ";
+                << edge1 << " - " << std::setw(8) << std::fixed
+                << std::setprecision(1) << edge2 << "): ";
 
       int barLen = (maxCount > 0) ? (bins[i] * barWidth / maxCount) : 0;
       std::cout << std::string(barLen, '#');

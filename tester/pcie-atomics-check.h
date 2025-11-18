@@ -15,8 +15,10 @@ inline bool check_pcie_atomics_support(bool verbose = true,
   // Check if user wants to ignore atomics check
   const char* ignore_env = getenv("AXIIO_IGNORE_ATOMICS");
   const char* force_env = getenv("AXIIO_FORCE_GPU");
+  const char* fast_env = getenv("AXIIO_FAST_ATOMICS_CHECK");
   bool ignore_atomics = (ignore_env && atoi(ignore_env) == 1) ||
                         (force_env && atoi(force_env) == 1);
+  bool fast_check = (fast_env && atoi(fast_env) == 1);
 
   if (ignore_atomics) {
     if (verbose) {
@@ -42,8 +44,11 @@ inline bool check_pcie_atomics_support(bool verbose = true,
   }
 
   // Method 1: Check dmesg for the specific error message
-  FILE* dmesg_pipe =
-    popen("dmesg 2>/dev/null | grep -i 'pcie atomics' | tail -5", "r");
+  // Skip dmesg in fast mode (it can be slow with large buffers)
+  FILE* dmesg_pipe = nullptr;
+  if (!fast_check) {
+    dmesg_pipe = popen("dmesg 2>/dev/null | grep -i 'pcie atomics' | tail -5", "r");
+  }
   if (dmesg_pipe) {
     char line[512];
     bool found_atomics_msg = false;
@@ -67,62 +72,69 @@ inline bool check_pcie_atomics_support(bool verbose = true,
   }
 
   // Method 2: Check GPU device PCIe capabilities
-  // Find AMD GPU device
-  FILE* lspci_find = popen("lspci 2>/dev/null | grep -i "
-                           "'amd.*radeon\\|amd.*vga' | head -1 | cut -d' ' -f1",
-                           "r");
-  if (lspci_find) {
-    char gpu_addr[32];
-    if (fgets(gpu_addr, sizeof(gpu_addr), lspci_find)) {
-      // Remove newline
-      gpu_addr[strcspn(gpu_addr, "\n")] = 0;
-
-      if (verbose) {
-        printf("   Found AMD GPU at PCIe address: %s\n", gpu_addr);
-      }
-
-      // Check PCIe capabilities
-      char cmd[256];
-      snprintf(cmd, sizeof(cmd),
-               "lspci -vvv -s %s 2>/dev/null | grep -i atomic", gpu_addr);
-      FILE* lspci_cap = popen(cmd, "r");
-      if (lspci_cap) {
-        char line[512];
-        bool atomics_supported = false;
-        bool atomics_enabled = false;
-
-        while (fgets(line, sizeof(line), lspci_cap)) {
-          // Check for capabilities: "AtomicOpsCap: 32bit+ 64bit+"
-          if (strstr(line, "AtomicOpsCap:")) {
-            if (strstr(line, "32bit+") || strstr(line, "64bit+")) {
-              atomics_supported = true;
-            }
-          }
-          // Check for control enabled: "AtomicOpsCtl: ReqEn+"
-          if (strstr(line, "AtomicOpsCtl:")) {
-            if (strstr(line, "ReqEn+")) {
-              atomics_enabled = true;
-            }
-          }
-        }
-        pclose(lspci_cap);
+  // Skip lspci check in fast mode (it's slow, especially -vvv)
+  if (!fast_check) {
+    // Find AMD GPU device (use faster method: lspci without verbose first)
+    FILE* lspci_find = popen("lspci 2>/dev/null | grep -i "
+                             "'amd.*radeon\\|amd.*vga' | head -1 | cut -d' ' -f1",
+                             "r");
+    if (lspci_find) {
+      char gpu_addr[32];
+      if (fgets(gpu_addr, sizeof(gpu_addr), lspci_find)) {
+        // Remove newline
+        gpu_addr[strcspn(gpu_addr, "\n")] = 0;
 
         if (verbose) {
-          printf("   PCIe Atomics Capability: %s\n",
-                 atomics_supported ? "✅ Supported" : "❌ Not Supported");
-          printf("   PCIe Atomics Control: %s\n",
-                 atomics_enabled ? "✅ Enabled" : "❌ Not Enabled");
+          printf("   Found AMD GPU at PCIe address: %s\n", gpu_addr);
         }
 
-        if (!atomics_supported || !atomics_enabled) {
-          atomics_ok = false;
-        } else if (verbose) {
-          printf(
-            "   Could not determine PCIe atomic capabilities from lspci\n");
+        // Check PCIe capabilities - use faster method: only read atomic ops section
+        // Use -v instead of -vvv to avoid reading all config space (much faster)
+        // Then grep for atomic section only
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "lspci -v -s %s 2>/dev/null | grep -A2 -i 'atomic'", gpu_addr);
+        FILE* lspci_cap = popen(cmd, "r");
+        if (lspci_cap) {
+          char line[512];
+          bool atomics_supported = false;
+          bool atomics_enabled = false;
+
+          while (fgets(line, sizeof(line), lspci_cap)) {
+            // Check for capabilities: "AtomicOpsCap: 32bit+ 64bit+"
+            if (strstr(line, "AtomicOpsCap:")) {
+              if (strstr(line, "32bit+") || strstr(line, "64bit+")) {
+                atomics_supported = true;
+              }
+            }
+            // Check for control enabled: "AtomicOpsCtl: ReqEn+"
+            if (strstr(line, "AtomicOpsCtl:")) {
+              if (strstr(line, "ReqEn+")) {
+                atomics_enabled = true;
+              }
+            }
+          }
+          pclose(lspci_cap);
+
+          if (verbose) {
+            printf("   PCIe Atomics Capability: %s\n",
+                   atomics_supported ? "✅ Supported" : "❌ Not Supported");
+            printf("   PCIe Atomics Control: %s\n",
+                   atomics_enabled ? "✅ Enabled" : "❌ Not Enabled");
+          }
+
+          if (!atomics_supported || !atomics_enabled) {
+            atomics_ok = false;
+          } else if (verbose && !atomics_supported && !atomics_enabled) {
+            printf(
+              "   Could not determine PCIe atomic capabilities from lspci\n");
+          }
         }
       }
+      pclose(lspci_find);
     }
-    pclose(lspci_find);
+  } else if (verbose) {
+    printf("   Skipping lspci check (fast mode)\n");
   }
 
   // Method 3: Try a simple HIP operation to verify
