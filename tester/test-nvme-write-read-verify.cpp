@@ -1,5 +1,6 @@
 /*
- * Test: Write random data to first 512 LBAs, then read back at random and verify
+ * Test: Write random data to first 512 LBAs, then read back at random and
+ * verify
  *
  * This test:
  * 1. Creates a queue via kernel module
@@ -8,112 +9,111 @@
  * 4. Verifies data matches
  */
 
-#include <iostream>
 #include <cstdint>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <random>
 #include <vector>
+
 #include <hip/hip_runtime.h>
+
 #include <fcntl.h>
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <hsa/hsa.h>
-#include <hsa/hsa_ext_amd.h>
+
+#include "../endpoints/nvme-ep/nvme-ep.h"
 #include "../kernel-module/nvme_axiio.h"
 #include "nvme-gpu-doorbell-hsa.h"
-#include "../endpoints/nvme-ep/nvme-ep.h"
 
 // GPU kernel to write random data pattern to buffer
-__global__ void write_random_pattern(uint8_t* buffer, uint64_t lba, uint32_t seed) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < 512) { // 512 bytes = 1 LBA
-        // Generate deterministic random data based on LBA and seed
-        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + idx);
-        rng ^= rng >> 16;
-        rng *= 0x85ebca6b;
-        rng ^= rng >> 13;
-        rng *= 0xc2b2ae35;
-        rng ^= rng >> 16;
-        buffer[idx] = (uint8_t)(rng & 0xFF);
-    }
+__global__ void write_random_pattern(uint8_t* buffer, uint64_t lba,
+                                     uint32_t seed) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < 512) { // 512 bytes = 1 LBA
+    // Generate deterministic random data based on LBA and seed
+    uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + idx);
+    rng ^= rng >> 16;
+    rng *= 0x85ebca6b;
+    rng ^= rng >> 13;
+    rng *= 0xc2b2ae35;
+    rng ^= rng >> 16;
+    buffer[idx] = (uint8_t)(rng & 0xFF);
+  }
 }
 
 // GPU kernel to generate NVMe Write commands
-__global__ void generate_write_commands(
-    struct nvme_sqe* sq,
-    volatile uint32_t* doorbell,
-    uint32_t nsid,
-    uint64_t start_lba,
-    uint32_t num_lbas,
-    uint64_t data_buffer_phys,
-    uint32_t queue_size) {
+__global__ void generate_write_commands(struct nvme_sqe* sq,
+                                        volatile uint32_t* doorbell,
+                                        uint32_t nsid, uint64_t start_lba,
+                                        uint32_t num_lbas,
+                                        uint64_t data_buffer_phys,
+                                        uint32_t queue_size) {
+  int tid = hipThreadIdx_x + hipBlockIdx_x * hipBlockDim_x;
 
-    int tid = hipThreadIdx_x + hipBlockIdx_x * hipBlockDim_x;
+  if (tid == 0) {
+    uint32_t sq_tail = 0;
 
-    if (tid == 0) {
-        uint32_t sq_tail = 0;
+    // Generate write commands for LBAs 0-511
+    for (uint32_t i = 0; i < num_lbas; i++) {
+      uint64_t lba = start_lba + i;
+      struct nvme_sqe* sqe = &sq[sq_tail];
 
-        // Generate write commands for LBAs 0-511
-        for (uint32_t i = 0; i < num_lbas; i++) {
-            uint64_t lba = start_lba + i;
-            struct nvme_sqe* sqe = &sq[sq_tail];
+      // Setup NVMe Write command (1 block = 512 bytes)
+      nvme_sqe_setup_write(sqe, i, nsid, lba, 1, data_buffer_phys + (i * 512),
+                           0);
 
-            // Setup NVMe Write command (1 block = 512 bytes)
-            nvme_sqe_setup_write(sqe, i, nsid, lba, 1,
-                                data_buffer_phys + (i * 512), 0);
-
-            sq_tail = (sq_tail + 1) % queue_size;
-        }
-
-        __threadfence_system();
-        *doorbell = sq_tail;
-        __threadfence_system();
-
-        printf("[GPU] Generated %u write commands, doorbell=%u\n", num_lbas, sq_tail);
+      sq_tail = (sq_tail + 1) % queue_size;
     }
+
+    __threadfence_system();
+    *doorbell = sq_tail;
+    __threadfence_system();
+
+    printf("[GPU] Generated %u write commands, doorbell=%u\n", num_lbas,
+           sq_tail);
+  }
 }
 
 // GPU kernel to generate NVMe Read commands (random LBAs)
 __global__ void generate_random_read_commands(
-    struct nvme_sqe* sq,
-    volatile uint32_t* doorbell,
-    uint32_t nsid,
-    uint64_t* random_lbas,
-    uint32_t num_reads,
-    uint64_t data_buffer_phys,
-    uint32_t queue_size) {
+  struct nvme_sqe* sq, volatile uint32_t* doorbell, uint32_t nsid,
+  uint64_t* random_lbas, uint32_t num_reads, uint64_t data_buffer_phys,
+  uint32_t queue_size) {
+  int tid = hipThreadIdx_x + hipBlockIdx_x * hipBlockDim_x;
 
-    int tid = hipThreadIdx_x + hipBlockIdx_x * hipBlockDim_x;
+  if (tid == 0) {
+    uint32_t sq_tail = 0;
 
-    if (tid == 0) {
-        uint32_t sq_tail = 0;
+    // Generate read commands for random LBAs
+    for (uint32_t i = 0; i < num_reads; i++) {
+      uint64_t lba = random_lbas[i];
+      struct nvme_sqe* sqe = &sq[sq_tail];
 
-        // Generate read commands for random LBAs
-        for (uint32_t i = 0; i < num_reads; i++) {
-            uint64_t lba = random_lbas[i];
-            struct nvme_sqe* sqe = &sq[sq_tail];
+      // Setup NVMe Read command (1 block = 512 bytes)
+      nvme_sqe_setup_read(sqe, i, nsid, lba, 1, data_buffer_phys + (i * 512),
+                          0);
 
-            // Setup NVMe Read command (1 block = 512 bytes)
-            nvme_sqe_setup_read(sqe, i, nsid, lba, 1,
-                                data_buffer_phys + (i * 512), 0);
-
-            sq_tail = (sq_tail + 1) % queue_size;
-        }
-
-        __threadfence_system();
-        *doorbell = sq_tail;
-        __threadfence_system();
-
-        printf("[GPU] Generated %u read commands, doorbell=%u\n", num_reads, sq_tail);
+      sq_tail = (sq_tail + 1) % queue_size;
     }
+
+    __threadfence_system();
+    *doorbell = sq_tail;
+    __threadfence_system();
+
+    printf("[GPU] Generated %u read commands, doorbell=%u\n", num_reads,
+           sq_tail);
+  }
 }
 
 int main(int argc, char* argv[]) {
-    std::cout << "=== NVMe Write/Read/Verify Test ===" << std::endl;
-    std::cout << "Writing random data to LBAs 0-511, then reading back randomly" << std::endl;
-    std::cout << std::endl;
+  std::cout << "=== NVMe Write/Read/Verify Test ===" << std::endl;
+  std::cout << "Writing random data to LBAs 0-511, then reading back randomly"
+            << std::endl;
+  std::cout << std::endl;
 
     const uint32_t NUM_LBAS = 512;
     const uint32_t NUM_RANDOM_READS = 100;

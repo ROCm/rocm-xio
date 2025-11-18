@@ -10,6 +10,7 @@
 #include <regex>
 #include <string>
 #include <vector>
+
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -24,8 +25,8 @@ constexpr const char* QEMU_PATHS[] = {
   "/opt/qemu-10.1.2/bin/qemu-system-x86_64",
   "/opt/qemu-10.1.0/bin/qemu-system-x86_64",
   "/usr/bin/qemu-system-x86_64", // Fallback to system QEMU
-  nullptr
-};
+  nullptr};
+
 
 // Structure to hold doorbell operation information
 struct DoorbellOp {
@@ -133,7 +134,8 @@ inline int parse_trace_file(const std::string& trace_file_path,
     line_num++;
 
     // Skip empty lines or lines with only null bytes/whitespace
-    if (line.empty() || line.find_first_not_of(" \t\r\n\0") == std::string::npos) {
+    if (line.empty() ||
+        line.find_first_not_of(" \t\r\n\0") == std::string::npos) {
       continue;
     }
 
@@ -238,8 +240,8 @@ inline int parse_trace_file(const std::string& trace_file_path,
  *
  * @param result Verification results to print
  */
-inline void print_verification_results(const VerificationResult& result,
-                                       const std::string& trace_file_path = "") {
+inline void print_verification_results(
+  const VerificationResult& result, const std::string& trace_file_path = "") {
   std::cout << "\n";
   std::cout << "========================================\n";
   std::cout << "  NVMe Doorbell Trace Verification\n";
@@ -251,10 +253,11 @@ inline void print_verification_results(const VerificationResult& result,
     std::cout << "QEMU Configuration:\n";
     std::cout << "-------------------\n";
     std::cout << "QEMU Path: " << result.qemu_path << "\n";
-    std::cout << (result.qemu_version_ok ? "✅" : "⚠️")
-              << " QEMU Version: " << (result.qemu_version_ok ? "OK (10.1.0+)" : "Unknown/Too Old")
+    std::cout << (result.qemu_version_ok ? "✅" : "⚠️") << " QEMU Version: "
+              << (result.qemu_version_ok ? "OK (10.1.0+)" : "Unknown/Too Old")
               << "\n";
-    std::cout << "Required: QEMU " << QEMU_MIN_VERSION << "+ (for libvfio-user)\n";
+    std::cout << "Required: QEMU " << QEMU_MIN_VERSION
+              << "+ (for libvfio-user)\n";
     std::cout << "\n";
   }
 
@@ -274,11 +277,13 @@ inline void print_verification_results(const VerificationResult& result,
     if (!trace_file_path.empty()) {
       std::cout << "    NVME_TRACE_FILE=" << trace_file_path << " ./run-vm\n";
     } else {
-      std::cout << "    NVME_TRACE_FILE=/tmp/rocm-axiio-nvme-trace.log ./run-vm\n";
+      std::cout
+        << "    NVME_TRACE_FILE=/tmp/rocm-axiio-nvme-trace.log ./run-vm\n";
     }
     std::cout << "\n";
     std::cout << "QEMU location: " << QEMU_BASE_PATH << "\n";
-    std::cout << "VM images: /home/stebates/Projects/qemu-minimal/qemu/images/\n";
+    std::cout
+      << "VM images: /home/stebates/Projects/qemu-minimal/qemu/images/\n";
     return;
   }
 
@@ -304,10 +309,9 @@ inline void print_verification_results(const VerificationResult& result,
   if (!result.sq_ops.empty() && result.sq_ops[0].addr != 0) {
     std::cout << "MMIO ADDRESSES CONFIRMED:\n";
     std::cout << "-------------------------\n";
-    std::cout << "✅ Admin SQ doorbell: 0x" << std::hex
-              << result.sq_ops[0].addr << std::dec << " (BAR0 + 0x"
-              << std::hex << (result.sq_ops[0].addr & 0xFFFF) << std::dec
-              << ")\n";
+    std::cout << "✅ Admin SQ doorbell: 0x" << std::hex << result.sq_ops[0].addr
+              << std::dec << " (BAR0 + 0x" << std::hex
+              << (result.sq_ops[0].addr & 0xFFFF) << std::dec << ")\n";
     if (!result.cq_ops.empty() && result.cq_ops[0].addr != 0) {
       std::cout << "✅ Admin CQ doorbell: 0x" << std::hex
                 << result.cq_ops[0].addr << std::dec << " (BAR0 + 0x"
@@ -337,8 +341,7 @@ inline void print_verification_results(const VerificationResult& result,
         std::cout << result.sq_ops[i].value << "→";
       }
       std::cout << "...→";
-      for (size_t i = result.sq_ops.size() - 5; i < result.sq_ops.size();
-           i++) {
+      for (size_t i = result.sq_ops.size() - 5; i < result.sq_ops.size(); i++) {
         std::cout << result.sq_ops[i].value;
         if (i < result.sq_ops.size() - 1)
           std::cout << "→";
@@ -397,4 +400,3 @@ inline void print_verification_results(const VerificationResult& result,
 }
 
 } // namespace nvme_trace_verifier
-
