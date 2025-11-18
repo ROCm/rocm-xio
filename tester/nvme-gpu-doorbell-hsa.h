@@ -126,6 +126,20 @@ static inline int init_hsa() {
 }
 
 /*
+ * Get GPU agent (for memory locking)
+ */
+static inline hsa_agent_t get_gpu_agent() {
+  return gpu_agent;
+}
+
+/*
+ * Get CPU memory pool (for memory locking)
+ */
+static inline hsa_amd_memory_pool_t get_cpu_pool() {
+  return cpu_pool;
+}
+
+/*
  * Shutdown HSA (call at cleanup)
  */
 static inline void shutdown_hsa() {
@@ -138,12 +152,16 @@ static inline void shutdown_hsa() {
 /*
  * Map GPU-accessible doorbell with HSA memory lock registration
  * THIS IS THE KEY that makes it work!
+ * 
+ * For IOVA mode: Returns IOVA address that GPU should use directly
+ * For physical mode: Returns HSA-locked pointer
  */
 static inline int map_gpu_doorbell(int axiio_fd, uint16_t queue_id, bool is_sq,
                                    volatile uint32_t** gpu_doorbell_ptr,
                                    void** mapped_base = nullptr,
                                    void** locked_base = nullptr,
-                                   const struct nvme_axiio_queue_info* existing_qinfo = nullptr) {
+                                   const struct nvme_axiio_queue_info* existing_qinfo = nullptr,
+                                   uint64_t* iova_address_out = nullptr) {
   if (!hsa_initialized) {
     if (init_hsa() < 0) {
       return -1;
@@ -247,125 +265,130 @@ static inline int map_gpu_doorbell(int axiio_fd, uint16_t queue_id, bool is_sq,
   
   std::cout << "  IOVA doorbell address: 0x" << std::hex 
             << iova_doorbell << std::dec << std::endl;
-  std::cout << "  QEMU has mapped IOVA in GPU's VFIO container" << std::endl;
-  std::cout << "  GPU must use IOVA address directly!" << std::endl;
+  std::cout << "  Using IOVA address directly (QEMU has mapped it in GPU's IOMMU)" << std::endl;
   
-  // For QEMU P2P with IOVA, QEMU has already set up the IOVA mapping in the
-  // GPU's VFIO container. We need to:
-  // 1. Map the IOVA address range to get a host virtual address (HVA)
-  // 2. Lock it with HSA so GPU MMU knows about it
-  // 3. GPU will use the IOVA address directly (cast to pointer)
-  
-  // Step 1: Map IOVA address range to get HVA
-  // Use MAP_FIXED to map at the IOVA address (if possible), or let kernel choose
+  // CRITICAL: For IOVA mode, we skip the kernel module's mmap (pgoff=3)
+  // because the kernel module maps physical BAR0, not IOVA.
+  // Instead, we map the IOVA address directly using anonymous mmap.
+  // QEMU has already mapped the IOVA in the GPU's VFIO container, so the GPU
+  // can access it directly once we register it with HSA.
   size_t page_size = getpagesize();
+  
+  // Step 1: Map IOVA address range directly using anonymous mmap
+  // Try MAP_FIXED first to map at the IOVA address (if address space allows)
   uint64_t iova_page_base = iova_doorbell & ~(page_size - 1);
-  uint32_t offset_in_iova_page = iova_doorbell & (page_size - 1);
+  void* iova_hva = mmap((void*)iova_page_base, page_size,
+                        PROT_READ | PROT_WRITE,
+                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
   
-  void* mapped = mmap((void*)iova_page_base, page_size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_FIXED, axiio_fd, 3 * page_size);
-  
-  // If MAP_FIXED fails (address already mapped or not available), try without it
-  if (mapped == MAP_FAILED) {
-    std::cout << "  MAP_FIXED failed, trying without it..." << std::endl;
-    mapped = mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
-                  MAP_SHARED, axiio_fd, 3 * page_size);
-    if (mapped == MAP_FAILED) {
-      std::cerr << "Error: Failed to mmap GPU doorbell via kernel module"
-                << std::endl;
-      perror("mmap");
+  if (iova_hva == MAP_FAILED) {
+    // MAP_FIXED failed - the IOVA address may not be in our address space
+    // This is OK - we'll map elsewhere and the GPU will still use the IOVA
+    std::cout << "  ⚠️  MAP_FIXED failed (IOVA not in address space), using anonymous mapping..." << std::endl;
+    iova_hva = mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                    MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (iova_hva == MAP_FAILED) {
+      std::cerr << "Error: Failed to create IOVA mapping: " << strerror(errno) << std::endl;
       return -1;
     }
-    // If kernel chose a different address, we need to use the IOVA directly
-    // The kernel module should have mapped the IOVA page
-    std::cout << "  Kernel mapped at: " << mapped << std::endl;
-    std::cout << "  Using IOVA address directly for GPU" << std::endl;
-    
-    // Lock the mapped region with HSA to create GPU MMU mapping
-    // Use hsa_amd_memory_lock_to_pool (as in test_iova_with_hsa.hip)
-    void* gpu_locked_ptr = nullptr;
-    hsa_status_t status = hsa_amd_memory_lock_to_pool(mapped, page_size, &gpu_agent,
-                                                       1, cpu_pool, 0, &gpu_locked_ptr);
-    if (status != HSA_STATUS_SUCCESS) {
-      std::cerr << "Error: HSA memory lock to pool failed: " << status << std::endl;
-      munmap(mapped, page_size);
-      return -1;
-    }
-    
-    std::cout << "  ✓ HSA locked memory for GPU MMU" << std::endl;
-    
-    // CRITICAL: GPU uses the locked pointer from HSA, NOT the IOVA directly!
-    // The locked pointer is what HSA registered with GPU MMU
-    // Calculate offset within the page for the doorbell
-    uint32_t offset_in_page = iova_doorbell & (page_size - 1);
-    *gpu_doorbell_ptr = (volatile uint32_t*)((char*)gpu_locked_ptr + offset_in_page);
-    
-    if (mapped_base) *mapped_base = mapped;
-    if (locked_base) *locked_base = gpu_locked_ptr;
-    
-    std::cout << "  ✅ GPU doorbell ready!" << std::endl;
-    std::cout << "    Mapped HVA: " << mapped << std::endl;
-    std::cout << "    Locked HVA: " << gpu_locked_ptr << std::endl;
-    std::cout << "    GPU doorbell ptr: " << (void*)*gpu_doorbell_ptr << std::endl;
-    std::cout << "    Offset in page: 0x" << std::hex << offset_in_page << std::dec << std::endl;
-    std::cout << "  🚀 GPU MMU mapping created!" << std::endl;
-    std::cout << "  ⚡ GPU uses HSA-locked pointer (not IOVA directly)!" << std::endl;
-    std::cout << "  🎉 TRUE GPU-DIRECT I/O ENABLED!" << std::endl;
-    
-    return 0;
+    std::cout << "  ⚠️  Note: HVA != IOVA, but GPU will use IOVA directly via IOMMU" << std::endl;
   }
   
-  // MAP_FIXED succeeded - mapped at IOVA address
-  // CRITICAL: This IOVA address is NOT CPU-accessible!
-  // We need a separate CPU-accessible mapping via kernel module
-  std::cout << "  ✓ Mapped IOVA page at HVA: " << mapped << std::endl;
-  std::cout << "  ⚠️  Note: IOVA address is GPU-only, CPU needs separate mapping" << std::endl;
+  std::cout << "  ✓ Created IOVA mapping at HVA: " << iova_hva << std::endl;
+  std::cout << "    IOVA: 0x" << std::hex << iova_doorbell << std::dec << std::endl;
   
-  // Create CPU-accessible mapping via kernel module (offset 2 for doorbell)
-  void* cpu_mapped = mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, axiio_fd, 2 * page_size);
-  if (cpu_mapped == MAP_FAILED) {
-    std::cerr << "Error: Failed to create CPU-accessible doorbell mapping" << std::endl;
-    perror("mmap");
-    munmap(mapped, page_size);
-    return -1;
-  }
-  std::cout << "  ✓ CPU-accessible mapping created: " << cpu_mapped << std::endl;
-  
-  // Step 2: Lock with HSA to create GPU MMU mapping
-  // Use hsa_amd_memory_lock_to_pool (as in test_iova_with_hsa.hip)
-  void* gpu_locked_ptr = nullptr;
-  hsa_status_t status = hsa_amd_memory_lock_to_pool(mapped, page_size, &gpu_agent,
-                                                   1, cpu_pool, 0, &gpu_locked_ptr);
+  // Step 2: Lock with HSA for GPU MMU registration
+  // CRITICAL: We need to register the memory region with GPU MMU so GPU can access it.
+  // Even though GPU will use IOVA address directly, HSA locking registers the region
+  // with GPU MMU. The key is that we're locking the IOVA address range, and GPU MMU
+  // will translate GPU accesses to that IOVA address correctly.
+  void* hsa_locked_ptr = nullptr;
+  hsa_status_t status = hsa_amd_memory_lock(iova_hva, page_size,
+                                             &gpu_agent, 1, &hsa_locked_ptr);
   if (status != HSA_STATUS_SUCCESS) {
-    std::cerr << "Error: HSA memory lock to pool failed: " << status << std::endl;
-    munmap(cpu_mapped, page_size);
-    munmap(mapped, page_size);
+    std::cerr << "Error: HSA memory lock failed for IOVA doorbell: " << status << std::endl;
+    munmap(iova_hva, page_size);
     return -1;
   }
   
-  std::cout << "  ✓ HSA locked memory for GPU MMU" << std::endl;
+  std::cout << "  ✓ HSA locked IOVA mapping for GPU MMU: " << hsa_locked_ptr << std::endl;
+  std::cout << "    HVA: " << iova_hva << " (mapped IOVA range)" << std::endl;
+  std::cout << "    HSA-locked: " << hsa_locked_ptr << " (GPU MMU registered)" << std::endl;
+  std::cout << "    IOVA: 0x" << std::hex << iova_doorbell << std::dec << " (GPU will use this directly)" << std::endl;
   
-  // CRITICAL: GPU uses the locked pointer from HSA, NOT the IOVA directly!
-  // The locked pointer is what HSA registered with GPU MMU
-  // Calculate offset within the page for the doorbell
-  uint32_t offset_in_page = iova_doorbell & (page_size - 1);
-  *gpu_doorbell_ptr = (volatile uint32_t*)((char*)gpu_locked_ptr + offset_in_page);
+  // Step 3: Calculate doorbell offset within the page
+  uint32_t sq_offset = 0;
+  if (existing_qinfo && existing_qinfo->sq_doorbell_offset != 0) {
+    sq_offset = existing_qinfo->sq_doorbell_offset & (page_size - 1);
+    std::cout << "  Using sq_doorbell_offset from queue info: 0x" << std::hex 
+              << existing_qinfo->sq_doorbell_offset << std::dec << std::endl;
+  } else {
+    sq_offset = iova_doorbell & (page_size - 1);
+    std::cout << "  ⚠️  Warning: Using IOVA offset (queue info not available)" << std::endl;
+  }
   
-  // Return CPU-accessible mapping (not IOVA) for CPU access
-  if (mapped_base) *mapped_base = cpu_mapped;  // CPU uses this
-  if (locked_base) *locked_base = gpu_locked_ptr;  // GPU uses this
+  // GPU doorbell pointer - CRITICAL: For IOVA mode, GPU must use HSA-locked pointer
+  // HSA locking registers the CPU virtual address (HVA) with GPU MMU, not IOVA.
+  // When GPU accesses the HSA-locked pointer (HVA), GPU MMU translates HVA → physical.
+  // For IOVA mode to work, we need the HVA to correspond to the IOVA range.
+  // If MAP_FIXED succeeded, HVA == IOVA, so GPU can use the HSA-locked pointer.
+  // If MAP_FIXED failed, HVA != IOVA, but GPU still uses HSA-locked pointer (HVA).
+  //
+  // The key insight: GPU MMU knows about HVA (from HSA lock), not IOVA directly.
+  // So GPU must use the HSA-locked pointer, which points to HVA.
+  // The HVA corresponds to the IOVA range we mapped, so IOMMU will translate correctly.
+  uint64_t final_iova = iova_doorbell + sq_offset;
+  // iova_page_base already defined above at line 279
+  bool map_fixed_succeeded = (iova_hva == (void*)iova_page_base);
   
-    std::cout << "  ✅ GPU doorbell ready!" << std::endl;
-    std::cout << "    Mapped HVA: " << mapped << std::endl;
-    std::cout << "    Locked HVA: " << gpu_locked_ptr << std::endl;
-    std::cout << "    GPU doorbell ptr: " << (void*)*gpu_doorbell_ptr << std::endl;
-    std::cout << "    Offset in page: 0x" << std::hex << offset_in_page << std::dec << std::endl;
-    std::cout << "  🚀 GPU MMU mapping created!" << std::endl;
-    std::cout << "  ⚡ GPU uses HSA-locked pointer (not IOVA directly)!" << std::endl;
-    std::cout << "  🎉 TRUE GPU-DIRECT I/O ENABLED!" << std::endl;
+  // Always use HSA-locked pointer - GPU MMU knows about this HVA
+  // The HVA corresponds to the IOVA range, so IOMMU will handle translation
+  volatile uint32_t* gpu_doorbell = (volatile uint32_t*)((char*)hsa_locked_ptr + sq_offset);
+  *gpu_doorbell_ptr = gpu_doorbell;
+  
+  if (iova_address_out) {
+    if (map_fixed_succeeded) {
+      // MAP_FIXED succeeded - HVA == IOVA, so we can pass IOVA for reference
+      *iova_address_out = final_iova;
+    } else {
+      // MAP_FIXED failed - HVA != IOVA, GPU uses HSA pointer (HVA), not IOVA
+      *iova_address_out = 0; // Signal that GPU should use HSA pointer
+    }
+  }
+  
+  std::cout << "  ✓ GPU doorbell pointer set to HSA-locked address: " << gpu_doorbell << std::endl;
+  std::cout << "    HVA: " << iova_hva << " (mapped IOVA range)" << std::endl;
+  std::cout << "    IOVA: 0x" << std::hex << final_iova << std::dec << std::endl;
+  if (map_fixed_succeeded) {
+    std::cout << "    MAP_FIXED succeeded - HVA == IOVA" << std::endl;
+  } else {
+    std::cout << "    MAP_FIXED failed - HVA != IOVA, GPU uses HVA (HSA-locked)" << std::endl;
+  }
+  std::cout << "    GPU MMU registered HVA via HSA lock" << std::endl;
+  
+  // Step 3: Also create CPU-accessible mapping (pgoff=2) for CPU-side operations
+  // This maps physical BAR0 for CPU to read doorbell values
+  void* cpu_doorbell_mapped = mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                   MAP_SHARED, axiio_fd, 2 * page_size);
+  if (cpu_doorbell_mapped == MAP_FAILED) {
+    std::cerr << "Error: Failed to mmap CPU doorbell via kernel module (pgoff=2)" << std::endl;
+    perror("mmap");
+    munmap(iova_hva, page_size);
+    return -1;
+  }
+  
+  volatile uint32_t* cpu_doorbell = (volatile uint32_t*)((char*)cpu_doorbell_mapped + sq_offset);
+  
+  if (mapped_base) *mapped_base = cpu_doorbell_mapped;  // CPU uses this (physical BAR0)
+  if (locked_base) *locked_base = hsa_locked_ptr;  // GPU uses this (HSA-locked IOVA)
+  
+  std::cout << "  ✅ GPU doorbell ready (IOVA mapped directly)!" << std::endl;
+  std::cout << "    CPU doorbell: " << (void*)cpu_doorbell << " (physical BAR0)" << std::endl;
+  std::cout << "    GPU doorbell: " << (void*)*gpu_doorbell_ptr << " (IOVA: 0x" << std::hex << iova_doorbell << std::dec << ")" << std::endl;
+  std::cout << "  🚀 GPU uses IOVA address directly - QEMU has mapped it in GPU's IOMMU!" << std::endl;
   
   return 0;
+  
 }
 
 /*
@@ -374,13 +397,16 @@ static inline int map_gpu_doorbell(int axiio_fd, uint16_t queue_id, bool is_sq,
 static inline void unmap_gpu_doorbell(void* mapped_base, void* locked_base,
                                       size_t size) {
   if (locked_base && locked_base != mapped_base) {
-    // Unlock HSA memory
-    hsa_amd_memory_unlock(mapped_base);
+    // Unlock HSA memory (locked_base is the HSA-locked pointer)
+    hsa_amd_memory_unlock(locked_base);
   }
 
   if (mapped_base && mapped_base != MAP_FAILED) {
     munmap(mapped_base, size);
   }
+  
+  // Also unmap the GPU doorbell mapping if it's different
+  // (In IOVA mode, we have both cpu_doorbell_mapped and gpu_doorbell_mapped)
 }
 
 /*

@@ -281,19 +281,30 @@ __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
 // This version accepts data buffers for real I/O testing
 // If readBuffer/writeBuffer are NULL, uses dummy PRP addresses
 //
-__device__ void nvme_ep_driveEndpointWithBuffers(
+__device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
-  uint32_t blockSize, enum nvme_test_pattern pattern) {
+  uint32_t blockSize, enum nvme_test_pattern pattern,
+  uint64_t readBufferDma, uint64_t writeBufferDma) {
+  printf("GPU: nvme_ep_driveEndpointWithBuffers called: sqeIterations=%u, sqeAddr=%p, cqeAddr=%p\n",
+         sqeIterations, sqeAddr, cqeAddr);
+  printf("GPU: readBuffer=%p, writeBuffer=%p, bufferSize=%zu\n",
+         readBuffer, writeBuffer, bufferSize);
+  printf("GPU: readBufferDma=0x%llx, writeBufferDma=0x%llx\n",
+         (unsigned long long)readBufferDma, (unsigned long long)writeBufferDma);
+  
   nvme_ep::sqeType sqeLocal = {};
   nvme_ep::cqeType cqeLocal = {};
 
   struct nvme_sqe* sqe = nvme_ep::nvme_sqe_from_generic(&sqeLocal);
   struct nvme_cqe* cqe = nvme_ep::nvme_cqe_from_generic(&cqeLocal);
+  
+  printf("GPU: Local structures initialized\n");
 
   // Initialize CQE with invalid command ID for first poll
   cqe->command_id = 0xFFFF;
+  printf("GPU: CQE initialized\n");
 
   // Test parameters
   const uint32_t nsid = 1;          // Namespace ID
@@ -302,19 +313,31 @@ __device__ void nvme_ep_driveEndpointWithBuffers(
 
   // Calculate buffer size per command (blocks * block_size)
   const size_t transfer_size = blocks * blockSize;
+  printf("GPU: Test parameters: nsid=%u, base_lba=0x%llx, blocks=%u, transfer_size=%zu\n",
+         nsid, (unsigned long long)base_lba, blocks, transfer_size);
 
   // Use real buffers if provided
   const bool use_real_buffers = (readBuffer != nullptr &&
                                  writeBuffer != nullptr && bufferSize > 0);
+  printf("GPU: use_real_buffers=%d\n", use_real_buffers);
 
   // If using real buffers, generate write data
   if (use_real_buffers && writeBuffer) {
+    printf("GPU: About to generate test pattern in write buffer\n");
     // Generate test pattern in write buffer
     nvme_generate_pattern(writeBuffer, bufferSize, pattern, 0);
+    printf("GPU: Test pattern generated\n");
   }
 
+  // Track submission queue tail
+  uint16_t sq_tail = 0;
+  const uint16_t queue_size = 1024; // Should match queue size, but hardcode for now
+  printf("GPU: Starting command loop: sqeIterations=%u, queue_size=%u\n", sqeIterations, queue_size);
+  printf("GPU: sqeAddr=%p, cqeAddr=%p\n", sqeAddr, cqeAddr);
+  
   // Issue read/write commands
   for (unsigned i = 0; i < sqeIterations; i++) {
+    printf("GPU: Iteration %u/%u: cmd_id=%u, lba=0x%llx\n", i, sqeIterations, (uint16_t)(i + 1), (unsigned long long)(base_lba + (i * blocks)));
     // Start command IDs at 1 to avoid confusion with zero-initialized memory
     uint16_t cmd_id = (uint16_t)(i + 1);
     uint64_t lba = base_lba + (i * blocks);
@@ -328,8 +351,10 @@ __device__ void nvme_ep_driveEndpointWithBuffers(
         // Calculate PRPs from read buffer
         uint64_t buffer_offset = (i / 2) * transfer_size;
         if (buffer_offset + transfer_size <= bufferSize) {
-          nvme_calculate_prps((uint64_t)(readBuffer + buffer_offset),
-                              transfer_size, &prp1, &prp2);
+          // Use DMA address if provided (GPU-direct mode), otherwise use virtual address
+          uint64_t buffer_addr = readBufferDma ? (readBufferDma + buffer_offset)
+                                               : (uint64_t)(readBuffer + buffer_offset);
+          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           // Buffer overflow - use dummy addresses
           prp1 = 0xDEADBEEF00000000ULL;
@@ -348,8 +373,10 @@ __device__ void nvme_ep_driveEndpointWithBuffers(
         // Calculate PRPs from write buffer
         uint64_t buffer_offset = (i / 2) * transfer_size;
         if (buffer_offset + transfer_size <= bufferSize) {
-          nvme_calculate_prps((uint64_t)(writeBuffer + buffer_offset),
-                              transfer_size, &prp1, &prp2);
+          // Use DMA address if provided (GPU-direct mode), otherwise use virtual address
+          uint64_t buffer_addr = writeBufferDma ? (writeBufferDma + buffer_offset)
+                                                : (uint64_t)(writeBuffer + buffer_offset);
+          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           // Buffer overflow - use dummy addresses
           prp1 = 0xDEADBEEF00000000ULL;
@@ -363,12 +390,21 @@ __device__ void nvme_ep_driveEndpointWithBuffers(
 
       nvme_sqe_setup_write(sqe, cmd_id, nsid, lba, blocks, prp1, prp2);
     }
+    
+    printf("GPU: SQE setup complete, prp1=0x%llx, prp2=0x%llx\n", (unsigned long long)prp1, (unsigned long long)prp2);
 
     // Record start time
+    printf("GPU: About to record start time at startTime[%u]=%p\n", i, &startTime[i]);
     startTime[i] = nvme_ep::wall_clock64();
+    printf("GPU: Start time recorded: %llu\n", (unsigned long long)startTime[i]);
 
-    // Submit command to queue
-    nvme_ep::sqeWrite(sqeLocal, (nvme_ep::sqeType*)sqeAddr);
+    // Submit command to queue at the current tail position
+    printf("GPU: About to write SQE to sqeAddr[%u]=%p\n", sq_tail, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+    nvme_ep::sqeWrite(sqeLocal, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+    printf("GPU: SQE written successfully\n");
+
+    // Increment tail (wrap around if needed)
+    sq_tail = (sq_tail + 1) % queue_size;
 
     // Poll for completion
     cqeLocal = nvme_ep::cqePoll(cqeLocal, (volatile nvme_ep::cqeType*)cqeAddr);
@@ -408,7 +444,11 @@ __device__ void nvme_ep_driveEndpointWithBuffers(
   sqe->opcode = 0xFF;
   sqe->command_id = 0xFFFF;
   sqe->nsid = 0;
-  nvme_ep::sqeWrite(sqeLocal, (nvme_ep::sqeType*)sqeAddr);
+  nvme_ep::sqeWrite(sqeLocal, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+  sq_tail = (sq_tail + 1) % queue_size;
+  
+  // Return final tail value so caller can ring doorbell
+  return sq_tail;
 }
 
 //
@@ -420,9 +460,10 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
                                       unsigned long long int* startTime,
                                       unsigned long long int* endTime) {
   // Call the buffer-aware version with NULL pointers (dummy mode)
-  nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr, startTime,
-                                   endTime, nullptr, nullptr, 0, 512,
-                                   NVME_PATTERN_SEQUENTIAL);
+  // Return value ignored for backward compatibility
+  (void)nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr, startTime,
+                                         endTime, nullptr, nullptr, 0, 512,
+                                         NVME_PATTERN_SEQUENTIAL, 0, 0);
 }
 
 } // extern "C"
