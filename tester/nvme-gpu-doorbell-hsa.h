@@ -49,6 +49,8 @@ namespace nvme_hsa_doorbell {
 // HSA state (module-level)
 static bool hsa_initialized = false;
 static hsa_agent_t gpu_agent;
+static hsa_agent_t cpu_agent;
+static hsa_amd_memory_pool_t cpu_pool;
 
 /*
  * Initialize HSA (call once at startup)
@@ -67,26 +69,58 @@ static inline int init_hsa() {
     return -1;
   }
 
-  // Find GPU agent
-  auto find_gpu = [](hsa_agent_t agent, void* data) -> hsa_status_t {
+  // Find CPU and GPU agents
+  auto find_agents = [](hsa_agent_t agent, void* data) -> hsa_status_t {
     hsa_device_type_t device_type;
     hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
-    if (device_type == HSA_DEVICE_TYPE_GPU) {
-      *(hsa_agent_t*)data = agent;
+    struct {
+      hsa_agent_t *cpu, *gpu;
+    }* agents = (decltype(agents))data;
+    if (device_type == HSA_DEVICE_TYPE_CPU && agents->cpu->handle == 0)
+      *agents->cpu = agent;
+    if (device_type == HSA_DEVICE_TYPE_GPU && agents->gpu->handle == 0)
+      *agents->gpu = agent;
+    return (agents->cpu->handle && agents->gpu->handle)
+             ? HSA_STATUS_INFO_BREAK
+             : HSA_STATUS_SUCCESS;
+  };
+
+  struct {
+    hsa_agent_t *cpu, *gpu;
+  } agents = {&cpu_agent, &gpu_agent};
+  err = hsa_iterate_agents(find_agents, &agents);
+
+  if (!cpu_agent.handle || !gpu_agent.handle) {
+    std::cerr << "Error: Failed to find CPU and GPU agents" << std::endl;
+    hsa_shut_down();
+    return -1;
+  }
+
+  // Find fine-grained CPU memory pool (CRITICAL for IOVA!)
+  auto find_pool = [](hsa_amd_memory_pool_t pool,
+                      void* data) -> hsa_status_t {
+    uint32_t flags;
+    hsa_amd_memory_pool_get_info(pool, HSA_AMD_MEMORY_POOL_INFO_GLOBAL_FLAGS,
+                                 &flags);
+    uint32_t req = HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_KERNARG_INIT |
+                   HSA_AMD_MEMORY_POOL_GLOBAL_FLAG_FINE_GRAINED;
+    if ((flags & req) == req) {
+      *(hsa_amd_memory_pool_t*)data = pool;
       return HSA_STATUS_INFO_BREAK;
     }
     return HSA_STATUS_SUCCESS;
   };
 
-  err = hsa_iterate_agents(find_gpu, &gpu_agent);
-  if (err != HSA_STATUS_INFO_BREAK && err != HSA_STATUS_SUCCESS) {
-    std::cerr << "Error: Failed to find GPU agent" << std::endl;
+  err = hsa_amd_agent_iterate_memory_pools(cpu_agent, find_pool, &cpu_pool);
+  if (!cpu_pool.handle) {
+    std::cerr << "Error: No fine-grained CPU memory pool found" << std::endl;
     hsa_shut_down();
     return -1;
   }
 
   hsa_initialized = true;
-  std::cout << "  ✓ HSA initialized, GPU agent found" << std::endl;
+  std::cout << "  ✓ HSA initialized, GPU agent and CPU fine-grained pool found"
+            << std::endl;
 
   return 0;
 }
@@ -115,75 +149,45 @@ static inline int map_gpu_doorbell(int axiio_fd, uint16_t queue_id, bool is_sq,
     }
   }
 
-  std::cout << "\n=== Mapping GPU Doorbell with HSA (TRUE GPU-DIRECT!) ==="
+  std::cout << "\n=== Using Direct IOVA for GPU Doorbell (TRUE GPU-DIRECT!) ==="
             << std::endl;
   std::cout << "  Queue ID: " << queue_id << " (" << (is_sq ? "SQ" : "CQ")
             << ")" << std::endl;
 
-  // Get queue info (assumes queue is already created)
+  // CRITICAL INSIGHT: For QEMU P2P, QEMU has already set up IOVA mappings
+  // in the GPU's VFIO container. We just use the IOVA address directly!
+  // NO mmap needed, NO HSA locking needed - just cast IOVA to pointer!
+  
+  // Get IOVA doorbell address from kernel module  
   struct nvme_axiio_queue_info queue_info;
   memset(&queue_info, 0, sizeof(queue_info));
   queue_info.queue_id = queue_id;
-
-  // Note: For existing queue, we use offset=2 to map doorbell
-  // Calculate doorbell offset
-  off_t doorbell_offset = 2 * getpagesize();
-  size_t doorbell_size = getpagesize();
-
-  // mmap doorbell using kernel module's BAR0 mapping
-  void* base = mmap(NULL, doorbell_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                    axiio_fd, doorbell_offset);
-
-  if (base == MAP_FAILED) {
-    perror("Error: mmap doorbell failed");
-    return -1;
+  
+  if (ioctl(axiio_fd, NVME_AXIIO_CREATE_QUEUE, &queue_info) < 0) {
+    // Queue already exists, that's okay - we just need the doorbell address
   }
-
-  std::cout << "  ✓ Doorbell mapped at: " << base << std::endl;
-
-  // THE KEY: Register with GPU MMU via HSA!
-  std::cout << "  Registering with GPU MMU via hsa_amd_memory_lock()..."
+  
+  uint64_t iova_doorbell = is_sq ? queue_info.sq_doorbell_phys 
+                                 : queue_info.cq_doorbell_phys;
+  
+  std::cout << "  IOVA doorbell address: 0x" << std::hex 
+            << iova_doorbell << std::dec << std::endl;
+  std::cout << "  Using IOVA directly - QEMU mapped this in GPU's VFIO container!"
             << std::endl;
+  
+  // Cast IOVA address directly to pointer - that's all we need!
+  *gpu_doorbell_ptr = (volatile uint32_t*)iova_doorbell;
 
-  void* locked_ptr = nullptr;
-  hsa_agent_t agents[1] = {gpu_agent};
-
-  hsa_status_t hsa_err = hsa_amd_memory_lock(base, doorbell_size, agents, 1,
-                                             &locked_ptr);
-  if (hsa_err != HSA_STATUS_SUCCESS) {
-    std::cerr << "  ⚠️  Warning: hsa_amd_memory_lock() failed: " << hsa_err
-              << std::endl;
-    std::cerr
-      << "  Falling back to non-registered pointer (may cause page faults)"
-      << std::endl;
-    locked_ptr = base;
-  } else {
-    std::cout << "  ✅ HSA memory lock successful!" << std::endl;
-    std::cout << "    Locked pointer: " << locked_ptr << std::endl;
-    std::cout << "    🎉 GPU MMU now has doorbell mapping!" << std::endl;
-  }
-
-  // Calculate doorbell pointer
-  // For queue_id, doorbell is at: 0x1000 + (qid * 2 * stride)
-  // SQ doorbell: qid * 2 * stride
-  // CQ doorbell: (qid * 2 + 1) * stride
-  // With stride=0 (in 4-byte units), this is: 0x1000 + qid * 8
-  uint32_t doorbell_stride = 0; // Most controllers have stride=0
-  uint32_t doorbell_offset_in_bar = 0x1000 +
-                                    (queue_id * 2 * (doorbell_stride + 1) * 4);
-  if (!is_sq) {
-    doorbell_offset_in_bar += (doorbell_stride + 1) * 4;
-  }
-
-  size_t offset_in_page = doorbell_offset_in_bar & (doorbell_size - 1);
-  *gpu_doorbell_ptr = (volatile uint32_t*)((char*)locked_ptr + offset_in_page);
-
+  // For IOVA direct mode, we don't have mapped/locked bases
+  // The GPU uses the IOVA address directly
   if (mapped_base) {
-    *mapped_base = base;
+    *mapped_base = (void*)iova_doorbell;
   }
   if (locked_base) {
-    *locked_base = (locked_ptr != base) ? locked_ptr : nullptr;
+    *locked_base = nullptr; // No HSA locking needed for IOVA direct
   }
+
+  uint64_t offset_in_page = iova_doorbell & 0xFFF; // Page offset
 
   std::cout << "  ✅ GPU doorbell ready!" << std::endl;
   std::cout << "    GPU doorbell ptr: " << (void*)*gpu_doorbell_ptr
