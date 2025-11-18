@@ -131,6 +131,12 @@ inline int parse_trace_file(const std::string& trace_file_path,
 
   while (std::getline(file, line)) {
     line_num++;
+
+    // Skip empty lines or lines with only null bytes/whitespace
+    if (line.empty() || line.find_first_not_of(" \t\r\n\0") == std::string::npos) {
+      continue;
+    }
+
     std::smatch match;
 
     // Try SQ pattern 1: sq_tail=X dbl_addr=0xYYYY

@@ -24,6 +24,10 @@ struct nvme_p2p_iova_info {
   u32 doorbell_size;
   u16 queue_depth;
   u16 reserved;
+  /* Guest physical addresses for kernel module to map */
+  u64 sqe_gpa;      /* Guest physical address of SQE buffer */
+  u64 cqe_gpa;      /* Guest physical address of CQE buffer */
+  u64 doorbell_gpa; /* Guest physical address of doorbell buffer */
 } __packed;
 
 /* Vendor-specific admin command opcode for P2P IOVA retrieval */
