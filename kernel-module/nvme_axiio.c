@@ -327,7 +327,9 @@ static int axiio_ioctl_create_queue(
 
   /* If we have exclusive controller access, create queues via admin commands */
   if (nvme_axiio_get_controller()) {
+    struct axiio_controller* ctrl = nvme_axiio_get_controller();
     int ret;
+
     pr_info("nvme_axiio: Creating I/O queues via admin commands...\n");
     ret = nvme_axiio_create_io_queues(info.queue_id, info.queue_size,
                                       ctx->sq_dma, ctx->cq_dma);
@@ -340,6 +342,34 @@ static int axiio_ioctl_create_queue(
       ctx->sq_virt = NULL;
       ctx->cq_virt = NULL;
       return ret;
+    }
+
+    /* If using IOVA mode, get IOVA addresses for this specific queue */
+    if (ctrl->using_iova) {
+      struct nvme_p2p_iova_info queue_iova;
+      
+      pr_info("nvme_axiio: Requesting IOVA info for queue %u...\n", 
+              info.queue_id);
+      
+      ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q, 
+                                   &ctx->pci_dev->dev,
+                                   info.queue_id, &queue_iova);
+      if (ret == 0) {
+        pr_info("nvme_axiio: ✅ Got IOVA addresses for QID %u:\n", 
+                info.queue_id);
+        pr_info("  SQE IOVA:      0x%016llx\n", queue_iova.sqe_iova);
+        pr_info("  CQE IOVA:      0x%016llx\n", queue_iova.cqe_iova);
+        pr_info("  Doorbell IOVA: 0x%016llx\n", queue_iova.doorbell_iova);
+        
+        /* Return IOVA addresses to userspace */
+        info.sq_dma_addr = queue_iova.sqe_iova;
+        info.cq_dma_addr = queue_iova.cqe_iova;
+        info.sq_doorbell_phys = queue_iova.doorbell_iova;
+        info.cq_doorbell_phys = queue_iova.doorbell_iova + 4;
+      } else {
+        pr_warn("nvme_axiio: Failed to get IOVA for QID %u, using physical\n",
+                info.queue_id);
+      }
     }
   } else {
     pr_warn("nvme_axiio: No exclusive controller access\n");
@@ -713,19 +743,30 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
 
   } else if (vma->vm_pgoff == 2) {
     /* Map doorbell BAR region for GPU access */
+    struct axiio_controller* ctrl = nvme_axiio_get_controller();
     unsigned long pfn;
     unsigned long doorbell_offset;
 
-    /* Calculate doorbell offset within BAR0 */
-    doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
-
-    /* Align to page boundary (doorbells are small, map whole page) */
-    unsigned long page_offset = doorbell_offset & PAGE_MASK;
-    pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
-
-    pr_info(
-      "nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, pfn=0x%lx)\n",
-      ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+    /* In QEMU P2P/IOVA mode, we need to use io_remap_pfn_range with the
+     * IOVA address so the GPU can access it. QEMU maps these IOVAs in the
+     * IOMMU for GPU P2P access. */
+    if (ctrl && ctrl->using_iova) {
+      /* QEMU P2P: Use IOVA address (page-aligned) */
+      pfn = ctrl->p2p_iova.doorbell_iova >> PAGE_SHIFT;
+      pr_info(
+        "nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
+        "iova=0x%llx, pfn=0x%lx)\n",
+        ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
+    } else {
+      /* Physical hardware: Use normal BAR0 address */
+      doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
+      unsigned long page_offset = doorbell_offset & PAGE_MASK;
+      pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
+      pr_info(
+        "nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
+        "pfn=0x%lx)\n",
+        ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+    }
 
     /* Set GPU-compatible page protection flags */
     /* Write-combine: Allows GPU to write efficiently to PCIe MMIO */

@@ -47,6 +47,7 @@
 #include "nvme-queue-manager.h"
 #include "nvme-random-io.h"     // GPU-based random I/O generation
 #include "nvme-smart-check.h"   // NVMe SMART log verification
+#include "nvme-trace-verifier.h" // QEMU trace verification
 #include "pcie-atomics-check.h" // PCIe atomics detection
 
 // Simple test kernel to verify HIP is working
@@ -95,6 +96,9 @@ typedef struct {
                     // required)
   bool hijackExistingQueue; // DANGEROUS: Use existing kernel queue without
                             // creating new one
+  // Trace verification support
+  bool verifyTrace;              // Enable trace verification after test
+  std::string traceFilePath;    // Path to QEMU trace log file
 } cmdLineArgs;
 
 typedef struct {
@@ -1875,6 +1879,19 @@ int main(int argc, char** argv) {
                              "random, or block_id");
     });
 
+  // Trace verification options
+  app
+    .add_flag("--verify-trace", config.args.verifyTrace,
+              "Verify doorbell operations in QEMU trace log after test "
+              "completes.")
+    ->default_val(false);
+
+  app
+    .add_option("--trace-file", config.args.traceFilePath,
+                "Path to QEMU NVMe trace log file for verification. "
+                "Default: /tmp/rocm-axiio-nvme-trace.log")
+    ->default_val("/tmp/rocm-axiio-nvme-trace.log");
+
   CLI11_PARSE(app, argc, argv);
 
   // Initialize HSA early for GPU doorbell support
@@ -2255,6 +2272,46 @@ int main(int argc, char** argv) {
     delete kernel_ctx;
     kernel_ctx = nullptr;
   }
+
+  // Verify trace if requested
+  if (config.args.verifyTrace) {
+    std::cout << "\n";
+    std::cout << "========================================\n";
+    std::cout << "  Verifying QEMU Trace Log\n";
+    std::cout << "========================================\n";
+    std::cout << "\n";
+    std::cout << "Trace file: " << config.args.traceFilePath << "\n";
+    std::cout << "\n";
+
+    nvme_trace_verifier::VerificationResult trace_result;
+    int parse_ret = nvme_trace_verifier::parse_trace_file(
+      config.args.traceFilePath, trace_result);
+
+    if (parse_ret == 0) {
+      nvme_trace_verifier::print_verification_results(trace_result,
+                                                       config.args.traceFilePath);
+    } else {
+      std::cerr << "⚠️  Failed to parse trace file: "
+                << trace_result.error_message << "\n";
+      std::cerr << "\n";
+      std::cerr << "To enable trace verification:\n";
+      std::cerr << "  1. Launch QEMU with tracing enabled:\n";
+      std::cerr << "     cd /home/stebates/Projects/qemu-minimal/qemu\n";
+      std::cerr << "     VM_NAME=rocm-axiio NVME=2 NVME_TRACE=doorbell \\\n";
+      std::cerr << "       NVME_TRACE_FILE=" << config.args.traceFilePath
+                << " ./run-vm\n";
+      std::cerr << "\n";
+      std::cerr << "  2. Run axiio-tester with --verify-trace:\n";
+      std::cerr << "     ./bin/axiio-tester --nvme-device /dev/nvme0 \\\n";
+      std::cerr << "       --verify-trace --trace-file "
+                << config.args.traceFilePath << "\n";
+      std::cerr << "\n";
+      std::cerr << "Note: QEMU must be version 10.1.0+ (found at "
+                << nvme_trace_verifier::QEMU_BASE_PATH << ")\n";
+    }
+  }
+
+  nvme_hsa_doorbell::shutdown_hsa();
 
   return EXIT_SUCCESS;
 }
