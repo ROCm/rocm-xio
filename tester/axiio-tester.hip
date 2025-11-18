@@ -382,14 +382,12 @@ static int run(testConfig* config, EndpointType endpointType,
   // Allocate queue memory based on mode
   size_t sqSize, cqSize;
 
-  if (kernel_ctx &&
-      (kernel_ctx->mem_fd != -2 || config->args.useRealHardware)) {
-    // CPU-HYBRID MODE with DUAL ALLOCATION for real hardware!
-    // - Kernel DMA memory: Used by NVMe controller (correct bus addresses)
-    // - hipHostMalloc memory: Used by GPU (accessible by GPU)
-    // - Data buffers: NVME_AXIIO_ALLOC_DMA (IOMMU-mapped for passthrough)
-    // - CPU copies GPU commands to kernel DMA memory
-    std::cout << "Using CPU-HYBRID mode with DUAL ALLOCATION" << std::endl;
+  // GPU-DIRECT (GDA) mode: Use when in exclusive mode (mem_fd == -2)
+  // This enables TRUE GPU-direct I/O for both doorbell and data
+  if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+    // GDA MODE - GPU writes directly to kernel DMA memory!
+    // GPU writes commands and data directly, rings doorbell directly
+    std::cout << "Using GPU-DIRECT (GDA) mode - TRUE GPU-direct I/O!" << std::endl;
 
     sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
     cqSize = kernel_ctx->qinfo.queue_size * 16; // 16 bytes per CQE
@@ -870,7 +868,8 @@ std::endl; #endif
         if (nvme_hsa_doorbell::map_gpu_doorbell(
               kernel_ctx->axiio_fd, config->args.nvmeQueueId,
               true, // SQ doorbell
-              &gpu_doorbell_ptr, &doorbell_mapping, &locked_mapping) < 0) {
+              &gpu_doorbell_ptr, &doorbell_mapping, &locked_mapping,
+              &kernel_ctx->qinfo) < 0) {
           std::cerr << "Error: Failed to map GPU doorbell (HSA)" << std::endl;
           return EXIT_FAILURE;
         }
@@ -2013,7 +2012,8 @@ int main(int argc, char** argv) {
       if (nvme_hsa_doorbell::map_gpu_doorbell(
             kernel_ctx->axiio_fd, config.args.nvmeQueueId,
             true, // SQ doorbell
-            &gpu_doorbell_ptr, &doorbell_mapping, &locked_mapping) < 0) {
+            &gpu_doorbell_ptr, &doorbell_mapping, &locked_mapping,
+            &kernel_ctx->qinfo) < 0) {
         std::cerr << "Error: Failed to map GPU doorbell (HSA)" << std::endl;
         delete kernel_ctx;
         kernel_ctx = nullptr;

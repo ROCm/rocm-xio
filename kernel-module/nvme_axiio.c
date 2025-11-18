@@ -797,8 +797,9 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
       pr_info("nvme_axiio: 🚀 Using GPU-aware mapping!\n");
       pr_info("  GPU file present - doorbell will be GPU-accessible\n");
 
-      /* Use GPU-aware mmap */
-      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping);
+      /* Use GPU-aware mmap - pass queue ID and PCI device for IOVA lookup */
+      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping,
+                                      ctx->queue_id, ctx->pci_dev);
       if (ret < 0) {
         pr_err("nvme_axiio: GPU-aware mmap failed: %d\n", ret);
         /* Fall through to regular mapping */
