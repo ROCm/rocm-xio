@@ -141,17 +141,24 @@ VirtFS
 wH
 
 # ===== Commands and Tools =====
+aspell
 bashrc
 CMake
 CMAKE
 cmake
 CMakeFiles
+DoozyX
 gcc
 github
 github
+hpp
 makefile
 Makefile
+pyspelling
+rojopolis
 sudo
+Werror
+wordlist
 
 # ===== Miscellaneous =====
 api

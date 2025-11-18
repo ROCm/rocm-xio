@@ -286,7 +286,7 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
   uint32_t blockSize, enum nvme_test_pattern pattern,
-  uint64_t readBufferDma, uint64_t writeBufferDma) {
+  uint64_t readBufferDma, uint64_t writeBufferDma, uint32_t lfsr_seed) {
   printf("GPU: nvme_ep_driveEndpointWithBuffers called: sqeIterations=%u, sqeAddr=%p, cqeAddr=%p\n",
          sqeIterations, sqeAddr, cqeAddr);
   printf("GPU: readBuffer=%p, writeBuffer=%p, bufferSize=%zu\n",
@@ -316,16 +316,26 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   printf("GPU: Test parameters: nsid=%u, base_lba=0x%llx, blocks=%u, transfer_size=%zu\n",
          nsid, (unsigned long long)base_lba, blocks, transfer_size);
 
-  // Use real buffers if provided
-  const bool use_real_buffers = (readBuffer != nullptr &&
-                                 writeBuffer != nullptr && bufferSize > 0);
-  printf("GPU: use_real_buffers=%d\n", use_real_buffers);
+  // Determine operation mode based on buffer availability
+  // - Both buffers: alternate reads/writes (legacy behavior)
+  // - Only writeBuffer: write-only mode
+  // - Only readBuffer: read-only mode
+  // - Neither: dummy mode (no real buffers)
+  const bool has_write_buffer = (writeBuffer != nullptr && bufferSize > 0);
+  const bool has_read_buffer = (readBuffer != nullptr && bufferSize > 0);
+  const bool write_only_mode = has_write_buffer && !has_read_buffer;
+  const bool read_only_mode = has_read_buffer && !has_write_buffer;
+  const bool alternate_mode = has_write_buffer && has_read_buffer;
+  const bool use_real_buffers = has_write_buffer || has_read_buffer;
 
-  // If using real buffers, generate write data
-  if (use_real_buffers && writeBuffer) {
+  printf("GPU: use_real_buffers=%d, write_only=%d, read_only=%d, alternate=%d\n",
+         use_real_buffers, write_only_mode, read_only_mode, alternate_mode);
+
+  // If using write buffer, generate write data
+  if (has_write_buffer) {
     printf("GPU: About to generate test pattern in write buffer\n");
     // Generate test pattern in write buffer
-    nvme_generate_pattern(writeBuffer, bufferSize, pattern, 0);
+    nvme_generate_pattern(writeBuffer, bufferSize, pattern, 0, lfsr_seed);
     printf("GPU: Test pattern generated\n");
   }
 
@@ -343,17 +353,36 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
     uint64_t lba = base_lba + (i * blocks);
 
     uint64_t prp1, prp2;
+    bool is_read_command = false;
 
-    // Alternate between read and write commands
-    if (i % 2 == 0) {
+    // Determine command type based on mode
+    if (write_only_mode) {
+      // Write-only mode: all commands are writes
+      is_read_command = false;
+    } else if (read_only_mode) {
+      // Read-only mode: all commands are reads
+      is_read_command = true;
+    } else if (alternate_mode) {
+      // Alternate mode: legacy behavior
+      is_read_command = (i % 2 == 0);
+    } else {
+      // Dummy mode: alternate (no real buffers)
+      is_read_command = (i % 2 == 0);
+    }
+
+    if (is_read_command) {
       // Issue Read command
-      if (use_real_buffers) {
+      if (has_read_buffer) {
         // Calculate PRPs from read buffer
-        uint64_t buffer_offset = (i / 2) * transfer_size;
+        // For read-only mode, use i directly; for alternate mode, use i/2
+        uint64_t buffer_offset = read_only_mode
+                                   ? (i * transfer_size)
+                                   : ((i / 2) * transfer_size);
         if (buffer_offset + transfer_size <= bufferSize) {
           // Use DMA address if provided (GPU-direct mode), otherwise use virtual address
-          uint64_t buffer_addr = readBufferDma ? (readBufferDma + buffer_offset)
-                                               : (uint64_t)(readBuffer + buffer_offset);
+          uint64_t buffer_addr = readBufferDma
+                                   ? (readBufferDma + buffer_offset)
+                                   : (uint64_t)(readBuffer + buffer_offset);
           nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           // Buffer overflow - use dummy addresses
@@ -369,13 +398,17 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
       nvme_sqe_setup_read(sqe, cmd_id, nsid, lba, blocks, prp1, prp2);
     } else {
       // Issue Write command
-      if (use_real_buffers) {
+      if (has_write_buffer) {
         // Calculate PRPs from write buffer
-        uint64_t buffer_offset = (i / 2) * transfer_size;
+        // For write-only mode, use i directly; for alternate mode, use i/2
+        uint64_t buffer_offset = write_only_mode
+                                   ? (i * transfer_size)
+                                   : ((i / 2) * transfer_size);
         if (buffer_offset + transfer_size <= bufferSize) {
           // Use DMA address if provided (GPU-direct mode), otherwise use virtual address
-          uint64_t buffer_addr = writeBufferDma ? (writeBufferDma + buffer_offset)
-                                                : (uint64_t)(writeBuffer + buffer_offset);
+          uint64_t buffer_addr = writeBufferDma
+                                   ? (writeBufferDma + buffer_offset)
+                                   : (uint64_t)(writeBuffer + buffer_offset);
           nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           // Buffer overflow - use dummy addresses
@@ -427,12 +460,16 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
     }
 
     // For read commands with real buffers, verify data
-    if (use_real_buffers && (i % 2 == 0) && readBuffer) {
-      uint64_t buffer_offset = (i / 2) * transfer_size;
+    if (is_read_command && has_read_buffer) {
+      // Calculate buffer offset based on mode
+      uint64_t buffer_offset = read_only_mode
+                                 ? (i * transfer_size)
+                                 : ((i / 2) * transfer_size);
       if (buffer_offset + transfer_size <= bufferSize) {
         size_t error_offset;
         if (!nvme_verify_pattern(readBuffer + buffer_offset, transfer_size,
-                                 pattern, buffer_offset, &error_offset)) {
+                                 pattern, buffer_offset, &error_offset,
+                                 lfsr_seed)) {
           // Data verification failed
           // In a real implementation, would handle this error
         }
@@ -463,7 +500,7 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
   // Return value ignored for backward compatibility
   (void)nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr, startTime,
                                          endTime, nullptr, nullptr, 0, 512,
-                                         NVME_PATTERN_SEQUENTIAL, 0, 0);
+                                         NVME_PATTERN_SEQUENTIAL, 0, 0, 0);
 }
 
 } // extern "C"

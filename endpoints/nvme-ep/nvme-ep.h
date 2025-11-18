@@ -318,7 +318,7 @@ enum nvme_test_pattern {
 // Generate test data pattern
 __host__ __device__ static inline void nvme_generate_pattern(
   uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
-  uint64_t offset) {
+  uint64_t offset, uint32_t lfsr_seed = 0) {
   // Debug: Print first few bytes before writing
   if (threadIdx.x == 0 && blockIdx.x == 0 && size > 0) {
     printf("GPU: nvme_generate_pattern: buffer=%p, size=%zu, pattern=%d\n", buffer, size, pattern);
@@ -381,10 +381,12 @@ __host__ __device__ static inline void nvme_generate_pattern(
 
     case NVME_PATTERN_LFSR: {
       // LFSR-based deterministic pattern
-      // (same as test-nvme-write-read-verify.cpp)
-      // offset is treated as LBA, seed is derived from LBA
+      // offset is treated as LBA, seed is combined with LBA-derived seed
+      // XOR combines user seed with LBA seed: seed=0 uses LBA-only, seed!=0
+      // varies pattern
       uint64_t lba = offset / 512; // Assuming 512-byte blocks
-      uint32_t seed = (uint32_t)(lba * 0x12345678);
+      uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+      uint32_t seed = base_seed ^ lfsr_seed; // XOR combines seeds
       for (size_t i = 0; i < size; i++) {
         uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
         rng ^= rng >> 16;
@@ -402,7 +404,7 @@ __host__ __device__ static inline void nvme_generate_pattern(
 // Verify test data pattern
 __host__ __device__ static inline bool nvme_verify_pattern(
   const uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
-  uint64_t offset, size_t* error_offset) {
+  uint64_t offset, size_t* error_offset, uint32_t lfsr_seed = 0) {
   uint8_t expected;
 
   for (size_t i = 0; i < size; i++) {
@@ -432,8 +434,11 @@ __host__ __device__ static inline bool nvme_verify_pattern(
 
       case NVME_PATTERN_LFSR: {
         // LFSR-based verification (same as generation)
+        // XOR combines user seed with LBA seed: seed=0 uses LBA-only,
+        // seed!=0 varies pattern
         uint64_t lba = offset / 512; // Assuming 512-byte blocks
-        uint32_t seed = (uint32_t)(lba * 0x12345678);
+        uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+        uint32_t seed = base_seed ^ lfsr_seed; // XOR combines seeds
         uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
         rng ^= rng >> 16;
         rng *= 0x85ebca6b;
@@ -476,7 +481,7 @@ extern "C" __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
   uint32_t blockSize, enum nvme_test_pattern pattern,
-  uint64_t readBufferDma, uint64_t writeBufferDma);
+  uint64_t readBufferDma, uint64_t writeBufferDma, uint32_t lfsr_seed = 0);
 
 // Emulate endpoint
 extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(
