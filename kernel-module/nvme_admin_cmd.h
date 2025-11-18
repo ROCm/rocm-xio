@@ -137,8 +137,8 @@ static inline int nvme_identify_ctrl(void __iomem* bar0,
   cmd.common.dptr.prp1 = cpu_to_le64(dma_addr);
   cmd.identify.cns = NVME_ID_CNS_CTRL;
 
-  /* Submit command */
-  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Submit command - use longer timeout for real hardware (30 seconds) */
+  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 
   if (ret == 0 && identify_data) {
     memcpy(identify_data, buffer, 4096);
@@ -170,7 +170,8 @@ static inline int nvme_create_io_cq_cmd(void __iomem* bar0,
                                        NVME_CQ_IRQ_ENABLED);
   cmd.create_cq.irq_vector = cpu_to_le16(iv);
 
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
+  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
@@ -195,7 +196,8 @@ static inline int nvme_create_io_sq_cmd(void __iomem* bar0,
                                        NVME_SQ_PRIO_MEDIUM);
   cmd.create_sq.cqid = cpu_to_le16(cqid);
 
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
+  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
@@ -213,7 +215,8 @@ static inline int nvme_delete_io_sq_cmd(void __iomem* bar0,
   cmd.delete_queue.opcode = nvme_admin_delete_sq;
   cmd.delete_queue.qid = cpu_to_le16(qid);
 
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
+  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
@@ -231,7 +234,8 @@ static inline int nvme_delete_io_cq_cmd(void __iomem* bar0,
   cmd.delete_queue.opcode = nvme_admin_delete_cq;
   cmd.delete_queue.qid = cpu_to_le16(qid);
 
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
+  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 }
 
 #endif /* NVME_ADMIN_CMD_H */

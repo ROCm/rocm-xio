@@ -74,7 +74,8 @@ static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
   cmd.common.cdw11 = cpu_to_le32(queue_id);           /* queue ID */
 
   /* Submit command */
-  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 5000);
+  /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
+  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
 
   if (ret == 0) {
     /* Copy IOVA info from DMA buffer */

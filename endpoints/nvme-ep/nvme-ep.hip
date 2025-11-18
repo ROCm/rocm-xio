@@ -426,10 +426,8 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
     
     printf("GPU: SQE setup complete, prp1=0x%llx, prp2=0x%llx\n", (unsigned long long)prp1, (unsigned long long)prp2);
 
-    // Record start time
-    printf("GPU: About to record start time at startTime[%u]=%p\n", i, &startTime[i]);
+    // Record start time for this command
     startTime[i] = nvme_ep::wall_clock64();
-    printf("GPU: Start time recorded: %llu\n", (unsigned long long)startTime[i]);
 
     // Submit command to queue at the current tail position
     printf("GPU: About to write SQE to sqeAddr[%u]=%p\n", sq_tail, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
@@ -438,53 +436,13 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 
     // Increment tail (wrap around if needed)
     sq_tail = (sq_tail + 1) % queue_size;
-
-    // Poll for completion
-    cqeLocal = nvme_ep::cqePoll(cqeLocal, (volatile nvme_ep::cqeType*)cqeAddr);
-
-    // Record end time
-    endTime[i] = nvme_ep::wall_clock64();
-
-    // Verify completion matches our command
-    const struct nvme_cqe* cqe_result = nvme_ep::nvme_cqe_from_generic_const(
-      &cqeLocal);
-    if (cqe_result->command_id != cmd_id) {
-      // Command ID mismatch - could indicate error
-      // In a real implementation, would handle this error
-    }
-
-    // Check if command succeeded
-    if (!nvme_cqe_ok(cqe_result)) {
-      // Command failed - could indicate error
-      // In a real implementation, would handle this error
-    }
-
-    // For read commands with real buffers, verify data
-    if (is_read_command && has_read_buffer) {
-      // Calculate buffer offset based on mode
-      uint64_t buffer_offset = read_only_mode
-                                 ? (i * transfer_size)
-                                 : ((i / 2) * transfer_size);
-      if (buffer_offset + transfer_size <= bufferSize) {
-        size_t error_offset;
-        if (!nvme_verify_pattern(readBuffer + buffer_offset, transfer_size,
-                                 pattern, buffer_offset, &error_offset,
-                                 lfsr_seed)) {
-          // Data verification failed
-          // In a real implementation, would handle this error
-        }
-      }
-    }
   }
 
-  // Send stop command (opcode 0xFF) to signal emulator to exit
-  sqe->opcode = 0xFF;
-  sqe->command_id = 0xFFFF;
-  sqe->nsid = 0;
-  nvme_ep::sqeWrite(sqeLocal, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
-  sq_tail = (sq_tail + 1) % queue_size;
+  // Memory fence to ensure all SQE writes are visible before doorbell
+  __threadfence_system();
   
   // Return final tail value so caller can ring doorbell
+  // After doorbell is rung, we'll poll for completions and record endTime
   return sq_tail;
 }
 
