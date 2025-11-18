@@ -99,6 +99,8 @@ typedef struct {
   // Trace verification support
   bool verifyTrace;              // Enable trace verification after test
   std::string traceFilePath;    // Path to QEMU trace log file
+  // Read verification support
+  bool verifyReads;              // Enable read data verification after test
 } cmdLineArgs;
 
 typedef struct {
@@ -1522,6 +1524,8 @@ std::endl; #endif
       pattern = NVME_PATTERN_RANDOM;
     } else if (config->args.testPattern == "block_id") {
       pattern = NVME_PATTERN_BLOCK_ID;
+    } else if (config->args.testPattern == "lfsr") {
+      pattern = NVME_PATTERN_LFSR;
     }
 
     // Use NVMe-specific kernel with buffers
@@ -1904,6 +1908,159 @@ std::endl; #endif
         __sync_synchronize(); // Memory fence
         std::cout << "  CQ head doorbell updated to: " << cq_head << std::endl;
       }
+
+      // Verify read data if requested
+      if (config->args.verifyReads && usingDataBuffers && readBuffer &&
+          completions_received > 0) {
+        std::cout << "\n=== Verifying Read Data ===" << std::endl;
+
+        // Parse pattern string to enum
+        enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+        if (config->args.testPattern == "zeros") {
+          pattern = NVME_PATTERN_ZEROS;
+        } else if (config->args.testPattern == "ones") {
+          pattern = NVME_PATTERN_ONES;
+        } else if (config->args.testPattern == "random") {
+          pattern = NVME_PATTERN_RANDOM;
+        } else if (config->args.testPattern == "block_id") {
+          pattern = NVME_PATTERN_BLOCK_ID;
+        } else if (config->args.testPattern == "lfsr") {
+          pattern = NVME_PATTERN_LFSR;
+        }
+
+        // Use CPU-accessible read buffer (not GPU-locked pointer)
+        // For kernel DMA buffers, readBuffer is already CPU-accessible
+        // For hipHostMalloc buffers, readBuffer is CPU-accessible
+        uint8_t* verify_buf = readBuffer;
+
+        // Extract LBAs from SQEs to verify each read block
+        // Note: This assumes sequential or known LBA pattern
+        uint32_t mismatches = 0;
+        uint32_t total_bytes_checked = 0;
+        uint32_t blocks_to_verify =
+          std::min((uint32_t)completions_received,
+                   (uint32_t)(config->args.dataBufferSize /
+                              config->args.nvmeBlockSize));
+
+        std::cout << "  Verifying " << blocks_to_verify << " blocks ("
+                  << (blocks_to_verify * config->args.nvmeBlockSize)
+                  << " bytes)..." << std::endl;
+
+        // For each completed command, verify the read data
+        // We need to extract LBA from SQE - for now, assume sequential or
+        // extract from SQEs
+        volatile cqeType* cq_to_verify =
+          (kernel_ctx && kernel_ctx->mem_fd == -2 &&
+           config->kernelDmaCqOrig)
+            ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+            : cqQueue;
+        volatile sqeType* sq_to_verify =
+          (kernel_ctx && kernel_ctx->mem_fd == -2 &&
+           config->kernelDmaSqOrig)
+            ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
+            : sqQueue;
+
+        uint16_t verify_cq_head = 0;
+        bool verify_phase = true;
+        uint32_t verified_blocks = 0;
+
+        for (uint32_t i = 0;
+             i < completions_received && verified_blocks < blocks_to_verify;
+             i++) {
+          volatile struct nvme_cqe* cqe =
+            reinterpret_cast<volatile struct nvme_cqe*>(
+              &cq_to_verify[verify_cq_head]);
+
+          if ((cqe->status & 0x1) == verify_phase) {
+            uint16_t cid = cqe->command_id;
+
+            // Get corresponding SQE to extract LBA
+            volatile struct nvme_sqe* sqe =
+              reinterpret_cast<volatile struct nvme_sqe*>(&sq_to_verify[cid]);
+
+            // Extract LBA from SQE (cdw10 and cdw11)
+            uint64_t lba = ((uint64_t)sqe->cdw11 << 32) | sqe->cdw10;
+            uint32_t nlb =
+              (sqe->cdw12 & 0xFFFF) + 1; // Number of logical blocks
+
+            // Verify each block in this command
+            for (uint32_t block = 0;
+                 block < nlb && verified_blocks < blocks_to_verify;
+                 block++) {
+              uint64_t block_lba = lba + block;
+              uint64_t offset_in_buffer =
+                verified_blocks * config->args.nvmeBlockSize;
+              uint8_t* block_buf = verify_buf + offset_in_buffer;
+
+              // Calculate offset for pattern generation (LBA * block_size)
+              uint64_t pattern_offset =
+                block_lba * config->args.nvmeBlockSize;
+
+              // Verify this block
+              size_t error_offset = 0;
+              bool verified =
+                nvme_verify_pattern(block_buf, config->args.nvmeBlockSize,
+                                    pattern, pattern_offset, &error_offset);
+
+              total_bytes_checked += config->args.nvmeBlockSize;
+
+              if (!verified) {
+                if (mismatches < 10) {
+                  // Regenerate expected value for error message
+                  uint64_t pattern_offset_for_error =
+                    block_lba * config->args.nvmeBlockSize;
+                  uint8_t expected_byte = 0;
+                  switch (pattern) {
+                    case NVME_PATTERN_LFSR: {
+                      uint64_t lba = block_lba;
+                      uint32_t seed = (uint32_t)(lba * 0x12345678);
+                      uint32_t rng =
+                        (uint32_t)(lba * 0x9e3779b9 + seed + error_offset);
+                      rng ^= rng >> 16;
+                      rng *= 0x85ebca6b;
+                      rng ^= rng >> 13;
+                      rng *= 0xc2b2ae35;
+                      rng ^= rng >> 16;
+                      expected_byte = (uint8_t)(rng & 0xFF);
+                      break;
+                    }
+                    default:
+                      // For other patterns, use nvme_verify_pattern logic
+                      // Simplified: just show actual value
+                      expected_byte = block_buf[error_offset];
+                      break;
+                  }
+                  std::cerr << "  ❌ Mismatch at LBA " << block_lba
+                            << ", byte " << error_offset << ": expected 0x"
+                            << std::hex << (int)expected_byte << ", got 0x"
+                            << (int)block_buf[error_offset] << std::dec
+                            << std::endl;
+                }
+                mismatches++;
+              }
+
+              verified_blocks++;
+            }
+
+            verify_cq_head++;
+            if (verify_cq_head >= config->args.completeQueueLen) {
+              verify_cq_head = 0;
+              verify_phase = !verify_phase;
+            }
+          }
+        }
+
+        if (mismatches == 0) {
+          std::cout << "✅ All " << total_bytes_checked
+                    << " bytes verified successfully!" << std::endl;
+          std::cout << "  Verified " << verified_blocks << " blocks"
+                    << std::endl;
+        } else {
+          std::cerr << "❌ Verification failed: " << mismatches
+                    << " mismatches out of " << total_bytes_checked
+                    << " bytes checked" << std::endl;
+        }
+      }
     }
   }
 
@@ -2168,14 +2325,15 @@ int main(int argc, char** argv) {
 
   app
     .add_option("--test-pattern", config.args.testPattern,
-                "Data test pattern: sequential, zeros, ones, random, block_id")
+                "Data test pattern: sequential, zeros, ones, random, "
+                "block_id, lfsr")
     ->default_val("sequential")
     ->check([](const std::string& val) {
       return (val == "sequential" || val == "zeros" || val == "ones" ||
-              val == "random" || val == "block_id")
+              val == "random" || val == "block_id" || val == "lfsr")
                ? std::string()
                : std::string("Pattern must be: sequential, zeros, ones, "
-                             "random, or block_id");
+                             "random, block_id, or lfsr");
     });
 
   // Trace verification options
@@ -2190,6 +2348,12 @@ int main(int argc, char** argv) {
                 "Path to QEMU NVMe trace log file for verification. "
                 "Default: /tmp/rocm-axiio-nvme-trace.log")
     ->default_val("/tmp/rocm-axiio-nvme-trace.log");
+
+  app
+    .add_flag("--verify-reads", config.args.verifyReads,
+              "Verify read data matches expected pattern after test "
+              "completes.")
+    ->default_val(false);
 
   CLI11_PARSE(app, argc, argv);
 
