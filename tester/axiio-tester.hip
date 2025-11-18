@@ -86,6 +86,7 @@ typedef struct {
   size_t dataBufferSize;
   unsigned nvmeBlockSize;
   std::string testPattern;
+  uint32_t lfsrSeed; // Seed for LFSR pattern (0 = derive from LBA)
   // NVMe I/O testing parameters
   size_t transferSize;       // Transfer size in bytes (default: 4096 for 4KiB)
   size_t lbaRangeGiB;        // LBA range to test in GiB (default: 1)
@@ -101,6 +102,9 @@ typedef struct {
   std::string traceFilePath;    // Path to QEMU trace log file
   // Read verification support
   bool verifyReads;              // Enable read data verification after test
+  // Operation mode flags
+  bool writeOnlyMode;            // Write-only mode (no read buffer)
+  bool readOnlyMode;             // Read-only mode (no write buffer)
 } cmdLineArgs;
 
 typedef struct {
@@ -217,7 +221,7 @@ __global__ void driveNVMeEndpointWithBuffersKernel(
         final_sq_tail = nvme_ep_driveEndpointWithBuffers(
           sqeIterations, sqeAddr, cqeAddr, startTime, endTime,
           readBuffer, writeBuffer, bufferSize, blockSize, pattern,
-          readBufferDma, writeBufferDma);
+          readBufferDma, writeBufferDma, config->args.lfsrSeed);
         printf("GPU: Posted %u commands, final_sq_tail=%u\n", sqeIterations, final_sq_tail);
       }
 
@@ -1402,6 +1406,13 @@ std::endl; #endif
     std::cout << "  Block size: " << config->args.nvmeBlockSize << " bytes"
               << std::endl;
     std::cout << "  Test pattern: " << config->args.testPattern << std::endl;
+    if (config->args.writeOnlyMode) {
+      std::cout << "  Mode: Write-only (no read buffer)" << std::endl;
+    } else if (config->args.readOnlyMode) {
+      std::cout << "  Mode: Read-only (no write buffer)" << std::endl;
+    } else {
+      std::cout << "  Mode: Alternate reads/writes (both buffers)" << std::endl;
+    }
 
     if (kernel_ctx && kernel_ctx->mem_fd == -2) {
       // GPU-DIRECT mode: Use kernel module DMA allocation + mmap for GPU-accessible buffers
@@ -1409,33 +1420,51 @@ std::endl; #endif
 
       uint64_t read_dma_addr = 0, write_dma_addr = 0;
 
-      // Allocate DMA-coherent buffers via kernel module
-      if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                              config->args.dataBufferSize,
-                                              &read_dma_addr, nullptr) < 0) {
-        std::cerr << "Error: Failed to allocate read buffer via kernel module" << std::endl;
-        return EXIT_FAILURE;
+      // Allocate DMA-coherent buffers via kernel module (only if needed)
+      if (!config->args.writeOnlyMode) {
+        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
+                                                config->args.dataBufferSize,
+                                                &read_dma_addr, nullptr) < 0) {
+          std::cerr << "Error: Failed to allocate read buffer via kernel module" << std::endl;
+          return EXIT_FAILURE;
+        }
+      } else {
+        readBuffer = nullptr;
+        config->readBufferDma = 0;
       }
 
-      if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                              config->args.dataBufferSize,
-                                              &write_dma_addr, nullptr) < 0) {
-        std::cerr << "Error: Failed to allocate write buffer via kernel module" << std::endl;
-        return EXIT_FAILURE;
+      if (!config->args.readOnlyMode) {
+        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
+                                                config->args.dataBufferSize,
+                                                &write_dma_addr, nullptr) < 0) {
+          std::cerr << "Error: Failed to allocate write buffer via kernel module" << std::endl;
+          return EXIT_FAILURE;
+        }
+      } else {
+        writeBuffer = nullptr;
+        config->writeBufferDma = 0;
       }
 
       // Map DMA buffers for GPU access via mmap (offset 4 for first buffer, 5 for second)
-      readBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
-                                  PROT_READ | PROT_WRITE, MAP_SHARED,
-                                  kernel_ctx->axiio_fd, 4 * getpagesize());
-      writeBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
-                                   PROT_READ | PROT_WRITE, MAP_SHARED,
-                                   kernel_ctx->axiio_fd, 5 * getpagesize());
-
-      if (readBuffer == MAP_FAILED || writeBuffer == MAP_FAILED) {
-        std::cerr << "Error: Failed to mmap DMA buffers for GPU access" << std::endl;
-        perror("mmap");
-        return EXIT_FAILURE;
+      if (!config->args.writeOnlyMode && read_dma_addr != 0) {
+        readBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                    PROT_READ | PROT_WRITE, MAP_SHARED,
+                                    kernel_ctx->axiio_fd, 4 * getpagesize());
+        if (readBuffer == MAP_FAILED) {
+          std::cerr << "Error: Failed to mmap read DMA buffer for GPU access" << std::endl;
+          perror("mmap");
+          return EXIT_FAILURE;
+        }
+      }
+      if (!config->args.readOnlyMode && write_dma_addr != 0) {
+        writeBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                     PROT_READ | PROT_WRITE, MAP_SHARED,
+                                     kernel_ctx->axiio_fd, 5 * getpagesize());
+        if (writeBuffer == MAP_FAILED) {
+          std::cerr << "Error: Failed to mmap write DMA buffer for GPU access" << std::endl;
+          perror("mmap");
+          return EXIT_FAILURE;
+        }
       }
 
       // Lock DMA buffers with HSA for GPU MMU registration
@@ -1445,43 +1474,63 @@ std::endl; #endif
         hsa_amd_memory_pool_t cpu_pool = nvme_hsa_doorbell::get_cpu_pool();
 
         void* locked_read = nullptr, *locked_write = nullptr;
-        hsa_status_t status_read = hsa_amd_memory_lock_to_pool(
-          readBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_read);
-        hsa_status_t status_write = hsa_amd_memory_lock_to_pool(
-          writeBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_write);
+        hsa_status_t status_read = HSA_STATUS_SUCCESS;
+        hsa_status_t status_write = HSA_STATUS_SUCCESS;
 
-        if (status_read == HSA_STATUS_SUCCESS && status_write == HSA_STATUS_SUCCESS) {
+        if (readBuffer) {
+          status_read = hsa_amd_memory_lock_to_pool(
+            readBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_read);
+        }
+        if (writeBuffer) {
+          status_write = hsa_amd_memory_lock_to_pool(
+            writeBuffer, config->args.dataBufferSize, &gpu_agent, 1, cpu_pool, 0, &locked_write);
+        }
+
+        if ((!readBuffer || status_read == HSA_STATUS_SUCCESS) &&
+            (!writeBuffer || status_write == HSA_STATUS_SUCCESS)) {
           std::cout << "  ✅ HSA locked DMA buffers for GPU MMU" << std::endl;
-          std::cout << "    Original read buffer: " << (void*)readBuffer << std::endl;
-          std::cout << "    HSA-locked read buffer: " << locked_read << std::endl;
-          std::cout << "    Original write buffer: " << (void*)writeBuffer << std::endl;
-          std::cout << "    HSA-locked write buffer: " << locked_write << std::endl;
+          if (readBuffer) {
+            std::cout << "    Original read buffer: " << (void*)readBuffer << std::endl;
+            std::cout << "    HSA-locked read buffer: " << locked_read << std::endl;
+          }
+          if (writeBuffer) {
+            std::cout << "    Original write buffer: " << (void*)writeBuffer << std::endl;
+            std::cout << "    HSA-locked write buffer: " << locked_write << std::endl;
+          }
 
           // Store HSA-locked pointers for GPU access (like we do for doorbell)
           // Keep original pointers for CPU operations (memset, etc.)
-          uint8_t* gpu_readBuffer = static_cast<uint8_t*>(locked_read);
-          uint8_t* gpu_writeBuffer = static_cast<uint8_t*>(locked_write);
-          std::cout << "  ✅ Using HSA-locked pointers for GPU access" << std::endl;
-
-          // Initialize buffers using original pointers (CPU-accessible)
-          memset(writeBuffer, 0, config->args.dataBufferSize);
-          memset(readBuffer, 0, config->args.dataBufferSize);
-
-          // Now switch to GPU-locked pointers for GPU kernel
-          readBuffer = gpu_readBuffer;
-          writeBuffer = gpu_writeBuffer;
+          if (readBuffer) {
+            uint8_t* gpu_readBuffer = static_cast<uint8_t*>(locked_read);
+            std::cout << "  ✅ Using HSA-locked pointers for GPU access" << std::endl;
+            memset(readBuffer, 0, config->args.dataBufferSize);
+            readBuffer = gpu_readBuffer;
+          }
+          if (writeBuffer) {
+            uint8_t* gpu_writeBuffer = static_cast<uint8_t*>(locked_write);
+            std::cout << "  ✅ Using HSA-locked pointers for GPU access" << std::endl;
+            memset(writeBuffer, 0, config->args.dataBufferSize);
+            writeBuffer = gpu_writeBuffer;
+          }
         } else {
           std::cerr << "  ⚠️  Warning: HSA memory lock failed for DMA buffers" << std::endl;
-          std::cerr << "    Read buffer lock status: " << status_read << std::endl;
-          std::cerr << "    Write buffer lock status: " << status_write << std::endl;
-          // Initialize buffers with original pointers
-          memset(writeBuffer, 0, config->args.dataBufferSize);
-          memset(readBuffer, 0, config->args.dataBufferSize);
+          if (readBuffer) {
+            std::cerr << "    Read buffer lock status: " << status_read << std::endl;
+            memset(readBuffer, 0, config->args.dataBufferSize);
+          }
+          if (writeBuffer) {
+            std::cerr << "    Write buffer lock status: " << status_write << std::endl;
+            memset(writeBuffer, 0, config->args.dataBufferSize);
+          }
         }
       } else {
         // No HSA locking - initialize buffers
-        memset(writeBuffer, 0, config->args.dataBufferSize);
-        memset(readBuffer, 0, config->args.dataBufferSize);
+        if (readBuffer) {
+          memset(readBuffer, 0, config->args.dataBufferSize);
+        }
+        if (writeBuffer) {
+          memset(writeBuffer, 0, config->args.dataBufferSize);
+        }
       }
 
       std::cout << "  ✅ DMA buffers allocated and mapped for GPU access" << std::endl;
@@ -1496,13 +1545,20 @@ std::endl; #endif
     } else {
       // CPU-HYBRID mode: Use hipHostMalloc for CPU-GPU visibility
       std::cout << "  Using hipHostMalloc (CPU-hybrid mode)..." << std::endl;
-      HIP_CHECK(hipHostMalloc(&readBuffer, config->args.dataBufferSize, flags));
-      HIP_CHECK(hipHostMalloc(&writeBuffer, config->args.dataBufferSize, flags));
-
-      // Initialize write buffer with pattern on CPU
-      // (Pattern will be regenerated on GPU during test)
-      memset(writeBuffer, 0, config->args.dataBufferSize);
-      memset(readBuffer, 0, config->args.dataBufferSize);
+      if (!config->args.writeOnlyMode) {
+        HIP_CHECK(hipHostMalloc(&readBuffer, config->args.dataBufferSize, flags));
+        memset(readBuffer, 0, config->args.dataBufferSize);
+      } else {
+        readBuffer = nullptr;
+      }
+      if (!config->args.readOnlyMode) {
+        HIP_CHECK(hipHostMalloc(&writeBuffer, config->args.dataBufferSize, flags));
+        // Initialize write buffer with pattern on CPU
+        // (Pattern will be regenerated on GPU during test)
+        memset(writeBuffer, 0, config->args.dataBufferSize);
+      } else {
+        writeBuffer = nullptr;
+      }
     }
   }
 
@@ -1548,13 +1604,20 @@ std::endl; #endif
       }
     }
 
+    // Pass NULL buffers based on mode flags
+    uint8_t* final_read_buffer =
+      config->args.writeOnlyMode ? nullptr : readBuffer;
+    uint8_t* final_write_buffer =
+      config->args.readOnlyMode ? nullptr : writeBuffer;
+
     driveThread = std::thread(driveNVMeWithBuffersFunction, stream1,
                               config->args.nIterations, sqQueue, cqQueue,
-                              sqDoorBell, d_startTime, d_endTime, readBuffer,
-                              writeBuffer, config->args.dataBufferSize,
+                              sqDoorBell, d_startTime, d_endTime,
+                              final_read_buffer, final_write_buffer,
+                              config->args.dataBufferSize,
                               config->args.nvmeBlockSize, pattern,
-                              config->args.useRealHardware,
-                              read_dma, write_dma, doorbell_iova);
+                              config->args.useRealHardware, read_dma, write_dma,
+                              doorbell_iova);
   } else {
     // Use generic dispatcher
     driveThread = std::thread(driveFunction, endpointType, stream1,
@@ -2000,7 +2063,8 @@ std::endl; #endif
               size_t error_offset = 0;
               bool verified =
                 nvme_verify_pattern(block_buf, config->args.nvmeBlockSize,
-                                    pattern, pattern_offset, &error_offset);
+                                    pattern, pattern_offset, &error_offset,
+                                    config->args.lfsrSeed);
 
               total_bytes_checked += config->args.nvmeBlockSize;
 
@@ -2013,7 +2077,8 @@ std::endl; #endif
                   switch (pattern) {
                     case NVME_PATTERN_LFSR: {
                       uint64_t lba = block_lba;
-                      uint32_t seed = (uint32_t)(lba * 0x12345678);
+                      uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+                      uint32_t seed = base_seed ^ config->args.lfsrSeed; // XOR
                       uint32_t rng =
                         (uint32_t)(lba * 0x9e3779b9 + seed + error_offset);
                       rng ^= rng >> 16;
@@ -2078,15 +2143,29 @@ std::endl; #endif
 
   // Free data buffers if allocated
   if (usingDataBuffers) {
-    if (readBuffer) {
-      // Check if buffers are DMA buffers from kernel module (GPU-direct mode)
-      if (kernel_ctx && kernel_ctx->mem_fd == -2) {
-        // DMA buffers are mmap'd - unmap them
-        munmap(readBuffer, config->args.dataBufferSize);
-        munmap(writeBuffer, config->args.dataBufferSize);
-      } else {
-        // hipHostMalloc buffers - free them
+    // Check if buffers are DMA buffers from kernel module (GPU-direct mode)
+    if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+      // DMA buffers are mmap'd - unmap them
+      if (readBuffer) {
+        size_t page_size_val = getpagesize();
+        size_t read_size = ((config->args.dataBufferSize + page_size_val - 1) /
+                           page_size_val) *
+                          page_size_val;
+        munmap(readBuffer, read_size);
+      }
+      if (writeBuffer) {
+        size_t page_size_val = getpagesize();
+        size_t write_size = ((config->args.dataBufferSize + page_size_val - 1) /
+                            page_size_val) *
+                           page_size_val;
+        munmap(writeBuffer, write_size);
+      }
+    } else {
+      // hipHostMalloc buffers - free them
+      if (readBuffer) {
         HIP_CHECK(hipHostFree(readBuffer));
+      }
+      if (writeBuffer) {
         HIP_CHECK(hipHostFree(writeBuffer));
       }
     }
@@ -2353,6 +2432,24 @@ int main(int argc, char** argv) {
     .add_flag("--verify-reads", config.args.verifyReads,
               "Verify read data matches expected pattern after test "
               "completes.")
+    ->default_val(false);
+
+  app
+    .add_option("--lfsr-seed", config.args.lfsrSeed,
+                "Seed for LFSR pattern generation (0 = derive from LBA). "
+                "Allows different data patterns for same LBA.")
+    ->default_val(0);
+
+  app
+    .add_flag("--write-only", config.args.writeOnlyMode,
+              "Write-only mode: only allocate write buffer, issue only write "
+              "commands.")
+    ->default_val(false);
+
+  app
+    .add_flag("--read-only", config.args.readOnlyMode,
+              "Read-only mode: only allocate read buffer, issue only read "
+              "commands.")
     ->default_val(false);
 
   CLI11_PARSE(app, argc, argv);
