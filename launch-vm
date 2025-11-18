@@ -27,5 +27,6 @@ FILESYSTEM=/home/stebates/Projects \
 NVME=1 \
 NVME_TRACE=all \
 NVME_TRACE_FILE=/home/stebates/Projects/rocm-axiio/nvme-gda-trace.log \
-PCI_HOSTDEV=10:00.0 \
+P2P_HOSTDEV=10:00.0 \
+PCI_HOSTDEV=c2:00.0,c3:00.0 \
 ./run-vm 2>&1 | tee /home/stebates/Projects/rocm-axiio/gda-test-vm.log

@@ -311,7 +311,8 @@ enum nvme_test_pattern {
   NVME_PATTERN_ZEROS = 1,      // All zeros
   NVME_PATTERN_ONES = 2,       // All ones (0xFF)
   NVME_PATTERN_RANDOM = 3,     // Pseudo-random (based on offset)
-  NVME_PATTERN_BLOCK_ID = 4    // Block ID repeated
+  NVME_PATTERN_BLOCK_ID = 4,   // Block ID repeated
+  NVME_PATTERN_LFSR = 5        // LFSR-based deterministic pattern
 };
 
 // Generate test data pattern
@@ -377,6 +378,24 @@ __host__ __device__ static inline void nvme_generate_pattern(
         }
       }
       break;
+
+    case NVME_PATTERN_LFSR: {
+      // LFSR-based deterministic pattern
+      // (same as test-nvme-write-read-verify.cpp)
+      // offset is treated as LBA, seed is derived from LBA
+      uint64_t lba = offset / 512; // Assuming 512-byte blocks
+      uint32_t seed = (uint32_t)(lba * 0x12345678);
+      for (size_t i = 0; i < size; i++) {
+        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
+        rng ^= rng >> 16;
+        rng *= 0x85ebca6b;
+        rng ^= rng >> 13;
+        rng *= 0xc2b2ae35;
+        rng ^= rng >> 16;
+        buffer[i] = (uint8_t)(rng & 0xFF);
+      }
+      break;
+    }
   }
 }
 
@@ -410,6 +429,20 @@ __host__ __device__ static inline bool nvme_verify_pattern(
       case NVME_PATTERN_BLOCK_ID:
         expected = (uint8_t)((offset >> ((i % sizeof(uint64_t)) * 8)) & 0xFF);
         break;
+
+      case NVME_PATTERN_LFSR: {
+        // LFSR-based verification (same as generation)
+        uint64_t lba = offset / 512; // Assuming 512-byte blocks
+        uint32_t seed = (uint32_t)(lba * 0x12345678);
+        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
+        rng ^= rng >> 16;
+        rng *= 0x85ebca6b;
+        rng ^= rng >> 13;
+        rng *= 0xc2b2ae35;
+        rng ^= rng >> 16;
+        expected = (uint8_t)(rng & 0xFF);
+        break;
+      }
 
       default:
         expected = buffer[i]; // Always pass for unknown patterns
