@@ -45,26 +45,27 @@ struct nvme_gpu_mapping {
  *
  * Similar to how rocSHMEM GDA maps InfiniBand doorbells.
  */
-static inline int nvme_map_doorbell_for_gpu(struct nvme_gpu_mapping* mapping,
+static inline int nvme_map_doorbell_for_gpu(struct device* dev,
+                                            struct nvme_gpu_mapping* mapping,
                                             int gpu_fd,
                                             resource_size_t doorbell_phys,
                                             size_t size) {
   struct file* gpu_file;
 
-  pr_info("nvme_axiio: Setting up GPU doorbell mapping...\n");
-  pr_info("  GPU FD: %d\n", gpu_fd);
-  pr_info("  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
-  pr_info("  Size: %zu bytes\n", size);
+  dev_info(dev, "nvme_axiio: Setting up GPU doorbell mapping...\n");
+  dev_info(dev, "  GPU FD: %d\n", gpu_fd);
+  dev_info(dev, "  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
+  dev_info(dev, "  Size: %zu bytes\n", size);
 
   /* Get GPU device file to verify it's valid */
   gpu_file = fget(gpu_fd);
   if (!gpu_file) {
-    pr_err("nvme_axiio: Invalid GPU file descriptor\n");
+    dev_err(dev, "nvme_axiio: Invalid GPU file descriptor\n");
     return -EBADF;
   }
 
-  pr_info("nvme_axiio: GPU file descriptor valid\n");
-  pr_info("  File: %s\n", gpu_file->f_path.dentry->d_name.name);
+  dev_info(dev, "nvme_axiio: GPU file descriptor valid\n");
+  dev_info(dev, "  File: %s\n", gpu_file->f_path.dentry->d_name.name);
 
   /*
    * Strategy for GPU-direct doorbell:
@@ -85,9 +86,9 @@ static inline int nvme_map_doorbell_for_gpu(struct nvme_gpu_mapping* mapping,
   mapping->size = size;
   mapping->mapped = false;
 
-  pr_info("nvme_axiio: ✓ GPU mapping context prepared\n");
-  pr_info("  mmap will use GPU-aware VMA flags\n");
-  pr_info("  GPU driver should handle MMU setup via page faults\n");
+  dev_info(dev, "nvme_axiio: ✓ GPU mapping context prepared\n");
+  dev_info(dev, "  mmap will use GPU-aware VMA flags\n");
+  dev_info(dev, "  GPU driver should handle MMU setup via page faults\n");
 
   /* Actual mapping happens in mmap handler */
   return 0;
@@ -97,13 +98,13 @@ static inline int nvme_map_doorbell_for_gpu(struct nvme_gpu_mapping* mapping,
  * Unmap doorbell from GPU
  */
 static inline void nvme_unmap_doorbell_from_gpu(
-  struct nvme_gpu_mapping* mapping) {
+  struct device* dev, struct nvme_gpu_mapping* mapping) {
   if (mapping->gpu_file) {
     fput(mapping->gpu_file);
     mapping->gpu_file = NULL;
   }
   mapping->mapped = false;
-  pr_info("nvme_axiio: GPU doorbell unmapped\n");
+  dev_info(dev, "nvme_axiio: GPU doorbell unmapped\n");
 }
 
 /*
@@ -129,31 +130,34 @@ static inline int nvme_mmap_doorbell_for_gpu(
       /* Use queue-specific IOVA - QEMU has mapped this in GPU's VFIO container
        */
       doorbell_addr = queue_iova.doorbell_iova;
-      pr_info(
+      dev_info(
+        &pdev->dev,
         "nvme_axiio: Using queue-specific IOVA address for GPU mapping\n");
-      pr_info("  Queue ID: %u\n", (unsigned int)queue_id);
-      pr_info("  IOVA: 0x%llx\n", (u64)doorbell_addr);
+      dev_info(&pdev->dev, "  Queue ID: %u\n", (unsigned int)queue_id);
+      dev_info(&pdev->dev, "  IOVA: 0x%llx\n", (u64)doorbell_addr);
     } else {
       /* Fallback to controller base IOVA */
       doorbell_addr = ctrl->p2p_iova.doorbell_iova;
-      pr_info("nvme_axiio: Using controller base IOVA for GPU mapping\n");
-      pr_info("  IOVA: 0x%llx\n", (u64)doorbell_addr);
+      dev_info(&pdev->dev,
+               "nvme_axiio: Using controller base IOVA for GPU mapping\n");
+      dev_info(&pdev->dev, "  IOVA: 0x%llx\n", (u64)doorbell_addr);
     }
   } else {
     /* Use physical address */
     doorbell_addr = gpu_mapping->doorbell_phys;
-    pr_info("nvme_axiio: Using physical address for GPU mapping\n");
-    pr_info("  Physical: 0x%llx\n", (u64)doorbell_addr);
+    dev_info(&pdev->dev,
+             "nvme_axiio: Using physical address for GPU mapping\n");
+    dev_info(&pdev->dev, "  Physical: 0x%llx\n", (u64)doorbell_addr);
   }
 
   /* Align doorbell to page boundary */
   unsigned long page_base = doorbell_addr & PAGE_MASK;
   pfn = page_base >> PAGE_SHIFT;
 
-  pr_info("nvme_axiio: GPU-aware mmap setup\n");
-  pr_info("  PFN: 0x%lx\n", pfn);
-  pr_info("  VMA start: 0x%lx\n", vma->vm_start);
-  pr_info("  Size: %zu\n", gpu_mapping->size);
+  dev_info(&pdev->dev, "nvme_axiio: GPU-aware mmap setup\n");
+  dev_info(&pdev->dev, "  PFN: 0x%lx\n", pfn);
+  dev_info(&pdev->dev, "  VMA start: 0x%lx\n", vma->vm_start);
+  dev_info(&pdev->dev, "  Size: %zu\n", gpu_mapping->size);
 
   /*
    * Critical flags for GPU accessibility:
@@ -183,12 +187,15 @@ static inline int nvme_mmap_doorbell_for_gpu(
      * handles it. However, we still need to set up the VMA properly so mmap
      * succeeds. We'll create an anonymous mapping that userspace can use.
      */
-    pr_info(
+    dev_info(
+      &pdev->dev,
       "nvme_axiio: IOVA mode - setting up VMA for userspace IOVA mapping\n");
-    pr_info("  IOVA address: 0x%llx (userspace will map this directly)\n",
-            (u64)doorbell_addr);
-    pr_info("  Physical BAR0: 0x%llx (not used for GPU in IOVA mode)\n",
-            (u64)gpu_mapping->doorbell_phys);
+    dev_info(&pdev->dev,
+             "  IOVA address: 0x%llx (userspace will map this directly)\n",
+             (u64)doorbell_addr);
+    dev_info(&pdev->dev,
+             "  Physical BAR0: 0x%llx (not used for GPU in IOVA mode)\n",
+             (u64)gpu_mapping->doorbell_phys);
 
     /* For IOVA mode, we don't map physical BAR0 here.
      * Instead, we set up the VMA to allow userspace to map the IOVA address.
@@ -207,8 +214,9 @@ static inline int nvme_mmap_doorbell_for_gpu(
     /* Just mark the VMA as valid - userspace mapping will happen separately */
     ret = 0; /* Success - VMA is set up, userspace will do the actual mapping */
 
-    pr_info("nvme_axiio: ✓ VMA set up for IOVA mode (userspace will map IOVA "
-            "directly)\n");
+    dev_info(&pdev->dev,
+             "nvme_axiio: ✓ VMA set up for IOVA mode (userspace will map IOVA "
+             "directly)\n");
   } else {
     /* Physical mode: Use remap_pfn_range with physical PFN */
     ret = remap_pfn_range(vma, vma->vm_start, pfn, gpu_mapping->size,
@@ -216,16 +224,16 @@ static inline int nvme_mmap_doorbell_for_gpu(
   }
 
   if (ret < 0) {
-    pr_err("nvme_axiio: remap_pfn_range failed: %d\n", ret);
+    dev_err(&pdev->dev, "nvme_axiio: remap_pfn_range failed: %d\n", ret);
     return ret;
   }
 
   gpu_mapping->gpu_va = (void __user*)vma->vm_start;
   gpu_mapping->mapped = true;
 
-  pr_info("nvme_axiio: ✓ GPU doorbell mapped!\n");
-  pr_info("  GPU VA: 0x%lx\n", vma->vm_start);
-  pr_info("  GPU can now access doorbell!\n");
+  dev_info(&pdev->dev, "nvme_axiio: ✓ GPU doorbell mapped!\n");
+  dev_info(&pdev->dev, "  GPU VA: 0x%lx\n", vma->vm_start);
+  dev_info(&pdev->dev, "  GPU can now access doorbell!\n");
 
   return 0;
 }

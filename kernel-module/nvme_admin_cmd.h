@@ -15,7 +15,8 @@
 /*
  * Submit admin command and wait for completion
  */
-static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
+static inline int nvme_submit_admin_cmd_sync(struct device* dev,
+                                             void __iomem* bar0,
                                              struct nvme_admin_queue* admin_q,
                                              struct nvme_command* cmd,
                                              u32* result, unsigned timeout_ms) {
@@ -29,8 +30,8 @@ static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
   u32 doorbell_stride;
   volatile u32 __iomem* sq_doorbell;
 
-  pr_debug("nvme_axiio: Submitting admin command opcode=0x%02x\n",
-           cmd->common.opcode);
+  dev_dbg(dev, "nvme_axiio: Submitting admin command opcode=0x%02x\n",
+          cmd->common.opcode);
 
   spin_lock_irqsave(&admin_q->sq_lock, flags);
 
@@ -53,7 +54,7 @@ static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
   sq_doorbell = (volatile u32 __iomem*)(bar0 + 0x1000);
   writel(sq_tail, sq_doorbell);
 
-  pr_debug("nvme_axiio: Rang admin SQ doorbell (tail=%u)\n", sq_tail);
+  dev_dbg(dev, "nvme_axiio: Rang admin SQ doorbell (tail=%u)\n", sq_tail);
 
   spin_unlock_irqrestore(&admin_q->sq_lock, flags);
 
@@ -73,7 +74,8 @@ static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
       if (result)
         *result = le32_to_cpu(cq_entry->result.u32);
 
-      pr_debug(
+      dev_dbg(
+        dev,
         "nvme_axiio: Admin command completed: status=0x%04x result=0x%08x\n",
         status, *result);
 
@@ -94,7 +96,8 @@ static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
 
       /* Check status */
       if (status != 0) {
-        pr_err("nvme_axiio: Admin command failed: status=0x%04x\n", status);
+        dev_err(dev, "nvme_axiio: Admin command failed: status=0x%04x\n",
+                status);
         return -EIO;
       }
 
@@ -105,7 +108,7 @@ static inline int nvme_submit_admin_cmd_sync(void __iomem* bar0,
     usleep_range(10, 100);
   }
 
-  pr_err("nvme_axiio: Timeout waiting for admin command completion\n");
+  dev_err(dev, "nvme_axiio: Timeout waiting for admin command completion\n");
   return -ETIMEDOUT;
 }
 
@@ -121,12 +124,12 @@ static inline int nvme_identify_ctrl(void __iomem* bar0,
   u32 result;
   int ret;
 
-  pr_info("nvme_axiio: Identifying controller...\n");
+  dev_info(dev, "nvme_axiio: Identifying controller...\n");
 
   /* Allocate DMA buffer for identify data */
   buffer = dma_alloc_coherent(dev, 4096, &dma_addr, GFP_KERNEL);
   if (!buffer) {
-    pr_err("nvme_axiio: Failed to allocate identify buffer\n");
+    dev_err(dev, "nvme_axiio: Failed to allocate identify buffer\n");
     return -ENOMEM;
   }
 
@@ -138,11 +141,11 @@ static inline int nvme_identify_ctrl(void __iomem* bar0,
   cmd.identify.cns = NVME_ID_CNS_CTRL;
 
   /* Submit command - use longer timeout for real hardware (30 seconds) */
-  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  ret = nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 
   if (ret == 0 && identify_data) {
     memcpy(identify_data, buffer, 4096);
-    pr_info("nvme_axiio: ✓ Controller identified\n");
+    dev_info(dev, "nvme_axiio: ✓ Controller identified\n");
   }
 
   dma_free_coherent(dev, 4096, buffer, dma_addr);
@@ -152,14 +155,15 @@ static inline int nvme_identify_ctrl(void __iomem* bar0,
 /*
  * Create I/O Completion Queue
  */
-static inline int nvme_create_io_cq_cmd(void __iomem* bar0,
+static inline int nvme_create_io_cq_cmd(struct device* dev, void __iomem* bar0,
                                         struct nvme_admin_queue* admin_q,
                                         u16 qid, u16 qsize, dma_addr_t cq_dma,
                                         u16 iv) {
   struct nvme_command cmd;
   u32 result;
 
-  pr_info("nvme_axiio: Creating I/O CQ (qid=%u, size=%u)...\n", qid, qsize);
+  dev_info(dev, "nvme_axiio: Creating I/O CQ (qid=%u, size=%u)...\n", qid,
+           qsize);
 
   memset(&cmd, 0, sizeof(cmd));
   cmd.create_cq.opcode = nvme_admin_create_cq;
@@ -171,21 +175,21 @@ static inline int nvme_create_io_cq_cmd(void __iomem* bar0,
   cmd.create_cq.irq_vector = cpu_to_le16(iv);
 
   /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  return nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
  * Create I/O Submission Queue
  */
-static inline int nvme_create_io_sq_cmd(void __iomem* bar0,
+static inline int nvme_create_io_sq_cmd(struct device* dev, void __iomem* bar0,
                                         struct nvme_admin_queue* admin_q,
                                         u16 qid, u16 cqid, u16 qsize,
                                         dma_addr_t sq_dma) {
   struct nvme_command cmd;
   u32 result;
 
-  pr_info("nvme_axiio: Creating I/O SQ (qid=%u, cqid=%u, size=%u)...\n", qid,
-          cqid, qsize);
+  dev_info(dev, "nvme_axiio: Creating I/O SQ (qid=%u, cqid=%u, size=%u)...\n",
+           qid, cqid, qsize);
 
   memset(&cmd, 0, sizeof(cmd));
   cmd.create_sq.opcode = nvme_admin_create_sq;
@@ -197,45 +201,45 @@ static inline int nvme_create_io_sq_cmd(void __iomem* bar0,
   cmd.create_sq.cqid = cpu_to_le16(cqid);
 
   /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  return nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
  * Delete I/O Submission Queue
  */
-static inline int nvme_delete_io_sq_cmd(void __iomem* bar0,
+static inline int nvme_delete_io_sq_cmd(struct device* dev, void __iomem* bar0,
                                         struct nvme_admin_queue* admin_q,
                                         u16 qid) {
   struct nvme_command cmd;
   u32 result;
 
-  pr_info("nvme_axiio: Deleting I/O SQ (qid=%u)...\n", qid);
+  dev_info(dev, "nvme_axiio: Deleting I/O SQ (qid=%u)...\n", qid);
 
   memset(&cmd, 0, sizeof(cmd));
   cmd.delete_queue.opcode = nvme_admin_delete_sq;
   cmd.delete_queue.qid = cpu_to_le16(qid);
 
   /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  return nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 }
 
 /*
  * Delete I/O Completion Queue
  */
-static inline int nvme_delete_io_cq_cmd(void __iomem* bar0,
+static inline int nvme_delete_io_cq_cmd(struct device* dev, void __iomem* bar0,
                                         struct nvme_admin_queue* admin_q,
                                         u16 qid) {
   struct nvme_command cmd;
   u32 result;
 
-  pr_info("nvme_axiio: Deleting I/O CQ (qid=%u)...\n", qid);
+  dev_info(dev, "nvme_axiio: Deleting I/O CQ (qid=%u)...\n", qid);
 
   memset(&cmd, 0, sizeof(cmd));
   cmd.delete_queue.opcode = nvme_admin_delete_cq;
   cmd.delete_queue.qid = cpu_to_le16(qid);
 
   /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
-  return nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  return nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 }
 
 #endif /* NVME_ADMIN_CMD_H */
