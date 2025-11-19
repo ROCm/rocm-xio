@@ -1,0 +1,112 @@
+--- a/kernel-module/nvme_axiio_pci_driver.h
++++ b/kernel-module/nvme_axiio_pci_driver.h
+@@ -14,6 +14,7 @@
+ 
+ #include "nvme_admin_cmd.h"
+ #include "nvme_controller_init.h"
++#include "nvme_p2p_iova.h"
+ 
+ /* Controller context (per bound device) */
+ struct axiio_controller {
+@@ -24,6 +25,10 @@ struct axiio_controller {
+   struct nvme_admin_queue admin_q;
+   u32 doorbell_stride;
+   u16 max_queue_entries;
+   u32 version;
++  
++  /* IOVA support for QEMU P2P */
++  bool using_iova;
++  struct nvme_p2p_iova_info p2p_iova;
+ };
+ 
+@@ -156,6 +161,17 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
+     goto shutdown_admin;
+   }
+ 
++  /* Try to get P2P IOVA info (for QEMU emulated devices) */
++  if (is_qemu_emulated_nvme(pdev)) {
++    ret = nvme_get_p2p_iova_info(bar0, &axiio_ctrl->admin_q, &pdev->dev,
++                                 &axiio_ctrl->p2p_iova);
++    if (ret == 0) {
++      axiio_ctrl->using_iova = true;
++      pr_info("nvme_axiio: ✅ Using IOVA addresses for GPU access\n");
++    } else {
++      axiio_ctrl->using_iova = false;
++    }
++  }
++
+   pr_info("nvme_axiio: ✓ Controller initialized and ready\n");
+   pr_info("  Admin queue: SQ/CQ size=64 entries\n");
+   pr_info("  Max I/O queue size: %u entries\n", axiio_ctrl->max_queue_entries);
+@@ -310,6 +326,24 @@ static inline int nvme_axiio_create_io_queues(u16 qid, u16 qsize,
+   pci_info(ctrl->pdev, "nvme_axiio: ✓ I/O queues created (SQ %u, CQ %u)\n",
+            qid, qid);
++  
++  /* If using IOVA, queues are already mapped by QEMU - don't create them! */
++  if (ctrl->using_iova) {
++    pci_info(ctrl->pdev,
++             "nvme_axiio: ℹ️  IOVA mode - queues pre-mapped by QEMU\n");
++    pci_info(ctrl->pdev,
++             "  Skipping CREATE_SQ/CQ commands (not needed for IOVA)\n");
++    return 0;
++  }
++
+   return 0;
+ }
+ 
++/*
++ * Get doorbell address (physical or IOVA depending on mode)
++ */
++static inline u64 nvme_axiio_get_doorbell_addr(u16 qid, bool is_sq) {
++  struct axiio_controller* ctrl = nvme_axiio_get_controller();
++  
++  if (ctrl && ctrl->using_iova) {
++    /* Return IOVA doorbell address */
++    return ctrl->p2p_iova.doorbell_iova;
++  } else {
++    /* Calculate physical doorbell address */
++    u32 stride_bytes = 4 << ctrl->doorbell_stride;
++    u32 offset = 0x1000 + ((qid * 2) + (is_sq ? 0 : 1)) * stride_bytes;
++    return ctrl->bar0_phys + offset;
++  }
++}
++
+ #endif /* NVME_AXIIO_PCI_DRIVER_H */
+
+--- a/kernel-module/nvme_axiio.c
++++ b/kernel-module/nvme_axiio.c
+@@ -327,7 +327,21 @@ static long axiio_ioctl(struct file* filp, unsigned int cmd,
+ 
+   /* If we have exclusive controller access, create queues via admin commands */
+   if (nvme_axiio_get_controller()) {
++    struct axiio_controller* ctrl = nvme_axiio_get_controller();
+     int ret;
++    
++    /* Skip queue creation if using IOVA (QEMU pre-maps them) */
++    if (ctrl->using_iova) {
++      pr_info("nvme_axiio: Using IOVA mode - queues pre-mapped by QEMU\n");
++      pr_info("  Using doorbell IOVA: 0x%016llx\n",
++              ctrl->p2p_iova.doorbell_iova);
++      
++      /* Return IOVA addresses instead of physical */
++      info.sq_doorbell_phys = ctrl->p2p_iova.doorbell_iova;
++      info.cq_doorbell_phys = ctrl->p2p_iova.doorbell_iova + 4;
++      goto skip_create;
++    }
++    
+     pr_info("nvme_axiio: Creating I/O queues via admin commands...\n");
+     ret = nvme_axiio_create_io_queues(info.queue_id, info.queue_size,
+                                       ctx->sq_dma, ctx->cq_dma);
+@@ -344,6 +358,7 @@ static long axiio_ioctl(struct file* filp, unsigned int cmd,
+     }
+   }
+ 
++skip_create:
+   /* Copy queue info back to userspace */
+   if (copy_to_user((void __user*)arg, &info, sizeof(info))) {
+     return -EFAULT;
+
+
+
+
+

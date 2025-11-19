@@ -311,17 +311,37 @@ enum nvme_test_pattern {
   NVME_PATTERN_ZEROS = 1,      // All zeros
   NVME_PATTERN_ONES = 2,       // All ones (0xFF)
   NVME_PATTERN_RANDOM = 3,     // Pseudo-random (based on offset)
-  NVME_PATTERN_BLOCK_ID = 4    // Block ID repeated
+  NVME_PATTERN_BLOCK_ID = 4,   // Block ID repeated
+  NVME_PATTERN_LFSR = 5        // LFSR-based deterministic pattern
 };
 
 // Generate test data pattern
 __host__ __device__ static inline void nvme_generate_pattern(
-  uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
-  uint64_t offset) {
+  uint8_t* buffer, size_t size, enum nvme_test_pattern pattern, uint64_t offset,
+  uint32_t lfsr_seed = 0) {
+  // Debug: Print first few bytes before writing
+  if (threadIdx.x == 0 && blockIdx.x == 0 && size > 0) {
+    printf("GPU: nvme_generate_pattern: buffer=%p, size=%zu, pattern=%d\n",
+           buffer, size, pattern);
+    printf("GPU: First byte before write: 0x%02x\n", buffer[0]);
+  }
+
   switch (pattern) {
     case NVME_PATTERN_SEQUENTIAL:
+      // Write in chunks to avoid long loops
       for (size_t i = 0; i < size; i++) {
+        if (i < 10 && threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("GPU: Writing buffer[%zu] = 0x%02x\n", i,
+                 (uint8_t)((offset + i) & 0xFF));
+        }
         buffer[i] = (uint8_t)((offset + i) & 0xFF);
+        if (i == 9 && threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("GPU: First 10 bytes written, continuing...\n");
+        }
+      }
+      if (threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("GPU: Pattern generation complete, first byte after: 0x%02x\n",
+               buffer[0]);
       }
       break;
 
@@ -361,13 +381,33 @@ __host__ __device__ static inline void nvme_generate_pattern(
         }
       }
       break;
+
+    case NVME_PATTERN_LFSR: {
+      // LFSR-based deterministic pattern
+      // offset is treated as LBA, seed is combined with LBA-derived seed
+      // XOR combines user seed with LBA seed: seed=0 uses LBA-only, seed!=0
+      // varies pattern
+      uint64_t lba = offset / 512; // Assuming 512-byte blocks
+      uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+      uint32_t seed = base_seed ^ lfsr_seed; // XOR combines seeds
+      for (size_t i = 0; i < size; i++) {
+        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
+        rng ^= rng >> 16;
+        rng *= 0x85ebca6b;
+        rng ^= rng >> 13;
+        rng *= 0xc2b2ae35;
+        rng ^= rng >> 16;
+        buffer[i] = (uint8_t)(rng & 0xFF);
+      }
+      break;
+    }
   }
 }
 
 // Verify test data pattern
 __host__ __device__ static inline bool nvme_verify_pattern(
   const uint8_t* buffer, size_t size, enum nvme_test_pattern pattern,
-  uint64_t offset, size_t* error_offset) {
+  uint64_t offset, size_t* error_offset, uint32_t lfsr_seed = 0) {
   uint8_t expected;
 
   for (size_t i = 0; i < size; i++) {
@@ -395,6 +435,23 @@ __host__ __device__ static inline bool nvme_verify_pattern(
         expected = (uint8_t)((offset >> ((i % sizeof(uint64_t)) * 8)) & 0xFF);
         break;
 
+      case NVME_PATTERN_LFSR: {
+        // LFSR-based verification (same as generation)
+        // XOR combines user seed with LBA seed: seed=0 uses LBA-only,
+        // seed!=0 varies pattern
+        uint64_t lba = offset / 512; // Assuming 512-byte blocks
+        uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+        uint32_t seed = base_seed ^ lfsr_seed; // XOR combines seeds
+        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed + i);
+        rng ^= rng >> 16;
+        rng *= 0x85ebca6b;
+        rng ^= rng >> 13;
+        rng *= 0xc2b2ae35;
+        rng ^= rng >> 16;
+        expected = (uint8_t)(rng & 0xFF);
+        break;
+      }
+
       default:
         expected = buffer[i]; // Always pass for unknown patterns
         break;
@@ -421,11 +478,13 @@ extern "C" __device__ void nvme_ep_driveEndpoint(
   unsigned long long int* startTime, unsigned long long int* endTime);
 
 // Drive endpoint with data buffers (uses real PRPs)
-extern "C" __device__ void nvme_ep_driveEndpointWithBuffers(
+// Returns final sq_tail value for doorbell ringing
+extern "C" __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
-  uint32_t blockSize, enum nvme_test_pattern pattern);
+  uint32_t blockSize, enum nvme_test_pattern pattern, uint64_t readBufferDma,
+  uint64_t writeBufferDma, uint32_t lfsr_seed = 0);
 
 // Emulate endpoint
 extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(

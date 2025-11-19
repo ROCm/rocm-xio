@@ -1,0 +1,42 @@
+#!/bin/bash
+# Simple VM launcher - uses already-bound devices
+
+set -e
+
+# Safety check: Ensure rootfs NVMe is not passed through
+ROOTFS_NVME="c1:00.0"
+PCI_HOSTDEV_VALUE="c2:00.0,c3:00.0"
+if echo "${PCI_HOSTDEV_VALUE}" | grep -qw "${ROOTFS_NVME}"; then
+    echo "ERROR: Rootfs NVMe (${ROOTFS_NVME}) cannot be passed through!"
+    echo "       This would make the host system unbootable."
+    exit 1
+fi
+
+echo "========================================="
+echo "  GDA Test VM - Simple Launcher"
+echo "========================================="
+echo
+echo "Configuration:"
+echo "  GPU:        0000:10:00.0 (already bound to vfio-pci)"
+echo "  QEMU:       /opt/qemu-10.1.2-amd-p2p"
+echo "  Emulated:   1 NVMe with NVME_TRACE=all"
+echo "  Real NVMe:  c2:00.0, c3:00.0 (with iommufd)"
+echo "  Filesystem: /home/stebates/Projects/rocm-axiio"
+echo
+echo "Starting VM..."
+echo "========================================="
+echo
+
+cd /home/stebates/Projects/qemu-minimal/qemu
+
+QEMU_PATH=/opt/qemu-10.1.2-amd-p2p/bin/ \
+VM_NAME=rocm-axiio \
+VCPUS=16 \
+VMEM=16384 \
+FILESYSTEM=/home/stebates/Projects \
+NVME=1 \
+NVME_TRACE=all \
+NVME_TRACE_FILE=/home/stebates/Projects/rocm-axiio/nvme-gda-trace.log \
+P2P_HOSTDEV=10:00.0 \
+PCI_HOSTDEV=${PCI_HOSTDEV_VALUE} \
+./run-vm 2>&1 | tee /home/stebates/Projects/rocm-axiio/gda-test-vm.log

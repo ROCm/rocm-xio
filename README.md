@@ -38,10 +38,30 @@ sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 100 --verbose
 | **List endpoints** | `./bin/axiio-tester -e` |
 | **Emulated test** | `./bin/axiio-tester -n 100 --verbose` |
 
+### VM Testing (With GPU Passthrough, Real + Emulated NVMe)
+
+If you're testing in a VM environment with GPU passthrough and multiple
+NVMe devices, use the automated testing scripts:
+
+```bash
+# Interactive menu (easiest)
+./quick-test.sh
+
+# Automated build and test
+./build-and-test.sh --test real --nvme /dev/nvme0 --iterations 100
+
+# Simple clean build
+./clean-build.sh
+```
+
+See **[VM_TESTING_GUIDE.md](VM_TESTING_GUIDE.md)** for complete VM
+testing documentation.
+
 ## Table of Contents
 
 - [Introduction](#introduction)
 - [Quick Reference](#quick-reference)
+  - [VM Testing](#vm-testing-with-gpu-passthrough-real--emulated-nvme)
 - [Endpoints](#endpoints)
 - [Prerequisites](#prerequisites)
   - [Installing ROCm](#installing-rocm)

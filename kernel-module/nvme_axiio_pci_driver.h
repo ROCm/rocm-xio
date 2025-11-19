@@ -14,6 +14,7 @@
 
 #include "nvme_admin_cmd.h"
 #include "nvme_controller_init.h"
+#include "nvme_p2p_iova.h"
 
 /* Controller context (per bound device) */
 struct axiio_controller {
@@ -25,6 +26,10 @@ struct axiio_controller {
   u32 doorbell_stride;
   u16 max_queue_entries;
   u32 version;
+
+  /* IOVA support for QEMU P2P */
+  bool using_iova;
+  struct nvme_p2p_iova_info p2p_iova;
 };
 
 /* Global PCI device (set when driver binds) */
@@ -152,6 +157,24 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
   if (ret < 0) {
     pr_warn("nvme_axiio: Failed to identify controller: %d\n", ret);
     /* Continue anyway - not fatal */
+  }
+
+  /* Try to get P2P IOVA info (for QEMU emulated devices) */
+  axiio_ctrl->using_iova = false;
+  if (is_qemu_emulated_nvme(pdev)) {
+    /* Get admin queue (QID 0) IOVA info first */
+    ret = nvme_get_p2p_iova_info(bar0, &axiio_ctrl->admin_q, &pdev->dev,
+                                 0, /* queue_id = 0 (admin) */
+                                 &axiio_ctrl->p2p_iova);
+    if (ret == 0) {
+      axiio_ctrl->using_iova = true;
+      pr_info("nvme_axiio: ✅ Using IOVA addresses for GPU access\n");
+      pr_info("  Note: These are admin queue IOVAs\n");
+      pr_info("  I/O queue IOVAs will be retrieved when queues are created\n");
+    } else {
+      pr_warn("nvme_axiio: QEMU detected but P2P IOVA unavailable\n");
+      pr_warn("  Will fall back to physical addresses\n");
+    }
   }
 
   pr_info("nvme_axiio: ✓ Controller initialized and ready\n");
@@ -282,6 +305,21 @@ static inline int nvme_axiio_create_io_queues(u16 qid, u16 qsize,
     return -ENODEV;
   }
 
+  /* For real hardware, skip queue creation/deletion - assume queues exist */
+  if (!is_qemu_emulated_nvme(ctrl->pdev)) {
+    pci_info(ctrl->pdev,
+             "nvme_axiio: Real hardware detected - skipping queue creation\n");
+    pci_info(
+      ctrl->pdev,
+      "nvme_axiio: Assuming queue %u already exists from kernel driver\n", qid);
+    pci_info(
+      ctrl->pdev,
+      "nvme_axiio: Using provided DMA addresses (sq=0x%llx, cq=0x%llx)\n",
+      (u64)sq_dma, (u64)cq_dma);
+    return 0; /* Success - queues assumed to exist */
+  }
+
+  /* QEMU emulated device - create queues normally */
   /* Try to delete existing queues first (in case of previous crash) */
   pci_info(ctrl->pdev,
            "nvme_axiio: Cleaning up any existing queues (qid=%u)...\n", qid);
