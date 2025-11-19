@@ -43,7 +43,6 @@ struct DoorbellMapping {
 static inline int map_doorbell_for_gpu(int axiio_fd, uint16_t queue_id,
                                        DoorbellMapping* mapping) {
   int ret;
-  hsa_status_t status;
 
   std::cout << "\n=== Mapping NVMe Doorbell for GPU Access ===" << std::endl;
   std::cout << "  Queue ID: " << queue_id << std::endl;

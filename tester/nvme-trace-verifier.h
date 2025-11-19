@@ -127,11 +127,8 @@ inline int parse_trace_file(const std::string& trace_file_path,
     R"(pci_nvme_mmio_doorbell_cq\s+cqid\s+(\d+)\s+new_head\s+(\d+))");
 
   std::string line;
-  size_t line_num = 0;
 
   while (std::getline(file, line)) {
-    line_num++;
-
     // Skip empty lines or lines with only null bytes/whitespace
     if (line.empty() ||
         line.find_first_not_of(" \t\r\n\0") == std::string::npos) {

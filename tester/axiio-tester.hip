@@ -971,7 +971,6 @@ std::endl; #endif
       // Explicitly set and verify HIP device
       int deviceId = 0;
       HIP_CHECK(hipSetDevice(deviceId));
-      hipDevice_t device;
       HIP_CHECK(hipGetDevice(&deviceId));
       std::cout << "Using HIP device: " << deviceId << std::endl;
 
@@ -2189,7 +2188,6 @@ std::endl; #endif
         if (cqe_phase == phase) {
           // New completion available
           uint16_t cid = cqe->command_id;
-          uint16_t sq_head_val = cqe->sq_head;
           uint16_t status_code = (status >> 1) & 0xFF;
 
           // Skip stop command completion (CID 0xFFFF, opcode 0xFF) - not a real
@@ -2351,8 +2349,6 @@ std::endl; #endif
               if (!verified) {
                 if (mismatches < 10) {
                   // Regenerate expected value for error message
-                  uint64_t pattern_offset_for_error =
-                    block_lba * config->args.nvmeBlockSize;
                   uint8_t expected_byte = 0;
                   switch (pattern) {
                     case NVME_PATTERN_LFSR: {
