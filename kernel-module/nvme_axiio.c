@@ -16,14 +16,14 @@
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/memremap.h>
 #include <linux/module.h>
 #include <linux/nvme.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <linux/io.h>
-#include <linux/memremap.h>
 
 #include "nvme_axiio_pci_driver.h"
 #include "nvme_doorbell_dmabuf.h" /* dmabuf export for GPU-direct! */
@@ -95,8 +95,8 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
   if (pdev) {
     pci_info(pdev, "Using PCI-bound device\n");
     pci_info(pdev, "  Device: %s\n", pci_name(pdev));
-    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n",
-             pdev->vendor, pdev->device);
+    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+             pdev->device);
     pci_dev_get(pdev); /* Take reference */
     return pdev;
   }
@@ -111,8 +111,8 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
   while ((pdev = pci_get_class(0x01080000, pdev)) != NULL) {
     pci_info(pdev, "Found NVMe device via pci_get_class\n");
     pci_info(pdev, "  Device: %s\n", pci_name(pdev));
-    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n",
-             pdev->vendor, pdev->device);
+    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+             pdev->device);
     pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
     /* Return the first NVMe controller found */
     /* TODO: Match against major/minor to find specific device */
@@ -131,8 +131,8 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
     if ((pdev->class >> 8) == 0x0108) {
       pci_info(pdev, "✓ Found NVMe device via for_each_pci_dev\n");
       pci_info(pdev, "  Device: %s\n", pci_name(pdev));
-      pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n",
-               pdev->vendor, pdev->device);
+      pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+               pdev->device);
       pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
       pci_dev_get(pdev); /* Take reference */
       return pdev;
@@ -175,8 +175,8 @@ static int axiio_open(struct inode* inode, struct file* filp) {
   /* Print comprehensive PCI device information */
   pci_info(pdev, "NVMe PCI device found:\n");
   pci_info(pdev, "  Device: %s\n", pci_name(pdev));
-  pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n",
-           pdev->vendor, pdev->device);
+  pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+           pdev->device);
   pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
   pci_info(pdev, "  Subsystem Vendor: 0x%04x Subsystem: 0x%04x\n",
            pdev->subsystem_vendor, pdev->subsystem_device);
@@ -215,7 +215,7 @@ static int axiio_open(struct inode* inode, struct file* filp) {
   }
 
   pci_info(pdev, "BAR0 mapped at phys=0x%llx size=0x%llx stride=%u\n",
-          (u64)ctx->bar0_phys, (u64)ctx->bar0_size, ctx->doorbell_stride);
+           (u64)ctx->bar0_phys, (u64)ctx->bar0_size, ctx->doorbell_stride);
 
   filp->private_data = ctx;
   return 0;
@@ -255,7 +255,9 @@ static int axiio_release(struct inode* inode, struct file* filp) {
         dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
                           ctx->sq_dma);
       } else {
-        pci_info(ctx->pci_dev, "QEMU GPA buffer (SQ GPA=0x%llx) - no cleanup needed\n", ctx->sq_dma);
+        pci_info(ctx->pci_dev,
+                 "QEMU GPA buffer (SQ GPA=0x%llx) - no cleanup needed\n",
+                 ctx->sq_dma);
       }
     }
     if (ctx->cq_virt) {
@@ -264,7 +266,9 @@ static int axiio_release(struct inode* inode, struct file* filp) {
         dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
                           ctx->cq_dma);
       } else {
-        pci_info(ctx->pci_dev, "QEMU GPA buffer (CQ GPA=0x%llx) - no cleanup needed\n", ctx->cq_dma);
+        pci_info(ctx->pci_dev,
+                 "QEMU GPA buffer (CQ GPA=0x%llx) - no cleanup needed\n",
+                 ctx->cq_dma);
       }
     }
 
@@ -310,7 +314,7 @@ static int axiio_ioctl_create_queue(
     return -EFAULT;
 
   pci_info(ctx->pci_dev, "Creating queue qid=%u size=%u\n", info.queue_id,
-          info.queue_size);
+           info.queue_size);
 
   ctx->sq_size = info.queue_size * 64; /* SQE is 64 bytes */
   ctx->cq_size = info.queue_size * 16; /* CQE is 16 bytes */
@@ -324,41 +328,47 @@ static int axiio_ioctl_create_queue(
       int ret;
 
       pci_info(ctx->pci_dev, "Requesting IOVA/GPA info for queue %u...\n",
-              info.queue_id);
+               info.queue_id);
 
       ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q,
-                                   &ctx->pci_dev->dev,
-                                   info.queue_id, &queue_iova);
+                                   &ctx->pci_dev->dev, info.queue_id,
+                                   &queue_iova);
       if (ret == 0 && queue_iova.sqe_gpa != 0) {
         /* Use QEMU's GPA addresses - these are guest physical addresses */
         pci_info(ctx->pci_dev, "✅ Using QEMU-provided GPA addresses:\n");
-        pci_info(ctx->pci_dev, "  SQE GPA:      0x%016llx\n", queue_iova.sqe_gpa);
-        pci_info(ctx->pci_dev, "  CQE GPA:      0x%016llx\n", queue_iova.cqe_gpa);
-        pci_info(ctx->pci_dev, "  Doorbell GPA: 0x%016llx\n", queue_iova.doorbell_gpa);
+        pci_info(ctx->pci_dev, "  SQE GPA:      0x%016llx\n",
+                 queue_iova.sqe_gpa);
+        pci_info(ctx->pci_dev, "  CQE GPA:      0x%016llx\n",
+                 queue_iova.cqe_gpa);
+        pci_info(ctx->pci_dev, "  Doorbell GPA: 0x%016llx\n",
+                 queue_iova.doorbell_gpa);
 
         /* For QEMU GPA addresses, we don't need kernel virtual addresses.
          * We'll map them directly to userspace via mmap using remap_pfn_range.
          * Set virt pointers to NULL to indicate we're using GPA directly. */
-        ctx->sq_virt = NULL;  /* Will be mapped via mmap */
-        ctx->cq_virt = NULL;  /* Will be mapped via mmap */
+        ctx->sq_virt = NULL; /* Will be mapped via mmap */
+        ctx->cq_virt = NULL; /* Will be mapped via mmap */
 
         /* Use GPA addresses as DMA addresses */
         ctx->sq_dma = queue_iova.sqe_gpa;
         ctx->cq_dma = queue_iova.cqe_gpa;
 
-        pci_info(ctx->pci_dev, "✅ Using QEMU GPA buffers (will map via mmap):\n");
+        pci_info(ctx->pci_dev,
+                 "✅ Using QEMU GPA buffers (will map via mmap):\n");
         pci_info(ctx->pci_dev, "  SQE GPA: 0x%llx\n", ctx->sq_dma);
         pci_info(ctx->pci_dev, "  CQE GPA: 0x%llx\n", ctx->cq_dma);
 
         /* Skip DMA allocation - we're using QEMU's buffers */
         goto use_qemu_buffers;
       } else {
-        pci_warn(ctx->pci_dev, "QEMU GPA addresses not available, using DMA alloc\n");
+        pci_warn(ctx->pci_dev,
+                 "QEMU GPA addresses not available, using DMA alloc\n");
       }
     }
   }
 
-  /* Fallback: Allocate DMA-coherent memory (for real hardware or if QEMU GPA unavailable) */
+  /* Fallback: Allocate DMA-coherent memory (for real hardware or if QEMU GPA
+   * unavailable) */
   ctx->sq_virt = dma_alloc_coherent(&ctx->pci_dev->dev, ctx->sq_size,
                                     &ctx->sq_dma, GFP_KERNEL);
   if (!ctx->sq_virt) {
@@ -400,12 +410,14 @@ use_qemu_buffers:
   ctx->queue_id = info.queue_id;
 
   pci_info(ctx->pci_dev, "Queue memory allocated successfully\n");
-  pci_info(ctx->pci_dev, "  SQ DMA: 0x%llx (size %zu)\n", (u64)ctx->sq_dma, ctx->sq_size);
-  pci_info(ctx->pci_dev, "  CQ DMA: 0x%llx (size %zu)\n", (u64)ctx->cq_dma, ctx->cq_size);
-  pci_info(ctx->pci_dev, "  SQ Doorbell: phys=0x%llx offset=0x%x\n", info.sq_doorbell_phys,
-          info.sq_doorbell_offset);
-  pci_info(ctx->pci_dev, "  CQ Doorbell: phys=0x%llx offset=0x%x\n", info.cq_doorbell_phys,
-          info.cq_doorbell_offset);
+  pci_info(ctx->pci_dev, "  SQ DMA: 0x%llx (size %zu)\n", (u64)ctx->sq_dma,
+           ctx->sq_size);
+  pci_info(ctx->pci_dev, "  CQ DMA: 0x%llx (size %zu)\n", (u64)ctx->cq_dma,
+           ctx->cq_size);
+  pci_info(ctx->pci_dev, "  SQ Doorbell: phys=0x%llx offset=0x%x\n",
+           info.sq_doorbell_phys, info.sq_doorbell_offset);
+  pci_info(ctx->pci_dev, "  CQ Doorbell: phys=0x%llx offset=0x%x\n",
+           info.cq_doorbell_phys, info.cq_doorbell_offset);
 
   /* If we have exclusive controller access, create queues via admin commands */
   if (nvme_axiio_get_controller()) {
@@ -436,17 +448,20 @@ use_qemu_buffers:
       struct nvme_p2p_iova_info queue_iova;
 
       pci_info(ctx->pci_dev, "Requesting IOVA info for queue %u...\n",
-              info.queue_id);
+               info.queue_id);
 
       ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q,
-                                   &ctx->pci_dev->dev,
-                                   info.queue_id, &queue_iova);
+                                   &ctx->pci_dev->dev, info.queue_id,
+                                   &queue_iova);
       if (ret == 0) {
         pci_info(ctx->pci_dev, "✅ Got IOVA addresses for QID %u:\n",
-                info.queue_id);
-        pci_info(ctx->pci_dev, "  SQE IOVA:      0x%016llx\n", queue_iova.sqe_iova);
-        pci_info(ctx->pci_dev, "  CQE IOVA:      0x%016llx\n", queue_iova.cqe_iova);
-        pci_info(ctx->pci_dev, "  Doorbell IOVA: 0x%016llx\n", queue_iova.doorbell_iova);
+                 info.queue_id);
+        pci_info(ctx->pci_dev, "  SQE IOVA:      0x%016llx\n",
+                 queue_iova.sqe_iova);
+        pci_info(ctx->pci_dev, "  CQE IOVA:      0x%016llx\n",
+                 queue_iova.cqe_iova);
+        pci_info(ctx->pci_dev, "  Doorbell IOVA: 0x%016llx\n",
+                 queue_iova.doorbell_iova);
 
         /* Return IOVA addresses to userspace */
         info.sq_dma_addr = queue_iova.sqe_iova;
@@ -454,14 +469,17 @@ use_qemu_buffers:
         info.sq_doorbell_phys = queue_iova.doorbell_iova;
         info.cq_doorbell_phys = queue_iova.doorbell_iova + 4;
       } else {
-        pci_warn(ctx->pci_dev, "Failed to get IOVA for QID %u, using physical\n",
-                info.queue_id);
+        pci_warn(ctx->pci_dev,
+                 "Failed to get IOVA for QID %u, using physical\n",
+                 info.queue_id);
       }
     }
   } else {
     pci_warn(ctx->pci_dev, "No exclusive controller access\n");
-    pci_warn(ctx->pci_dev, "  Queue memory allocated but not created on controller\n");
-    pci_warn(ctx->pci_dev, "  Userspace must use NVME_IOCTL_ADMIN_CMD to create queues\n");
+    pci_warn(ctx->pci_dev,
+             "  Queue memory allocated but not created on controller\n");
+    pci_warn(ctx->pci_dev,
+             "  Userspace must use NVME_IOCTL_ADMIN_CMD to create queues\n");
   }
 
   ctx->queue_created = true;
@@ -486,8 +504,10 @@ static int axiio_ioctl_register_user_queue(
 
   pci_info(ctx->pci_dev, "Registering user-provided queue memory\n");
   pci_info(ctx->pci_dev, "  Queue ID: %u\n", info.queue_id);
-  pci_info(ctx->pci_dev, "  User SQ DMA: 0x%llx\n", (unsigned long long)info.sq_dma_addr_user);
-  pci_info(ctx->pci_dev, "  User CQ DMA: 0x%llx\n", (unsigned long long)info.cq_dma_addr_user);
+  pci_info(ctx->pci_dev, "  User SQ DMA: 0x%llx\n",
+           (unsigned long long)info.sq_dma_addr_user);
+  pci_info(ctx->pci_dev, "  User CQ DMA: 0x%llx\n",
+           (unsigned long long)info.cq_dma_addr_user);
 
   /* Check if queues are already allocated */
   if (!ctx->queue_created) {
@@ -540,7 +560,7 @@ static int axiio_ioctl_map_doorbell_for_gpu(
     return -EFAULT;
 
   pci_info(ctx->pci_dev, "Mapping doorbell for GPU access (QID %u)\n",
-          map.queue_id);
+           map.queue_id);
 
   /* BAR0 bus address - this is what GPU needs for P2P access */
   map.bar0_bus_addr = pci_resource_start(ctx->pci_dev, 0);
@@ -556,11 +576,13 @@ static int axiio_ioctl_map_doorbell_for_gpu(
   map.doorbell_phys = map.bar0_phys + map.doorbell_offset;
 
   pci_info(ctx->pci_dev, "Doorbell mapping for QID %u:\n", map.queue_id);
-  pci_info(ctx->pci_dev, "  BAR0 bus address: 0x%llx (for GPU P2P)\n", map.bar0_bus_addr);
+  pci_info(ctx->pci_dev, "  BAR0 bus address: 0x%llx (for GPU P2P)\n",
+           map.bar0_bus_addr);
   pci_info(ctx->pci_dev, "  BAR0 physical: 0x%llx (for CPU)\n", map.bar0_phys);
   pci_info(ctx->pci_dev, "  Doorbell offset: 0x%x\n", map.doorbell_offset);
-  pci_info(ctx->pci_dev, "  Doorbell bus address: 0x%llx (GPU should use this)\n",
-          map.doorbell_bus_addr);
+  pci_info(ctx->pci_dev,
+           "  Doorbell bus address: 0x%llx (GPU should use this)\n",
+           map.doorbell_bus_addr);
 
   if (copy_to_user(umap, &map, sizeof(map)))
     return -EFAULT;
@@ -600,7 +622,7 @@ static int axiio_ioctl_get_gpu_doorbell(
   info.mmap_size = PAGE_SIZE;
 
   pci_info(ctx->pci_dev, "GPU doorbell setup for QID %u (%s):\n", info.queue_id,
-          info.is_sq ? "SQ" : "CQ");
+           info.is_sq ? "SQ" : "CQ");
   pci_info(ctx->pci_dev, "  Doorbell phys: 0x%llx\n", info.doorbell_phys);
   pci_info(ctx->pci_dev, "  GPU FD: %d\n", info.gpu_fd);
 
@@ -619,7 +641,7 @@ static int axiio_ioctl_get_gpu_doorbell(
   }
 
   pci_info(ctx->pci_dev, "  Use mmap(fd, PAGE_SIZE, offset=%llu*PAGE_SIZE)\n",
-          info.mmap_offset);
+           info.mmap_offset);
 
   if (copy_to_user(uinfo, &info, sizeof(info)))
     return -EFAULT;
@@ -645,7 +667,8 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
     return -ENODEV;
   }
 
-  pci_info(ctx->pci_dev, "Allocating DMA buffer (size=%llu bytes)\n", info.size);
+  pci_info(ctx->pci_dev, "Allocating DMA buffer (size=%llu bytes)\n",
+           info.size);
 
   /* Allocate DMA-coherent memory */
   virt_addr = dma_alloc_coherent(&ctx->pci_dev->dev, info.size, &dma_addr,
@@ -710,7 +733,8 @@ static int axiio_ioctl_export_doorbell_dmabuf(
                                          info.is_sq, ctrl->doorbell_stride);
 
   pci_info(ctx->pci_dev, "🚀🚀🚀 EXPORTING DOORBELL AS DMABUF! 🚀🚀🚀\n");
-  pci_info(ctx->pci_dev, "  QID %u (%s)\n", info.queue_id, info.is_sq ? "SQ" : "CQ");
+  pci_info(ctx->pci_dev, "  QID %u (%s)\n", info.queue_id,
+           info.is_sq ? "SQ" : "CQ");
   pci_info(ctx->pci_dev, "  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
 
   /* Export as dmabuf! */
@@ -810,8 +834,9 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
       /* Using QEMU GPA - map directly using remap_pfn_range */
       /* GPA is already a guest physical address, convert to PFN */
       unsigned long pfn = ctx->sq_dma >> PAGE_SHIFT;
-      pci_info(ctx->pci_dev, "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n",
-              ctx->sq_dma, pfn);
+      pci_info(ctx->pci_dev,
+               "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n", ctx->sq_dma,
+               pfn);
 
       /* Use normal page protection (not write-combine) for RAM */
       vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
@@ -825,8 +850,8 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     } else {
       /* Use dma_mmap_coherent for DMA-allocated memory */
       vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
-      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->sq_virt, ctx->sq_dma,
-                              ctx->sq_size);
+      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->sq_virt,
+                              ctx->sq_dma, ctx->sq_size);
       if (ret < 0) {
         pci_err(ctx->pci_dev, "dma_mmap_coherent failed for SQ: %d\n", ret);
         return ret;
@@ -847,8 +872,9 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
       /* Using QEMU GPA - map directly using remap_pfn_range */
       /* GPA is already a guest physical address, convert to PFN */
       unsigned long pfn = ctx->cq_dma >> PAGE_SHIFT;
-      pci_info(ctx->pci_dev, "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n",
-              ctx->cq_dma, pfn);
+      pci_info(ctx->pci_dev,
+               "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n", ctx->cq_dma,
+               pfn);
 
       /* Use normal page protection (not write-combine) for RAM */
       vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
@@ -862,8 +888,8 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     } else {
       /* Use dma_mmap_coherent for DMA-allocated memory */
       vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
-      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->cq_virt, ctx->cq_dma,
-                              ctx->cq_size);
+      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->cq_virt,
+                              ctx->cq_dma, ctx->cq_size);
       if (ret < 0) {
         pci_err(ctx->pci_dev, "dma_mmap_coherent failed for CQ: %d\n", ret);
         return ret;
@@ -882,19 +908,17 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     if (ctrl && ctrl->using_iova) {
       /* QEMU P2P: Use IOVA address (page-aligned) */
       pfn = ctrl->p2p_iova.doorbell_iova >> PAGE_SHIFT;
-      pr_info(
-        "nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
-        "iova=0x%llx, pfn=0x%lx)\n",
-        ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
+      pr_info("nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
+              "iova=0x%llx, pfn=0x%lx)\n",
+              ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
     } else {
       /* Physical hardware: Use normal BAR0 address */
       doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
       unsigned long page_offset = doorbell_offset & PAGE_MASK;
       pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
-      pr_info(
-        "nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
-        "pfn=0x%lx)\n",
-        ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+      pr_info("nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
+              "pfn=0x%lx)\n",
+              ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
     }
 
     /* Set GPU-compatible page protection flags */
@@ -927,8 +951,8 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
       pr_info("  GPU file present - doorbell will be GPU-accessible\n");
 
       /* Use GPU-aware mmap - pass queue ID and PCI device for IOVA lookup */
-      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping,
-                                      ctx->queue_id, ctx->pci_dev);
+      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping, ctx->queue_id,
+                                       ctx->pci_dev);
       if (ret < 0) {
         pr_err("nvme_axiio: GPU-aware mmap failed: %d\n", ret);
         /* Fall through to regular mapping */

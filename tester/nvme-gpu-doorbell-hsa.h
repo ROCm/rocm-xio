@@ -187,7 +187,7 @@ static inline int map_gpu_doorbell(
     struct nvme_axiio_queue_info queue_info;
     memset(&queue_info, 0, sizeof(queue_info));
     queue_info.queue_id = queue_id;
-    
+
     // Try to get queue info - if queue exists, this will populate the structure
     int ret = ioctl(axiio_fd, NVME_AXIIO_CREATE_QUEUE, &queue_info);
     if (ret == 0 || errno == EEXIST) {
@@ -206,7 +206,7 @@ static inline int map_gpu_doorbell(
   if (iova_doorbell == 0) {
     std::cout << "  ⚠️  IOVA address is 0, using physical address with HSA lock"
               << std::endl;
-    
+
     // Get queue info if we don't have it
     struct nvme_axiio_queue_info queue_info;
     bool have_qinfo = false;
@@ -239,7 +239,7 @@ static inline int map_gpu_doorbell(
         std::cerr << "Error: Failed to mmap doorbell" << std::endl;
         return -1;
       }
-      
+
       // Lock with HSA for GPU access
       void* locked_ptr = nullptr;
       hsa_status_t status = hsa_amd_memory_lock(mapped, getpagesize(),
@@ -272,7 +272,7 @@ static inline int map_gpu_doorbell(
   std::cout
     << "  Using IOVA address directly (QEMU has mapped it in GPU's IOMMU)"
     << std::endl;
-  
+
   // CRITICAL: For IOVA mode, we skip the kernel module's mmap (pgoff=3)
   // because the kernel module maps physical BAR0, not IOVA.
   // Instead, we map the IOVA address directly using anonymous mmap.
@@ -360,7 +360,7 @@ static inline int map_gpu_doorbell(
   uint64_t final_iova = iova_doorbell + sq_offset;
   // iova_page_base already defined above at line 279
   bool map_fixed_succeeded = (iova_hva == (void*)iova_page_base);
-  
+
   // Always use HSA-locked pointer - GPU MMU knows about this HVA
   // The HVA corresponds to the IOVA range, so IOMMU will handle translation
   volatile uint32_t* gpu_doorbell = (volatile uint32_t*)((char*)hsa_locked_ptr +

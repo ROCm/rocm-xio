@@ -305,6 +305,21 @@ static inline int nvme_axiio_create_io_queues(u16 qid, u16 qsize,
     return -ENODEV;
   }
 
+  /* For real hardware, skip queue creation/deletion - assume queues exist */
+  if (!is_qemu_emulated_nvme(ctrl->pdev)) {
+    pci_info(ctrl->pdev,
+             "nvme_axiio: Real hardware detected - skipping queue creation\n");
+    pci_info(
+      ctrl->pdev,
+      "nvme_axiio: Assuming queue %u already exists from kernel driver\n", qid);
+    pci_info(
+      ctrl->pdev,
+      "nvme_axiio: Using provided DMA addresses (sq=0x%llx, cq=0x%llx)\n",
+      (u64)sq_dma, (u64)cq_dma);
+    return 0; /* Success - queues assumed to exist */
+  }
+
+  /* QEMU emulated device - create queues normally */
   /* Try to delete existing queues first (in case of previous crash) */
   pci_info(ctrl->pdev,
            "nvme_axiio: Cleaning up any existing queues (qid=%u)...\n", qid);
