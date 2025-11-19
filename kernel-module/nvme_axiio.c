@@ -230,7 +230,7 @@ static int axiio_release(struct inode* inode, struct file* filp) {
   if (ctx && ctx->pci_dev)
     pci_info(ctx->pci_dev, "Device closed\n");
   else
-    pr_info("nvme_axiio: Device closed\n");
+    dev_info(&ctx->pci_dev->dev, "nvme_axiio: Device closed\n");
 
   if (ctx) {
     /* Free allocated DMA buffers */
@@ -283,7 +283,7 @@ static int axiio_release(struct inode* inode, struct file* filp) {
 
     /* Clean up GPU mapping */
     if (ctx->gpu_mapping.gpu_file) {
-      nvme_unmap_doorbell_from_gpu(&ctx->gpu_mapping);
+      nvme_unmap_doorbell_from_gpu(&ctx->pci_dev->dev, &ctx->gpu_mapping);
     }
 
     kfree(ctx);
@@ -606,7 +606,7 @@ static int axiio_ioctl_get_gpu_doorbell(
     return -EFAULT;
 
   if (!ctrl || !ctrl->bar0) {
-    pr_err("nvme_axiio: No exclusive controller access\n");
+    dev_err(&ctx->pci_dev->dev, "nvme_axiio: No exclusive controller access\n");
     return -ENODEV;
   }
 
@@ -630,8 +630,9 @@ static int axiio_ioctl_get_gpu_doorbell(
   if (info.gpu_fd >= 0) {
     pci_info(ctx->pci_dev, "🚀 Setting up GPU-direct doorbell...\n");
 
-    ret = nvme_map_doorbell_for_gpu(&ctx->gpu_mapping, info.gpu_fd,
-                                    info.doorbell_phys, info.mmap_size);
+    ret = nvme_map_doorbell_for_gpu(&ctx->pci_dev->dev, &ctx->gpu_mapping,
+                                    info.gpu_fd, info.doorbell_phys,
+                                    info.mmap_size);
     if (ret < 0) {
       pci_err(ctx->pci_dev, "GPU mapping setup failed: %d\n", ret);
       /* Continue anyway - fallback to regular mapping */
@@ -712,7 +713,7 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
 /*
  * Export doorbell as dmabuf (Standard Linux GPU-Direct!)
  */
-static int axiio_ioctl_export_doorbell_dmabuf(
+static __maybe_unused int axiio_ioctl_export_doorbell_dmabuf(
   struct axiio_file_ctx* ctx,
   struct nvme_doorbell_dmabuf_export __user* uinfo) {
   struct axiio_controller* ctrl = nvme_axiio_get_controller();
@@ -724,7 +725,7 @@ static int axiio_ioctl_export_doorbell_dmabuf(
     return -EFAULT;
 
   if (!ctrl || !ctrl->bar0) {
-    pr_err("nvme_axiio: No exclusive controller access\n");
+    dev_err(&ctx->pci_dev->dev, "nvme_axiio: No exclusive controller access\n");
     return -ENODEV;
   }
 
@@ -908,17 +909,19 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     if (ctrl && ctrl->using_iova) {
       /* QEMU P2P: Use IOVA address (page-aligned) */
       pfn = ctrl->p2p_iova.doorbell_iova >> PAGE_SHIFT;
-      pr_info("nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
-              "iova=0x%llx, pfn=0x%lx)\n",
-              ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
+      dev_info(&ctx->pci_dev->dev,
+               "nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
+               "iova=0x%llx, pfn=0x%lx)\n",
+               ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
     } else {
       /* Physical hardware: Use normal BAR0 address */
       doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
       unsigned long page_offset = doorbell_offset & PAGE_MASK;
       pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
-      pr_info("nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
-              "pfn=0x%lx)\n",
-              ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+      dev_info(&ctx->pci_dev->dev,
+               "nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
+               "pfn=0x%lx)\n",
+               ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
     }
 
     /* Set GPU-compatible page protection flags */
@@ -932,46 +935,55 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     /* This mapping will be GPU-accessible! */
     ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
     if (ret < 0) {
-      pr_err("nvme_axiio: remap_pfn_range failed for doorbell: %d\n", ret);
+      dev_err(&ctx->pci_dev->dev,
+              "nvme_axiio: remap_pfn_range failed for doorbell: %d\n", ret);
       return ret;
     }
 
-    pr_info(
+    dev_info(
+      &ctx->pci_dev->dev,
       "nvme_axiio: ✓ Doorbell mapped with GPU-compatible flags (WC + IO)\n");
 
   } else if (vma->vm_pgoff == 3) {
     /* Map GPU doorbell with GPU MMU registration! */
 
-    pr_info("nvme_axiio: mmap GPU doorbell (GPU-DIRECT mode)\n");
-    pr_info("  Queue ID: %u\n", ctx->queue_id);
+    dev_info(&ctx->pci_dev->dev,
+             "nvme_axiio: mmap GPU doorbell (GPU-DIRECT mode)\n");
+    dev_info(&ctx->pci_dev->dev, "  Queue ID: %u\n", ctx->queue_id);
 
     /* Check if GPU context was set up via IOCTL */
     if (ctx->gpu_mapping.gpu_file) {
-      pr_info("nvme_axiio: 🚀 Using GPU-aware mapping!\n");
-      pr_info("  GPU file present - doorbell will be GPU-accessible\n");
+      dev_info(&ctx->pci_dev->dev, "nvme_axiio: 🚀 Using GPU-aware mapping!\n");
+      dev_info(&ctx->pci_dev->dev,
+               "  GPU file present - doorbell will be GPU-accessible\n");
 
       /* Use GPU-aware mmap - pass queue ID and PCI device for IOVA lookup */
       ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping, ctx->queue_id,
                                        ctx->pci_dev);
       if (ret < 0) {
-        pr_err("nvme_axiio: GPU-aware mmap failed: %d\n", ret);
+        dev_err(&ctx->pci_dev->dev, "nvme_axiio: GPU-aware mmap failed: %d\n",
+                ret);
         /* Fall through to regular mapping */
       } else {
-        pr_info("nvme_axiio: ✓ TRUE GPU-DIRECT doorbell mapped!\n");
-        pr_info("  GPU VA: 0x%lx\n", vma->vm_start);
-        pr_info("  GPU can now write directly to NVMe doorbell!\n");
+        dev_info(&ctx->pci_dev->dev,
+                 "nvme_axiio: ✓ TRUE GPU-DIRECT doorbell mapped!\n");
+        dev_info(&ctx->pci_dev->dev, "  GPU VA: 0x%lx\n", vma->vm_start);
+        dev_info(&ctx->pci_dev->dev,
+                 "  GPU can now write directly to NVMe doorbell!\n");
         return 0;
       }
     }
 
     /* Fallback: Regular mapping (no GPU MMU registration) */
-    pr_info("nvme_axiio: Using standard mapping (no GPU FD provided)\n");
+    dev_info(&ctx->pci_dev->dev,
+             "nvme_axiio: Using standard mapping (no GPU FD provided)\n");
 
     struct axiio_controller* ctrl = nvme_axiio_get_controller();
     resource_size_t doorbell_phys;
 
     if (!ctrl || !ctrl->bar0) {
-      pr_err("nvme_axiio: No exclusive controller for doorbell mapping\n");
+      dev_err(&ctx->pci_dev->dev,
+              "nvme_axiio: No exclusive controller for doorbell mapping\n");
       return -ENODEV;
     }
 
@@ -980,16 +992,19 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
                                            true, /* SQ doorbell */
                                            ctrl->doorbell_stride);
 
-    pr_info("  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
+    dev_info(&ctx->pci_dev->dev, "  Doorbell phys: 0x%llx\n",
+             (u64)doorbell_phys);
 
     /* Setup standard doorbell mapping */
-    ret = nvme_setup_gpu_doorbell_vma(vma, doorbell_phys, size);
+    ret = nvme_setup_gpu_doorbell_vma(&ctx->pci_dev->dev, vma, doorbell_phys,
+                                      size);
     if (ret < 0) {
-      pr_err("nvme_axiio: Failed to setup doorbell VMA: %d\n", ret);
+      dev_err(&ctx->pci_dev->dev,
+              "nvme_axiio: Failed to setup doorbell VMA: %d\n", ret);
       return ret;
     }
 
-    pr_info("nvme_axiio: ✓ Standard doorbell mapped\n");
+    dev_info(&ctx->pci_dev->dev, "nvme_axiio: ✓ Standard doorbell mapped\n");
 
   } else if (vma->vm_pgoff >= 4) {
     /* Map DMA buffers (offset 4+)
@@ -1001,8 +1016,9 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     int buffer_index = vma->vm_pgoff - 4;
     int found_index = 0;
 
-    pr_info("nvme_axiio: mmap DMA buffer (index=%d, size=%lu)\n", buffer_index,
-            size);
+    dev_info(&ctx->pci_dev->dev,
+             "nvme_axiio: mmap DMA buffer (index=%d, size=%lu)\n", buffer_index,
+             size);
 
     /* Find the DMA buffer at the requested index */
     mutex_lock(&ctx->dma_lock);
@@ -1015,13 +1031,15 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     mutex_unlock(&ctx->dma_lock);
 
     if (!entry || found_index != buffer_index) {
-      pr_err("nvme_axiio: DMA buffer index %d not found\n", buffer_index);
+      dev_err(&ctx->pci_dev->dev, "nvme_axiio: DMA buffer index %d not found\n",
+              buffer_index);
       return -EINVAL;
     }
 
     if (size > entry->size) {
-      pr_err("nvme_axiio: Requested size %lu exceeds buffer size %zu\n", size,
-             entry->size);
+      dev_err(&ctx->pci_dev->dev,
+              "nvme_axiio: Requested size %lu exceeds buffer size %zu\n", size,
+              entry->size);
       return -EINVAL;
     }
 
@@ -1030,12 +1048,14 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, entry->virt_addr,
                             entry->dma_addr, size);
     if (ret < 0) {
-      pr_err("nvme_axiio: dma_mmap_coherent failed for DMA buffer: %d\n", ret);
+      dev_err(&ctx->pci_dev->dev,
+              "nvme_axiio: dma_mmap_coherent failed for DMA buffer: %d\n", ret);
       return ret;
     }
 
-    pr_info("nvme_axiio: ✓ DMA buffer mapped (index=%d, DMA=0x%llx)\n",
-            buffer_index, (u64)entry->dma_addr);
+    dev_info(&ctx->pci_dev->dev,
+             "nvme_axiio: ✓ DMA buffer mapped (index=%d, DMA=0x%llx)\n",
+             buffer_index, (u64)entry->dma_addr);
 
   } else {
     return -EINVAL;
@@ -1099,15 +1119,20 @@ static int __init nvme_axiio_init(void) {
     return PTR_ERR(axiio_device);
   }
 
-  pr_info("nvme_axiio: Module loaded successfully, device /dev/%s created\n",
-          NVME_AXIIO_NAME);
+  if (axiio_device)
+    dev_info(axiio_device,
+             "nvme_axiio: Module loaded successfully, device /dev/%s created\n",
+             NVME_AXIIO_NAME);
+  else
+    pr_info("nvme_axiio: Module loaded successfully, device /dev/%s created\n",
+            NVME_AXIIO_NAME);
 
   /* Register as PCI driver for device binding */
   ret = nvme_axiio_register_pci_driver();
   if (ret < 0) {
     pr_warn("nvme_axiio: PCI driver registration failed: %d\n", ret);
-    pr_warn(
-      "  Character device still available, but cannot bind to PCI devices\n");
+    pr_warn("nvme_axiio: Character device still available, but cannot bind to "
+            "PCI devices\n");
     /* Don't fail module load - character device still works */
   }
 
