@@ -8,6 +8,9 @@
 
 #include <hip/hip_runtime.h>
 
+// Global debug flag for GPU device functions (declared before extern "C")
+__device__ bool g_nvme_ep_debug = false;
+
 #include "axiio-endpoints.h"
 #include "nvme-ep.h"
 
@@ -287,13 +290,16 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
   uint32_t blockSize, enum nvme_test_pattern pattern, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsr_seed) {
-  printf("GPU: nvme_ep_driveEndpointWithBuffers called: sqeIterations=%u, "
-         "sqeAddr=%p, cqeAddr=%p\n",
-         sqeIterations, sqeAddr, cqeAddr);
-  printf("GPU: readBuffer=%p, writeBuffer=%p, bufferSize=%zu\n", readBuffer,
-         writeBuffer, bufferSize);
-  printf("GPU: readBufferDma=0x%llx, writeBufferDma=0x%llx\n",
-         (unsigned long long)readBufferDma, (unsigned long long)writeBufferDma);
+  if (g_nvme_ep_debug) {
+    printf("GPU: nvme_ep_driveEndpointWithBuffers called: sqeIterations=%u, "
+           "sqeAddr=%p, cqeAddr=%p\n",
+           sqeIterations, sqeAddr, cqeAddr);
+    printf("GPU: readBuffer=%p, writeBuffer=%p, bufferSize=%zu\n", readBuffer,
+           writeBuffer, bufferSize);
+    printf("GPU: readBufferDma=0x%llx, writeBufferDma=0x%llx\n",
+           (unsigned long long)readBufferDma,
+           (unsigned long long)writeBufferDma);
+  }
 
   nvme_ep::sqeType sqeLocal = {};
   nvme_ep::cqeType cqeLocal = {};
@@ -301,11 +307,15 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   struct nvme_sqe* sqe = nvme_ep::nvme_sqe_from_generic(&sqeLocal);
   struct nvme_cqe* cqe = nvme_ep::nvme_cqe_from_generic(&cqeLocal);
 
-  printf("GPU: Local structures initialized\n");
+  if (g_nvme_ep_debug) {
+    printf("GPU: Local structures initialized\n");
+  }
 
   // Initialize CQE with invalid command ID for first poll
   cqe->command_id = 0xFFFF;
-  printf("GPU: CQE initialized\n");
+  if (g_nvme_ep_debug) {
+    printf("GPU: CQE initialized\n");
+  }
 
   // Test parameters
   const uint32_t nsid = 1;          // Namespace ID
@@ -314,9 +324,11 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 
   // Calculate buffer size per command (blocks * block_size)
   const size_t transfer_size = blocks * blockSize;
-  printf("GPU: Test parameters: nsid=%u, base_lba=0x%llx, blocks=%u, "
-         "transfer_size=%zu\n",
-         nsid, (unsigned long long)base_lba, blocks, transfer_size);
+  if (g_nvme_ep_debug) {
+    printf("GPU: Test parameters: nsid=%u, base_lba=0x%llx, blocks=%u, "
+           "transfer_size=%zu\n",
+           nsid, (unsigned long long)base_lba, blocks, transfer_size);
+  }
 
   // Determine operation mode based on buffer availability
   // - Both buffers: alternate reads/writes (legacy behavior)
@@ -330,30 +342,40 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   const bool alternate_mode = has_write_buffer && has_read_buffer;
   const bool use_real_buffers = has_write_buffer || has_read_buffer;
 
-  printf(
-    "GPU: use_real_buffers=%d, write_only=%d, read_only=%d, alternate=%d\n",
-    use_real_buffers, write_only_mode, read_only_mode, alternate_mode);
+  if (g_nvme_ep_debug) {
+    printf(
+      "GPU: use_real_buffers=%d, write_only=%d, read_only=%d, alternate=%d\n",
+      use_real_buffers, write_only_mode, read_only_mode, alternate_mode);
+  }
 
   // If using write buffer, generate write data
   if (has_write_buffer) {
-    printf("GPU: About to generate test pattern in write buffer\n");
+    if (g_nvme_ep_debug) {
+      printf("GPU: About to generate test pattern in write buffer\n");
+    }
     // Generate test pattern in write buffer
     nvme_generate_pattern(writeBuffer, bufferSize, pattern, 0, lfsr_seed);
-    printf("GPU: Test pattern generated\n");
+    if (g_nvme_ep_debug) {
+      printf("GPU: Test pattern generated\n");
+    }
   }
 
   // Track submission queue tail
   uint16_t sq_tail = 0;
   const uint16_t queue_size = 1024; // Should match queue size, but hardcode for
                                     // now
-  printf("GPU: Starting command loop: sqeIterations=%u, queue_size=%u\n",
-         sqeIterations, queue_size);
-  printf("GPU: sqeAddr=%p, cqeAddr=%p\n", sqeAddr, cqeAddr);
+  if (g_nvme_ep_debug) {
+    printf("GPU: Starting command loop: sqeIterations=%u, queue_size=%u\n",
+           sqeIterations, queue_size);
+    printf("GPU: sqeAddr=%p, cqeAddr=%p\n", sqeAddr, cqeAddr);
+  }
 
   // Issue read/write commands
   for (unsigned i = 0; i < sqeIterations; i++) {
-    printf("GPU: Iteration %u/%u: cmd_id=%u, lba=0x%llx\n", i, sqeIterations,
-           (uint16_t)(i + 1), (unsigned long long)(base_lba + (i * blocks)));
+    if (g_nvme_ep_debug) {
+      printf("GPU: Iteration %u/%u: cmd_id=%u, lba=0x%llx\n", i, sqeIterations,
+             (uint16_t)(i + 1), (unsigned long long)(base_lba + (i * blocks)));
+    }
     // Start command IDs at 1 to avoid confusion with zero-initialized memory
     uint16_t cmd_id = (uint16_t)(i + 1);
     uint64_t lba = base_lba + (i * blocks);
@@ -430,17 +452,23 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
       nvme_sqe_setup_write(sqe, cmd_id, nsid, lba, blocks, prp1, prp2);
     }
 
-    printf("GPU: SQE setup complete, prp1=0x%llx, prp2=0x%llx\n",
-           (unsigned long long)prp1, (unsigned long long)prp2);
+    if (g_nvme_ep_debug) {
+      printf("GPU: SQE setup complete, prp1=0x%llx, prp2=0x%llx\n",
+             (unsigned long long)prp1, (unsigned long long)prp2);
+    }
 
     // Record start time for this command
     startTime[i] = nvme_ep::wall_clock64();
 
     // Submit command to queue at the current tail position
-    printf("GPU: About to write SQE to sqeAddr[%u]=%p\n", sq_tail,
-           &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+    if (g_nvme_ep_debug) {
+      printf("GPU: About to write SQE to sqeAddr[%u]=%p\n", sq_tail,
+             &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+    }
     nvme_ep::sqeWrite(sqeLocal, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
-    printf("GPU: SQE written successfully\n");
+    if (g_nvme_ep_debug) {
+      printf("GPU: SQE written successfully\n");
+    }
 
     // Increment tail (wrap around if needed)
     sq_tail = (sq_tail + 1) % queue_size;
@@ -468,6 +496,15 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
                                          startTime, endTime, nullptr, nullptr,
                                          0, 512, NVME_PATTERN_SEQUENTIAL, 0, 0,
                                          0);
+}
+
+// Host function to set debug flag
+__host__ void nvme_ep_set_debug(bool debug) {
+  // Copy debug flag to device global variable
+  // Note: HIP_SYMBOL is a macro that resolves the symbol name
+  hipError_t err = hipMemcpyToSymbol(HIP_SYMBOL(g_nvme_ep_debug), &debug,
+                                     sizeof(bool), 0, hipMemcpyHostToDevice);
+  (void)err; // Suppress unused warning
 }
 
 } // extern "C"
