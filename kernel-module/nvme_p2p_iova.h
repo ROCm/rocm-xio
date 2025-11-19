@@ -54,14 +54,15 @@ static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
   u32 result;
   int ret;
 
-  pr_info("nvme_axiio: Requesting P2P IOVA info for QID %u from QEMU (vendor "
-          "cmd 0xC0)...\n",
-          queue_id);
+  dev_info(dev,
+           "nvme_axiio: Requesting P2P IOVA info for QID %u from QEMU (vendor "
+           "cmd 0xC0)...\n",
+           queue_id);
 
   /* Allocate DMA buffer for IOVA info */
   buffer = dma_alloc_coherent(dev, sizeof(*iova_info), &dma_addr, GFP_KERNEL);
   if (!buffer) {
-    pr_err("nvme_axiio: Failed to allocate IOVA info buffer\n");
+    dev_err(dev, "nvme_axiio: Failed to allocate IOVA info buffer\n");
     return -ENOMEM;
   }
 
@@ -75,27 +76,28 @@ static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
 
   /* Submit command */
   /* Use longer timeout for real hardware (30 seconds) vs QEMU (5 seconds) */
-  ret = nvme_submit_admin_cmd_sync(bar0, admin_q, &cmd, &result, 30000);
+  ret = nvme_submit_admin_cmd_sync(dev, bar0, admin_q, &cmd, &result, 30000);
 
   if (ret == 0) {
     /* Copy IOVA info from DMA buffer */
     memcpy(iova_info, buffer, sizeof(*iova_info));
 
-    pr_info("nvme_axiio: ✅ P2P IOVA mappings retrieved from QEMU:\n");
-    pr_info("  SQE IOVA:      0x%016llx (size: %u bytes)\n",
-            iova_info->sqe_iova, iova_info->sqe_size);
-    pr_info("  CQE IOVA:      0x%016llx (size: %u bytes)\n",
-            iova_info->cqe_iova, iova_info->cqe_size);
-    pr_info("  Doorbell IOVA: 0x%016llx (size: %u bytes)\n",
-            iova_info->doorbell_iova, iova_info->doorbell_size);
-    pr_info("  Queue depth:   %u\n", iova_info->queue_depth);
-    pr_info("  🎉 QEMU P2P setup complete - GPU can access these IOVAs!\n");
+    dev_info(dev, "nvme_axiio: ✅ P2P IOVA mappings retrieved from QEMU:\n");
+    dev_info(dev, "  SQE IOVA:      0x%016llx (size: %u bytes)\n",
+             iova_info->sqe_iova, iova_info->sqe_size);
+    dev_info(dev, "  CQE IOVA:      0x%016llx (size: %u bytes)\n",
+             iova_info->cqe_iova, iova_info->cqe_size);
+    dev_info(dev, "  Doorbell IOVA: 0x%016llx (size: %u bytes)\n",
+             iova_info->doorbell_iova, iova_info->doorbell_size);
+    dev_info(dev, "  Queue depth:   %u\n", iova_info->queue_depth);
+    dev_info(dev,
+             "  🎉 QEMU P2P setup complete - GPU can access these IOVAs!\n");
   } else if (ret == -EIO) {
-    pr_warn("nvme_axiio: Vendor command 0xC0 failed (not supported)\n");
-    pr_warn("  This is expected for real hardware (not emulated)\n");
-    pr_warn("  Will use physical addresses instead of IOVA\n");
+    dev_warn(dev, "nvme_axiio: Vendor command 0xC0 failed (not supported)\n");
+    dev_warn(dev, "  This is expected for real hardware (not emulated)\n");
+    dev_warn(dev, "  Will use physical addresses instead of IOVA\n");
   } else {
-    pr_err("nvme_axiio: Failed to get P2P IOVA info: %d\n", ret);
+    dev_err(dev, "nvme_axiio: Failed to get P2P IOVA info: %d\n", ret);
   }
 
   dma_free_coherent(dev, sizeof(*iova_info), buffer, dma_addr);
@@ -113,18 +115,18 @@ static inline bool is_qemu_emulated_nvme(struct pci_dev* pdev) {
   /* Check for QEMU vendor IDs */
   if (pdev->vendor == 0x1b36 ||           /* Red Hat / QEMU */
       pdev->subsystem_vendor == 0x1af4) { /* virtio */
-    pr_info("nvme_axiio: Detected QEMU emulated NVMe device\n");
+    dev_info(&pdev->dev, "nvme_axiio: Detected QEMU emulated NVMe device\n");
     return true;
   }
 
   /* Also check device ID - QEMU often uses specific IDs */
   if (pdev->device == 0x0010 && pdev->vendor == 0x1b36) {
-    pr_info("nvme_axiio: Detected QEMU NVMe controller\n");
+    dev_info(&pdev->dev, "nvme_axiio: Detected QEMU NVMe controller\n");
     return true;
   }
 
-  pr_debug("nvme_axiio: Real hardware NVMe device (vendor=0x%04x)\n",
-           pdev->vendor);
+  dev_dbg(&pdev->dev, "nvme_axiio: Real hardware NVMe device (vendor=0x%04x)\n",
+          pdev->vendor);
   return false;
 }
 

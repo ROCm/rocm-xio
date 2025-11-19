@@ -237,6 +237,7 @@ lint-format:
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
 		-not -path './include/external/*' \
+		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
 		&& echo "✓ All files pass clang-format check" \
 		|| (echo "✗ Formatting issues found. Run 'make format' to fix." && exit 1)
@@ -254,6 +255,7 @@ format:
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
 		-not -path './include/external/*' \
+		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) -i --style=file
 	@echo "✓ Formatting complete"
 
