@@ -33,6 +33,7 @@ endpoints/rdma-ep/pvrdma/pvrdma-rdma.h
 # Editor and IDE files
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~

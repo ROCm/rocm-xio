@@ -27,7 +27,6 @@ constexpr const char* QEMU_PATHS[] = {
   "/usr/bin/qemu-system-x86_64", // Fallback to system QEMU
   nullptr};
 
-
 // Structure to hold doorbell operation information
 struct DoorbellOp {
   bool is_sq;        // true for SQ, false for CQ

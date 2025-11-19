@@ -47,7 +47,8 @@ inline bool check_pcie_atomics_support(bool verbose = true,
   // Skip dmesg in fast mode (it can be slow with large buffers)
   FILE* dmesg_pipe = nullptr;
   if (!fast_check) {
-    dmesg_pipe = popen("dmesg 2>/dev/null | grep -i 'pcie atomics' | tail -5", "r");
+    dmesg_pipe = popen("dmesg 2>/dev/null | grep -i 'pcie atomics' | tail -5",
+                       "r");
   }
   if (dmesg_pipe) {
     char line[512];
@@ -75,9 +76,10 @@ inline bool check_pcie_atomics_support(bool verbose = true,
   // Skip lspci check in fast mode (it's slow, especially -vvv)
   if (!fast_check) {
     // Find AMD GPU device (use faster method: lspci without verbose first)
-    FILE* lspci_find = popen("lspci 2>/dev/null | grep -i "
-                             "'amd.*radeon\\|amd.*vga' | head -1 | cut -d' ' -f1",
-                             "r");
+    FILE* lspci_find =
+      popen("lspci 2>/dev/null | grep -i "
+            "'amd.*radeon\\|amd.*vga' | head -1 | cut -d' ' -f1",
+            "r");
     if (lspci_find) {
       char gpu_addr[32];
       if (fgets(gpu_addr, sizeof(gpu_addr), lspci_find)) {
@@ -88,9 +90,9 @@ inline bool check_pcie_atomics_support(bool verbose = true,
           printf("   Found AMD GPU at PCIe address: %s\n", gpu_addr);
         }
 
-        // Check PCIe capabilities - use faster method: only read atomic ops section
-        // Use -v instead of -vvv to avoid reading all config space (much faster)
-        // Then grep for atomic section only
+        // Check PCIe capabilities - use faster method: only read atomic ops
+        // section Use -v instead of -vvv to avoid reading all config space
+        // (much faster) Then grep for atomic section only
         char cmd[256];
         snprintf(cmd, sizeof(cmd),
                  "lspci -v -s %s 2>/dev/null | grep -A2 -i 'atomic'", gpu_addr);

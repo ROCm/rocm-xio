@@ -46,8 +46,7 @@ struct nvme_p2p_iova_info {
  */
 static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
                                          struct nvme_admin_queue* admin_q,
-                                         struct device* dev,
-                                         u16 queue_id,
+                                         struct device* dev, u16 queue_id,
                                          struct nvme_p2p_iova_info* iova_info) {
   struct nvme_command cmd;
   dma_addr_t dma_addr;
@@ -55,7 +54,8 @@ static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
   u32 result;
   int ret;
 
-  pr_info("nvme_axiio: Requesting P2P IOVA info for QID %u from QEMU (vendor cmd 0xC0)...\n", 
+  pr_info("nvme_axiio: Requesting P2P IOVA info for QID %u from QEMU (vendor "
+          "cmd 0xC0)...\n",
           queue_id);
 
   /* Allocate DMA buffer for IOVA info */
@@ -111,7 +111,7 @@ static inline int nvme_get_p2p_iova_info(void __iomem* bar0,
  */
 static inline bool is_qemu_emulated_nvme(struct pci_dev* pdev) {
   /* Check for QEMU vendor IDs */
-  if (pdev->vendor == 0x1b36 || /* Red Hat / QEMU */
+  if (pdev->vendor == 0x1b36 ||           /* Red Hat / QEMU */
       pdev->subsystem_vendor == 0x1af4) { /* virtio */
     pr_info("nvme_axiio: Detected QEMU emulated NVMe device\n");
     return true;
@@ -129,8 +129,3 @@ static inline bool is_qemu_emulated_nvme(struct pci_dev* pdev) {
 }
 
 #endif /* NVME_P2P_IOVA_H */
-
-
-
-
-
