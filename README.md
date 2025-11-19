@@ -31,10 +31,10 @@ sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 100 --verbose
 
 | Use Case | Command |
 |----------|---------|
-| **Test with real NVMe** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0` |
-| **CPU-only mode** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only` |
-| **Use kernel module** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --use-kernel-module` |
-| **Performance test** | `sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 10000 --histogram` |
+| **Test with real NVMe** | `sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0` |
+| **CPU-only mode** | `sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --cpu-only` |
+| **Use kernel module** | `sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --kernel-module` |
+| **Performance test** | `sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 -n 10000 --histogram` |
 | **List endpoints** | `./bin/axiio-tester -e` |
 | **Emulated test** | `./bin/axiio-tester -n 100 --verbose` |
 
@@ -127,10 +127,10 @@ All endpoints are built into the binary.
 ./bin/axiio-tester --endpoint nvme-ep -n 100
 
 # Use NVMe endpoint with real hardware
-sudo ./bin/axiio-tester --endpoint nvme-ep --nvme-device /dev/nvme0
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0
 
-# The endpoint is auto-selected when using --nvme-device
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0  # Uses nvme-ep automatically
+# View endpoint-specific options
+./bin/axiio-tester -e nvme-ep --help
 ```
 
 The build system compiles all endpoints and uses static dispatch to route operations to the correct endpoint at runtime.
@@ -477,14 +477,12 @@ GPU-to-NVMe interactions without emulation.
 sudo ./scripts/discover-nvme-addresses.sh
 
 # Run test with real hardware
-sudo ./bin/axiio-tester \
-  --endpoint nvme-ep \
-  --real-hardware \
-  --nvme-doorbell 0xfeb01000 \
-  --nvme-sq-base 0xfeb10000 \
-  --nvme-cq-base 0xfeb20000 \
-  --nvme-sq-size 4096 \
-  --nvme-cq-size 4096 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --doorbell 0xfeb01000 \
+  --sq-base 0xfeb10000 \
+  --cq-base 0xfeb20000 \
+  --sq-size 4096 \
+  --cq-size 4096 \
   --iterations 10 \
   --verbose
 ```
@@ -525,8 +523,8 @@ The simplest way to run with real NVMe hardware:
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
 # Run with automatic device setup
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   --iterations 100 \
   --verbose
 ```
@@ -542,15 +540,15 @@ The kernel module (`/dev/nvme-axiio`) provides DMA-safe memory and proper queue 
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
-  --use-kernel-module \
-  --nvme-queue-id 63 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
+  --kernel-module \
+  --queue-id 63 \
   --iterations 100 \
   --transfer-size 4096 \
   --lba-range-gib 1 \
   --access-pattern random \
-  --nvme-nsid 1 \
+  --nsid 1 \
   --verbose
 ```
 
@@ -569,13 +567,13 @@ Direct device access with automatic address discovery.
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   --iterations 100 \
   --transfer-size 4096 \
   --lba-range-gib 1 \
   --access-pattern random \
-  --nvme-nsid 1 \
+  --nsid 1 \
   --verbose
 ```
 
@@ -612,44 +610,35 @@ sudo ./bin/axiio-tester \
 
 #### Essential Arguments
 
-| Argument | Description | Example | Default |
-|----------|-------------|---------|---------|
-| `--nvme-device` | Path to NVMe device | `/dev/nvme0` | - |
-| `--iterations` | Number of I/O operations | `100` | 128 |
-| `--verbose` | Enable detailed output | flag | false |
-
-#### Hardware Control
+#### Global Options
 
 | Argument | Description | Example | Default |
 |----------|-------------|---------|---------|
-| `--use-kernel-module` | Use `/dev/nvme-axiio` kernel module | flag | false |
-| `--nvme-queue-id` | Queue ID (high IDs avoid kernel conflicts) | `63` | 63 |
-| `--cpu-only` | CPU command generation (no GPU atomics) | flag | false |
-| `--real-hardware` | Enable real hardware mode | flag | false |
+| `-n, --iterations` | Number of I/O operations | `100` | 128 |
+| `-v, --verbose` | Enable detailed output | flag | false |
+| `-i, --info` | Print GPU information | flag | false |
+| `--histogram` | Generate performance histogram | flag | false |
+| `-e, --endpoint` | Select endpoint or list available | `nvme-ep`, `test-ep` | test-ep |
+| `-m, --memory` | Memory type | `host`, `device` | host |
+| `--submit-queue-len` | Submission queue length | `1024` | 1024 |
+| `--complete-queue-len` | Completion queue length | `512` | 512 |
+| `--skip-atomics-check` | Skip PCIe atomics check | flag | false |
 
-#### I/O Parameters
+#### NVMe Endpoint Options (use with `-e nvme-ep`)
 
 | Argument | Description | Example | Default |
 |----------|-------------|---------|---------|
+| `--device` | Path to NVMe device | `/dev/nvme0` | - |
+| `--kernel-module` | Use `/dev/nvme-axiio` kernel module | flag | false |
+| `--queue-id` | Queue ID (high IDs avoid kernel conflicts) | `63` | 63 |
+| `--nsid` | NVMe namespace ID | `1` | 1 |
+| `--block-size` | NVMe block size | `512`, `4096` | 512 |
 | `--transfer-size` | Transfer size in bytes | `4096` | 4096 |
 | `--lba-range-gib` | LBA range to test in GiB | `10` | 1 |
 | `--access-pattern` | Access pattern | `random`, `sequential` | random |
-| `--nvme-nsid` | NVMe namespace ID | `1` | 1 |
-
-#### Queue Configuration
-
-| Argument | Description | Example | Default |
-|----------|-------------|---------|---------|
-| `--submit-queue-len` | Submission queue length | `1024` | 1024 |
-| `--complete-queue-len` | Completion queue length | `512` | 512 |
-
-#### Data Buffer Options
-
-| Argument | Description | Example | Default |
-|----------|-------------|---------|---------|
+| `--cpu-only` | CPU command generation (no GPU atomics) | flag | false |
 | `--use-data-buffers` | Enable data buffer testing | flag | false |
 | `--data-buffer-size` | Data buffer size in bytes | `1048576` | 1MB |
-| `--nvme-block-size` | NVMe block size | `512`, `4096` | 512 |
 | `--test-pattern` | Data pattern | `random`, `zeros`, `ones`, `sequential`, `block_id` | sequential |
 
 #### Output Control
@@ -667,8 +656,8 @@ sudo ./bin/axiio-tester \
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   -n 10 \
   --verbose
 ```
@@ -678,8 +667,8 @@ sudo ./bin/axiio-tester \
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   --iterations 10000 \
   --transfer-size 8192 \
   --lba-range-gib 10 \
@@ -692,11 +681,11 @@ sudo ./bin/axiio-tester \
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   --use-data-buffers \
   --data-buffer-size 1048576 \
-  --nvme-block-size 512 \
+  --block-size 512 \
   --test-pattern random \
   --iterations 1000 \
   --verbose
@@ -707,8 +696,8 @@ sudo ./bin/axiio-tester \
 ```bash
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
   --transfer-size 131072 \
   --access-pattern sequential \
   --lba-range-gib 100 \
@@ -724,10 +713,10 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 # Load kernel module first (if available)
 sudo modprobe nvme-axiio
 
-sudo ./bin/axiio-tester \
-  --nvme-device /dev/nvme0 \
-  --use-kernel-module \
-  --nvme-queue-id 63 \
+sudo ./bin/axiio-tester -e nvme-ep \
+  --device /dev/nvme0 \
+  --kernel-module \
+  --queue-id 63 \
   --iterations 1000 \
   --transfer-size 4096 \
   --verbose
@@ -766,14 +755,14 @@ Start with these steps to verify functionality:
 ./bin/axiio-tester -n 10 --verbose
 
 # 3. Test with CPU-only mode (validates NVMe access)
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only -n 10 --verbose
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --cpu-only -n 10 --verbose
 
 # 4. Test with GPU (requires PCIe atomics)
 export HSA_FORCE_FINE_GRAIN_PCIE=1
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 100 --verbose
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 -n 100 --verbose
 
 # 5. Performance benchmarking
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 -n 10000 --histogram
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 -n 10000 --histogram
 ```
 
 ### GPU Doorbell Modes
@@ -821,7 +810,7 @@ make GPU_DIRECT_DOORBELL=0 all
 
 ```bash
 # Solution 1: Use CPU-only mode
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --cpu-only
 
 # Solution 2: Enable PCIe atomics in BIOS/VM settings
 # (Requires system configuration changes)
@@ -834,17 +823,17 @@ sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --cpu-only
 lsmod | grep nvme
 
 # Try direct device access without kernel module
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --verbose
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --verbose
 ```
 
 #### Issue: "Queue creation failed"
 
 ```bash
 # Try a different queue ID
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0 --nvme-queue-id 50
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 --queue-id 50
 
 # Or use auto-detection (default behavior)
-sudo ./bin/axiio-tester --nvme-device /dev/nvme0
+sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0
 ```
 
 #### Issue: GPU page faults

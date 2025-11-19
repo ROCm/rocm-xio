@@ -74,6 +74,9 @@ LIB_OBJECTS += $(ENDPOINT_DISPATCH_OBJ)
 # Tester source file
 TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
 TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.hip=.o)
+# Tester depends on endpoint headers it includes (all endpoint headers)
+TESTER_HEADERS := $(call rwildcard,$(ENDPOINTS_DIR),*.h) \
+                  $(call rwildcard,$(INCLUDE_DIR),*.h)
 
 # GPU architecture
 OFFLOAD_ARCH ?=
@@ -163,6 +166,9 @@ fetch-external-headers: fetch-nvme-headers fetch-rdma-headers
 
 $(LIBTARGET): $(LIB_OBJECTS) $(LIB_HEADERS) | $(LIB_DIR)
 	$(AR) rcsD $@ $(LIB_OBJECTS)
+
+# Make tester object depend on headers it includes
+$(TESTER_OBJECT): $(TESTER_HEADERS) $(ENDPOINT_REGISTRY_GEN)
 
 $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
 	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^ -lhsa-runtime64

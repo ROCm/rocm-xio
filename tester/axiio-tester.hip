@@ -33,6 +33,8 @@
 #include "axiio.h"
 
 // For NVMe-specific buffer testing
+#include "nvme-ep-cli.h"
+#include "nvme-ep-config.h"
 #include "nvme-ep.h"
 
 // For NVMe device management
@@ -109,6 +111,12 @@ typedef struct {
   bool skipAtomicsCheck; // Skip PCIe atomics check (faster startup)
 } cmdLineArgs;
 
+// Endpoint-specific configuration
+typedef struct {
+  nvme_ep::NvmeEpConfig nvmeConfig; // NVMe endpoint configuration
+  // Add other endpoint configs here as needed
+} endpointConfigs;
+
 typedef struct {
   unsigned long long int* startTime;
   unsigned long long int* endTime;
@@ -116,6 +124,7 @@ typedef struct {
 
 typedef struct {
   cmdLineArgs args;
+  endpointConfigs epConfigs; // Endpoint-specific configurations
   testStats stats;
   // CPU-hybrid mode: GPU writes to these, CPU copies to kernel DMA memory
   void* gpuSqMem;
@@ -2491,9 +2500,9 @@ cleanup_and_exit:
   }
 
   // Clean up dedicated NVMe queues if we created them
-  // Skip cleanup if using kernel module (queues may be pre-existing on real
-  // hardware)
-  bool should_skip_cleanup = config->args.skipQueueCleanup || kernel_ctx;
+  // Skip cleanup only if explicitly requested (not automatically for kernel
+  // module) The kernel module handles QEMU vs real hardware appropriately
+  bool should_skip_cleanup = config->args.skipQueueCleanup;
   if (!mappedPhysical && !config->args.nvmeDevice.empty() &&
       !should_skip_cleanup) {
     std::cout << "\n=== Cleaning up dedicated I/O queues ===" << std::endl;
@@ -2506,13 +2515,7 @@ cleanup_and_exit:
     std::cout << "Queue cleanup complete" << std::endl;
   } else if (should_skip_cleanup) {
     std::cout << "\n=== Skipping queue cleanup ===" << std::endl;
-    if (kernel_ctx) {
-      std::cout
-        << "  Using kernel module - queues may be pre-existing (real hardware)"
-        << std::endl;
-    } else {
-      std::cout << "  (--skip-queue-cleanup flag set)" << std::endl;
-    }
+    std::cout << "  (--skip-queue-cleanup flag set)" << std::endl;
     std::cout << "  Queue " << config->args.nvmeQueueId << " will remain active"
               << std::endl;
   }
@@ -2531,6 +2534,10 @@ int main(int argc, char** argv) {
   config.args.printDeviceInfo = false;
   config.args.genHistogram = false;
   config.args.beVerbose = false;
+
+  // Initialize endpoint-specific configs with defaults
+  config.epConfigs.nvmeConfig = nvme_ep::NvmeEpConfig();
+
   // Initialize pointer fields to nullptr
   config.kernelDmaSq = nullptr;
   config.kernelDmaCq = nullptr;
@@ -2543,32 +2550,48 @@ int main(int argc, char** argv) {
   config.writeBufferCpu = nullptr;
   config.writeBufferGpu = nullptr;
 
-  app
-    .add_option("-n, --iterations", config.args.nIterations,
-                "Number of iterations to run the test.")
-    ->default_val(128)
-    ->check(CLI::PositiveNumber);
+  // Group all global options together
+  const std::string global_group = "Global Options";
 
-  app
-    .add_flag("-i, --info", config.args.printDeviceInfo,
-              "Print information about GPUs in the system.")
-    ->default_val(false);
+  // Help option first (CLI11 adds it automatically, we'll move it to the group)
+  // Note: CLI11's help option is added automatically, we'll handle grouping
+  // after
 
+  // Global options in alphabetical order by long name
   app
-    .add_flag("--histogram", config.args.genHistogram,
-              "Generate histogram of iteration runtimes.")
-    ->default_val(false);
-
-  app
-    .add_flag("-v, --verbose", config.args.beVerbose,
-              "Print detailed per-iteration timing results.")
-    ->default_val(false);
+    .add_option("--complete-queue-len", config.args.completeQueueLen,
+                "Length of the completion queue (number of entries).")
+    ->default_val(512)
+    ->check(CLI::PositiveNumber)
+    ->group(global_group);
 
   auto endpoint_opt =
     app
       .add_option("-e, --endpoint", config.args.endpoint,
                   "Select endpoint (test-ep, nvme-ep) or use -e alone to list.")
-      ->expected(0, 1);
+      ->expected(0, 1)
+      ->group(global_group);
+
+  app
+    .add_flag("--histogram", config.args.genHistogram,
+              "Generate histogram of iteration runtimes.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(global_group);
+
+  app
+    .add_flag("-i, --info", config.args.printDeviceInfo,
+              "Print information about GPUs in the system.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(global_group);
+
+  app
+    .add_option("-n, --iterations", config.args.nIterations,
+                "Number of iterations to run the test.")
+    ->default_val(128)
+    ->check(CLI::PositiveNumber)
+    ->group(global_group);
 
   app
     .add_option("-m, --memory", config.args.memoryType,
@@ -2583,192 +2606,78 @@ int main(int argc, char** argv) {
       return (lower == "host" || lower == "device")
                ? std::string()
                : std::string("Memory type must be 'host' or 'device'");
-    });
+    })
+    ->group(global_group);
+
+  app
+    .add_flag("--skip-atomics-check", config.args.skipAtomicsCheck,
+              "Skip PCIe atomics check at startup (faster startup).")
+    ->default_val(false)
+    ->default_str("")
+    ->group(global_group);
 
   app
     .add_option("--submit-queue-len", config.args.submitQueueLen,
                 "Length of the submission queue (number of entries).")
     ->default_val(1024)
-    ->check(CLI::PositiveNumber);
+    ->check(CLI::PositiveNumber)
+    ->group(global_group);
 
   app
-    .add_option("--complete-queue-len", config.args.completeQueueLen,
-                "Length of the completion queue (number of entries).")
-    ->default_val(512)
-    ->check(CLI::PositiveNumber);
+    .add_flag("-v, --verbose", config.args.beVerbose,
+              "Print detailed per-iteration timing results.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(global_group);
 
-  // Real NVMe hardware support options
-  app
-    .add_flag("--real-hardware", config.args.useRealHardware,
-              "Use real NVMe hardware instead of emulated endpoint.")
-    ->default_val(false);
+  // Move help option to Global Options group and update description
+  // CLI11 adds help automatically, we need to access it and set its group
+  for (auto* opt : app.get_options()) {
+    if (opt->get_name() == "--help" || opt->get_name() == "-h") {
+      opt->group(global_group);
+      opt->description("Print this help message and exit. Use with -e "
+                       "<endpoint> to show endpoint-specific options.");
+      break;
+    }
+  }
 
-  app
-    .add_option(
-      "--nvme-device", config.args.nvmeDevice,
-      "NVMe device path (e.g., /dev/nvme0). Enables automatic hardware setup.")
-    ->default_val("");
+  // Determine endpoint early to register endpoint-specific options
+  // Manually scan argv for endpoint option before parsing
+  std::string preliminary_endpoint;
+  for (int i = 1; i < argc; i++) {
+    std::string arg = argv[i];
+    // Check for endpoint specification
+    if (arg == "-e" || arg == "--endpoint") {
+      if (i + 1 < argc) {
+        preliminary_endpoint = argv[i + 1];
+      }
+      break;
+    } else if (arg.find("--endpoint=") == 0) {
+      preliminary_endpoint = arg.substr(11); // Skip "--endpoint="
+      break;
+    } else if (arg.find("-e") == 0 && arg.length() > 2) {
+      preliminary_endpoint = arg.substr(2); // Skip "-e"
+      break;
+    }
+  }
 
-  app
-    .add_flag("--use-kernel-module", config.args.useKernelModule,
-              "Use kernel module (/dev/nvme-axiio) for queue management "
-              "instead of direct device access.")
-    ->default_val(false);
+  // Register endpoint-specific options ONLY when endpoint is explicitly
+  // specified This ensures endpoint options only appear in help when using -e
+  // <endpoint> -h
+  std::string preliminary_endpoint_lower = preliminary_endpoint;
+  std::transform(preliminary_endpoint_lower.begin(),
+                 preliminary_endpoint_lower.end(),
+                 preliminary_endpoint_lower.begin(), [](unsigned char c) {
+                   return std::tolower(c);
+                 });
 
-  app
-    .add_option("--nvme-queue-id", config.args.nvmeQueueId,
-                "NVMe queue ID to use (0=admin queue, 1+=IO queues). Use high "
-                "ID to avoid kernel conflicts.")
-    ->default_val(63)
-    ->check(CLI::Range(0, 65535));
-
-  app
-    .add_option("--nvme-doorbell", config.args.nvmeDoorbellAddr,
-                "Physical address of NVMe doorbell register (hex). "
-                "Auto-detected if --nvme-device is specified.")
-    ->default_val(0ULL);
-
-  app
-    .add_option("--nvme-sq-base", config.args.nvmeSqBaseAddr,
-                "Physical base address of NVMe submission queue (hex).")
-    ->default_val(0ULL);
-
-  app
-    .add_option("--nvme-cq-base", config.args.nvmeCqBaseAddr,
-                "Physical base address of NVMe completion queue (hex).")
-    ->default_val(0ULL);
-
-  app
-    .add_option("--nvme-sq-size", config.args.nvmeSqSize,
-                "Size of NVMe submission queue in bytes.")
-    ->default_val(0ULL)
-    ->check(CLI::NonNegativeNumber);
-
-  app
-    .add_option("--nvme-cq-size", config.args.nvmeCqSize,
-                "Size of NVMe completion queue in bytes.")
-    ->default_val(0ULL)
-    ->check(CLI::NonNegativeNumber);
-
-  // Data buffer options for NVMe I/O testing
-  app
-    .add_flag("--use-data-buffers", config.args.useDataBuffers,
-              "Enable data buffer allocation for NVMe I/O testing.")
-    ->default_val(false);
-
-  app
-    .add_flag(
-      "--cpu-only", config.args.cpuOnlyMode,
-      "Use CPU for NVMe command generation (no GPU, no PCIe atomics required).")
-    ->default_val(false);
-
-  app
-    .add_flag("--hijack-existing-queue", config.args.hijackExistingQueue,
-              "⚠️  DANGEROUS: Use existing kernel queue without creating new "
-              "one (for testing).")
-    ->default_val(false);
-
-  // NVMe I/O testing parameters
-  app
-    .add_option(
-      "--transfer-size", config.args.transferSize,
-      "Transfer size for NVMe I/O operations in bytes (e.g., 4096 for 4KiB).")
-    ->default_val(4096)
-    ->check(CLI::PositiveNumber);
-
-  app
-    .add_option("--lba-range-gib", config.args.lbaRangeGiB,
-                "LBA range to test in GiB (e.g., 1 for first 1GiB).")
-    ->default_val(1)
-    ->check(CLI::PositiveNumber);
-
-  app
-    .add_option("--access-pattern", config.args.accessPattern,
-                "Access pattern: 'sequential' or 'random'.")
-    ->default_val("random")
-    ->check(CLI::IsMember({"sequential", "random"}));
-
-  app
-    .add_option("--nvme-nsid", config.args.nsid,
-                "NVMe namespace ID for I/O operations.")
-    ->default_val(1)
-    ->check(CLI::Range(1u, 0xFFFFFFFFu));
-
-  app
-    .add_option(
-      "--data-buffer-size", config.args.dataBufferSize,
-      "Size of data buffers for NVMe I/O testing (bytes). "
-      "If not specified, will be auto-calculated as "
-      "iterations * 8 * block-size (kernel uses 8 blocks per operation).")
-    ->default_val(1024 * 1024) // 1 MB default (will be auto-adjusted if too
-                               // small)
-    ->check(CLI::PositiveNumber);
-
-  app
-    .add_option("--nvme-block-size", config.args.nvmeBlockSize,
-                "NVMe block size in bytes (typically 512 or 4096).")
-    ->default_val(512)
-    ->check(CLI::PositiveNumber);
-
-  app
-    .add_option("--test-pattern", config.args.testPattern,
-                "Data test pattern: sequential, zeros, ones, random, "
-                "block_id, lfsr")
-    ->default_val("sequential")
-    ->check([](const std::string& val) {
-      return (val == "sequential" || val == "zeros" || val == "ones" ||
-              val == "random" || val == "block_id" || val == "lfsr")
-               ? std::string()
-               : std::string("Pattern must be: sequential, zeros, ones, "
-                             "random, block_id, or lfsr");
-    });
-
-  // Trace verification options
-  app
-    .add_flag("--verify-trace", config.args.verifyTrace,
-              "Verify doorbell operations in QEMU trace log after test "
-              "completes.")
-    ->default_val(false);
-
-  app
-    .add_option("--trace-file", config.args.traceFilePath,
-                "Path to QEMU NVMe trace log file for verification. "
-                "Default: /tmp/rocm-axiio-nvme-trace.log")
-    ->default_val("/tmp/rocm-axiio-nvme-trace.log");
-
-  app
-    .add_flag("--verify-reads", config.args.verifyReads,
-              "Verify read data matches expected pattern after test "
-              "completes.")
-    ->default_val(false);
-
-  app
-    .add_option("--lfsr-seed", config.args.lfsrSeed,
-                "Seed for LFSR pattern generation (0 = derive from LBA). "
-                "Allows different data patterns for same LBA.")
-    ->default_val(0);
-
-  app
-    .add_flag("--write-only", config.args.writeOnlyMode,
-              "Write-only mode: only allocate write buffer, issue only write "
-              "commands.")
-    ->default_val(false);
-
-  app
-    .add_flag("--read-only", config.args.readOnlyMode,
-              "Read-only mode: only allocate read buffer, issue only read "
-              "commands.")
-    ->default_val(false);
-
-  app
-    .add_flag("--skip-queue-cleanup", config.args.skipQueueCleanup,
-              "Skip queue deletion on exit (faster, leaves queues active).")
-    ->default_val(false);
-
-  app
-    .add_flag("--skip-atomics-check", config.args.skipAtomicsCheck,
-              "Skip PCIe atomics check at startup (faster startup).")
-    ->default_val(false);
+  if (preliminary_endpoint_lower == "nvme-ep") {
+    // Register NVMe endpoint CLI options only when nvme-ep is explicitly
+    // specified
+    nvme_ep::registerCliOptions(app, &config.epConfigs.nvmeConfig);
+  }
+  // Add other endpoint registrations here as needed (rdma-ep, sdma-ep, etc.)
+  // Note: Only register when endpoint is explicitly specified, not by default
 
   CLI11_PARSE(app, argc, argv);
 
@@ -2800,6 +2709,53 @@ int main(int argc, char** argv) {
     listAvailableEndpoints();
     nvme_hsa_doorbell::shutdown_hsa();
     return EXIT_SUCCESS;
+  }
+
+  // Map endpoint-specific config to legacy cmdLineArgs structure for backward
+  // compatibility This allows existing code to continue working while we
+  // transition
+  std::string endpoint_lower = config.args.endpoint;
+  std::transform(endpoint_lower.begin(), endpoint_lower.end(),
+                 endpoint_lower.begin(), [](unsigned char c) {
+                   return std::tolower(c);
+                 });
+
+  if (endpoint_lower == "nvme-ep") {
+    // Copy NVMe endpoint config to legacy structure
+    config.args.nvmeDevice = config.epConfigs.nvmeConfig.device;
+    config.args.useKernelModule = config.epConfigs.nvmeConfig.useKernelModule;
+    config.args.nvmeQueueId = config.epConfigs.nvmeConfig.queueId;
+    config.args.nvmeDoorbellAddr = config.epConfigs.nvmeConfig.doorbellAddr;
+    config.args.nvmeSqBaseAddr = config.epConfigs.nvmeConfig.sqBaseAddr;
+    config.args.nvmeCqBaseAddr = config.epConfigs.nvmeConfig.cqBaseAddr;
+    config.args.nvmeSqSize = config.epConfigs.nvmeConfig.sqSize;
+    config.args.nvmeCqSize = config.epConfigs.nvmeConfig.cqSize;
+    config.args.nsid = config.epConfigs.nvmeConfig.nsid;
+    config.args.transferSize = config.epConfigs.nvmeConfig.transferSize;
+    config.args.lbaRangeGiB = config.epConfigs.nvmeConfig.lbaRangeGiB;
+    config.args.accessPattern = config.epConfigs.nvmeConfig.accessPattern;
+    config.args.nvmeBlockSize = config.epConfigs.nvmeConfig.blockSize;
+    config.args.useDataBuffers = config.epConfigs.nvmeConfig.useDataBuffers;
+    config.args.dataBufferSize = config.epConfigs.nvmeConfig.dataBufferSize;
+    config.args.testPattern = config.epConfigs.nvmeConfig.testPattern;
+    config.args.lfsrSeed = config.epConfigs.nvmeConfig.lfsrSeed;
+    config.args.cpuOnlyMode = config.epConfigs.nvmeConfig.cpuOnlyMode;
+    config.args.hijackExistingQueue =
+      config.epConfigs.nvmeConfig.hijackExistingQueue;
+    config.args.writeOnlyMode = config.epConfigs.nvmeConfig.writeOnlyMode;
+    config.args.readOnlyMode = config.epConfigs.nvmeConfig.readOnlyMode;
+    config.args.skipQueueCleanup = config.epConfigs.nvmeConfig.skipQueueCleanup;
+    config.args.verifyTrace = config.epConfigs.nvmeConfig.verifyTrace;
+    config.args.traceFilePath = config.epConfigs.nvmeConfig.traceFilePath;
+    config.args.verifyReads = config.epConfigs.nvmeConfig.verifyReads;
+
+    // Validate NVMe endpoint configuration
+    std::string validation_error = nvme_ep::validateConfig(
+      &config.epConfigs.nvmeConfig);
+    if (!validation_error.empty()) {
+      std::cerr << "Error: " << validation_error << std::endl;
+      return EXIT_FAILURE;
+    }
   }
 
   // Note: printDeviceInfo is defined later, so we handle this flag after device
