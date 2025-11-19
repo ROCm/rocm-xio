@@ -40,10 +40,12 @@ __global__ void nvme_generate_random_reads_kernel(
   int tid = hipThreadIdx_x + hipBlockIdx_x * hipBlockDim_x;
 
   // Debug: Print from ALL threads to see if kernel launches
-  printf("[GPU] Kernel launched! tid=%d, doorbell=%p\n", tid, doorbell);
+  // Note: debug flag would need to be passed as parameter, but these kernels
+  // are not currently used in the main test flow, so suppressing for now
+  // printf("[GPU] Kernel launched! tid=%d, doorbell=%p\n", tid, doorbell);
 
   if (tid == 0) {
-    printf("[GPU] Thread 0 executing! num_commands=%u\n", num_commands);
+    // printf("[GPU] Thread 0 executing! num_commands=%u\n", num_commands);
     // Capture start time
     *start_time = clock64();
 
@@ -73,8 +75,9 @@ __global__ void nvme_generate_random_reads_kernel(
     __threadfence_system();
 
     // Debug: Print before doorbell write
-    printf("[GPU] About to write doorbell: sq_tail=%u, doorbell ptr=%p\n",
-           sq_tail, doorbell);
+    // Suppressed - use --debug flag for GPU output
+    // printf("[GPU] About to write doorbell: sq_tail=%u, doorbell ptr=%p\n",
+    //        sq_tail, doorbell);
 
     // Write doorbell with system-scope atomic (for PCIe ordering)
     // This ensures the GPU write is visible to the NVMe controller
@@ -84,8 +87,9 @@ __global__ void nvme_generate_random_reads_kernel(
     // System-wide memory fence (ensures PCIe ordering)
     __threadfence_system();
 
-    printf("[GPU] ✓ Doorbell written with system-scope atomic! (value=%u)\n",
-           sq_tail);
+    // Suppressed - use --debug flag for GPU output
+    // printf("[GPU] ✓ Doorbell written with system-scope atomic! (value=%u)\n",
+    //        sq_tail);
 
     // Capture end time
     *end_time = clock64();
