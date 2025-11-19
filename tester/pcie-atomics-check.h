@@ -155,7 +155,7 @@ inline bool check_pcie_atomics_support(bool verbose = true,
     void* test_ptr = nullptr;
     err = hipMalloc(&test_ptr, 1024);
     if (err == hipSuccess) {
-      hipFree(test_ptr);
+      (void)hipFree(test_ptr);
       if (verbose) {
         printf("   ✅ hipMalloc/hipFree: OK\n");
       }
@@ -170,7 +170,7 @@ inline bool check_pcie_atomics_support(bool verbose = true,
     void* host_ptr = nullptr;
     err = hipHostMalloc(&host_ptr, 1024);
     if (err == hipSuccess) {
-      hipHostFree(host_ptr);
+      (void)hipHostFree(host_ptr);
       if (verbose) {
         printf("   ✅ hipHostMalloc/hipHostFree: OK\n");
       }
