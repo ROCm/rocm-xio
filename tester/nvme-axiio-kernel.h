@@ -106,9 +106,14 @@ static inline int axiio_kernel_init(KernelModuleContext* ctx,
   std::cout << "  Queue ID: " << queue_id << std::endl;
   std::cout << "  Queue Size: " << queue_size << " entries" << std::endl;
   std::cout << "  Namespace ID: " << nsid << std::endl;
+  std::cout.flush();
 
   // Create queue via ioctl
+  std::cerr << "DEBUG: About to call ioctl for queue creation..." << std::endl;
+  std::cerr.flush();
   int ret = ioctl(ctx->axiio_fd, NVME_AXIIO_CREATE_QUEUE, &ctx->qinfo);
+  std::cerr << "DEBUG: ioctl returned: " << ret << std::endl;
+  std::cerr.flush();
   if (ret < 0) {
     perror("  Error: NVME_AXIIO_CREATE_QUEUE ioctl failed");
     close(ctx->axiio_fd);

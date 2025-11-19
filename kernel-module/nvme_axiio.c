@@ -16,7 +16,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/memremap.h>
 #include <linux/module.h>
 #include <linux/nvme.h>
 #include <linux/pci.h>
@@ -91,7 +93,10 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
   /* First, check if we have a PCI-bound device */
   pdev = nvme_axiio_get_bound_device();
   if (pdev) {
-    pr_info("nvme_axiio: Using PCI-bound device: %s\n", pci_name(pdev));
+    pci_info(pdev, "Using PCI-bound device\n");
+    pci_info(pdev, "  Device: %s\n", pci_name(pdev));
+    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+             pdev->device);
     pci_dev_get(pdev); /* Take reference */
     return pdev;
   }
@@ -104,8 +109,11 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
   /* pci_get_class expects class code in bits [31:8], so 0x0108 becomes
    * 0x01080000 */
   while ((pdev = pci_get_class(0x01080000, pdev)) != NULL) {
-    pr_info("nvme_axiio: Found NVMe device: %s (class 0x%08x)\n",
-            pci_name(pdev), pdev->class);
+    pci_info(pdev, "Found NVMe device via pci_get_class\n");
+    pci_info(pdev, "  Device: %s\n", pci_name(pdev));
+    pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+             pdev->device);
+    pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
     /* Return the first NVMe controller found */
     /* TODO: Match against major/minor to find specific device */
     return pdev;
@@ -121,8 +129,11 @@ static struct pci_dev* find_nvme_pci_device(int major, int minor) {
     /* NVMe is class 0x01, subclass 0x08, prog-if 0x02 -> 0x00010802 */
     /* Mask out revision, check class+subclass: (class >> 8) == 0x0108 */
     if ((pdev->class >> 8) == 0x0108) {
-      pr_info("nvme_axiio: ✓ Found NVMe device: %s (class 0x%08x)\n",
-              pci_name(pdev), pdev->class);
+      pci_info(pdev, "✓ Found NVMe device via for_each_pci_dev\n");
+      pci_info(pdev, "  Device: %s\n", pci_name(pdev));
+      pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+               pdev->device);
+      pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
       pci_dev_get(pdev); /* Take reference */
       return pdev;
     }
@@ -140,6 +151,7 @@ static int axiio_open(struct inode* inode, struct file* filp) {
   struct pci_dev* pdev;
   int ret;
 
+  /* Note: Can't use pci_info here yet - device not found */
   pr_info("nvme_axiio: Device opened\n");
 
   ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
@@ -160,10 +172,20 @@ static int axiio_open(struct inode* inode, struct file* filp) {
 
   ctx->pci_dev = pdev;
 
+  /* Print comprehensive PCI device information */
+  pci_info(pdev, "NVMe PCI device found:\n");
+  pci_info(pdev, "  Device: %s\n", pci_name(pdev));
+  pci_info(pdev, "  Vendor: 0x%04x Device: 0x%04x\n", pdev->vendor,
+           pdev->device);
+  pci_info(pdev, "  Class: 0x%06x\n", pdev->class);
+  pci_info(pdev, "  Subsystem Vendor: 0x%04x Subsystem: 0x%04x\n",
+           pdev->subsystem_vendor, pdev->subsystem_device);
+  pci_info(pdev, "  Revision: 0x%02x\n", pdev->revision);
+
   /* Get BAR0 info */
   ret = pci_enable_device(pdev);
   if (ret) {
-    pr_err("nvme_axiio: Failed to enable PCI device\n");
+    pci_err(pdev, "Failed to enable PCI device\n");
     pci_dev_put(pdev);
     kfree(ctx);
     return ret;
@@ -177,7 +199,7 @@ static int axiio_open(struct inode* inode, struct file* filp) {
   /* Map BAR0 */
   ctx->bar0 = pci_iomap(pdev, 0, 0);
   if (!ctx->bar0) {
-    pr_err("nvme_axiio: Failed to map BAR0\n");
+    pci_err(pdev, "Failed to map BAR0\n");
     pci_disable_device(pdev);
     pci_dev_put(pdev);
     kfree(ctx);
@@ -188,12 +210,12 @@ static int axiio_open(struct inode* inode, struct file* filp) {
   {
     u64 cap = readq(ctx->bar0 + 0x00);        /* CAP at offset 0x00 */
     ctx->doorbell_stride = (cap >> 32) & 0xF; /* DSTRD in bits 35:32 */
-    pr_info("nvme_axiio: CAP register = 0x%016llx\n", cap);
-    pr_info("nvme_axiio: DSTRD (bits 35:32) = %u\n", ctx->doorbell_stride);
+    pci_info(pdev, "CAP register = 0x%016llx\n", cap);
+    pci_info(pdev, "DSTRD (bits 35:32) = %u\n", ctx->doorbell_stride);
   }
 
-  pr_info("nvme_axiio: BAR0 mapped at phys=0x%llx size=0x%llx stride=%u\n",
-          (u64)ctx->bar0_phys, (u64)ctx->bar0_size, ctx->doorbell_stride);
+  pci_info(pdev, "BAR0 mapped at phys=0x%llx size=0x%llx stride=%u\n",
+           (u64)ctx->bar0_phys, (u64)ctx->bar0_size, ctx->doorbell_stride);
 
   filp->private_data = ctx;
   return 0;
@@ -205,7 +227,10 @@ static int axiio_open(struct inode* inode, struct file* filp) {
 static int axiio_release(struct inode* inode, struct file* filp) {
   struct axiio_file_ctx* ctx = filp->private_data;
 
-  pr_info("nvme_axiio: Device closed\n");
+  if (ctx && ctx->pci_dev)
+    pci_info(ctx->pci_dev, "Device closed\n");
+  else
+    pr_info("nvme_axiio: Device closed\n");
 
   if (ctx) {
     /* Free allocated DMA buffers */
@@ -213,7 +238,7 @@ static int axiio_release(struct inode* inode, struct file* filp) {
       struct dma_buffer_entry *entry, *tmp;
       mutex_lock(&ctx->dma_lock);
       list_for_each_entry_safe(entry, tmp, &ctx->dma_buffers, list) {
-        pr_info("nvme_axiio: Freeing DMA buffer (size=%zu)\n", entry->size);
+        pci_info(ctx->pci_dev, "Freeing DMA buffer (size=%zu)\n", entry->size);
         dma_free_coherent(&ctx->pci_dev->dev, entry->size, entry->virt_addr,
                           entry->dma_addr);
         list_del(&entry->list);
@@ -223,13 +248,29 @@ static int axiio_release(struct inode* inode, struct file* filp) {
       mutex_destroy(&ctx->dma_lock);
     }
 
-    /* Free DMA buffers */
-    if (ctx->sq_virt)
-      dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
-                        ctx->sq_dma);
-    if (ctx->cq_virt)
-      dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
-                        ctx->cq_dma);
+    /* Free DMA buffers (QEMU GPA buffers don't need freeing) */
+    if (ctx->sq_virt) {
+      /* Only free if it's DMA-allocated (not QEMU GPA) */
+      if (ctx->sq_dma < 0x1000000000ULL) {
+        dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
+                          ctx->sq_dma);
+      } else {
+        pci_info(ctx->pci_dev,
+                 "QEMU GPA buffer (SQ GPA=0x%llx) - no cleanup needed\n",
+                 ctx->sq_dma);
+      }
+    }
+    if (ctx->cq_virt) {
+      /* Only free if it's DMA-allocated (not QEMU GPA) */
+      if (ctx->cq_dma < 0x1000000000ULL) {
+        dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
+                          ctx->cq_dma);
+      } else {
+        pci_info(ctx->pci_dev,
+                 "QEMU GPA buffer (CQ GPA=0x%llx) - no cleanup needed\n",
+                 ctx->cq_dma);
+      }
+    }
 
     /* Unmap BAR0 */
     if (ctx->bar0)
@@ -272,24 +313,73 @@ static int axiio_ioctl_create_queue(
   if (copy_from_user(&info, uinfo, sizeof(info)))
     return -EFAULT;
 
-  pr_info("nvme_axiio: Creating queue qid=%u size=%u\n", info.queue_id,
-          info.queue_size);
+  pci_info(ctx->pci_dev, "Creating queue qid=%u size=%u\n", info.queue_id,
+           info.queue_size);
 
-  /* Allocate DMA-coherent memory for submission queue */
   ctx->sq_size = info.queue_size * 64; /* SQE is 64 bytes */
+  ctx->cq_size = info.queue_size * 16; /* CQE is 16 bytes */
+
+  /* Check if we should use QEMU's GPA addresses (IOVA mode) */
+  if (nvme_axiio_get_controller()) {
+    struct axiio_controller* ctrl = nvme_axiio_get_controller();
+
+    if (ctrl->using_iova) {
+      struct nvme_p2p_iova_info queue_iova;
+      int ret;
+
+      pci_info(ctx->pci_dev, "Requesting IOVA/GPA info for queue %u...\n",
+               info.queue_id);
+
+      ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q,
+                                   &ctx->pci_dev->dev, info.queue_id,
+                                   &queue_iova);
+      if (ret == 0 && queue_iova.sqe_gpa != 0) {
+        /* Use QEMU's GPA addresses - these are guest physical addresses */
+        pci_info(ctx->pci_dev, "✅ Using QEMU-provided GPA addresses:\n");
+        pci_info(ctx->pci_dev, "  SQE GPA:      0x%016llx\n",
+                 queue_iova.sqe_gpa);
+        pci_info(ctx->pci_dev, "  CQE GPA:      0x%016llx\n",
+                 queue_iova.cqe_gpa);
+        pci_info(ctx->pci_dev, "  Doorbell GPA: 0x%016llx\n",
+                 queue_iova.doorbell_gpa);
+
+        /* For QEMU GPA addresses, we don't need kernel virtual addresses.
+         * We'll map them directly to userspace via mmap using remap_pfn_range.
+         * Set virt pointers to NULL to indicate we're using GPA directly. */
+        ctx->sq_virt = NULL; /* Will be mapped via mmap */
+        ctx->cq_virt = NULL; /* Will be mapped via mmap */
+
+        /* Use GPA addresses as DMA addresses */
+        ctx->sq_dma = queue_iova.sqe_gpa;
+        ctx->cq_dma = queue_iova.cqe_gpa;
+
+        pci_info(ctx->pci_dev,
+                 "✅ Using QEMU GPA buffers (will map via mmap):\n");
+        pci_info(ctx->pci_dev, "  SQE GPA: 0x%llx\n", ctx->sq_dma);
+        pci_info(ctx->pci_dev, "  CQE GPA: 0x%llx\n", ctx->cq_dma);
+
+        /* Skip DMA allocation - we're using QEMU's buffers */
+        goto use_qemu_buffers;
+      } else {
+        pci_warn(ctx->pci_dev,
+                 "QEMU GPA addresses not available, using DMA alloc\n");
+      }
+    }
+  }
+
+  /* Fallback: Allocate DMA-coherent memory (for real hardware or if QEMU GPA
+   * unavailable) */
   ctx->sq_virt = dma_alloc_coherent(&ctx->pci_dev->dev, ctx->sq_size,
                                     &ctx->sq_dma, GFP_KERNEL);
   if (!ctx->sq_virt) {
-    pr_err("nvme_axiio: Failed to allocate SQ DMA memory\n");
+    pci_err(ctx->pci_dev, "Failed to allocate SQ DMA memory\n");
     return -ENOMEM;
   }
 
-  /* Allocate DMA-coherent memory for completion queue */
-  ctx->cq_size = info.queue_size * 16; /* CQE is 16 bytes */
   ctx->cq_virt = dma_alloc_coherent(&ctx->pci_dev->dev, ctx->cq_size,
                                     &ctx->cq_dma, GFP_KERNEL);
   if (!ctx->cq_virt) {
-    pr_err("nvme_axiio: Failed to allocate CQ DMA memory\n");
+    pci_err(ctx->pci_dev, "Failed to allocate CQ DMA memory\n");
     dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
                       ctx->sq_dma);
     ctx->sq_virt = NULL;
@@ -299,6 +389,8 @@ static int axiio_ioctl_create_queue(
   /* Zero out the queues */
   memset(ctx->sq_virt, 0, ctx->sq_size);
   memset(ctx->cq_virt, 0, ctx->cq_size);
+
+use_qemu_buffers:
 
   /* Fill in return values */
   info.sq_dma_addr = ctx->sq_dma;
@@ -317,34 +409,77 @@ static int axiio_ioctl_create_queue(
 
   ctx->queue_id = info.queue_id;
 
-  pr_info("nvme_axiio: Queue memory allocated successfully\n");
-  pr_info("  SQ DMA: 0x%llx (size %zu)\n", (u64)ctx->sq_dma, ctx->sq_size);
-  pr_info("  CQ DMA: 0x%llx (size %zu)\n", (u64)ctx->cq_dma, ctx->cq_size);
-  pr_info("  SQ Doorbell: phys=0x%llx offset=0x%x\n", info.sq_doorbell_phys,
-          info.sq_doorbell_offset);
-  pr_info("  CQ Doorbell: phys=0x%llx offset=0x%x\n", info.cq_doorbell_phys,
-          info.cq_doorbell_offset);
+  pci_info(ctx->pci_dev, "Queue memory allocated successfully\n");
+  pci_info(ctx->pci_dev, "  SQ DMA: 0x%llx (size %zu)\n", (u64)ctx->sq_dma,
+           ctx->sq_size);
+  pci_info(ctx->pci_dev, "  CQ DMA: 0x%llx (size %zu)\n", (u64)ctx->cq_dma,
+           ctx->cq_size);
+  pci_info(ctx->pci_dev, "  SQ Doorbell: phys=0x%llx offset=0x%x\n",
+           info.sq_doorbell_phys, info.sq_doorbell_offset);
+  pci_info(ctx->pci_dev, "  CQ Doorbell: phys=0x%llx offset=0x%x\n",
+           info.cq_doorbell_phys, info.cq_doorbell_offset);
 
   /* If we have exclusive controller access, create queues via admin commands */
   if (nvme_axiio_get_controller()) {
+    struct axiio_controller* ctrl = nvme_axiio_get_controller();
     int ret;
-    pr_info("nvme_axiio: Creating I/O queues via admin commands...\n");
+
+    pci_info(ctx->pci_dev, "Creating I/O queues via admin commands...\n");
     ret = nvme_axiio_create_io_queues(info.queue_id, info.queue_size,
                                       ctx->sq_dma, ctx->cq_dma);
     if (ret < 0) {
-      pr_err("nvme_axiio: Admin command failed: %d\n", ret);
-      dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
-                        ctx->cq_dma);
-      dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
-                        ctx->sq_dma);
-      ctx->sq_virt = NULL;
-      ctx->cq_virt = NULL;
+      pci_err(ctx->pci_dev, "Admin command failed: %d\n", ret);
+      /* Clean up based on memory type */
+      if (ctx->cq_virt && ctx->cq_dma < 0x1000000000ULL) {
+        dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
+                          ctx->cq_dma);
+        ctx->cq_virt = NULL;
+      }
+      if (ctx->sq_virt && ctx->sq_dma < 0x1000000000ULL) {
+        dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
+                          ctx->sq_dma);
+        ctx->sq_virt = NULL;
+      }
       return ret;
     }
+
+    /* If using IOVA mode, get IOVA addresses for this specific queue */
+    if (ctrl->using_iova) {
+      struct nvme_p2p_iova_info queue_iova;
+
+      pci_info(ctx->pci_dev, "Requesting IOVA info for queue %u...\n",
+               info.queue_id);
+
+      ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q,
+                                   &ctx->pci_dev->dev, info.queue_id,
+                                   &queue_iova);
+      if (ret == 0) {
+        pci_info(ctx->pci_dev, "✅ Got IOVA addresses for QID %u:\n",
+                 info.queue_id);
+        pci_info(ctx->pci_dev, "  SQE IOVA:      0x%016llx\n",
+                 queue_iova.sqe_iova);
+        pci_info(ctx->pci_dev, "  CQE IOVA:      0x%016llx\n",
+                 queue_iova.cqe_iova);
+        pci_info(ctx->pci_dev, "  Doorbell IOVA: 0x%016llx\n",
+                 queue_iova.doorbell_iova);
+
+        /* Return IOVA addresses to userspace */
+        info.sq_dma_addr = queue_iova.sqe_iova;
+        info.cq_dma_addr = queue_iova.cqe_iova;
+        info.sq_doorbell_phys = queue_iova.doorbell_iova;
+        info.cq_doorbell_phys = queue_iova.doorbell_iova + 4;
+      } else {
+        pci_warn(ctx->pci_dev,
+                 "Failed to get IOVA for QID %u, using physical\n",
+                 info.queue_id);
+      }
+    }
   } else {
-    pr_warn("nvme_axiio: No exclusive controller access\n");
-    pr_warn("  Queue memory allocated but not created on controller\n");
-    pr_warn("  Userspace must use NVME_IOCTL_ADMIN_CMD to create queues\n");
+    pci_warn(ctx->pci_dev, "No exclusive controller access\n");
+    pci_warn(ctx->pci_dev,
+             "  Queue memory allocated but not created on controller\n");
+    pci_warn(ctx->pci_dev,
+             "  Userspace must use NVME_IOCTL_ADMIN_CMD to create queues\n");
   }
 
   ctx->queue_created = true;
@@ -367,26 +502,28 @@ static int axiio_ioctl_register_user_queue(
   if (copy_from_user(&info, uinfo, sizeof(info)))
     return -EFAULT;
 
-  pr_info("nvme_axiio: Registering user-provided queue memory\n");
-  pr_info("  Queue ID: %u\n", info.queue_id);
-  pr_info("  User SQ DMA: 0x%llx\n", (unsigned long long)info.sq_dma_addr_user);
-  pr_info("  User CQ DMA: 0x%llx\n", (unsigned long long)info.cq_dma_addr_user);
+  pci_info(ctx->pci_dev, "Registering user-provided queue memory\n");
+  pci_info(ctx->pci_dev, "  Queue ID: %u\n", info.queue_id);
+  pci_info(ctx->pci_dev, "  User SQ DMA: 0x%llx\n",
+           (unsigned long long)info.sq_dma_addr_user);
+  pci_info(ctx->pci_dev, "  User CQ DMA: 0x%llx\n",
+           (unsigned long long)info.cq_dma_addr_user);
 
   /* Check if queues are already allocated */
   if (!ctx->queue_created) {
-    pr_err("nvme_axiio: No queue exists to update. Create queue first!\n");
+    pci_err(ctx->pci_dev, "No queue exists to update. Create queue first!\n");
     return -EINVAL;
   }
 
   /* Free kernel-allocated queue memory since we'll use user memory */
   if (ctx->sq_virt) {
-    pr_info("nvme_axiio: Freeing kernel-allocated SQ memory\n");
+    pci_info(ctx->pci_dev, "Freeing kernel-allocated SQ memory\n");
     dma_free_coherent(&ctx->pci_dev->dev, ctx->sq_size, ctx->sq_virt,
                       ctx->sq_dma);
     ctx->sq_virt = NULL;
   }
   if (ctx->cq_virt) {
-    pr_info("nvme_axiio: Freeing kernel-allocated CQ memory\n");
+    pci_info(ctx->pci_dev, "Freeing kernel-allocated CQ memory\n");
     dma_free_coherent(&ctx->pci_dev->dev, ctx->cq_size, ctx->cq_virt,
                       ctx->cq_dma);
     ctx->cq_virt = NULL;
@@ -396,9 +533,9 @@ static int axiio_ioctl_register_user_queue(
   ctx->sq_dma = info.sq_dma_addr_user;
   ctx->cq_dma = info.cq_dma_addr_user;
 
-  pr_info("nvme_axiio: Queue memory updated to user-provided addresses\n");
-  pr_info("  SQ DMA: 0x%llx\n", (unsigned long long)ctx->sq_dma);
-  pr_info("  CQ DMA: 0x%llx\n", (unsigned long long)ctx->cq_dma);
+  pci_info(ctx->pci_dev, "Queue memory updated to user-provided addresses\n");
+  pci_info(ctx->pci_dev, "  SQ DMA: 0x%llx\n", (unsigned long long)ctx->sq_dma);
+  pci_info(ctx->pci_dev, "  CQ DMA: 0x%llx\n", (unsigned long long)ctx->cq_dma);
 
   /* Note: We don't update the NVMe controller here.
    * The controller will be configured with these addresses during next
@@ -422,8 +559,8 @@ static int axiio_ioctl_map_doorbell_for_gpu(
   if (copy_from_user(&map, umap, sizeof(map)))
     return -EFAULT;
 
-  pr_info("nvme_axiio: Mapping doorbell for GPU access (QID %u)\n",
-          map.queue_id);
+  pci_info(ctx->pci_dev, "Mapping doorbell for GPU access (QID %u)\n",
+           map.queue_id);
 
   /* BAR0 bus address - this is what GPU needs for P2P access */
   map.bar0_bus_addr = pci_resource_start(ctx->pci_dev, 0);
@@ -438,12 +575,14 @@ static int axiio_ioctl_map_doorbell_for_gpu(
   map.doorbell_bus_addr = map.bar0_bus_addr + map.doorbell_offset;
   map.doorbell_phys = map.bar0_phys + map.doorbell_offset;
 
-  pr_info("nvme_axiio: Doorbell mapping for QID %u:\n", map.queue_id);
-  pr_info("  BAR0 bus address: 0x%llx (for GPU P2P)\n", map.bar0_bus_addr);
-  pr_info("  BAR0 physical: 0x%llx (for CPU)\n", map.bar0_phys);
-  pr_info("  Doorbell offset: 0x%x\n", map.doorbell_offset);
-  pr_info("  Doorbell bus address: 0x%llx (GPU should use this)\n",
-          map.doorbell_bus_addr);
+  pci_info(ctx->pci_dev, "Doorbell mapping for QID %u:\n", map.queue_id);
+  pci_info(ctx->pci_dev, "  BAR0 bus address: 0x%llx (for GPU P2P)\n",
+           map.bar0_bus_addr);
+  pci_info(ctx->pci_dev, "  BAR0 physical: 0x%llx (for CPU)\n", map.bar0_phys);
+  pci_info(ctx->pci_dev, "  Doorbell offset: 0x%x\n", map.doorbell_offset);
+  pci_info(ctx->pci_dev,
+           "  Doorbell bus address: 0x%llx (GPU should use this)\n",
+           map.doorbell_bus_addr);
 
   if (copy_to_user(umap, &map, sizeof(map)))
     return -EFAULT;
@@ -482,27 +621,27 @@ static int axiio_ioctl_get_gpu_doorbell(
   info.mmap_offset = 3; /* pgoff */
   info.mmap_size = PAGE_SIZE;
 
-  pr_info("nvme_axiio: GPU doorbell setup for QID %u (%s):\n", info.queue_id,
-          info.is_sq ? "SQ" : "CQ");
-  pr_info("  Doorbell phys: 0x%llx\n", info.doorbell_phys);
-  pr_info("  GPU FD: %d\n", info.gpu_fd);
+  pci_info(ctx->pci_dev, "GPU doorbell setup for QID %u (%s):\n", info.queue_id,
+           info.is_sq ? "SQ" : "CQ");
+  pci_info(ctx->pci_dev, "  Doorbell phys: 0x%llx\n", info.doorbell_phys);
+  pci_info(ctx->pci_dev, "  GPU FD: %d\n", info.gpu_fd);
 
   /* If GPU FD provided, set up GPU integration */
   if (info.gpu_fd >= 0) {
-    pr_info("nvme_axiio: 🚀 Setting up GPU-direct doorbell...\n");
+    pci_info(ctx->pci_dev, "🚀 Setting up GPU-direct doorbell...\n");
 
     ret = nvme_map_doorbell_for_gpu(&ctx->gpu_mapping, info.gpu_fd,
                                     info.doorbell_phys, info.mmap_size);
     if (ret < 0) {
-      pr_err("nvme_axiio: GPU mapping setup failed: %d\n", ret);
+      pci_err(ctx->pci_dev, "GPU mapping setup failed: %d\n", ret);
       /* Continue anyway - fallback to regular mapping */
     } else {
-      pr_info("nvme_axiio: ✓ GPU context prepared for doorbell\n");
+      pci_info(ctx->pci_dev, "✓ GPU context prepared for doorbell\n");
     }
   }
 
-  pr_info("  Use mmap(fd, PAGE_SIZE, offset=%llu*PAGE_SIZE)\n",
-          info.mmap_offset);
+  pci_info(ctx->pci_dev, "  Use mmap(fd, PAGE_SIZE, offset=%llu*PAGE_SIZE)\n",
+           info.mmap_offset);
 
   if (copy_to_user(uinfo, &info, sizeof(info)))
     return -EFAULT;
@@ -524,17 +663,18 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
     return -EFAULT;
 
   if (!ctx->pci_dev) {
-    pr_err("nvme_axiio: No PCI device for DMA allocation\n");
+    pci_err(ctx->pci_dev, "No PCI device for DMA allocation\n");
     return -ENODEV;
   }
 
-  pr_info("nvme_axiio: Allocating DMA buffer (size=%llu bytes)\n", info.size);
+  pci_info(ctx->pci_dev, "Allocating DMA buffer (size=%llu bytes)\n",
+           info.size);
 
   /* Allocate DMA-coherent memory */
   virt_addr = dma_alloc_coherent(&ctx->pci_dev->dev, info.size, &dma_addr,
                                  GFP_KERNEL);
   if (!virt_addr) {
-    pr_err("nvme_axiio: Failed to allocate DMA buffer\n");
+    pci_err(ctx->pci_dev, "Failed to allocate DMA buffer\n");
     return -ENOMEM;
   }
 
@@ -555,9 +695,9 @@ static int axiio_ioctl_alloc_dma(struct axiio_file_ctx* ctx,
     }
   }
 
-  pr_info("nvme_axiio: ✓ DMA buffer allocated\n");
-  pr_info("  Virtual: %p\n", virt_addr);
-  pr_info("  DMA:     0x%llx\n", (u64)dma_addr);
+  pci_info(ctx->pci_dev, "✓ DMA buffer allocated\n");
+  pci_info(ctx->pci_dev, "  Virtual: %p\n", virt_addr);
+  pci_info(ctx->pci_dev, "  DMA:     0x%llx\n", (u64)dma_addr);
 
   /* Return addresses to userspace */
   info.dma_addr = dma_addr;
@@ -592,9 +732,10 @@ static int axiio_ioctl_export_doorbell_dmabuf(
   doorbell_phys = nvme_get_doorbell_phys(ctrl->bar0_phys, info.queue_id,
                                          info.is_sq, ctrl->doorbell_stride);
 
-  pr_info("nvme_axiio: 🚀🚀🚀 EXPORTING DOORBELL AS DMABUF! 🚀🚀🚀\n");
-  pr_info("  QID %u (%s)\n", info.queue_id, info.is_sq ? "SQ" : "CQ");
-  pr_info("  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
+  pci_info(ctx->pci_dev, "🚀🚀🚀 EXPORTING DOORBELL AS DMABUF! 🚀🚀🚀\n");
+  pci_info(ctx->pci_dev, "  QID %u (%s)\n", info.queue_id,
+           info.is_sq ? "SQ" : "CQ");
+  pci_info(ctx->pci_dev, "  Doorbell phys: 0x%llx\n", (u64)doorbell_phys);
 
   /* Export as dmabuf! */
   ret = nvme_export_doorbell_dmabuf(ctrl->pdev, doorbell_phys, PAGE_SIZE,
@@ -684,15 +825,37 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     if (size > ctx->sq_size)
       return -EINVAL;
 
-    pr_info("nvme_axiio: mmap SQ (size=%lu)\n", size);
+    pci_info(ctx->pci_dev, "mmap SQ (size=%lu)\n", size);
 
-    /* Use dma_mmap_coherent for DMA-allocated memory */
-    vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
-    ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->sq_virt, ctx->sq_dma,
-                            ctx->sq_size);
-    if (ret < 0) {
-      pr_err("nvme_axiio: dma_mmap_coherent failed for SQ: %d\n", ret);
-      return ret;
+    /* Check if we're using QEMU's GPA addresses */
+    if (nvme_axiio_get_controller() &&
+        nvme_axiio_get_controller()->using_iova &&
+        (ctx->sq_dma >= 0x1000000000ULL)) {
+      /* Using QEMU GPA - map directly using remap_pfn_range */
+      /* GPA is already a guest physical address, convert to PFN */
+      unsigned long pfn = ctx->sq_dma >> PAGE_SHIFT;
+      pci_info(ctx->pci_dev,
+               "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n", ctx->sq_dma,
+               pfn);
+
+      /* Use normal page protection (not write-combine) for RAM */
+      vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+
+      ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
+      if (ret < 0) {
+        pci_err(ctx->pci_dev, "remap_pfn_range failed for SQ: %d\n", ret);
+        return ret;
+      }
+      pci_info(ctx->pci_dev, "✅ SQ mapped from QEMU GPA\n");
+    } else {
+      /* Use dma_mmap_coherent for DMA-allocated memory */
+      vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
+      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->sq_virt,
+                              ctx->sq_dma, ctx->sq_size);
+      if (ret < 0) {
+        pci_err(ctx->pci_dev, "dma_mmap_coherent failed for SQ: %d\n", ret);
+        return ret;
+      }
     }
 
   } else if (vma->vm_pgoff == 1) {
@@ -700,32 +863,63 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     if (size > ctx->cq_size)
       return -EINVAL;
 
-    pr_info("nvme_axiio: mmap CQ (size=%lu)\n", size);
+    pci_info(ctx->pci_dev, "mmap CQ (size=%lu)\n", size);
 
-    /* Use dma_mmap_coherent for DMA-allocated memory */
-    vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
-    ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->cq_virt, ctx->cq_dma,
-                            ctx->cq_size);
-    if (ret < 0) {
-      pr_err("nvme_axiio: dma_mmap_coherent failed for CQ: %d\n", ret);
-      return ret;
+    /* Check if we're using QEMU's GPA addresses */
+    if (nvme_axiio_get_controller() &&
+        nvme_axiio_get_controller()->using_iova &&
+        (ctx->cq_dma >= 0x1000000000ULL)) {
+      /* Using QEMU GPA - map directly using remap_pfn_range */
+      /* GPA is already a guest physical address, convert to PFN */
+      unsigned long pfn = ctx->cq_dma >> PAGE_SHIFT;
+      pci_info(ctx->pci_dev,
+               "Mapping QEMU GPA buffer (GPA=0x%llx, pfn=0x%lx)\n", ctx->cq_dma,
+               pfn);
+
+      /* Use normal page protection (not write-combine) for RAM */
+      vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+
+      ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
+      if (ret < 0) {
+        pci_err(ctx->pci_dev, "remap_pfn_range failed for CQ: %d\n", ret);
+        return ret;
+      }
+      pci_info(ctx->pci_dev, "✅ CQ mapped from QEMU GPA\n");
+    } else {
+      /* Use dma_mmap_coherent for DMA-allocated memory */
+      vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
+      ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, ctx->cq_virt,
+                              ctx->cq_dma, ctx->cq_size);
+      if (ret < 0) {
+        pci_err(ctx->pci_dev, "dma_mmap_coherent failed for CQ: %d\n", ret);
+        return ret;
+      }
     }
 
   } else if (vma->vm_pgoff == 2) {
     /* Map doorbell BAR region for GPU access */
+    struct axiio_controller* ctrl = nvme_axiio_get_controller();
     unsigned long pfn;
     unsigned long doorbell_offset;
 
-    /* Calculate doorbell offset within BAR0 */
-    doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
-
-    /* Align to page boundary (doorbells are small, map whole page) */
-    unsigned long page_offset = doorbell_offset & PAGE_MASK;
-    pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
-
-    pr_info(
-      "nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, pfn=0x%lx)\n",
-      ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+    /* In QEMU P2P/IOVA mode, we need to use io_remap_pfn_range with the
+     * IOVA address so the GPU can access it. QEMU maps these IOVAs in the
+     * IOMMU for GPU P2P access. */
+    if (ctrl && ctrl->using_iova) {
+      /* QEMU P2P: Use IOVA address (page-aligned) */
+      pfn = ctrl->p2p_iova.doorbell_iova >> PAGE_SHIFT;
+      pr_info("nvme_axiio: mmap IOVA doorbell for GPU (queue_id=%u, "
+              "iova=0x%llx, pfn=0x%lx)\n",
+              ctx->queue_id, ctrl->p2p_iova.doorbell_iova, pfn);
+    } else {
+      /* Physical hardware: Use normal BAR0 address */
+      doorbell_offset = 0x1000 + (ctx->queue_id * 2 * ctx->doorbell_stride);
+      unsigned long page_offset = doorbell_offset & PAGE_MASK;
+      pfn = (ctx->bar0_phys + page_offset) >> PAGE_SHIFT;
+      pr_info("nvme_axiio: mmap doorbell BAR (queue_id=%u, phys=0x%llx, "
+              "pfn=0x%lx)\n",
+              ctx->queue_id, ctx->bar0_phys + doorbell_offset, pfn);
+    }
 
     /* Set GPU-compatible page protection flags */
     /* Write-combine: Allows GPU to write efficiently to PCIe MMIO */
@@ -756,8 +950,9 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
       pr_info("nvme_axiio: 🚀 Using GPU-aware mapping!\n");
       pr_info("  GPU file present - doorbell will be GPU-accessible\n");
 
-      /* Use GPU-aware mmap */
-      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping);
+      /* Use GPU-aware mmap - pass queue ID and PCI device for IOVA lookup */
+      ret = nvme_mmap_doorbell_for_gpu(vma, &ctx->gpu_mapping, ctx->queue_id,
+                                       ctx->pci_dev);
       if (ret < 0) {
         pr_err("nvme_axiio: GPU-aware mmap failed: %d\n", ret);
         /* Fall through to regular mapping */
@@ -795,6 +990,52 @@ static int axiio_mmap(struct file* filp, struct vm_area_struct* vma) {
     }
 
     pr_info("nvme_axiio: ✓ Standard doorbell mapped\n");
+
+  } else if (vma->vm_pgoff >= 4) {
+    /* Map DMA buffers (offset 4+)
+     * Offset 4 = first DMA buffer (read buffer)
+     * Offset 5 = second DMA buffer (write buffer)
+     * etc.
+     */
+    struct dma_buffer_entry* entry = NULL;
+    int buffer_index = vma->vm_pgoff - 4;
+    int found_index = 0;
+
+    pr_info("nvme_axiio: mmap DMA buffer (index=%d, size=%lu)\n", buffer_index,
+            size);
+
+    /* Find the DMA buffer at the requested index */
+    mutex_lock(&ctx->dma_lock);
+    list_for_each_entry(entry, &ctx->dma_buffers, list) {
+      if (found_index == buffer_index) {
+        break;
+      }
+      found_index++;
+    }
+    mutex_unlock(&ctx->dma_lock);
+
+    if (!entry || found_index != buffer_index) {
+      pr_err("nvme_axiio: DMA buffer index %d not found\n", buffer_index);
+      return -EINVAL;
+    }
+
+    if (size > entry->size) {
+      pr_err("nvme_axiio: Requested size %lu exceeds buffer size %zu\n", size,
+             entry->size);
+      return -EINVAL;
+    }
+
+    /* Use dma_mmap_coherent for DMA-allocated memory */
+    vma->vm_pgoff = 0; /* dma_mmap_coherent expects this to be 0 */
+    ret = dma_mmap_coherent(&ctx->pci_dev->dev, vma, entry->virt_addr,
+                            entry->dma_addr, size);
+    if (ret < 0) {
+      pr_err("nvme_axiio: dma_mmap_coherent failed for DMA buffer: %d\n", ret);
+      return ret;
+    }
+
+    pr_info("nvme_axiio: ✓ DMA buffer mapped (index=%d, DMA=0x%llx)\n",
+            buffer_index, (u64)entry->dma_addr);
 
   } else {
     return -EINVAL;

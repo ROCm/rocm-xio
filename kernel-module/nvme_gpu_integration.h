@@ -10,8 +10,15 @@
 #define NVME_GPU_INTEGRATION_H
 
 #include <linux/file.h>
+#include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
+
+#include "nvme_p2p_iova.h"
+
+/* Forward declarations */
+struct axiio_controller;
+struct axiio_controller* nvme_axiio_get_controller(void);
 
 /*
  * GPU doorbell mapping context
@@ -105,12 +112,42 @@ static inline void nvme_unmap_doorbell_from_gpu(
  * This uses the GPU context to set up proper MMU entries
  */
 static inline int nvme_mmap_doorbell_for_gpu(
-  struct vm_area_struct* vma, struct nvme_gpu_mapping* gpu_mapping) {
+  struct vm_area_struct* vma, struct nvme_gpu_mapping* gpu_mapping,
+  u16 queue_id, struct pci_dev* pdev) {
   unsigned long pfn;
   int ret;
+  struct axiio_controller* ctrl = nvme_axiio_get_controller();
+  resource_size_t doorbell_addr;
+
+  /* For IOVA mode, get queue-specific IOVA address */
+  if (ctrl && ctrl->using_iova && pdev) {
+    /* Get queue-specific IOVA for this queue */
+    struct nvme_p2p_iova_info queue_iova;
+    ret = nvme_get_p2p_iova_info(ctrl->bar0, &ctrl->admin_q, &pdev->dev,
+                                 queue_id, &queue_iova);
+    if (ret == 0) {
+      /* Use queue-specific IOVA - QEMU has mapped this in GPU's VFIO container
+       */
+      doorbell_addr = queue_iova.doorbell_iova;
+      pr_info(
+        "nvme_axiio: Using queue-specific IOVA address for GPU mapping\n");
+      pr_info("  Queue ID: %u\n", (unsigned int)queue_id);
+      pr_info("  IOVA: 0x%llx\n", (u64)doorbell_addr);
+    } else {
+      /* Fallback to controller base IOVA */
+      doorbell_addr = ctrl->p2p_iova.doorbell_iova;
+      pr_info("nvme_axiio: Using controller base IOVA for GPU mapping\n");
+      pr_info("  IOVA: 0x%llx\n", (u64)doorbell_addr);
+    }
+  } else {
+    /* Use physical address */
+    doorbell_addr = gpu_mapping->doorbell_phys;
+    pr_info("nvme_axiio: Using physical address for GPU mapping\n");
+    pr_info("  Physical: 0x%llx\n", (u64)doorbell_addr);
+  }
 
   /* Align doorbell to page boundary */
-  unsigned long page_base = gpu_mapping->doorbell_phys & PAGE_MASK;
+  unsigned long page_base = doorbell_addr & PAGE_MASK;
   pfn = page_base >> PAGE_SHIFT;
 
   pr_info("nvme_axiio: GPU-aware mmap setup\n");
@@ -131,9 +168,53 @@ static inline int nvme_mmap_doorbell_for_gpu(
   vm_flags_set(vma,
                VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP);
 
-  /* Map the physical doorbell pages */
-  ret = remap_pfn_range(vma, vma->vm_start, pfn, gpu_mapping->size,
-                        vma->vm_page_prot);
+  /* Map the doorbell pages */
+  if (ctrl && ctrl->using_iova) {
+    /* For IOVA mode: QEMU has already mapped the IOVA in GPU's VFIO container.
+     * We CANNOT use remap_pfn_range with IOVA because IOVA is not a physical
+     * PFN.
+     *
+     * The correct approach for IOVA mode:
+     * 1. Userspace will map the IOVA address directly (via anonymous mmap)
+     * 2. Userspace will lock it with HSA for GPU MMU registration
+     * 3. GPU uses the IOVA address directly (QEMU has mapped it in GPU's IOMMU)
+     *
+     * For pgoff=3 (GPU doorbell), we should NOT map anything - userspace
+     * handles it. However, we still need to set up the VMA properly so mmap
+     * succeeds. We'll create an anonymous mapping that userspace can use.
+     */
+    pr_info(
+      "nvme_axiio: IOVA mode - setting up VMA for userspace IOVA mapping\n");
+    pr_info("  IOVA address: 0x%llx (userspace will map this directly)\n",
+            (u64)doorbell_addr);
+    pr_info("  Physical BAR0: 0x%llx (not used for GPU in IOVA mode)\n",
+            (u64)gpu_mapping->doorbell_phys);
+
+    /* For IOVA mode, we don't map physical BAR0 here.
+     * Instead, we set up the VMA to allow userspace to map the IOVA address.
+     * Userspace will use MAP_ANONYMOUS | MAP_FIXED to map at the IOVA address,
+     * then lock it with HSA. The GPU will use the IOVA directly.
+     *
+     * We can't use remap_pfn_range because IOVA is not a physical PFN.
+     * Instead, we'll just set up the VMA flags and let userspace handle the
+     * mapping.
+     */
+
+    /* Set VMA flags for device memory */
+    vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+
+    /* Don't use remap_pfn_range - userspace will map IOVA directly */
+    /* Just mark the VMA as valid - userspace mapping will happen separately */
+    ret = 0; /* Success - VMA is set up, userspace will do the actual mapping */
+
+    pr_info("nvme_axiio: ✓ VMA set up for IOVA mode (userspace will map IOVA "
+            "directly)\n");
+  } else {
+    /* Physical mode: Use remap_pfn_range with physical PFN */
+    ret = remap_pfn_range(vma, vma->vm_start, pfn, gpu_mapping->size,
+                          vma->vm_page_prot);
+  }
+
   if (ret < 0) {
     pr_err("nvme_axiio: remap_pfn_range failed: %d\n", ret);
     return ret;

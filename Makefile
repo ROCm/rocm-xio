@@ -246,4 +246,22 @@ format:
 		| xargs $(CLANG_FORMAT) -i --style=file
 	@echo "✓ Formatting complete"
 
-.PHONY: all default clean asm list build_info lint lint-format format
+# Check spelling in markdown files (requires pyspelling)
+lint-spell:
+	@echo "Checking spelling in markdown files..."
+	@if command -v pyspelling >/dev/null 2>&1; then \
+		pyspelling -c .spellcheck.yml; \
+	else \
+		echo "Error: pyspelling not found. Install with:"; \
+		echo "  pip install pyspelling[all]"; \
+		echo "  sudo apt-get install aspell aspell-en"; \
+		echo ""; \
+		echo "Or run spell checking via GitHub Actions workflow."; \
+		exit 1; \
+	fi
+
+# Run all linting checks (format + spell)
+lint-all: lint-format lint-spell
+	@echo "✓ All linting checks passed"
+
+.PHONY: all default clean asm list build_info lint lint-format format lint-spell lint-all
