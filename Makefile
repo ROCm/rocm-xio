@@ -169,6 +169,17 @@ $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
 
 # Note: -lhsa-runtime64 is required for GPU doorbell HSA memory lock
 
+# RDMA endpoint tester
+RDMA_TESTER := ${BIN_DIR}/rdma-ep-tester
+RDMA_TESTER_SOURCE := $(TESTER_DIR)/rdma-ep-tester.hip
+RDMA_TESTER_OBJECT := $(BUILD_DIR)/$(RDMA_TESTER_SOURCE:.hip=.o)
+
+$(RDMA_TESTER): $(RDMA_TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^ -lhsa-runtime64
+
+rdma-ep-tester: $(RDMA_TESTER)
+	@echo "Built RDMA endpoint tester: $(RDMA_TESTER)"
+
 # Make RDMA endpoint depend on vendor headers
 $(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
 
@@ -264,4 +275,4 @@ lint-spell:
 lint-all: lint-format lint-spell
 	@echo "✓ All linting checks passed"
 
-.PHONY: all default clean asm list build_info lint lint-format format lint-spell lint-all
+.PHONY: all default clean asm list build_info lint lint-format format lint-spell lint-all rdma-ep-tester
