@@ -129,53 +129,50 @@ void axxioPrintHistogram(const std::vector<double>& durations,
     // All values are the same
     std::cout << "\nHistogram: All values are identical." << std::endl;
   } else {
-    // Sort data for quantile-based binning (ensures no empty bins)
-    std::vector<double> sortedData = durations;
-    std::sort(sortedData.begin(), sortedData.end());
-
-    size_t n = sortedData.size();
+    size_t n = durations.size();
 
     // Determine number of bins (8 to 64, but not more than data points)
     int desiredBins = std::min(64, std::max(8, (int)nIterations / 2));
     int numBins = std::min(desiredBins, (int)n);
 
-    // Create quantile-based bin boundaries
-    // to ensure each bin has at least one value
-    std::vector<double> binEdges;
-    binEdges.push_back(sortedData[0]); // Start with minimum
-
-    // Calculate target number of samples per bin
-    double samplesPerBin = (double)n / numBins;
-
-    for (int i = 1; i < numBins; i++) {
-      // Calculate the index for this quantile boundary
-      size_t idx = (size_t)(i * samplesPerBin);
-
-      // Ensure we don't go past the end and avoid duplicates
-      if (idx < n && sortedData[idx] > binEdges.back()) {
-        binEdges.push_back(sortedData[idx]);
-      }
+    // Safety check: ensure we have at least one bin
+    if (numBins <= 0) {
+      numBins = 1;
     }
 
-    // Add the maximum as the last edge
-    binEdges.push_back(sortedData[n - 1]);
+    // Create evenly-spaced bin boundaries based on range
+    // This ensures consistent binning regardless of data distribution
+    double range = maxVal - minVal;
+    double binWidth = (range > 0.0 && numBins > 0) ? range / numBins : 1.0;
 
-    // Remove any duplicate edges (can happen with repeated values)
-    binEdges.erase(std::unique(binEdges.begin(), binEdges.end()),
-                   binEdges.end());
+    // Create bin edges for display
+    std::vector<double> binEdges;
+    for (int i = 0; i <= numBins; i++) {
+      binEdges.push_back(minVal + i * binWidth);
+    }
+    // Ensure the last edge includes the maximum value exactly
+    binEdges[numBins] = maxVal;
 
-    // Update actual number of bins
-    numBins = binEdges.size() - 1;
     std::vector<int> bins(numBins, 0);
-    // Fill histogram bins
+    // Fill histogram bins using direct calculation
     for (double d : durations) {
-      for (int i = 0; i < numBins; i++) {
-        if (d >= binEdges[i] && (d < binEdges[i + 1] ||
-                                 (i == numBins - 1 && d <= binEdges[i + 1]))) {
-          bins[i]++;
-          break;
+      // Calculate bin index directly
+      int binIdx;
+      if (d <= minVal) {
+        binIdx = 0;
+      } else if (d >= maxVal) {
+        binIdx = numBins - 1;
+      } else {
+        // Calculate which bin this value falls into
+        binIdx = (int)((d - minVal) / binWidth);
+        // Clamp to valid range (shouldn't be necessary, but be safe)
+        if (binIdx < 0) {
+          binIdx = 0;
+        } else if (binIdx >= numBins) {
+          binIdx = numBins - 1;
         }
       }
+      bins[binIdx]++;
     }
 
     // Find max count for scaling
