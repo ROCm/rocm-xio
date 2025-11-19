@@ -58,3 +58,4 @@ tester/dump-queue-test
 
 # Reference materials (external)
 reference/
+gda-experiments/rocSHMEM/
