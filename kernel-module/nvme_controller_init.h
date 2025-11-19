@@ -54,8 +54,8 @@ struct nvme_admin_queue {
 /*
  * Wait for controller status bit
  */
-static inline int nvme_wait_csts(void __iomem* bar0, u32 mask, u32 val,
-                                 unsigned timeout_ms) {
+static inline int nvme_wait_csts(struct device* dev, void __iomem* bar0,
+                                 u32 mask, u32 val, unsigned timeout_ms) {
   unsigned long timeout = jiffies + msecs_to_jiffies(timeout_ms);
   u32 csts;
 
@@ -66,35 +66,37 @@ static inline int nvme_wait_csts(void __iomem* bar0, u32 mask, u32 val,
     msleep(10);
   }
 
-  pr_err("nvme_axiio: Timeout waiting for CSTS 0x%x (got 0x%x)\n", val, csts);
+  dev_err(dev, "nvme_axiio: Timeout waiting for CSTS 0x%x (got 0x%x)\n", val,
+          csts);
   return -ETIMEDOUT;
 }
 
 /*
  * Disable controller
  */
-static inline int nvme_disable_ctrl(void __iomem* bar0) {
+static inline int nvme_disable_ctrl(struct device* dev, void __iomem* bar0) {
   u32 cc;
 
-  pr_info("nvme_axiio: Disabling controller...\n");
+  dev_info(dev, "nvme_axiio: Disabling controller...\n");
 
   cc = readl(bar0 + NVME_REG_CC);
   cc &= ~NVME_CC_ENABLE;
   writel(cc, bar0 + NVME_REG_CC);
 
   /* Wait for controller to indicate ready=0 */
-  return nvme_wait_csts(bar0, NVME_CSTS_RDY, 0, 5000);
+  return nvme_wait_csts(dev, bar0, NVME_CSTS_RDY, 0, 5000);
 }
 
 /*
  * Enable controller
  */
-static inline int nvme_enable_ctrl(void __iomem* bar0, u32 page_size_shift) {
+static inline int nvme_enable_ctrl(struct device* dev, void __iomem* bar0,
+                                   u32 page_size_shift) {
   u32 cc;
   u64 cap;
   u32 mps;
 
-  pr_info("nvme_axiio: Enabling controller...\n");
+  dev_info(dev, "nvme_axiio: Enabling controller...\n");
 
   /* Read CAP to get page size requirements */
   cap = readq(bar0 + NVME_REG_CAP);
@@ -106,10 +108,10 @@ static inline int nvme_enable_ctrl(void __iomem* bar0, u32 page_size_shift) {
 
   writel(cc, bar0 + NVME_REG_CC);
 
-  pr_info("nvme_axiio: CC register: 0x%08x\n", cc);
+  dev_info(dev, "nvme_axiio: CC register: 0x%08x\n", cc);
 
   /* Wait for controller to become ready */
-  return nvme_wait_csts(bar0, NVME_CSTS_RDY, NVME_CSTS_RDY, 10000);
+  return nvme_wait_csts(dev, bar0, NVME_CSTS_RDY, NVME_CSTS_RDY, 10000);
 }
 
 /*
@@ -121,14 +123,15 @@ static inline int nvme_init_admin_queue(struct device* dev, void __iomem* bar0,
   u32 aqa;
   int ret;
 
-  pr_info("nvme_axiio: Initializing admin queue (size=%u)...\n", queue_size);
+  dev_info(dev, "nvme_axiio: Initializing admin queue (size=%u)...\n",
+           queue_size);
 
   /* Allocate admin submission queue */
   admin_q->queue_size = queue_size;
   admin_q->sq_virt = dma_alloc_coherent(dev, queue_size * 64, &admin_q->sq_dma,
                                         GFP_KERNEL);
   if (!admin_q->sq_virt) {
-    pr_err("nvme_axiio: Failed to allocate admin SQ\n");
+    dev_err(dev, "nvme_axiio: Failed to allocate admin SQ\n");
     return -ENOMEM;
   }
   memset(admin_q->sq_virt, 0, queue_size * 64);
@@ -137,7 +140,7 @@ static inline int nvme_init_admin_queue(struct device* dev, void __iomem* bar0,
   admin_q->cq_virt = dma_alloc_coherent(dev, queue_size * 16, &admin_q->cq_dma,
                                         GFP_KERNEL);
   if (!admin_q->cq_virt) {
-    pr_err("nvme_axiio: Failed to allocate admin CQ\n");
+    dev_err(dev, "nvme_axiio: Failed to allocate admin CQ\n");
     dma_free_coherent(dev, queue_size * 64, admin_q->sq_virt, admin_q->sq_dma);
     return -ENOMEM;
   }
@@ -148,32 +151,36 @@ static inline int nvme_init_admin_queue(struct device* dev, void __iomem* bar0,
   admin_q->cq_phase = 1;
   spin_lock_init(&admin_q->sq_lock);
 
-  pr_info("nvme_axiio: Admin queues allocated:\n");
-  pr_info("  ASQ: virt=%p dma=0x%llx\n", admin_q->sq_virt,
-          (u64)admin_q->sq_dma);
-  pr_info("  ACQ: virt=%p dma=0x%llx\n", admin_q->cq_virt,
-          (u64)admin_q->cq_dma);
+  dev_info(dev, "nvme_axiio: Admin queues allocated:\n");
+  dev_info(dev, "  ASQ: virt=%p dma=0x%llx\n", admin_q->sq_virt,
+           (u64)admin_q->sq_dma);
+  dev_info(dev, "  ACQ: virt=%p dma=0x%llx\n", admin_q->cq_virt,
+           (u64)admin_q->cq_dma);
 
   /* Check controller state - don't disable real hardware */
   /* Real hardware controllers are typically already disabled when unbound from
    * nvme driver */
   u32 csts = readl(bar0 + NVME_REG_CSTS);
-  pr_info("nvme_axiio: Controller status (CSTS): 0x%x\n", csts);
+  dev_info(dev, "nvme_axiio: Controller status (CSTS): 0x%x\n", csts);
 
   if (csts & NVME_CSTS_RDY) {
     /* Controller is enabled - try to disable (only works for QEMU) */
-    pr_info("nvme_axiio: Controller is enabled, attempting to disable...\n");
-    ret = nvme_disable_ctrl(bar0);
+    dev_info(dev,
+             "nvme_axiio: Controller is enabled, attempting to disable...\n");
+    ret = nvme_disable_ctrl(dev, bar0);
     if (ret < 0) {
       /* Disable failed - likely real hardware that we shouldn't disable */
-      pr_warn(
+      dev_warn(
+        dev,
         "nvme_axiio: Failed to disable controller (may be real hardware)\n");
-      pr_warn("nvme_axiio: Continuing anyway - controller may already be in "
-              "correct state\n");
+      dev_warn(dev,
+               "nvme_axiio: Continuing anyway - controller may already be in "
+               "correct state\n");
       /* Don't fail - continue with initialization */
     }
   } else {
-    pr_info("nvme_axiio: Controller already disabled (CSTS=0x%x)\n", csts);
+    dev_info(dev, "nvme_axiio: Controller already disabled (CSTS=0x%x)\n",
+             csts);
   }
 
   /* Configure admin queue attributes */
@@ -184,19 +191,19 @@ static inline int nvme_init_admin_queue(struct device* dev, void __iomem* bar0,
   writeq(admin_q->sq_dma, bar0 + NVME_REG_ASQ);
   writeq(admin_q->cq_dma, bar0 + NVME_REG_ACQ);
 
-  pr_info("nvme_axiio: Admin queue registers configured:\n");
-  pr_info("  AQA: 0x%08x\n", aqa);
-  pr_info("  ASQ: 0x%016llx\n", admin_q->sq_dma);
-  pr_info("  ACQ: 0x%016llx\n", admin_q->cq_dma);
+  dev_info(dev, "nvme_axiio: Admin queue registers configured:\n");
+  dev_info(dev, "  AQA: 0x%08x\n", aqa);
+  dev_info(dev, "  ASQ: 0x%016llx\n", admin_q->sq_dma);
+  dev_info(dev, "  ACQ: 0x%016llx\n", admin_q->cq_dma);
 
   /* Enable controller */
-  ret = nvme_enable_ctrl(bar0, PAGE_SHIFT);
+  ret = nvme_enable_ctrl(dev, bar0, PAGE_SHIFT);
   if (ret < 0) {
-    pr_err("nvme_axiio: Failed to enable controller\n");
+    dev_err(dev, "nvme_axiio: Failed to enable controller\n");
     goto free_queues;
   }
 
-  pr_info("nvme_axiio: ✓ Controller enabled, admin queue ready\n");
+  dev_info(dev, "nvme_axiio: ✓ Controller enabled, admin queue ready\n");
   return 0;
 
 free_queues:
@@ -211,10 +218,10 @@ free_queues:
 static inline void nvme_shutdown_admin_queue(struct device* dev,
                                              void __iomem* bar0,
                                              struct nvme_admin_queue* admin_q) {
-  pr_info("nvme_axiio: Shutting down admin queue...\n");
+  dev_info(dev, "nvme_axiio: Shutting down admin queue...\n");
 
   /* Disable controller */
-  nvme_disable_ctrl(bar0);
+  nvme_disable_ctrl(dev, bar0);
 
   /* Free admin queues */
   if (admin_q->cq_virt) {
@@ -229,7 +236,7 @@ static inline void nvme_shutdown_admin_queue(struct device* dev,
     admin_q->sq_virt = NULL;
   }
 
-  pr_info("nvme_axiio: ✓ Admin queue shut down\n");
+  dev_info(dev, "nvme_axiio: ✓ Admin queue shut down\n");
 }
 
 /*

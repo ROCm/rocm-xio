@@ -27,7 +27,8 @@
 /*
  * Setup VMA for GPU-accessible doorbell mapping
  */
-static inline int nvme_setup_gpu_doorbell_vma(struct vm_area_struct* vma,
+static inline int nvme_setup_gpu_doorbell_vma(struct device* dev,
+                                              struct vm_area_struct* vma,
                                               resource_size_t doorbell_phys,
                                               size_t size) {
   unsigned long pfn;
@@ -37,10 +38,10 @@ static inline int nvme_setup_gpu_doorbell_vma(struct vm_area_struct* vma,
   unsigned long page_base = doorbell_phys & PAGE_MASK;
   pfn = page_base >> PAGE_SHIFT;
 
-  pr_info("nvme_axiio: Setting up GPU doorbell mapping\n");
-  pr_info("  Physical address: 0x%llx\n", (u64)doorbell_phys);
-  pr_info("  PFN: 0x%lx\n", pfn);
-  pr_info("  Size: %zu bytes\n", size);
+  dev_info(dev, "nvme_axiio: Setting up GPU doorbell mapping\n");
+  dev_info(dev, "  Physical address: 0x%llx\n", (u64)doorbell_phys);
+  dev_info(dev, "  PFN: 0x%lx\n", pfn);
+  dev_info(dev, "  Size: %zu bytes\n", size);
 
   /* Set GPU-compatible page protection */
   vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
@@ -51,13 +52,13 @@ static inline int nvme_setup_gpu_doorbell_vma(struct vm_area_struct* vma,
   /* Map physical pages to userspace */
   ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
   if (ret < 0) {
-    pr_err("nvme_axiio: remap_pfn_range failed: %d\n", ret);
+    dev_err(dev, "nvme_axiio: remap_pfn_range failed: %d\n", ret);
     return ret;
   }
 
-  pr_info("nvme_axiio: ✓ GPU doorbell mapped with WC+IO flags\n");
-  pr_info("  Userspace VA: 0x%lx\n", vma->vm_start);
-  pr_info("  GPU can now write with system-scope atomics!\n");
+  dev_info(dev, "nvme_axiio: ✓ GPU doorbell mapped with WC+IO flags\n");
+  dev_info(dev, "  Userspace VA: 0x%lx\n", vma->vm_start);
+  dev_info(dev, "  GPU can now write with system-scope atomics!\n");
 
   return 0;
 }

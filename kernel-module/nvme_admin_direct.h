@@ -54,10 +54,10 @@ static inline int nvme_admin_queue_init(struct nvme_admin_queue* admin,
   /* Read Admin Completion Queue Base Address (ACQ) at offset 0x30 */
   acq = readq(bar0 + 0x30);
 
-  pr_info("nvme_axiio: Admin queue initialization:\n");
-  pr_info("  Queue size: %u entries\n", admin->queue_size);
-  pr_info("  ASQ: 0x%llx\n", asq);
-  pr_info("  ACQ: 0x%llx\n", acq);
+  dev_info(&pdev->dev, "nvme_axiio: Admin queue initialization:\n");
+  dev_info(&pdev->dev, "  Queue size: %u entries\n", admin->queue_size);
+  dev_info(&pdev->dev, "  ASQ: 0x%llx\n", asq);
+  dev_info(&pdev->dev, "  ACQ: 0x%llx\n", acq);
 
   /* We can't easily map these physical addresses from another driver
    * because they belong to the kernel nvme driver's DMA allocations.
@@ -66,9 +66,12 @@ static inline int nvme_admin_queue_init(struct nvme_admin_queue* admin,
    */
 
   /* For now, mark this as not implemented */
-  pr_warn("nvme_axiio: Direct admin queue access not fully implemented\n");
-  pr_warn("  Reason: Cannot safely map kernel driver's admin queue memory\n");
-  pr_warn("  Alternative: Use nvme_submit_admin_command() kernel API\n");
+  dev_warn(&pdev->dev,
+           "nvme_axiio: Direct admin queue access not fully implemented\n");
+  dev_warn(&pdev->dev,
+           "  Reason: Cannot safely map kernel driver's admin queue memory\n");
+  dev_warn(&pdev->dev,
+           "  Alternative: Use nvme_submit_admin_command() kernel API\n");
 
   return -ENOTSUPP;
 }
@@ -85,8 +88,10 @@ static inline int nvme_submit_admin_cmd_direct(struct nvme_admin_queue* admin,
    *
    * The kernel driver uses locks and has exclusive access.
    */
-  pr_err("nvme_axiio: Direct admin command submission not supported\n");
-  pr_err("  Reason: Would conflict with kernel driver's admin queue usage\n");
+  dev_err(&pdev->dev,
+          "nvme_axiio: Direct admin command submission not supported\n");
+  dev_err(&pdev->dev,
+          "  Reason: Would conflict with kernel driver's admin queue usage\n");
   return -ENOTSUPP;
 }
 

@@ -65,22 +65,22 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
 
   /* Only allow one device at a time for now */
   if (axiio_bound_pci_dev) {
-    pr_err("nvme_axiio: Already bound to device %s\n",
-           pci_name(axiio_bound_pci_dev));
+    dev_err(&pdev->dev, "nvme_axiio: Already bound to device %s\n",
+            pci_name(axiio_bound_pci_dev));
     return -EBUSY;
   }
 
   /* Enable PCI device */
   ret = pci_enable_device_mem(pdev);
   if (ret) {
-    pr_err("nvme_axiio: Failed to enable PCI device: %d\n", ret);
+    dev_err(&pdev->dev, "nvme_axiio: Failed to enable PCI device: %d\n", ret);
     return ret;
   }
 
   /* Request memory regions */
   ret = pci_request_regions(pdev, "nvme_axiio");
   if (ret) {
-    pr_err("nvme_axiio: Failed to request PCI regions: %d\n", ret);
+    dev_err(&pdev->dev, "nvme_axiio: Failed to request PCI regions: %d\n", ret);
     pci_disable_device(pdev);
     return ret;
   }
@@ -88,10 +88,11 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
   /* Set DMA mask (NVMe supports 64-bit DMA) */
   ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
   if (ret) {
-    pr_warn("nvme_axiio: 64-bit DMA not available, trying 32-bit\n");
+    dev_warn(&pdev->dev,
+             "nvme_axiio: 64-bit DMA not available, trying 32-bit\n");
     ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
     if (ret) {
-      pr_err("nvme_axiio: Failed to set DMA mask: %d\n", ret);
+      dev_err(&pdev->dev, "nvme_axiio: Failed to set DMA mask: %d\n", ret);
       goto release_regions;
     }
   }
@@ -104,14 +105,14 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
   bar0_size = pci_resource_len(pdev, 0);
 
   if (!bar0_phys || !bar0_size) {
-    pr_err("nvme_axiio: Invalid BAR0\n");
+    dev_err(&pdev->dev, "nvme_axiio: Invalid BAR0\n");
     ret = -ENXIO;
     goto release_regions;
   }
 
   bar0 = pci_ioremap_bar(pdev, 0);
   if (!bar0) {
-    pr_err("nvme_axiio: Failed to map BAR0\n");
+    dev_err(&pdev->dev, "nvme_axiio: Failed to map BAR0\n");
     ret = -ENOMEM;
     goto release_regions;
   }
@@ -119,7 +120,7 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
   /* Allocate controller context */
   axiio_ctrl = kzalloc(sizeof(*axiio_ctrl), GFP_KERNEL);
   if (!axiio_ctrl) {
-    pr_err("nvme_axiio: Failed to allocate controller context\n");
+    dev_err(&pdev->dev, "nvme_axiio: Failed to allocate controller context\n");
     ret = -ENOMEM;
     goto unmap_bar0;
   }
@@ -136,26 +137,30 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
   axiio_ctrl->max_queue_entries = nvme_get_max_queue_entries(bar0);
   dstrd = (cap >> 32) & 0xF;
 
-  pr_info("nvme_axiio: ✓ Successfully bound to NVMe controller\n");
-  pr_info("  PCI: %s\n", pci_name(pdev));
-  pr_info("  BAR0: phys=0x%llx size=0x%llx\n", (u64)bar0_phys, (u64)bar0_size);
-  pr_info("  Version: %u.%u.%u\n", (axiio_ctrl->version >> 16) & 0xFFFF,
-          (axiio_ctrl->version >> 8) & 0xFF, axiio_ctrl->version & 0xFF);
-  pr_info("  CAP: 0x%016llx (DSTRD=%u, MQES=%u)\n", cap, dstrd,
-          axiio_ctrl->max_queue_entries);
+  dev_info(&pdev->dev, "nvme_axiio: ✓ Successfully bound to NVMe controller\n");
+  dev_info(&pdev->dev, "  PCI: %s\n", pci_name(pdev));
+  dev_info(&pdev->dev, "  BAR0: phys=0x%llx size=0x%llx\n", (u64)bar0_phys,
+           (u64)bar0_size);
+  dev_info(&pdev->dev, "  Version: %u.%u.%u\n",
+           (axiio_ctrl->version >> 16) & 0xFFFF,
+           (axiio_ctrl->version >> 8) & 0xFF, axiio_ctrl->version & 0xFF);
+  dev_info(&pdev->dev, "  CAP: 0x%016llx (DSTRD=%u, MQES=%u)\n", cap, dstrd,
+           axiio_ctrl->max_queue_entries);
 
   /* Initialize controller and admin queue */
-  pr_info("nvme_axiio: Initializing NVMe controller...\n");
+  dev_info(&pdev->dev, "nvme_axiio: Initializing NVMe controller...\n");
   ret = nvme_init_admin_queue(&pdev->dev, bar0, &axiio_ctrl->admin_q, 64);
   if (ret < 0) {
-    pr_err("nvme_axiio: Failed to initialize admin queue: %d\n", ret);
+    dev_err(&pdev->dev, "nvme_axiio: Failed to initialize admin queue: %d\n",
+            ret);
     goto free_ctrl;
   }
 
   /* Identify controller */
   ret = nvme_identify_ctrl(bar0, &axiio_ctrl->admin_q, &pdev->dev, NULL);
   if (ret < 0) {
-    pr_warn("nvme_axiio: Failed to identify controller: %d\n", ret);
+    dev_warn(&pdev->dev, "nvme_axiio: Failed to identify controller: %d\n",
+             ret);
     /* Continue anyway - not fatal */
   }
 
@@ -168,20 +173,25 @@ static int nvme_axiio_pci_probe(struct pci_dev* pdev,
                                  &axiio_ctrl->p2p_iova);
     if (ret == 0) {
       axiio_ctrl->using_iova = true;
-      pr_info("nvme_axiio: ✅ Using IOVA addresses for GPU access\n");
-      pr_info("  Note: These are admin queue IOVAs\n");
-      pr_info("  I/O queue IOVAs will be retrieved when queues are created\n");
+      dev_info(&pdev->dev,
+               "nvme_axiio: ✅ Using IOVA addresses for GPU access\n");
+      dev_info(&pdev->dev, "  Note: These are admin queue IOVAs\n");
+      dev_info(&pdev->dev,
+               "  I/O queue IOVAs will be retrieved when queues are created\n");
     } else {
-      pr_warn("nvme_axiio: QEMU detected but P2P IOVA unavailable\n");
-      pr_warn("  Will fall back to physical addresses\n");
+      dev_warn(&pdev->dev,
+               "nvme_axiio: QEMU detected but P2P IOVA unavailable\n");
+      dev_warn(&pdev->dev, "  Will fall back to physical addresses\n");
     }
   }
 
-  pr_info("nvme_axiio: ✓ Controller initialized and ready\n");
-  pr_info("  Admin queue: SQ/CQ size=64 entries\n");
-  pr_info("  Max I/O queue size: %u entries\n", axiio_ctrl->max_queue_entries);
-  pr_info("  Controller is now under AXIIO control\n");
-  pr_info("  WARNING: Device is no longer accessible via /dev/nvmeX\n");
+  dev_info(&pdev->dev, "nvme_axiio: ✓ Controller initialized and ready\n");
+  dev_info(&pdev->dev, "  Admin queue: SQ/CQ size=64 entries\n");
+  dev_info(&pdev->dev, "  Max I/O queue size: %u entries\n",
+           axiio_ctrl->max_queue_entries);
+  dev_info(&pdev->dev, "  Controller is now under AXIIO control\n");
+  dev_info(&pdev->dev,
+           "  WARNING: Device is no longer accessible via /dev/nvmeX\n");
 
   /* Store device reference */
   axiio_bound_pci_dev = pdev;
@@ -207,7 +217,8 @@ release_regions:
 static void nvme_axiio_pci_remove(struct pci_dev* pdev) {
   struct axiio_controller* ctrl;
 
-  pr_info("nvme_axiio: PCI remove called for device %s\n", pci_name(pdev));
+  dev_info(&pdev->dev, "nvme_axiio: PCI remove called for device %s\n",
+           pci_name(pdev));
 
   /* Get controller context from driver data */
   ctrl = pci_get_drvdata(pdev);
@@ -235,9 +246,10 @@ static void nvme_axiio_pci_remove(struct pci_dev* pdev) {
   }
   axiio_ctrl = NULL;
 
-  pr_info("nvme_axiio: ✓ Device %s released\n", pci_name(pdev));
-  pr_info("  Controller shut down cleanly\n");
-  pr_info("  Device can now be bound back to kernel nvme driver\n");
+  dev_info(&pdev->dev, "nvme_axiio: ✓ Device %s released\n", pci_name(pdev));
+  dev_info(&pdev->dev, "  Controller shut down cleanly\n");
+  dev_info(&pdev->dev,
+           "  Device can now be bound back to kernel nvme driver\n");
 }
 
 /*
@@ -263,8 +275,9 @@ static inline int nvme_axiio_register_pci_driver(void) {
   }
 
   pr_info("nvme_axiio: PCI driver registered\n");
-  pr_info("  Devices can now be bound via sysfs:\n");
-  pr_info("    echo 0000:XX:00.0 > /sys/bus/pci/drivers/nvme_axiio/bind\n");
+  pr_info("nvme_axiio: Devices can now be bound via sysfs:\n");
+  pr_info(
+    "nvme_axiio:   echo 0000:XX:00.0 > /sys/bus/pci/drivers/nvme_axiio/bind\n");
 
   return 0;
 }
@@ -323,12 +336,14 @@ static inline int nvme_axiio_create_io_queues(u16 qid, u16 qsize,
   /* Try to delete existing queues first (in case of previous crash) */
   pci_info(ctrl->pdev,
            "nvme_axiio: Cleaning up any existing queues (qid=%u)...\n", qid);
-  nvme_delete_io_sq_cmd(ctrl->bar0, &ctrl->admin_q, qid); // Ignore error
-  nvme_delete_io_cq_cmd(ctrl->bar0, &ctrl->admin_q, qid); // Ignore error
+  nvme_delete_io_sq_cmd(&ctrl->pdev->dev, ctrl->bar0, &ctrl->admin_q,
+                        qid); // Ignore error
+  nvme_delete_io_cq_cmd(&ctrl->pdev->dev, ctrl->bar0, &ctrl->admin_q,
+                        qid); // Ignore error
 
   /* Create CQ first */
-  ret = nvme_create_io_cq_cmd(ctrl->bar0, &ctrl->admin_q, qid, qsize, cq_dma,
-                              0);
+  ret = nvme_create_io_cq_cmd(&ctrl->pdev->dev, ctrl->bar0, &ctrl->admin_q, qid,
+                              qsize, cq_dma, 0);
   if (ret < 0) {
     pci_err(ctrl->pdev, "nvme_axiio: Failed to create I/O CQ %u: %d\n", qid,
             ret);
@@ -338,18 +353,19 @@ static inline int nvme_axiio_create_io_queues(u16 qid, u16 qsize,
   pci_info(ctrl->pdev, "nvme_axiio: ✓ I/O CQ %u created\n", qid);
 
   /* Create SQ */
-  ret = nvme_create_io_sq_cmd(ctrl->bar0, &ctrl->admin_q, qid, qid, qsize,
-                              sq_dma);
+  ret = nvme_create_io_sq_cmd(&ctrl->pdev->dev, ctrl->bar0, &ctrl->admin_q, qid,
+                              qid, qsize, sq_dma);
   if (ret < 0) {
     pci_err(ctrl->pdev, "nvme_axiio: Failed to create I/O SQ %u: %d\n", qid,
             ret);
     /* Try to clean up CQ */
-    nvme_delete_io_cq_cmd(ctrl->bar0, &ctrl->admin_q, qid);
+    nvme_delete_io_cq_cmd(&ctrl->pdev->dev, ctrl->bar0, &ctrl->admin_q, qid);
     return ret;
   }
 
-  pr_info("nvme_axiio: ✓ I/O SQ %u created\n", qid);
-  pr_info("nvme_axiio: ✓ I/O queue pair %u ready for GPU-direct I/O!\n", qid);
+  pci_info(ctrl->pdev, "nvme_axiio: ✓ I/O SQ %u created\n", qid);
+  pci_info(ctrl->pdev,
+           "nvme_axiio: ✓ I/O queue pair %u ready for GPU-direct I/O!\n", qid);
 
   return 0;
 }
