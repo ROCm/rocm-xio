@@ -315,12 +315,19 @@ enum nvme_test_pattern {
   NVME_PATTERN_LFSR = 5        // LFSR-based deterministic pattern
 };
 
+// Forward declaration of global debug flag (defined in nvme-ep.hip)
+extern __device__ bool g_nvme_ep_debug;
+
 // Generate test data pattern
 __host__ __device__ static inline void nvme_generate_pattern(
   uint8_t* buffer, size_t size, enum nvme_test_pattern pattern, uint64_t offset,
   uint32_t lfsr_seed = 0) {
   // Debug: Print first few bytes before writing
-  if (threadIdx.x == 0 && blockIdx.x == 0 && size > 0) {
+#ifdef __HIP_DEVICE_COMPILE__
+  if (threadIdx.x == 0 && blockIdx.x == 0 && size > 0 && g_nvme_ep_debug) {
+#else
+  if (false) {
+#endif
     printf("GPU: nvme_generate_pattern: buffer=%p, size=%zu, pattern=%d\n",
            buffer, size, pattern);
     printf("GPU: First byte before write: 0x%02x\n", buffer[0]);
@@ -330,19 +337,25 @@ __host__ __device__ static inline void nvme_generate_pattern(
     case NVME_PATTERN_SEQUENTIAL:
       // Write in chunks to avoid long loops
       for (size_t i = 0; i < size; i++) {
-        if (i < 10 && threadIdx.x == 0 && blockIdx.x == 0) {
+#ifdef __HIP_DEVICE_COMPILE__
+        if (i < 10 && threadIdx.x == 0 && blockIdx.x == 0 && g_nvme_ep_debug) {
           printf("GPU: Writing buffer[%zu] = 0x%02x\n", i,
                  (uint8_t)((offset + i) & 0xFF));
         }
+#endif
         buffer[i] = (uint8_t)((offset + i) & 0xFF);
-        if (i == 9 && threadIdx.x == 0 && blockIdx.x == 0) {
+#ifdef __HIP_DEVICE_COMPILE__
+        if (i == 9 && threadIdx.x == 0 && blockIdx.x == 0 && g_nvme_ep_debug) {
           printf("GPU: First 10 bytes written, continuing...\n");
         }
+#endif
       }
-      if (threadIdx.x == 0 && blockIdx.x == 0) {
+#ifdef __HIP_DEVICE_COMPILE__
+      if (threadIdx.x == 0 && blockIdx.x == 0 && g_nvme_ep_debug) {
         printf("GPU: Pattern generation complete, first byte after: 0x%02x\n",
                buffer[0]);
       }
+#endif
       break;
 
     case NVME_PATTERN_ZEROS:
@@ -489,5 +502,8 @@ extern "C" __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 // Emulate endpoint
 extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(
   unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr);
+
+// Host function to set global debug flag for GPU endpoint functions
+extern "C" __host__ void nvme_ep_set_debug(bool debug);
 
 #endif // NVME_EP_H
