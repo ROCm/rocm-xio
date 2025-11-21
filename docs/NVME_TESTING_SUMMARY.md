@@ -129,7 +129,7 @@ cd scripts
 1. **PCIe Atomics Required**
    - GPU-direct mode requires PCIe atomic operations
    - Some older systems may not support this
-   - Workaround: Use CPU-hybrid mode
+   - **Note**: CPU-hybrid mode has been removed. GPU-direct mode is required.
 
 2. **Kernel Module Required for GPU-Direct**
    - DMA buffer allocation needs kernel module

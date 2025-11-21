@@ -58,7 +58,8 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
       "--data-buffer-size", config->dataBufferSize,
       "Size of data buffers for NVMe I/O testing (bytes). "
       "If not specified, will be auto-calculated as "
-      "iterations * 8 * block-size (kernel uses 8 blocks per operation).")
+      "(read-io + write-io) * 8 * block-size (kernel uses 8 blocks per "
+      "operation).")
     ->default_val(1024 * 1024) // 1 MB default
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
@@ -104,6 +105,13 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
     .add_option("--nsid", config->nsid, "NVMe namespace ID for I/O operations.")
     ->default_val(1)
     ->check(CLI::Range(1u, 0xFFFFFFFFu))
+    ->group(nvme_group);
+
+  app
+    .add_option("--read-io", config->readIo,
+                "Number of read I/O operations to perform.")
+    ->default_val(64)
+    ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
 
   app
@@ -160,15 +168,22 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
     ->group(nvme_group);
 
   app
-    .add_flag("--use-data-buffers", config->useDataBuffers,
-              "Enable data buffer allocation for NVMe I/O testing.")
+    .add_flag("--verify-reads", config->verifyReads,
+              "Verify read data matches expected pattern after test completes. "
+              "Requires --test-pattern (and --lfsr-seed if using lfsr pattern) "
+              "to match the pattern used when data was written. If using "
+              "--read-only mode, ensure data was previously written with "
+              "matching pattern/seed.")
     ->default_val(false)
     ->default_str("")
     ->group(nvme_group);
 
   app
-    .add_flag("--verify-reads", config->verifyReads,
-              "Verify read data matches expected pattern after test completes.")
+    .add_flag(
+      "--gpu-verify-reads", config->gpuVerifyReads,
+      "Use GPU-based verification (faster, no CPU buffer access). "
+      "Requires --verify-reads to be enabled. Uses LFSR pattern and seed "
+      "for verification entirely on GPU.")
     ->default_val(false)
     ->default_str("")
     ->group(nvme_group);
@@ -179,6 +194,13 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
       "Verify doorbell operations in QEMU trace log after test completes.")
     ->default_val(false)
     ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option("--write-io", config->writeIo,
+                "Number of write I/O operations to perform.")
+    ->default_val(64)
+    ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
 
   app
@@ -236,7 +258,7 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
  * @param config Pointer to NvmeEpConfig structure
  * @return Empty string if valid, error message otherwise
  */
-inline std::string validateConfig(const NvmeEpConfig* config) {
+inline std::string validateConfig(NvmeEpConfig* config) {
   if (config->writeOnlyMode && config->readOnlyMode) {
     return "Cannot specify both --write-only and --read-only";
   }
@@ -245,6 +267,37 @@ inline std::string validateConfig(const NvmeEpConfig* config) {
       config->accessPattern != "random") {
     return "Access pattern must be 'sequential' or 'random'";
   }
+
+  // Note: useDataBuffers is always true for NVMe endpoint (data buffers are
+  // always used), so no validation needed here.
+
+  // Validate read/write I/O counts
+  // In read-only mode, writeIo should be 0 (auto-set if not explicitly set)
+  if (config->readOnlyMode && config->writeIo > 0) {
+    config->writeIo = 0; // Force writeIo to 0 in read-only mode
+  }
+  // In write-only mode, readIo should be 0 (auto-set if not explicitly set)
+  if (config->writeOnlyMode && config->readIo > 0) {
+    config->readIo = 0; // Force readIo to 0 in write-only mode
+  }
+  // Validate that at least one is non-zero
+  if (config->readIo == 0 && config->writeIo == 0) {
+    return "At least one of --read-io or --write-io must be specified (both "
+           "cannot be zero)";
+  }
+
+  if (config->verifyReads && config->writeOnlyMode) {
+    return "--verify-reads cannot be used with --write-only mode (no read "
+           "buffer available)";
+  }
+
+  if (config->gpuVerifyReads && !config->verifyReads) {
+    return "--gpu-verify-reads requires --verify-reads to be enabled";
+  }
+
+  // Note: verifyReads with readOnlyMode is valid if data was written
+  // beforehand, so we don't return an error here. A warning will be shown
+  // during verification if needed.
 
   return ""; // Valid
 }

@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -56,7 +57,10 @@ void axxioPrintDeviceInfo() {
   }
 }
 
-void axxioPrintStatistics(const std::vector<double>& durations) {
+void axxioPrintStatistics(const std::vector<double>& durations,
+                          unsigned totalIterations, unsigned readIterations,
+                          unsigned writeIterations,
+                          unsigned verifiedReadsCount) {
   if (durations.empty()) {
     return;
   }
@@ -105,6 +109,25 @@ void axxioPrintStatistics(const std::vector<double>& durations) {
   }
 
   std::cout << "\nStatistics:" << std::endl;
+
+  // Print iterations - endpoint-specific (at the top)
+  if (readIterations > 0 || writeIterations > 0) {
+    // NVMe endpoint: show Reads and Writes on separate lines
+    std::cout << "  Reads:            " << std::setw(10) << readIterations
+              << std::endl;
+    if (verifiedReadsCount != UINT_MAX && readIterations > 0) {
+      // Show verified reads count if verification was attempted
+      std::cout << "  Verified Reads:   " << std::setw(10) << verifiedReadsCount
+                << std::endl;
+    }
+    std::cout << "  Writes:           " << std::setw(10) << writeIterations
+              << std::endl;
+  } else if (totalIterations > 0) {
+    // Other endpoints: show total iterations
+    std::cout << "  Iterations:       " << std::setw(10) << totalIterations
+              << std::endl;
+  }
+
   std::cout << "  Minimum:          " << std::setw(10) << std::fixed
             << std::setprecision(2) << min_display << time_unit << std::endl;
   std::cout << "  Maximum:          " << std::setw(10) << std::fixed
@@ -116,7 +139,9 @@ void axxioPrintStatistics(const std::vector<double>& durations) {
 }
 
 void axxioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations) {
+                         unsigned nIterations, unsigned readIterations,
+                         unsigned writeIterations,
+                         unsigned verifiedReadsCount) {
   if (durations.empty() || nIterations == 0) {
     return;
   }
@@ -223,5 +248,6 @@ void axxioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  axxioPrintStatistics(durations);
+  axxioPrintStatistics(durations, nIterations, readIterations, writeIterations,
+                       verifiedReadsCount);
 }

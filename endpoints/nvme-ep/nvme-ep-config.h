@@ -46,6 +46,10 @@ struct NvmeEpConfig {
                            // block_id, lfsr
   uint32_t lfsrSeed;       // Seed for LFSR pattern (0 = derive from LBA)
 
+  // I/O operation counts
+  unsigned readIo;  // Number of read I/O operations
+  unsigned writeIo; // Number of write I/O operations
+
   // Operation mode flags
   bool cpuOnlyMode;         // Use CPU for command generation
   bool hijackExistingQueue; // DANGEROUS: Use existing kernel queue
@@ -57,6 +61,7 @@ struct NvmeEpConfig {
   bool verifyTrace;          // Verify doorbell operations in QEMU trace
   std::string traceFilePath; // Path to QEMU trace log file
   bool verifyReads;          // Verify read data matches expected pattern
+  bool gpuVerifyReads; // Use GPU-based verification (no CPU buffer access)
 
   // Legacy/backward compatibility flags
   bool useRealHardware; // Legacy: Use real NVMe hardware
@@ -66,14 +71,15 @@ struct NvmeEpConfig {
     : device(""), useKernelModule(false), queueId(63), doorbellAddr(0),
       sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0), nsid(1),
       transferSize(4096), lbaRangeGiB(1), accessPattern("random"),
-      blockSize(512), useDataBuffers(false),
-      dataBufferSize(1024 * 1024) // 1 MB default
+      blockSize(512), useDataBuffers(true), // Always use data buffers for NVMe
+      dataBufferSize(1024 * 1024)           // 1 MB default
       ,
-      testPattern("sequential"), lfsrSeed(0), cpuOnlyMode(false),
-      hijackExistingQueue(false), writeOnlyMode(false), readOnlyMode(false),
-      skipQueueCleanup(false), verifyTrace(false),
+      testPattern("sequential"), lfsrSeed(0), readIo(64),
+      writeIo(64), // Default: 64 reads, 64 writes
+      cpuOnlyMode(false), hijackExistingQueue(false), writeOnlyMode(false),
+      readOnlyMode(false), skipQueueCleanup(false), verifyTrace(false),
       traceFilePath("/tmp/rocm-axiio-nvme-trace.log"), verifyReads(false),
-      useRealHardware(false) {
+      gpuVerifyReads(false), useRealHardware(false) {
   }
 };
 
