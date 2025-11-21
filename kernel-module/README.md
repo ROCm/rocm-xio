@@ -113,10 +113,10 @@ See `test_gpu_doorbell.cpp` for a complete GPU example.
 ## Integration with axiio-tester
 
 ```bash
-# Build axiio-tester with GPU-direct doorbell support
-GPU_DIRECT_DOORBELL=1 make all
+# Build axiio-tester (GPU-direct doorbell always enabled)
+make all
 
-# Run with GPU-direct doorbell
+# Run with GPU-direct doorbell (always enabled)
 sudo ./bin/axiio-tester --nvme-device /dev/nvme0 \
                          --memory host \
                          --iterations 100 \

@@ -101,10 +101,7 @@ override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
 override CXXFLAGS += $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep))
 
 # NVMe doorbell ringing mode
-# Set GPU_DIRECT_DOORBELL=1 to enable GPU-direct doorbell writes (GDA-style)
-# Default is 1 (GPU-direct mode with proper GDA implementation)
-GPU_DIRECT_DOORBELL ?= 1
-override CXXFLAGS += -DGPU_DIRECT_DOORBELL=$(GPU_DIRECT_DOORBELL)
+# Always use GPU-direct mode (CPU-hybrid mode removed, no compile-time flag needed)
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)

@@ -508,3 +508,73 @@ __host__ void nvme_ep_set_debug(bool debug) {
 }
 
 } // extern "C"
+
+// GPU kernel for verifying read data (must be outside extern "C" for C++
+// linkage) Each thread verifies one block from completed read commands
+// Simplified: assumes sequential buffer layout matching read command order
+extern "C" __global__ void nvme_ep_verify_reads_gpu(
+  const uint8_t* readBuffer, void* sqeAddr_ptr, void* cqeAddr_ptr,
+  uint32_t numCompletions, uint32_t blockSize, enum nvme_test_pattern pattern,
+  uint32_t lfsr_seed, uint32_t* verifiedCount, uint32_t* mismatchCount) {
+  // Cast to typed pointers (using types from namespace)
+  using namespace nvme_ep;
+  const sqeType* sqeAddr = static_cast<const sqeType*>(sqeAddr_ptr);
+  const cqeType* cqeAddr = static_cast<const cqeType*>(cqeAddr_ptr);
+  uint32_t threadIdx_global = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // Iterate through CQEs to find read commands and map to blocks
+  uint32_t blockCounter = 0;
+  uint32_t cqeIdx = 0;
+
+  // Find which read command contains this thread's block
+  for (uint32_t i = 0; i < numCompletions; i++) {
+    const struct nvme_cqe* cqe = nvme_ep::nvme_cqe_from_generic_const(
+      &cqeAddr[cqeIdx]);
+    uint16_t cid = cqe->command_id;
+
+    // Skip stop command and invalid CIDs
+    if (cid != 0xFFFF && cid > 0 && cid <= numCompletions) {
+      const struct nvme_sqe* sqe = nvme_ep::nvme_sqe_from_generic_const(
+        &sqeAddr[cid - 1]);
+
+      // Only verify read commands
+      if (sqe->opcode == NVME_CMD_READ) {
+        uint64_t lba = ((uint64_t)sqe->cdw11 << 32) | sqe->cdw10;
+        uint32_t nlb = (sqe->cdw12 & 0xFFFF) + 1;
+
+        // Check if this thread's block is in this command
+        if (threadIdx_global >= blockCounter &&
+            threadIdx_global < blockCounter + nlb) {
+          // This thread verifies a block from this command
+          uint32_t block_in_cmd = threadIdx_global - blockCounter;
+          uint64_t block_lba = lba + block_in_cmd;
+          uint64_t buffer_offset = threadIdx_global * blockSize;
+          const uint8_t* block_buf = readBuffer + buffer_offset;
+
+          // Verify this block
+          uint64_t pattern_offset = block_lba * blockSize;
+          size_t error_offset = 0;
+          bool verified = nvme_verify_pattern(block_buf, blockSize, pattern,
+                                              pattern_offset, &error_offset,
+                                              lfsr_seed);
+
+          if (verified) {
+            atomicAdd(verifiedCount, 1);
+          } else {
+            atomicAdd(mismatchCount, 1);
+          }
+          return; // Done verifying
+        }
+
+        blockCounter += nlb;
+      }
+    }
+
+    cqeIdx++;
+    if (cqeIdx >= numCompletions) {
+      cqeIdx = 0;
+    }
+  }
+
+  // Thread has no block to verify (more threads than blocks)
+}
