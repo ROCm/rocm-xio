@@ -46,8 +46,7 @@ The `build-and-test.sh` script provides flexible command-line options:
 # Skip clean step (faster iteration)
 ./build-and-test.sh --no-clean --test emulated
 
-# Build with CPU-hybrid doorbell mode
-./build-and-test.sh --cpu-doorbell --test real --nvme /dev/nvme0
+# GPU-direct mode is always used (CPU-hybrid mode removed)
 ```
 
 ## VM Environment Setup
@@ -200,22 +199,14 @@ Auto-detected by default, but can be specified:
 ./build-and-test.sh --arch gfx942
 ```
 
-### Doorbell Modes
+### Doorbell Mode
 
-**GPU-Direct Mode** (default, `GPU_DIRECT_DOORBELL=1`):
+**GPU-Direct Mode** (always enabled, CPU-hybrid mode removed):
 - GPU writes directly to NVMe doorbell registers
 - Lowest latency (< 1 μs)
-- Requires HSA memory locking
+- Requires HSA memory locking and kernel module exclusive mode
 
-**CPU-Hybrid Mode** (`--cpu-doorbell`):
-- GPU generates commands, CPU rings doorbell
-- Better compatibility
-- ~100 ns overhead
-
-```bash
-# Build with CPU-hybrid mode
-./build-and-test.sh --cpu-doorbell --test real --nvme /dev/nvme0
-```
+**Note**: If GPU-direct mode is not available, the program will fail with a clear error message. CPU-hybrid mode has been removed to simplify the codebase.
 
 ## Troubleshooting
 

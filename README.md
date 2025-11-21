@@ -331,8 +331,7 @@ make OFFLOAD_ARCH=gfx1100 all
 ### Build Configuration Options
 
 ```bash
-# Build with CPU-hybrid doorbell mode (instead of GPU-direct)
-make GPU_DIRECT_DOORBELL=0 all
+# GPU-direct mode is always used (CPU-hybrid mode removed)
 
 # Build for specific GPU architecture
 make OFFLOAD_ARCH=gfx90a all
@@ -765,36 +764,21 @@ sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 -n 100 --verbose
 sudo ./bin/axiio-tester -e nvme-ep --device /dev/nvme0 -n 10000 --histogram
 ```
 
-### GPU Doorbell Modes
+### GPU Doorbell Mode
 
-The build system supports two doorbell modes (controlled by `GPU_DIRECT_DOORBELL` in Makefile):
-
-#### GPU-Direct Mode (Default: `GPU_DIRECT_DOORBELL=1`)
+The build system always uses GPU-direct mode (CPU-hybrid mode removed):
 
 GPU writes directly to NVMe doorbell registers:
 - **Latency**: < 1 microsecond per batch
 - **Performance**: Maximum throughput
-- **Requirements**: HSA memory locking, kernel module support
+- **Requirements**: HSA memory locking, kernel module support, exclusive mode
 
 ```bash
-# Build with GPU-direct mode (default)
+# Build with GPU-direct mode (always enabled)
 make all
-
-# Or explicitly
-make GPU_DIRECT_DOORBELL=1 all
 ```
 
-#### CPU-Hybrid Mode (`GPU_DIRECT_DOORBELL=0`)
-
-GPU generates commands, CPU rings doorbell:
-- **Latency**: ~100 nanoseconds overhead
-- **Compatibility**: Works on more systems
-- **Requirements**: Standard /dev/mem access
-
-```bash
-# Build with CPU-hybrid mode
-make GPU_DIRECT_DOORBELL=0 all
-```
+**Note**: If GPU-direct mode is not available (e.g., HSA initialization fails or kernel module is not in exclusive mode), the program will fail with a clear error message. CPU-hybrid mode has been removed to simplify the codebase.
 
 ### Important Notes
 
