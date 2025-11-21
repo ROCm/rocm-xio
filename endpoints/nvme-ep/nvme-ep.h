@@ -506,4 +506,13 @@ extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(
 // Host function to set global debug flag for GPU endpoint functions
 extern "C" __host__ void nvme_ep_set_debug(bool debug);
 
+// GPU-based read verification kernel
+// Verifies read data matches expected pattern using LFSR/seed without CPU
+// touching buffers Returns verified count and mismatch count via output
+// parameters
+extern "C" __global__ void nvme_ep_verify_reads_gpu(
+  const uint8_t* readBuffer, void* sqeAddr, void* cqeAddr,
+  uint32_t numCompletions, uint32_t blockSize, enum nvme_test_pattern pattern,
+  uint32_t lfsr_seed, uint32_t* verifiedCount, uint32_t* mismatchCount);
+
 #endif // NVME_EP_H

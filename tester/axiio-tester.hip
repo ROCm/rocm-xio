@@ -20,10 +20,7 @@
 #include <hsa/hsa_ext_amd.h>
 
 // Doorbell access mode configuration
-// GPU_DIRECT_DOORBELL is now defined by the Makefile
-// 0 = CPU-hybrid mode (default, safe)
-// 1 = GPU-direct mode (experimental, may cause kernel panics)
-// Set GPU_DIRECT_DOORBELL=1 when running make to enable GPU-direct mode
+// Always use GPU-direct mode (CPU-hybrid mode removed)
 
 // For physical memory mapping
 #include <fcntl.h>
@@ -104,7 +101,10 @@ typedef struct {
   bool verifyTrace;          // Enable trace verification after test
   std::string traceFilePath; // Path to QEMU trace log file
   // Read verification support
-  bool verifyReads; // Enable read data verification after test
+  bool verifyReads;    // Enable read data verification after test
+  bool gpuVerifyReads; // Use GPU-based verification (no CPU buffer access)
+  unsigned verifiedReadsCount; // Number of reads that were successfully
+                               // verified
   // Operation mode flags
   bool writeOnlyMode;    // Write-only mode (no read buffer)
   bool readOnlyMode;     // Read-only mode (no write buffer)
@@ -127,9 +127,9 @@ typedef struct {
   cmdLineArgs args;
   endpointConfigs epConfigs; // Endpoint-specific configurations
   testStats stats;
-  // CPU-hybrid mode: GPU writes to these, CPU copies to kernel DMA memory
-  void* gpuSqMem;
-  void* gpuCqMem;
+  // Removed: gpuSqMem, gpuCqMem (CPU-hybrid mode removed - no longer needed)
+  void* gpuSqMem;        // Unused (kept for struct compatibility)
+  void* gpuCqMem;        // Unused (kept for struct compatibility)
   void* kernelDmaSq;     // GPU-accessible (HSA-locked) SQ pointer
   void* kernelDmaCq;     // GPU-accessible (HSA-locked) CQ pointer
   void* kernelDmaSqOrig; // Original (CPU-accessible) SQ pointer for cleanup
@@ -162,23 +162,16 @@ __global__ void driveEndpointKernel(EndpointType endpointType,
     __threadfence_system();
   }
 
-  // For real hardware with CPU-hybrid: Skip GPU dispatch entirely
-  // The dispatch tries to write SQEs which may trigger GPU page faults
-  // CPU will prepare SQEs directly instead
+  // GPU-direct mode: Always use GPU dispatch
   if (!realHardware) {
     axiioEndPoint::driveEndpointDispatch(endpointType, sqeIterations, sqeAddr,
                                          cqeAddr, startTime, endTime);
   } else {
-    // In CPU-hybrid mode, just record timing for the signaling operation
-    // The actual I/O work is done by the CPU
+    // Real hardware mode: GPU handles everything
+    // (CPU-hybrid mode removed)
     if (startTime) {
       *startTime = clock64();
     }
-    __threadfence_system();
-
-    // Minimal work - just signal the CPU that we're ready
-    // CPU will do the actual SQE preparation
-
     __threadfence_system();
     if (endTime) {
       *endTime = clock64();
@@ -188,7 +181,6 @@ __global__ void driveEndpointKernel(EndpointType endpointType,
   // Ring doorbell (or signal CPU in hybrid mode)
   if (sqDoorBell) {
     if (realHardware) {
-#if GPU_DIRECT_DOORBELL
       // GPU-direct mode: write directly to mapped NVMe doorbell register
       // Requires kernel module to map PCIe BAR into GPU address space
       volatile uint32_t* doorbell = (volatile uint32_t*)sqDoorBell;
@@ -197,13 +189,6 @@ __global__ void driveEndpointKernel(EndpointType endpointType,
       __threadfence_system(); // Ensure all SQE writes are visible
       __builtin_nontemporal_store(tail_value, doorbell);
       __threadfence_system(); // Ensure doorbell write completes
-#else
-      // CPU-hybrid mode: write tail value to staging area
-      // CPU thread will monitor and forward to hardware doorbell
-      __threadfence_system();      // Ensure all SQE writes are visible
-      *sqDoorBell = sqeIterations; // Write tail to staging area
-      __threadfence_system();      // Ensure CPU can see the write
-#endif
     } else {
       // Emulated mode: write iteration count for CPU synchronization
       *sqDoorBell = sqeIterations;
@@ -231,7 +216,6 @@ __global__ void driveNVMeEndpointWithBuffersKernel(
     }
 
     if (sqDoorBell && realHardware) {
-#if GPU_DIRECT_DOORBELL
       // Step 1: Post NVMe I/O commands to submission queue
       if (debug) {
         printf("GPU: Posting NVMe commands (sqeIterations=%u)...\n",
@@ -359,13 +343,6 @@ __global__ void driveNVMeEndpointWithBuffersKernel(
         printf("GPU: Polled %u completions, all endTime values recorded\n",
                completions_polled);
       }
-#else
-      // CPU-hybrid mode: write tail value to staging area
-      // CPU thread will monitor and forward to hardware doorbell
-      __threadfence_system();      // Ensure all SQE writes are visible
-      *sqDoorBell = sqeIterations; // Write tail to staging area
-      __threadfence_system();      // Ensure CPU can see the write
-#endif
     } else if (sqDoorBell && !realHardware) {
       // Emulated mode: write iteration count for CPU synchronization
       *sqDoorBell = sqeIterations;
@@ -515,8 +492,8 @@ static int run(testConfig* config, EndpointType endpointType,
   sqeType* sqQueue;
   cqeType* cqQueue;
   unsigned long long int* sqDoorBell;
-  unsigned long long int* d_startTime;
-  unsigned long long int* d_endTime;
+  unsigned long long int* d_startTime = nullptr;
+  unsigned long long int* d_endTime = nullptr;
 
   // File descriptors for /dev/mem mapping (used in real hardware mode)
   int sqFd = -1, cqFd = -1, dbFd = -1;
@@ -712,15 +689,13 @@ static int run(testConfig* config, EndpointType endpointType,
     }
 
   } else if (kernel_ctx) {
-    if (config->args.debug) {
-      std::cout << "DEBUG: Entering CPU-hybrid mode block..." << std::endl;
-    }
-    // CPU-HYBRID MODE with DUAL ALLOCATION (fallback for non-exclusive mode)
-    // - Kernel DMA memory: Used by NVMe controller (correct bus addresses)
-    // - hipHostMalloc memory: Used by GPU (accessible by GPU)
-    // - Data buffers: NVME_AXIIO_ALLOC_DMA (IOMMU-mapped for passthrough)
-    // - CPU copies GPU commands to kernel DMA memory
-    std::cout << "Using CPU-HYBRID mode with DUAL ALLOCATION" << std::endl;
+    // CPU-hybrid mode removed - require exclusive mode for GPU-direct I/O
+    std::cerr << "Error: Kernel module is not in exclusive mode (mem_fd != -2)"
+              << std::endl;
+    std::cerr << "  CPU-hybrid mode has been removed. Please ensure the kernel "
+              << "module" << std::endl;
+    std::cerr << "  provides exclusive access for GPU-direct I/O." << std::endl;
+    return EXIT_FAILURE;
 
     sqSize = kernel_ctx->qinfo.queue_size * 64; // 64 bytes per SQE
     cqSize = kernel_ctx->qinfo.queue_size * 16; // 16 bytes per CQE
@@ -834,7 +809,7 @@ static int run(testConfig* config, EndpointType endpointType,
     }
   }
 
-  // Get doorbell pointer for --nvme-device mode (CPU-hybrid)
+  // Get doorbell pointer for --nvme-device mode
   // (cpu_doorbell_ptr and sqDoorBell_is_gpu_mapped already declared earlier)
 
   if (!mappedPhysical && !config->args.nvmeDevice.empty()) {
@@ -946,65 +921,10 @@ static int run(testConfig* config, EndpointType endpointType,
     // verification
     cpu_doorbell_ptr = nullptr; // Will be set later
 
-    /*
-#if GPU_DIRECT_DOORBELL
-    // GPU-direct mode: Attempt Pure HSA (no /dev/mem)
-    std::cout << "  🚀 GPU-direct mode: Attempting Pure HSA mapping..." <<
-std::endl;
-
-    gpu_doorbell::DoorbellMapping db_mapping = {};
-    if (gpu_doorbell::map_doorbell_for_gpu(config->args.nvmeQueueId,
-                                            &db_mapping,
-                                            config->args.debug) < 0 ||
-        db_mapping.gpu_ptr == nullptr) { std::cerr << "ERROR: HSA
-doorbell mapping failed!" << std::endl; return EXIT_FAILURE;
-    }
-
-    // Use HSA-mapped pointer for BOTH CPU and GPU (no /dev/mem!)
-    cpu_doorbell_ptr = (volatile uint32_t*)db_mapping.cpu_ptr;
-    sqDoorBell = (unsigned long long int*)db_mapping.gpu_ptr;
-    sqDoorBell_is_gpu_mapped = true;
-
-    std::cout << "  ✅ Pure HSA doorbell mapping successful!" << std::endl;
-    std::cout << "    CPU pointer (HSA): " << db_mapping.cpu_ptr << std::endl;
-    std::cout << "    GPU pointer (HSA): " << db_mapping.gpu_ptr << std::endl;
-    std::cout << "    Bus address: 0x" << std::hex << db_mapping.bus_addr <<
-std::dec << std::endl; std::cout << "    Zero /dev/mem - pure HSA like
-standalone test!" << std::endl;
-
-    // Test HSA-mapped CPU access
-    uint32_t test_val = *cpu_doorbell_ptr;
-    std::cout << "  Current doorbell value: 0x" << std::hex << test_val <<
-std::dec << std::endl; #else
-    // CPU-hybrid mode: Minimal /dev/mem mapping (just the doorbell page)
-    int doorbell_fd;
-    cpu_doorbell_ptr = nvme_map_single_doorbell(config->args.nvmeDoorbellAddr,
-&doorbell_fd); if (!cpu_doorbell_ptr) { std::cerr << "ERROR: Failed to map
-doorbell for CPU access!" << std::endl; return EXIT_FAILURE;
-    }
-
-    // CQ doorbell is 4 bytes after SQ doorbell (standard NVMe stride)
-    volatile uint32_t* cpu_cq_doorbell_ptr = cpu_doorbell_ptr + 1; // +1
-uint32_t = +4 bytes
-
-    std::cout << "  ✅ CPU-hybrid doorbell mode" << std::endl;
-    std::cout << "    - Minimal /dev/mem mapping (1 page)" << std::endl;
-    std::cout << "    - GPU writes SQEs and signals via staging area" <<
-std::endl; std::cout << "    - CPU forwards doorbell write to hardware" <<
-std::endl;
-
-    // Test CPU access
-    uint32_t test_val = *cpu_doorbell_ptr;
-    std::cout << "  Current doorbell value: 0x" << std::hex << test_val <<
-std::dec << std::endl; std::cout << "  CPU SQ doorbell pointer: " <<
-(void*)cpu_doorbell_ptr << std::endl; std::cout << "  CPU CQ doorbell pointer: "
-<< (void*)cpu_cq_doorbell_ptr << std::endl;
-
-    // sqDoorBell already allocated as hipHostMalloc staging area
-    std::cout << "  Staging area address: " << (void*)sqDoorBell << std::endl;
-    std::cout << "  Hardware doorbell address: " << (void*)cpu_doorbell_ptr <<
-std::endl; #endif
-    */
+    // GPU-direct mode: Always use Pure HSA (no /dev/mem)
+    // CPU-hybrid mode removed - always use GPU-direct
+    // Note: This code path is currently commented out as doorbell mapping
+    // happens later in the GPU I/O test section
 
     config->args.useRealHardware = true;
     std::cout << std::endl;
@@ -1222,47 +1142,15 @@ std::endl; #endif
         }
 
       } else if (kernel_ctx) {
-        // FALLBACK: CPU-HYBRID mode
-        std::cout << "\n  Configuring CPU-HYBRID doorbell mode..." << std::endl;
-        std::cout
-          << "  (GPU generates commands + staging doorbell, CPU rings hardware)"
-          << std::endl;
-
-        // Get CPU-accessible hardware doorbell from kernel module
-        cpu_doorbell_ptr = (volatile uint32_t*)kernel_ctx->sq_doorbell;
-
-        // Verify BAR0 mapping works by reading CAP register
-        std::cout << "  Verifying BAR0 mapping..." << std::endl;
-        volatile uint64_t* cap_reg = (volatile uint64_t*)
-                                       kernel_ctx->bar0_mapped;
-        uint64_t cap_value = *cap_reg;
-        std::cout << "    CAP register: 0x" << std::hex << cap_value << std::dec
+        // CPU-hybrid mode removed - require exclusive mode
+        std::cerr << "Error: Kernel module is not in exclusive mode"
                   << std::endl;
-
-        if (cap_value == 0 || cap_value == 0xFFFFFFFFFFFFFFFFULL) {
-          std::cerr << "    ⚠️  BAR0 mapping appears invalid!" << std::endl;
-          return EXIT_FAILURE;
-        }
-
-        std::cout << "  ✅ BAR0 mapped correctly!" << std::endl;
-        std::cout
-          << "  NOTE: Doorbells are write-only registers (can't read back)"
-          << std::endl;
-
-        // Allocate GPU-accessible staging doorbell in shared memory
-        HIP_CHECK(hipHostMalloc((void**)&sqDoorBell, sizeof(uint32_t),
-                                hipHostMallocDefault));
-        *(uint32_t*)sqDoorBell = 0; // Initialize to 0
-
-        std::cout << "  ✅ CPU-HYBRID doorbell configured!" << std::endl;
-        std::cout << "    GPU staging doorbell: " << (void*)sqDoorBell
+        std::cerr
+          << "  CPU-hybrid mode has been removed. Please ensure the kernel "
+          << "module" << std::endl;
+        std::cerr << "  provides exclusive access for GPU-direct I/O."
                   << std::endl;
-        std::cout << "    CPU hardware doorbell: " << (void*)cpu_doorbell_ptr
-                  << std::endl;
-        std::cout << "    Performance: GPU commands at full speed, ~100ns "
-                     "doorbell overhead"
-                  << std::endl;
-
+        return EXIT_FAILURE;
       } else {
         std::cerr << "ERROR: Kernel module context not available!" << std::endl;
         return EXIT_FAILURE;
@@ -1334,101 +1222,59 @@ std::endl; #endif
         std::cout << "✅ GPU kernel completed" << std::endl;
       }
 
-      // Check if we're in GPU-direct mode or CPU-hybrid mode
-      bool is_gpu_direct_mode = (config->gpuSqMem == nullptr);
+      // GPU-DIRECT MODE: GPU writes directly to kernel DMA memory, no copy
+      // needed (CPU-hybrid mode removed)
+      if (config->args.debug) {
+        std::cout
+          << "\n=== GPU-Direct Mode: GPU wrote directly to kernel DMA ==="
+          << std::endl;
+      }
 
-      if (is_gpu_direct_mode) {
-        // GPU-DIRECT MODE: GPU writes directly to kernel DMA memory, no copy
-        // needed
-        if (config->args.debug) {
-          std::cout
-            << "\n=== GPU-Direct Mode: GPU wrote directly to kernel DMA ==="
-            << std::endl;
-        }
+      // GPU already wrote doorbell value (confirmed by GPU printf above)
+      // Use expected value since GPU writes may not be immediately visible to
+      // CPU due to cache coherency or different memory mappings
+      uint32_t gpu_doorbell_val = config->args.nIterations;
 
-        // GPU already wrote doorbell value (confirmed by GPU printf above)
-        // Use expected value since GPU writes may not be immediately visible to
-        // CPU due to cache coherency or different memory mappings
-        uint32_t gpu_doorbell_val = config->args.nIterations;
-
-        // Try to read from CPU pointer for verification (may be 0 due to
-        // coherency)
-        if (cpu_doorbell_ptr) {
-          uint32_t cpu_read_val = *cpu_doorbell_ptr;
-          if (cpu_read_val > 0 && cpu_read_val == gpu_doorbell_val) {
-            if (config->args.debug) {
-              std::cout << "  GPU doorbell value (verified via CPU): "
-                        << cpu_read_val << std::endl;
-            }
-          } else {
-            if (config->args.debug) {
-              std::cout << "  GPU doorbell value (expected): "
-                        << gpu_doorbell_val << std::endl;
-              if (cpu_read_val != gpu_doorbell_val) {
-                std::cout << "    (CPU read shows " << cpu_read_val
-                          << " - GPU write may not be visible to CPU yet)"
-                          << std::endl;
-              }
-            }
+      // Try to read from CPU pointer for verification (may be 0 due to
+      // coherency)
+      if (cpu_doorbell_ptr) {
+        uint32_t cpu_read_val = *cpu_doorbell_ptr;
+        if (cpu_read_val > 0 && cpu_read_val == gpu_doorbell_val) {
+          if (config->args.debug) {
+            std::cout << "  GPU doorbell value (verified via CPU): "
+                      << cpu_read_val << std::endl;
           }
         } else {
           if (config->args.debug) {
             std::cout << "  GPU doorbell value (expected): " << gpu_doorbell_val
                       << std::endl;
+            if (cpu_read_val != gpu_doorbell_val) {
+              std::cout << "    (CPU read shows " << cpu_read_val
+                        << " - GPU write may not be visible to CPU yet)"
+                        << std::endl;
+            }
           }
-        }
-
-        if (gpu_doorbell_val > 0) {
-          if (config->args.debug) {
-            std::cout << "  ✅ GPU-DIRECT complete! (sq_tail="
-                      << gpu_doorbell_val << ")" << std::endl;
-            std::cout << "    GPU wrote commands directly to kernel DMA memory"
-                      << std::endl;
-            std::cout << "    GPU rang doorbell directly (IOVA: 0x" << std::hex
-                      << kernel_ctx->qinfo.sq_doorbell_phys << std::dec << ")"
-                      << std::endl;
-            std::cout << "    No CPU intervention needed!" << std::endl;
-          }
-        } else {
-          std::cerr << "  ⚠️  WARNING: GPU doorbell value is 0!" << std::endl;
         }
       } else {
-        // CPU-HYBRID MODE: Copy GPU commands to kernel DMA memory, then ring
-        // doorbell
-        std::cout << "\n=== CPU-Hybrid Mode: Copy & Submit ===" << std::endl;
-
-        // Read GPU's staging doorbell value
-        uint32_t gpu_doorbell_val = *(volatile uint32_t*)sqDoorBell;
-        std::cout << "  GPU wrote staging doorbell value: " << gpu_doorbell_val
-                  << std::endl;
-
-        if (gpu_doorbell_val > 0 && config->kernelDmaSq && config->gpuSqMem) {
-          // Step 1: CPU copies GPU-generated commands to kernel DMA memory
-          std::cout << "  Step 1: Copying GPU commands to kernel DMA memory..."
+        if (config->args.debug) {
+          std::cout << "  GPU doorbell value (expected): " << gpu_doorbell_val
                     << std::endl;
-          size_t copy_size = gpu_doorbell_val * 64; // 64 bytes per SQE
-          memcpy(config->kernelDmaSq, config->gpuSqMem, copy_size);
-          __sync_synchronize(); // Memory barrier
-          std::cout << "    ✅ Copied " << gpu_doorbell_val << " commands ("
-                    << copy_size << " bytes)" << std::endl;
-
-          // Step 2: CPU writes doorbell (controller will DMA from kernel
-          // memory)
-          std::cout << "  Step 2: Ringing hardware doorbell..." << std::endl;
-          *cpu_doorbell_ptr = gpu_doorbell_val;
-          __sync_synchronize(); // Memory barrier
-
-          std::cout << "  ✅ CPU-HYBRID complete! (sq_tail=" << gpu_doorbell_val
-                    << ")" << std::endl;
-          std::cout
-            << "    GPU generated commands → CPU copied to DMA memory → "
-               "Doorbell rung"
-            << std::endl;
-        } else {
-          std::cerr
-            << "  ⚠️  WARNING: GPU staging doorbell is 0 or no DMA memory!"
-            << std::endl;
         }
+      }
+
+      if (gpu_doorbell_val > 0) {
+        if (config->args.debug) {
+          std::cout << "  ✅ GPU-DIRECT complete! (sq_tail=" << gpu_doorbell_val
+                    << ")" << std::endl;
+          std::cout << "    GPU wrote commands directly to kernel DMA memory"
+                    << std::endl;
+          std::cout << "    GPU rang doorbell directly (IOVA: 0x" << std::hex
+                    << kernel_ctx->qinfo.sq_doorbell_phys << std::dec << ")"
+                    << std::endl;
+          std::cout << "    No CPU intervention needed!" << std::endl;
+        }
+      } else {
+        std::cerr << "  ⚠️  WARNING: GPU doorbell value is 0!" << std::endl;
       }
 
       // Read SMART log AFTER I/O operations to verify commands were processed
@@ -1486,15 +1332,13 @@ std::endl; #endif
       std::cout << "  GPU doorbell value (from CPU pointer): " << doorbell_val
                 << std::endl;
 
-// In GPU-direct mode, they might be different mappings
-#if GPU_DIRECT_DOORBELL
+      // In GPU-direct mode, they might be different mappings
       if (sqDoorBell_is_gpu_mapped) {
         std::cout << "  Note: GPU-direct mode - GPU wrote to different mapping"
                   << std::endl;
         std::cout << "  Both should map to same physical register though."
                   << std::endl;
       }
-#endif
 
       if (first_sqe->opcode == 0) {
         std::cerr << "  ⚠️  WARNING: SQE opcode is 0! Commands may not have "
@@ -1600,648 +1444,759 @@ std::endl; #endif
         std::cout << "CQ doorbell updated to: " << cq_head << std::endl;
       }
 
-      // Get timing data
-      unsigned long long int h_start_time, h_end_time;
-      HIP_CHECK(hipMemcpy(&h_start_time, d_start_time,
-                          sizeof(unsigned long long int),
-                          hipMemcpyDeviceToHost));
-      HIP_CHECK(hipMemcpy(&h_end_time, d_end_time,
-                          sizeof(unsigned long long int),
-                          hipMemcpyDeviceToHost));
+      // Verify read data if requested (first polling path)
+      if (config->args.verifyReads && usingDataBuffers &&
+          (config->readBufferCpu || readBuffer) && completions_received > 0) {
+        // GPU-based verification (no CPU buffer access)
+        if (config->args.gpuVerifyReads && readBuffer) {
+          std::cout << "\n=== Verifying Read Data (GPU-based) ===" << std::endl;
 
-      double elapsed_cycles = (double)(h_end_time - h_start_time);
-      double elapsed_ns = elapsed_cycles; // Approximate
-      double avg_latency_ns = elapsed_ns / config->args.nIterations;
+          // Parse pattern string to enum
+          enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+          if (config->args.testPattern == "zeros") {
+            pattern = NVME_PATTERN_ZEROS;
+          } else if (config->args.testPattern == "ones") {
+            pattern = NVME_PATTERN_ONES;
+          } else if (config->args.testPattern == "random") {
+            pattern = NVME_PATTERN_RANDOM;
+          } else if (config->args.testPattern == "block_id") {
+            pattern = NVME_PATTERN_BLOCK_ID;
+          } else if (config->args.testPattern == "lfsr") {
+            pattern = NVME_PATTERN_LFSR;
+          }
 
-      std::cout << "\n=== Performance Results ===" << std::endl;
-      std::cout << "Total GPU time: " << elapsed_ns << " ns" << std::endl;
-      std::cout << "Average latency per command: " << avg_latency_ns << " ns"
-                << std::endl;
-      std::cout << "Throughput: "
-                << (completions_received * 1000000000.0 / elapsed_ns) << " IOPS"
-                << std::endl;
+          // Allocate device memory for verification results
+          uint32_t* d_verifiedCount;
+          uint32_t* d_mismatchCount;
+          uint32_t h_verifiedCount = 0;
+          uint32_t h_mismatchCount = 0;
 
-      // Cleanup
-      HIP_CHECK(hipFree(d_start_time));
-      HIP_CHECK(hipFree(d_end_time));
-      HIP_CHECK(hipHostFree(data_buffer));
+          HIP_CHECK(hipMalloc(&d_verifiedCount, sizeof(uint32_t)));
+          HIP_CHECK(hipMalloc(&d_mismatchCount, sizeof(uint32_t)));
+          HIP_CHECK(hipMemset(d_verifiedCount, 0, sizeof(uint32_t)));
+          HIP_CHECK(hipMemset(d_mismatchCount, 0, sizeof(uint32_t)));
 
-      // No need to unmap doorbell - it's handled by kernel module cleanup
+          // Get SQEs and CQEs for GPU verification
+          volatile sqeType* sq_for_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig)
+              ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
+              : sqQueue;
+          volatile cqeType* cq_for_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+              ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+              : cqQueue;
 
-      std::cout << "\n=== GPU Random I/O Test Complete ===" << std::endl;
+          // Count total read blocks for kernel launch
+          uint32_t totalReadBlocks =
+            std::min((uint32_t)completions_received,
+                     (uint32_t)(config->args.dataBufferSize /
+                                config->args.nvmeBlockSize));
 
-      // Skip the old test framework - we're done
-      goto cleanup_and_exit;
+          std::cout << "  Verifying " << totalReadBlocks << " blocks ("
+                    << (totalReadBlocks * config->args.nvmeBlockSize)
+                    << " bytes) on GPU..." << std::endl;
+
+          // Launch GPU verification kernel
+          uint32_t threadsPerBlock = 256;
+          uint32_t numBlocks = (totalReadBlocks + threadsPerBlock - 1) /
+                               threadsPerBlock;
+
+          nvme_ep_verify_reads_gpu<<<numBlocks, threadsPerBlock>>>(
+            readBuffer,
+            reinterpret_cast<void*>(const_cast<sqeType*>(sq_for_verify)),
+            reinterpret_cast<void*>(const_cast<cqeType*>(cq_for_verify)),
+            completions_received, config->args.nvmeBlockSize, pattern,
+            config->args.lfsrSeed, d_verifiedCount, d_mismatchCount);
+
+          HIP_CHECK(hipGetLastError());
+          HIP_CHECK(hipDeviceSynchronize());
+
+          // Copy results back to host
+          HIP_CHECK(hipMemcpy(&h_verifiedCount, d_verifiedCount,
+                              sizeof(uint32_t), hipMemcpyDeviceToHost));
+          HIP_CHECK(hipMemcpy(&h_mismatchCount, d_mismatchCount,
+                              sizeof(uint32_t), hipMemcpyDeviceToHost));
+
+          // Cleanup
+          HIP_CHECK(hipFree(d_verifiedCount));
+          HIP_CHECK(hipFree(d_mismatchCount));
+
+          // Report results
+          uint32_t total_bytes_checked = totalReadBlocks *
+                                         config->args.nvmeBlockSize;
+          if (h_mismatchCount == 0) {
+            std::cout << "\n✅ GPU Verification SUCCESS: All reads matched "
+                      << "expected pattern!" << std::endl;
+            std::cout << "  ✓ Verified " << totalReadBlocks << " blocks ("
+                      << total_bytes_checked << " bytes)" << std::endl;
+          } else {
+            std::cerr << "\n❌ GPU Verification FAILED: " << h_mismatchCount
+                      << " mismatches found out of " << total_bytes_checked
+                      << " bytes checked (" << totalReadBlocks << " blocks)"
+                      << std::endl;
+            double mismatch_rate = (double)h_mismatchCount /
+                                   total_bytes_checked * 100.0;
+            std::cerr << "  Mismatch rate: " << std::fixed
+                      << std::setprecision(2) << mismatch_rate << "%"
+                      << std::endl;
+          }
+
+          // Store verified reads count for statistics display
+          config->args.verifiedReadsCount = h_verifiedCount;
+        } else {
+          // CPU-based verification (original implementation)
+          std::cout << "\n=== Verifying Read Data ===" << std::endl;
+
+          // Warn if in read-only mode
+          if (config->args.readOnlyMode) {
+            std::cout << "⚠️  WARNING: --verify-reads is enabled in "
+                      << "--read-only mode." << std::endl;
+            std::cout << "   This assumes data was previously written to the "
+                      << "target LBAs" << std::endl;
+            std::cout << "   using the same --test-pattern ("
+                      << config->args.testPattern << ")";
+            if (config->args.testPattern == "lfsr") {
+              std::cout << " and --lfsr-seed (0x" << std::hex
+                        << config->args.lfsrSeed << std::dec << ")";
+            }
+            std::cout << "." << std::endl;
+            std::cout << "   If verification fails, ensure writes were "
+                      << "performed first." << std::endl;
+          }
+
+          // Parse pattern string to enum
+          enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+          if (config->args.testPattern == "zeros") {
+            pattern = NVME_PATTERN_ZEROS;
+          } else if (config->args.testPattern == "ones") {
+            pattern = NVME_PATTERN_ONES;
+          } else if (config->args.testPattern == "random") {
+            pattern = NVME_PATTERN_RANDOM;
+          } else if (config->args.testPattern == "block_id") {
+            pattern = NVME_PATTERN_BLOCK_ID;
+          } else if (config->args.testPattern == "lfsr") {
+            pattern = NVME_PATTERN_LFSR;
+          }
+
+          // Use CPU-accessible read buffer
+          uint8_t* verify_buf = config->readBufferCpu ? config->readBufferCpu
+                                                      : readBuffer;
+
+          uint32_t mismatches = 0;
+          uint32_t total_bytes_checked = 0;
+          uint32_t verified_reads_count = 0;
+          uint32_t blocks_to_verify =
+            std::min((uint32_t)completions_received,
+                     (uint32_t)(config->args.dataBufferSize /
+                                config->args.nvmeBlockSize));
+
+          std::cout << "  Verifying " << blocks_to_verify << " blocks ("
+                    << (blocks_to_verify * config->args.nvmeBlockSize)
+                    << " bytes)..." << std::endl;
+
+          // Extract LBAs from SQEs and verify
+          volatile cqeType* cq_to_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+              ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+              : cqQueue;
+          volatile sqeType* sq_to_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig)
+              ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
+              : sqQueue;
+
+          uint16_t verify_cq_head = 0;
+          bool verify_phase = true;
+          uint32_t verified_blocks = 0;
+
+          for (uint32_t i = 0;
+               i < completions_received && verified_blocks < blocks_to_verify;
+               i++) {
+            volatile struct nvme_cqe* cqe =
+              reinterpret_cast<volatile struct nvme_cqe*>(
+                &cq_to_verify[verify_cq_head]);
+
+            if ((cqe->status & 0x1) == verify_phase) {
+              uint16_t cid = cqe->command_id;
+              volatile struct nvme_sqe* sqe =
+                reinterpret_cast<volatile struct nvme_sqe*>(&sq_to_verify[cid]);
+              uint64_t lba = ((uint64_t)sqe->cdw11 << 32) | sqe->cdw10;
+              uint32_t nlb = (sqe->cdw12 & 0xFFFF) + 1;
+
+              for (uint32_t block = 0;
+                   block < nlb && verified_blocks < blocks_to_verify; block++) {
+                uint64_t block_lba = lba + block;
+                uint64_t offset_in_buffer = verified_blocks *
+                                            config->args.nvmeBlockSize;
+                uint8_t* block_buf = verify_buf + offset_in_buffer;
+                uint64_t pattern_offset = block_lba *
+                                          config->args.nvmeBlockSize;
+
+                size_t error_offset = 0;
+                bool verified = nvme_verify_pattern(block_buf,
+                                                    config->args.nvmeBlockSize,
+                                                    pattern, pattern_offset,
+                                                    &error_offset,
+                                                    config->args.lfsrSeed);
+
+                total_bytes_checked += config->args.nvmeBlockSize;
+
+                if (verified) {
+                  verified_reads_count++;
+                } else {
+                  mismatches++;
+                  if (config->args.beVerbose && mismatches <= 20) {
+                    uint8_t expected_byte = 0;
+                    switch (pattern) {
+                      case NVME_PATTERN_LFSR: {
+                        uint64_t lba = block_lba;
+                        uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+                        uint32_t seed = base_seed ^ config->args.lfsrSeed;
+                        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed +
+                                                  error_offset);
+                        rng ^= rng >> 16;
+                        rng *= 0x85ebca6b;
+                        rng ^= rng >> 13;
+                        rng *= 0xc2b2ae35;
+                        rng ^= rng >> 16;
+                        expected_byte = (uint8_t)(rng & 0xFF);
+                        break;
+                      }
+                      default: {
+                        uint64_t pattern_offset = block_lba *
+                                                    config->args.nvmeBlockSize +
+                                                  error_offset;
+                        switch (pattern) {
+                          case NVME_PATTERN_SEQUENTIAL:
+                            expected_byte = (uint8_t)(pattern_offset & 0xFF);
+                            break;
+                          case NVME_PATTERN_ZEROS:
+                            expected_byte = 0x00;
+                            break;
+                          case NVME_PATTERN_ONES:
+                            expected_byte = 0xFF;
+                            break;
+                          case NVME_PATTERN_BLOCK_ID:
+                            expected_byte = (uint8_t)(block_lba & 0xFF);
+                            break;
+                          default:
+                            expected_byte = block_buf[error_offset];
+                            break;
+                        }
+                        break;
+                      }
+                    }
+                    std::cerr << "  ❌ Mismatch #" << mismatches << " at LBA "
+                              << block_lba << ", byte " << error_offset
+                              << ": expected 0x" << std::hex << std::setw(2)
+                              << std::setfill('0') << (int)expected_byte
+                              << ", got 0x" << std::setw(2) << std::setfill('0')
+                              << (int)block_buf[error_offset] << std::dec
+                              << std::endl;
+                  } else if (config->args.beVerbose && mismatches == 21) {
+                    std::cerr << "  ... (suppressing further mismatch details, "
+                              << "showing summary at end)" << std::endl;
+                  }
+                }
+
+                verified_blocks++;
+              }
+
+              verify_cq_head++;
+              if (verify_cq_head >= config->args.completeQueueLen) {
+                verify_cq_head = 0;
+                verify_phase = !verify_phase;
+              }
+            }
+          }
+
+          if (mismatches == 0) {
+            std::cout
+              << "\n✅ Verification SUCCESS: All reads matched expected "
+              << "pattern!" << std::endl;
+            std::cout << "  ✓ Verified " << verified_blocks << " blocks ("
+                      << total_bytes_checked << " bytes)" << std::endl;
+          } else {
+            std::cerr << "\n❌ Verification FAILED: " << mismatches
+                      << " mismatches found out of " << total_bytes_checked
+                      << " bytes checked (" << verified_blocks << " blocks)"
+                      << std::endl;
+            double mismatch_rate = (double)mismatches / total_bytes_checked *
+                                   100.0;
+            std::cerr << "  Mismatch rate: " << std::fixed
+                      << std::setprecision(2) << mismatch_rate << "%"
+                      << std::endl;
+          }
+          config->args.verifiedReadsCount = verified_reads_count;
+        }
+
+        // Get timing data
+        unsigned long long int h_start_time, h_end_time;
+        HIP_CHECK(hipMemcpy(&h_start_time, d_start_time,
+                            sizeof(unsigned long long int),
+                            hipMemcpyDeviceToHost));
+        HIP_CHECK(hipMemcpy(&h_end_time, d_end_time,
+                            sizeof(unsigned long long int),
+                            hipMemcpyDeviceToHost));
+
+        double elapsed_cycles = (double)(h_end_time - h_start_time);
+        double elapsed_ns = elapsed_cycles; // Approximate
+        double avg_latency_ns = elapsed_ns / config->args.nIterations;
+
+        std::cout << "\n=== Performance Results ===" << std::endl;
+        std::cout << "Total GPU time: " << elapsed_ns << " ns" << std::endl;
+        std::cout << "Average latency per command: " << avg_latency_ns << " ns"
+                  << std::endl;
+        std::cout << "Throughput: "
+                  << (completions_received * 1000000000.0 / elapsed_ns)
+                  << " IOPS" << std::endl;
+
+        // Cleanup
+        HIP_CHECK(hipFree(d_start_time));
+        HIP_CHECK(hipFree(d_end_time));
+        HIP_CHECK(hipHostFree(data_buffer));
+
+        // No need to unmap doorbell - it's handled by kernel module cleanup
+
+        std::cout << "\n=== GPU Random I/O Test Complete ===" << std::endl;
+
+        // Skip the old test framework - we're done
+        goto cleanup_and_exit;
+      }
+    } // End GPU random I/O block
+    // ========================================================================
+
+    // Initialize queues to safe initial values to avoid polling uninitialized
+    // memory Use values that won't match the initial poll states in
+    // emulate/drive functions Skip initialization for real hardware mode
+    // (queues may already contain data)
+    if (!mappedPhysical) {
+      sqeType sqeInit = {};
+      sqeInit.magicID = 0x00; // Invalid magic ID (not TEST_EP_MAGIC_ID)
+      sqeInit.entryId = 0;
+      sqeInit.timeStamp = 0;
+      sqeInit.dataPayload = 0;
+
+      cqeType cqeInit = {};
+      cqeInit.magicID = 0x00; // Invalid magic ID (not TEST_EP_MAGIC_ID)
+      cqeInit.entryId = 0;
+      cqeInit.dataPayload = 0;
+
+      // For GPU-direct mode with HSA-locked pointers, use original pointers for
+      // CPU initialization
+      void* sq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 &&
+                          config->kernelDmaSqOrig)
+                           ? config->kernelDmaSqOrig
+                           : sqQueue;
+      void* cq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 &&
+                          config->kernelDmaCqOrig)
+                           ? config->kernelDmaCqOrig
+                           : cqQueue;
+
+      if (useDeviceMemory) {
+        HIP_CHECK(hipMemcpy(sq_to_init, &sqeInit, sizeof(sqeType),
+                            hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(cq_to_init, &cqeInit, sizeof(cqeType),
+                            hipMemcpyHostToDevice));
+      } else {
+        memcpy(sq_to_init, &sqeInit, sizeof(sqeType));
+        memcpy(cq_to_init, &cqeInit, sizeof(cqeType));
+      }
     }
-  } // End GPU random I/O block
-  // ========================================================================
 
-  // Initialize queues to safe initial values to avoid polling uninitialized
-  // memory Use values that won't match the initial poll states in emulate/drive
-  // functions Skip initialization for real hardware mode (queues may already
-  // contain data)
-  if (!mappedPhysical) {
-    sqeType sqeInit = {};
-    sqeInit.magicID = 0x00; // Invalid magic ID (not TEST_EP_MAGIC_ID)
-    sqeInit.entryId = 0;
-    sqeInit.timeStamp = 0;
-    sqeInit.dataPayload = 0;
-
-    cqeType cqeInit = {};
-    cqeInit.magicID = 0x00; // Invalid magic ID (not TEST_EP_MAGIC_ID)
-    cqeInit.entryId = 0;
-    cqeInit.dataPayload = 0;
-
-    // For GPU-direct mode with HSA-locked pointers, use original pointers for
-    // CPU initialization
-    void* sq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 &&
-                        config->kernelDmaSqOrig)
-                         ? config->kernelDmaSqOrig
-                         : sqQueue;
-    void* cq_to_init = (kernel_ctx && kernel_ctx->mem_fd == -2 &&
-                        config->kernelDmaCqOrig)
-                         ? config->kernelDmaCqOrig
-                         : cqQueue;
-
-    if (useDeviceMemory) {
-      HIP_CHECK(hipMemcpy(sq_to_init, &sqeInit, sizeof(sqeType),
-                          hipMemcpyHostToDevice));
-      HIP_CHECK(hipMemcpy(cq_to_init, &cqeInit, sizeof(cqeType),
-                          hipMemcpyHostToDevice));
-    } else {
-      memcpy(sq_to_init, &sqeInit, sizeof(sqeType));
-      memcpy(cq_to_init, &cqeInit, sizeof(cqeType));
-    }
-  }
-
-  // allocate device timers
-  HIP_CHECK(hipMalloc(&d_startTime, config->args.nIterations *
+    // allocate device timers
+    HIP_CHECK(hipMalloc(&d_startTime, config->args.nIterations *
+                                        sizeof(unsigned long long int)));
+    HIP_CHECK(hipMalloc(&d_endTime, config->args.nIterations *
                                       sizeof(unsigned long long int)));
-  HIP_CHECK(hipMalloc(&d_endTime, config->args.nIterations *
-                                    sizeof(unsigned long long int)));
 
-  // Allocate data buffers if requested
-  // (Variables already declared above to avoid goto bypass)
+    // Allocate data buffers if requested
+    // (Variables already declared above to avoid goto bypass)
 
-  if (config->args.useDataBuffers && endpointType == EndpointType::NVME_EP) {
-    usingDataBuffers = true;
+    // NVMe endpoint always uses data buffers (sensible PRPs)
+    if (endpointType == EndpointType::NVME_EP) {
+      usingDataBuffers = true;
+      // Ensure useDataBuffers is set (for backward compatibility with config)
+      config->args.useDataBuffers = true;
 
-    // Calculate required buffer size: kernel uses 8 blocks per operation
-    // Buffer must hold: iterations * 8 blocks * blockSize
-    const uint32_t blocks_per_operation = 8; // Hardcoded in nvme-ep.hip
-    size_t required_buffer_size = config->args.nIterations *
-                                  blocks_per_operation *
-                                  config->args.nvmeBlockSize;
+      // Calculate required buffer size: kernel uses 8 blocks per operation
+      // Buffer must hold: iterations * 8 blocks * blockSize
+      const uint32_t blocks_per_operation = 8; // Hardcoded in nvme-ep.hip
+      size_t required_buffer_size = config->args.nIterations *
+                                    blocks_per_operation *
+                                    config->args.nvmeBlockSize;
 
-    // Use calculated size if user didn't specify, or validate user's size
-    if (config->args.dataBufferSize < required_buffer_size) {
-      if (config->args.dataBufferSize == (1024 * 1024)) {
-        // User didn't specify (using default), auto-calculate
-        config->args.dataBufferSize = required_buffer_size;
+      // Use calculated size if user didn't specify, or validate user's size
+      if (config->args.dataBufferSize < required_buffer_size) {
+        if (config->args.dataBufferSize == (1024 * 1024)) {
+          // User didn't specify (using default), auto-calculate
+          config->args.dataBufferSize = required_buffer_size;
+          std::cout << "Allocating data buffers for NVMe I/O testing..."
+                    << std::endl;
+          std::cout << "  Auto-calculated buffer size: "
+                    << config->args.dataBufferSize << " bytes"
+                    << " (iterations=" << config->args.nIterations
+                    << " * blocks_per_op=" << blocks_per_operation
+                    << " * block_size=" << config->args.nvmeBlockSize << ")"
+                    << std::endl;
+        } else {
+          // User specified but too small - warn and use calculated size
+          std::cerr << "Warning: Specified buffer size ("
+                    << config->args.dataBufferSize
+                    << " bytes) is too small for " << config->args.nIterations
+                    << " iterations with " << blocks_per_operation
+                    << " blocks per operation." << std::endl;
+          std::cerr << "  Required: " << required_buffer_size << " bytes"
+                    << std::endl;
+          std::cerr << "  Auto-adjusting to: " << required_buffer_size
+                    << " bytes" << std::endl;
+          config->args.dataBufferSize = required_buffer_size;
+        }
+      } else {
         std::cout << "Allocating data buffers for NVMe I/O testing..."
                   << std::endl;
-        std::cout << "  Auto-calculated buffer size: "
-                  << config->args.dataBufferSize << " bytes"
-                  << " (iterations=" << config->args.nIterations
-                  << " * blocks_per_op=" << blocks_per_operation
-                  << " * block_size=" << config->args.nvmeBlockSize << ")"
-                  << std::endl;
-      } else {
-        // User specified but too small - warn and use calculated size
-        std::cerr << "Warning: Specified buffer size ("
-                  << config->args.dataBufferSize << " bytes) is too small for "
-                  << config->args.nIterations << " iterations with "
-                  << blocks_per_operation << " blocks per operation."
-                  << std::endl;
-        std::cerr << "  Required: " << required_buffer_size << " bytes"
-                  << std::endl;
-        std::cerr << "  Auto-adjusting to: " << required_buffer_size << " bytes"
-                  << std::endl;
-        config->args.dataBufferSize = required_buffer_size;
+        std::cout << "  Buffer size: " << config->args.dataBufferSize
+                  << " bytes" << " (required: " << required_buffer_size
+                  << " bytes)" << std::endl;
       }
-    } else {
-      std::cout << "Allocating data buffers for NVMe I/O testing..."
+      std::cout << "  Block size: " << config->args.nvmeBlockSize << " bytes"
                 << std::endl;
-      std::cout << "  Buffer size: " << config->args.dataBufferSize << " bytes"
-                << " (required: " << required_buffer_size << " bytes)"
-                << std::endl;
-    }
-    std::cout << "  Block size: " << config->args.nvmeBlockSize << " bytes"
+      std::cout << "  Test pattern: " << config->args.testPattern << std::endl;
+      if (config->args.writeOnlyMode) {
+        std::cout << "  Mode: Write-only (no read buffer)" << std::endl;
+      } else if (config->args.readOnlyMode) {
+        std::cout << "  Mode: Read-only (no write buffer)" << std::endl;
+      } else {
+        std::cout << "  Mode: Alternate reads/writes (both buffers)"
+                  << std::endl;
+      }
+
+      if (kernel_ctx && kernel_ctx->mem_fd == -2) {
+        // GPU-DIRECT mode: Use kernel module DMA allocation + mmap for
+        // GPU-accessible buffers
+        std::cout
+          << "  Using kernel module DMA allocation + mmap (GPU-direct mode)..."
+          << std::endl;
+
+        uint64_t read_dma_addr = 0, write_dma_addr = 0;
+
+        // Allocate DMA-coherent buffers via kernel module (only if needed)
+        if (!config->args.writeOnlyMode) {
+          if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
+                                                 config->args.dataBufferSize,
+                                                 &read_dma_addr, nullptr) < 0) {
+            std::cerr
+              << "Error: Failed to allocate read buffer via kernel module"
               << std::endl;
-    std::cout << "  Test pattern: " << config->args.testPattern << std::endl;
-    if (config->args.writeOnlyMode) {
-      std::cout << "  Mode: Write-only (no read buffer)" << std::endl;
-    } else if (config->args.readOnlyMode) {
-      std::cout << "  Mode: Read-only (no write buffer)" << std::endl;
-    } else {
-      std::cout << "  Mode: Alternate reads/writes (both buffers)" << std::endl;
-    }
-
-    if (kernel_ctx && kernel_ctx->mem_fd == -2) {
-      // GPU-DIRECT mode: Use kernel module DMA allocation + mmap for
-      // GPU-accessible buffers
-      std::cout
-        << "  Using kernel module DMA allocation + mmap (GPU-direct mode)..."
-        << std::endl;
-
-      uint64_t read_dma_addr = 0, write_dma_addr = 0;
-
-      // Allocate DMA-coherent buffers via kernel module (only if needed)
-      if (!config->args.writeOnlyMode) {
-        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                               config->args.dataBufferSize,
-                                               &read_dma_addr, nullptr) < 0) {
-          std::cerr << "Error: Failed to allocate read buffer via kernel module"
-                    << std::endl;
-          return EXIT_FAILURE;
-        }
-      } else {
-        readBuffer = nullptr;
-        config->readBufferDma = 0;
-      }
-
-      if (!config->args.readOnlyMode) {
-        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                               config->args.dataBufferSize,
-                                               &write_dma_addr, nullptr) < 0) {
-          std::cerr
-            << "Error: Failed to allocate write buffer via kernel module"
-            << std::endl;
-          return EXIT_FAILURE;
-        }
-      } else {
-        writeBuffer = nullptr;
-        config->writeBufferDma = 0;
-      }
-
-      // Map DMA buffers for GPU access via mmap
-      // Kernel module uses allocation order: first allocated = index 0 = offset
-      // 4 Read buffer is always allocated first (if present), so it gets offset
-      // 4 Write buffer is allocated second (if both present), so it gets offset
-      // 5 In write-only mode, write buffer is allocated first, so it gets
-      // offset 4
-      if (!config->args.writeOnlyMode && read_dma_addr != 0) {
-        // Read buffer allocated first → offset 4
-        readBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
-                                    PROT_READ | PROT_WRITE, MAP_SHARED,
-                                    kernel_ctx->axiio_fd, 4 * getpagesize());
-        if (readBuffer == MAP_FAILED) {
-          std::cerr << "Error: Failed to mmap read DMA buffer for GPU access"
-                    << std::endl;
-          perror("mmap");
-          return EXIT_FAILURE;
-        }
-      }
-      if (!config->args.readOnlyMode && write_dma_addr != 0) {
-        // Write buffer: offset 4 if write-only (allocated first), offset 5 if
-        // both buffers (allocated second)
-        int write_offset = config->args.writeOnlyMode ? 4 : 5;
-        writeBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
-                                     PROT_READ | PROT_WRITE, MAP_SHARED,
-                                     kernel_ctx->axiio_fd,
-                                     write_offset * getpagesize());
-        if (writeBuffer == MAP_FAILED) {
-          std::cerr << "Error: Failed to mmap write DMA buffer for GPU access"
-                    << std::endl;
-          perror("mmap");
-          return EXIT_FAILURE;
-        }
-      }
-
-      // Lock DMA buffers with HSA for GPU MMU registration
-      // This is critical for GPU-direct access to DMA buffers
-      if (nvme_hsa_doorbell::init_hsa() == 0) {
-        hsa_agent_t gpu_agent = nvme_hsa_doorbell::get_gpu_agent();
-
-        void *locked_read = nullptr, *locked_write = nullptr;
-        hsa_status_t status_read = HSA_STATUS_SUCCESS;
-        hsa_status_t status_write = HSA_STATUS_SUCCESS;
-
-        if (readBuffer) {
-          status_read = hsa_amd_memory_lock(readBuffer,
-                                            config->args.dataBufferSize,
-                                            &gpu_agent, 1, &locked_read);
-        }
-        if (writeBuffer) {
-          status_write = hsa_amd_memory_lock(writeBuffer,
-                                             config->args.dataBufferSize,
-                                             &gpu_agent, 1, &locked_write);
+            return EXIT_FAILURE;
+          }
+        } else {
+          readBuffer = nullptr;
+          config->readBufferDma = 0;
         }
 
-        if ((!readBuffer || status_read == HSA_STATUS_SUCCESS) &&
-            (!writeBuffer || status_write == HSA_STATUS_SUCCESS)) {
-          std::cout << "  ✅ HSA locked DMA buffers for GPU MMU" << std::endl;
+        if (!config->args.readOnlyMode) {
+          if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
+                                                 config->args.dataBufferSize,
+                                                 &write_dma_addr,
+                                                 nullptr) < 0) {
+            std::cerr
+              << "Error: Failed to allocate write buffer via kernel module"
+              << std::endl;
+            return EXIT_FAILURE;
+          }
+        } else {
+          writeBuffer = nullptr;
+          config->writeBufferDma = 0;
+        }
+
+        // Map DMA buffers for GPU access via mmap
+        // Kernel module uses allocation order: first allocated = index 0 =
+        // offset 4 Read buffer is always allocated first (if present), so it
+        // gets offset 4 Write buffer is allocated second (if both present), so
+        // it gets offset 5 In write-only mode, write buffer is allocated first,
+        // so it gets offset 4
+        if (!config->args.writeOnlyMode && read_dma_addr != 0) {
+          // Read buffer allocated first → offset 4
+          readBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                      PROT_READ | PROT_WRITE, MAP_SHARED,
+                                      kernel_ctx->axiio_fd, 4 * getpagesize());
+          if (readBuffer == MAP_FAILED) {
+            std::cerr << "Error: Failed to mmap read DMA buffer for GPU access"
+                      << std::endl;
+            perror("mmap");
+            return EXIT_FAILURE;
+          }
+        }
+        if (!config->args.readOnlyMode && write_dma_addr != 0) {
+          // Write buffer: offset 4 if write-only (allocated first), offset 5 if
+          // both buffers (allocated second)
+          int write_offset = config->args.writeOnlyMode ? 4 : 5;
+          writeBuffer = (uint8_t*)mmap(NULL, config->args.dataBufferSize,
+                                       PROT_READ | PROT_WRITE, MAP_SHARED,
+                                       kernel_ctx->axiio_fd,
+                                       write_offset * getpagesize());
+          if (writeBuffer == MAP_FAILED) {
+            std::cerr << "Error: Failed to mmap write DMA buffer for GPU access"
+                      << std::endl;
+            perror("mmap");
+            return EXIT_FAILURE;
+          }
+        }
+
+        // Lock DMA buffers with HSA for GPU MMU registration
+        // This is critical for GPU-direct access to DMA buffers
+        if (nvme_hsa_doorbell::init_hsa() == 0) {
+          hsa_agent_t gpu_agent = nvme_hsa_doorbell::get_gpu_agent();
+
+          void *locked_read = nullptr, *locked_write = nullptr;
+          hsa_status_t status_read = HSA_STATUS_SUCCESS;
+          hsa_status_t status_write = HSA_STATUS_SUCCESS;
+
           if (readBuffer) {
-            std::cout << "    Original read buffer: " << (void*)readBuffer
-                      << std::endl;
-            std::cout << "    HSA-locked read buffer: " << locked_read
-                      << std::endl;
+            status_read = hsa_amd_memory_lock(readBuffer,
+                                              config->args.dataBufferSize,
+                                              &gpu_agent, 1, &locked_read);
           }
           if (writeBuffer) {
-            std::cout << "    Original write buffer: " << (void*)writeBuffer
-                      << std::endl;
-            std::cout << "    HSA-locked write buffer: " << locked_write
-                      << std::endl;
+            status_write = hsa_amd_memory_lock(writeBuffer,
+                                               config->args.dataBufferSize,
+                                               &gpu_agent, 1, &locked_write);
           }
 
-          // Store separate CPU and GPU pointers (like working test)
-          // GPU pointers for GPU kernels, CPU pointers for CPU operations
-          if (readBuffer) {
-            config->readBufferCpu = readBuffer; // Keep original CPU pointer
-            config->readBufferGpu = static_cast<uint8_t*>(
-              locked_read); // GPU pointer
-            std::cout << "  ✅ Using separate CPU/GPU pointers for read buffer"
-                      << std::endl;
-            readBuffer = config->readBufferGpu; // Use GPU pointer for GPU
-                                                // kernels
-          }
-          if (writeBuffer) {
-            config->writeBufferCpu = writeBuffer; // Keep original CPU pointer
-            config->writeBufferGpu = static_cast<uint8_t*>(
-              locked_write); // GPU pointer
-            std::cout << "  ✅ Using separate CPU/GPU pointers for write buffer"
-                      << std::endl;
-            writeBuffer = config->writeBufferGpu; // Use GPU pointer for GPU
+          if ((!readBuffer || status_read == HSA_STATUS_SUCCESS) &&
+              (!writeBuffer || status_write == HSA_STATUS_SUCCESS)) {
+            std::cout << "  ✅ HSA locked DMA buffers for GPU MMU" << std::endl;
+            if (readBuffer) {
+              std::cout << "    Original read buffer: " << (void*)readBuffer
+                        << std::endl;
+              std::cout << "    HSA-locked read buffer: " << locked_read
+                        << std::endl;
+            }
+            if (writeBuffer) {
+              std::cout << "    Original write buffer: " << (void*)writeBuffer
+                        << std::endl;
+              std::cout << "    HSA-locked write buffer: " << locked_write
+                        << std::endl;
+            }
+
+            // Store separate CPU and GPU pointers (like working test)
+            // GPU pointers for GPU kernels, CPU pointers for CPU operations
+            if (readBuffer) {
+              config->readBufferCpu = readBuffer; // Keep original CPU pointer
+              config->readBufferGpu = static_cast<uint8_t*>(
+                locked_read); // GPU pointer
+              std::cout
+                << "  ✅ Using separate CPU/GPU pointers for read buffer"
+                << std::endl;
+              readBuffer = config->readBufferGpu; // Use GPU pointer for GPU
                                                   // kernels
+            }
+            if (writeBuffer) {
+              config->writeBufferCpu = writeBuffer; // Keep original CPU pointer
+              config->writeBufferGpu = static_cast<uint8_t*>(
+                locked_write); // GPU pointer
+              std::cout
+                << "  ✅ Using separate CPU/GPU pointers for write buffer"
+                << std::endl;
+              writeBuffer = config->writeBufferGpu; // Use GPU pointer for GPU
+                                                    // kernels
+            }
+          } else {
+            std::cerr << "  ⚠️  Warning: HSA memory lock failed for DMA buffers"
+                      << std::endl;
+            if (readBuffer) {
+              std::cerr << "    Read buffer lock status: " << status_read
+                        << std::endl;
+              // Still set CPU pointer even if HSA lock failed
+              config->readBufferCpu = readBuffer;
+              config->readBufferGpu = readBuffer; // Fallback: use same pointer
+            }
+            if (writeBuffer) {
+              std::cerr << "    Write buffer lock status: " << status_write
+                        << std::endl;
+              // Still set CPU pointer even if HSA lock failed
+              config->writeBufferCpu = writeBuffer;
+              config->writeBufferGpu = writeBuffer; // Fallback: use same
+                                                    // pointer
+            }
           }
         } else {
-          std::cerr << "  ⚠️  Warning: HSA memory lock failed for DMA buffers"
-                    << std::endl;
+          // HSA not initialized - set CPU pointers only
           if (readBuffer) {
-            std::cerr << "    Read buffer lock status: " << status_read
-                      << std::endl;
-            // Still set CPU pointer even if HSA lock failed
             config->readBufferCpu = readBuffer;
-            config->readBufferGpu = readBuffer; // Fallback: use same pointer
+            config->readBufferGpu = readBuffer;
           }
           if (writeBuffer) {
-            std::cerr << "    Write buffer lock status: " << status_write
-                      << std::endl;
-            // Still set CPU pointer even if HSA lock failed
             config->writeBufferCpu = writeBuffer;
-            config->writeBufferGpu = writeBuffer; // Fallback: use same pointer
+            config->writeBufferGpu = writeBuffer;
           }
         }
+
+        std::cout << "  ✅ DMA buffers allocated and mapped for GPU access"
+                  << std::endl;
+        std::cout << "    Read buffer DMA: 0x" << std::hex << read_dma_addr
+                  << std::dec << std::endl;
+        std::cout << "    Write buffer DMA: 0x" << std::hex << write_dma_addr
+                  << std::dec << std::endl;
+        std::cout << "    Read buffer VA (GPU): " << (void*)readBuffer
+                  << std::endl;
+        std::cout << "    Write buffer VA (GPU): " << (void*)writeBuffer
+                  << std::endl;
+
+        // Store DMA addresses for PRP calculation
+        config->readBufferDma = read_dma_addr;
+        config->writeBufferDma = write_dma_addr;
       } else {
-        // HSA not initialized - set CPU pointers only
-        if (readBuffer) {
-          config->readBufferCpu = readBuffer;
-          config->readBufferGpu = readBuffer;
-        }
-        if (writeBuffer) {
-          config->writeBufferCpu = writeBuffer;
-          config->writeBufferGpu = writeBuffer;
-        }
-      }
-
-      std::cout << "  ✅ DMA buffers allocated and mapped for GPU access"
-                << std::endl;
-      std::cout << "    Read buffer DMA: 0x" << std::hex << read_dma_addr
-                << std::dec << std::endl;
-      std::cout << "    Write buffer DMA: 0x" << std::hex << write_dma_addr
-                << std::dec << std::endl;
-      std::cout << "    Read buffer VA (GPU): " << (void*)readBuffer
-                << std::endl;
-      std::cout << "    Write buffer VA (GPU): " << (void*)writeBuffer
-                << std::endl;
-
-      // Store DMA addresses for PRP calculation
-      config->readBufferDma = read_dma_addr;
-      config->writeBufferDma = write_dma_addr;
-    } else {
-      // CPU-HYBRID mode: Use hipHostMalloc for CPU-GPU visibility
-      std::cout << "  Using hipHostMalloc (CPU-hybrid mode)..." << std::endl;
-      if (!config->args.writeOnlyMode) {
-        HIP_CHECK(
-          hipHostMalloc(&readBuffer, config->args.dataBufferSize, flags));
-        memset(readBuffer, 0, config->args.dataBufferSize);
-      } else {
-        readBuffer = nullptr;
-      }
-      if (!config->args.readOnlyMode) {
-        HIP_CHECK(
-          hipHostMalloc(&writeBuffer, config->args.dataBufferSize, flags));
-        // Initialize write buffer with pattern on CPU
-        // (Pattern will be regenerated on GPU during test)
-        memset(writeBuffer, 0, config->args.dataBufferSize);
-      } else {
-        writeBuffer = nullptr;
-      }
-    }
-  }
-
-  if (config->args.beVerbose) {
-    std::cout << "Starting drive and emulate threads..." << std::endl;
-  }
-
-  // Choose appropriate drive function based on data buffer usage
-  // (Threads already declared above to avoid goto bypass)
-
-  if (usingDataBuffers) {
-    // Parse pattern string to enum
-    enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
-    if (config->args.testPattern == "zeros") {
-      pattern = NVME_PATTERN_ZEROS;
-    } else if (config->args.testPattern == "ones") {
-      pattern = NVME_PATTERN_ONES;
-    } else if (config->args.testPattern == "random") {
-      pattern = NVME_PATTERN_RANDOM;
-    } else if (config->args.testPattern == "block_id") {
-      pattern = NVME_PATTERN_BLOCK_ID;
-    } else if (config->args.testPattern == "lfsr") {
-      pattern = NVME_PATTERN_LFSR;
-    }
-
-    // Use NVMe-specific kernel with buffers
-    // Pass DMA addresses for GPU-direct mode
-    uint64_t read_dma = (kernel_ctx && kernel_ctx->mem_fd == -2)
-                          ? config->readBufferDma
-                          : 0;
-    uint64_t write_dma = (kernel_ctx && kernel_ctx->mem_fd == -2)
-                           ? config->writeBufferDma
-                           : 0;
-
-    // Pass NULL buffers based on mode flags
-    uint8_t* final_read_buffer = config->args.writeOnlyMode ? nullptr
-                                                            : readBuffer;
-    uint8_t* final_write_buffer = config->args.readOnlyMode ? nullptr
-                                                            : writeBuffer;
-
-    driveThread =
-      std::thread(driveNVMeWithBuffersFunction, stream1,
-                  config->args.nIterations, sqQueue, cqQueue, sqDoorBell,
-                  d_startTime, d_endTime, final_read_buffer, final_write_buffer,
-                  config->args.dataBufferSize, config->args.nvmeBlockSize,
-                  pattern, config->args.useRealHardware, read_dma, write_dma,
-                  0, // doorbell_iova not used with working test approach
-                  config->args.lfsrSeed, config->args.debug);
-  } else {
-    // Use generic dispatcher
-    driveThread = std::thread(driveFunction, endpointType, stream1,
-                              config->args.nIterations, sqQueue, cqQueue,
-                              sqDoorBell, d_startTime, d_endTime,
-                              config->args.useRealHardware);
-  }
-
-  // Only create emulate thread for emulated mode
-  // For real hardware (--nvme-device), the actual NVMe controller handles this
-  if (!config->args.useRealHardware) {
-    emulateThread = std::thread(emulateFunction, endpointType, stream2,
-                                config->args.nIterations, sqQueue, cqQueue,
-                                sqDoorBell);
-  }
-
-  if (config->args.beVerbose) {
-    std::cout << "Threads started, waiting for completion..." << std::endl;
-    if (config->args.useRealHardware) {
-      std::cout << "  (Emulate thread skipped - using real NVMe hardware)"
-                << std::endl;
-    }
-  }
-
-  // Wait a moment and check if kernel started
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  if (config->args.beVerbose) {
-    // In GPU-DIRECT mode, read from CPU-accessible pointer; otherwise use
-    // sqDoorBell
-    volatile uint32_t* readptr = (isGpuDirectMode && cpu_doorbell_ptr)
-                                   ? cpu_doorbell_ptr
-                                   : (volatile uint32_t*)sqDoorBell;
-    if (readptr) {
-      std::cout << "Doorbell value after 100ms: 0x" << std::hex << *readptr
-                << std::dec << std::endl;
-    } else {
-      std::cout << "Doorbell value check skipped (pointer not available)"
-                << std::endl;
-    }
-  }
-
-  driveThread.join();
-
-  if (config->args.beVerbose) {
-    std::cout << "Drive thread completed" << std::endl;
-  }
-
-  // Verify GPU doorbell write (for debugging)
-  // Note: Don't dereference GPU pointer from CPU - it may cause segfault
-  // GPU printf output above confirms the write succeeded
-  if (cpu_doorbell_ptr && sqDoorBell) {
-    HIP_CHECK(hipDeviceSynchronize()); // Ensure GPU kernel completes
-    usleep(50000);                     // 50ms delay
-
-    // Only read from CPU pointer (safe)
-    uint32_t cpu_doorbell_val = *cpu_doorbell_ptr;
-
-    std::cout << "\n=== GPU Doorbell Verification ===" << std::endl;
-    std::cout << "GPU doorbell ptr: " << (void*)sqDoorBell
-              << " (GPU-only, don't dereference from CPU)" << std::endl;
-    std::cout << "CPU doorbell ptr: " << (void*)cpu_doorbell_ptr
-              << " value: " << cpu_doorbell_val << std::endl;
-    std::cout << "  ✅ GPU doorbell write SUCCESS (confirmed by GPU printf "
-                 "output above)"
-              << std::endl;
-    std::cout << "  GPU read doorbell, wrote incremented value, and read it "
-                 "back successfully!"
-              << std::endl;
-  }
-
-  // CPU-Hybrid Doorbell Forwarding for Real Hardware
-  // GPU signals completion, CPU prepares SQEs and rings hardware doorbell
-  if (cpu_doorbell_ptr && config->args.useRealHardware) {
-#if GPU_DIRECT_DOORBELL
-    // GPU-direct mode: GPU already wrote directly to hardware doorbell
-    if (config->args.beVerbose) {
-      std::cout << "GPU-direct mode: doorbell written by device code"
-                << std::endl;
-    }
-#else
-    // CPU-hybrid mode: Prepare SQEs on CPU and ring doorbell
-    uint32_t tail_value = (uint32_t)(*sqDoorBell);
-
-    if (config->args.beVerbose) {
-      std::cout << "CPU-hybrid mode:" << std::endl;
-      std::cout << "  GPU signaled: " << tail_value << " iterations"
-                << std::endl;
-      std::cout << "  CPU preparing NVMe SQEs..." << std::endl;
-    }
-
-    // For CPU-hybrid mode: Call endpoint-specific host function to prepare SQEs
-    // The emulate thread is skipped for real hardware, so CPU must generate
-    // SQEs
-    if (endpointType == EndpointType::NVME_EP && usingDataBuffers) {
-      // Create proper NVMe Read commands with data buffers
-      // Get physical addresses of data buffers
-      uint64_t read_buf_phys = virt_to_phys(readBuffer);
-      uint64_t write_buf_phys = virt_to_phys(writeBuffer);
-
-      uint32_t nsid = 1; // Namespace ID (typically 1 for single-namespace
-                         // drives)
-      uint64_t base_lba = 0x1000; // Starting LBA (avoid LBA 0 which might be
-                                  // special)
-      uint32_t blocks = config->args.dataBufferSize /
-                        512; // Number of 512-byte blocks
-
-      if (config->args.beVerbose) {
-        std::cout << "  Creating NVMe commands:" << std::endl;
-        std::cout << "    Read buffer phys addr: 0x" << std::hex
-                  << read_buf_phys << std::dec << std::endl;
-        std::cout << "    Write buffer phys addr: 0x" << std::hex
-                  << write_buf_phys << std::dec << std::endl;
-        std::cout << "    NSID: " << nsid << ", Base LBA: 0x" << std::hex
-                  << base_lba << std::dec << std::endl;
-        std::cout << "    Blocks per command: " << blocks << std::endl;
-      }
-
-      for (unsigned i = 0; i < config->args.nIterations; i++) {
-        struct nvme_sqe* sqe = reinterpret_cast<struct nvme_sqe*>(&sqQueue[i]);
-
-        // Alternate between read and write for testing
-        if (i % 2 == 0) {
-          // Read command
-          nvme_sqe_setup_read(sqe, i, nsid, base_lba + (i * blocks), blocks,
-                              read_buf_phys, 0);
-          if (config->args.beVerbose && i == 0) {
-            std::cout << "    SQE[0]: READ, CID=" << i << ", LBA=0x" << std::hex
-                      << (base_lba + (i * blocks)) << std::dec << std::endl;
-            std::cout << "      opcode=0x" << std::hex << (int)sqe->opcode
-                      << " nsid=" << std::dec << sqe->nsid << " prp1=0x"
-                      << std::hex << sqe->dptr.prp.prp1 << std::dec
-                      << " nlb=" << (sqe->cdw12 & 0xFFFF) << std::endl;
-          }
-        } else {
-          // Write command
-          nvme_sqe_setup_write(sqe, i, nsid, base_lba + (i * blocks), blocks,
-                               write_buf_phys, 0);
-          if (config->args.beVerbose && i == 1) {
-            std::cout << "    SQE[1]: WRITE, CID=" << i << ", LBA=0x"
-                      << std::hex << (base_lba + (i * blocks)) << std::dec
-                      << std::endl;
-            std::cout << "      opcode=0x" << std::hex << (int)sqe->opcode
-                      << " nsid=" << std::dec << sqe->nsid << " prp1=0x"
-                      << std::hex << sqe->dptr.prp.prp1 << std::dec
-                      << " nlb=" << (sqe->cdw12 & 0xFFFF) << std::endl;
-          }
-        }
-      }
-
-      // Verify first SQE is non-zero
-      if (config->args.beVerbose) {
-        struct nvme_sqe* sqe0 = reinterpret_cast<struct nvme_sqe*>(&sqQueue[0]);
-        if (sqe0->opcode == 0) {
-          std::cerr << "  WARNING: SQE[0] opcode is 0!" << std::endl;
-        }
-      }
-    } else if (endpointType == EndpointType::NVME_EP) {
-      // NVMe without data buffers - create simple test commands
-      for (unsigned i = 0; i < config->args.nIterations; i++) {
-        sqQueue[i].magicID = 0xAA;
-        sqQueue[i].entryId = i;
-        sqQueue[i].timeStamp = 0;
-        sqQueue[i].dataPayload = i * 0x1000;
-      }
-    } else {
-      // For other endpoints, use generic approach
-      for (unsigned i = 0; i < config->args.nIterations; i++) {
-        sqQueue[i].magicID = 0xBB;
-        sqQueue[i].entryId = i;
-        sqQueue[i].timeStamp = 0;
-        sqQueue[i].dataPayload = 0;
-      }
-    }
-
-    if (config->args.beVerbose) {
-      std::cout << "  CPU prepared " << config->args.nIterations << " SQEs"
-                << std::endl;
-
-      // Safety check
-      if (cpu_doorbell_ptr == nullptr) {
-        std::cerr << "ERROR: cpu_doorbell_ptr is NULL!" << std::endl;
+        // CPU-hybrid mode removed - require exclusive mode
+        std::cerr << "Error: Kernel module is not in exclusive mode for data "
+                     "buffers"
+                  << std::endl;
+        std::cerr
+          << "  CPU-hybrid mode has been removed. Please ensure the kernel "
+          << "module" << std::endl;
+        std::cerr
+          << "  provides exclusive access (mem_fd == -2) for GPU-direct I/O."
+          << std::endl;
         return EXIT_FAILURE;
       }
-      // Doorbell pointer verification skipped (no nvme_ctrl in lightweight
-      // mode)
     }
-
-    // CRITICAL: Ensure all SQE writes are visible to the NVMe controller
-    // before ringing the doorbell
-    __sync_synchronize(); // Full memory barrier
-    std::this_thread::sleep_for(
-      std::chrono::microseconds(100)); // Give time for writes to propagate
 
     if (config->args.beVerbose) {
-      std::cout << "  CPU ringing hardware doorbell..." << std::endl;
-      std::cout << "  Doorbell pointer: " << (void*)cpu_doorbell_ptr
-                << std::endl;
-
-      uint32_t before = *cpu_doorbell_ptr;
-      std::cout << "  Doorbell before write: 0x" << std::hex << before
-                << std::dec << std::endl;
+      std::cout << "Starting drive and emulate threads..." << std::endl;
     }
 
-    // Read current doorbell value to detect stale state
-    uint32_t current_tail = *cpu_doorbell_ptr;
+    // Choose appropriate drive function based on data buffer usage
+    // (Threads already declared above to avoid goto bypass)
 
-    // CRITICAL FIX: If doorbell has stale value from previous run,
-    // we need to write a DIFFERENT value to signal new commands
-    // NVMe controller only processes when tail advances
-    uint32_t tail_to_write;
-    if (current_tail > 0) {
-      // Stale doorbell detected! Advance from current position
-      tail_to_write = current_tail + (uint32_t)config->args.nIterations;
+    if (usingDataBuffers) {
+      // Parse pattern string to enum
+      enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+      if (config->args.testPattern == "zeros") {
+        pattern = NVME_PATTERN_ZEROS;
+      } else if (config->args.testPattern == "ones") {
+        pattern = NVME_PATTERN_ONES;
+      } else if (config->args.testPattern == "random") {
+        pattern = NVME_PATTERN_RANDOM;
+      } else if (config->args.testPattern == "block_id") {
+        pattern = NVME_PATTERN_BLOCK_ID;
+      } else if (config->args.testPattern == "lfsr") {
+        pattern = NVME_PATTERN_LFSR;
+      }
+
+      // Use NVMe-specific kernel with buffers
+      // Pass DMA addresses for GPU-direct mode
+      uint64_t read_dma = (kernel_ctx && kernel_ctx->mem_fd == -2)
+                            ? config->readBufferDma
+                            : 0;
+      uint64_t write_dma = (kernel_ctx && kernel_ctx->mem_fd == -2)
+                             ? config->writeBufferDma
+                             : 0;
+
+      // Pass NULL buffers based on mode flags
+      uint8_t* final_read_buffer = config->args.writeOnlyMode ? nullptr
+                                                              : readBuffer;
+      uint8_t* final_write_buffer = config->args.readOnlyMode ? nullptr
+                                                              : writeBuffer;
+
+      driveThread = std::thread(
+        driveNVMeWithBuffersFunction, stream1, config->args.nIterations,
+        sqQueue, cqQueue, sqDoorBell, d_startTime, d_endTime, final_read_buffer,
+        final_write_buffer, config->args.dataBufferSize,
+        config->args.nvmeBlockSize, pattern, config->args.useRealHardware,
+        read_dma, write_dma,
+        0, // doorbell_iova not used with working test approach
+        config->args.lfsrSeed, config->args.debug);
+    } else {
+      // Use generic dispatcher
+      driveThread = std::thread(driveFunction, endpointType, stream1,
+                                config->args.nIterations, sqQueue, cqQueue,
+                                sqDoorBell, d_startTime, d_endTime,
+                                config->args.useRealHardware);
+    }
+
+    // Only create emulate thread for emulated mode
+    // For real hardware (--nvme-device), the actual NVMe controller handles
+    // this
+    if (!config->args.useRealHardware) {
+      emulateThread = std::thread(emulateFunction, endpointType, stream2,
+                                  config->args.nIterations, sqQueue, cqQueue,
+                                  sqDoorBell);
+    }
+
+    if (config->args.beVerbose) {
+      std::cout << "Threads started, waiting for completion..." << std::endl;
+      if (config->args.useRealHardware) {
+        std::cout << "  (Emulate thread skipped - using real NVMe hardware)"
+                  << std::endl;
+      }
+    }
+
+    // Wait a moment and check if kernel started
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (config->args.beVerbose) {
+      // In GPU-DIRECT mode, read from CPU-accessible pointer; otherwise use
+      // sqDoorBell
+      volatile uint32_t* readptr = (isGpuDirectMode && cpu_doorbell_ptr)
+                                     ? cpu_doorbell_ptr
+                                     : (volatile uint32_t*)sqDoorBell;
+      if (readptr) {
+        std::cout << "Doorbell value after 100ms: 0x" << std::hex << *readptr
+                  << std::dec << std::endl;
+      } else {
+        std::cout << "Doorbell value check skipped (pointer not available)"
+                  << std::endl;
+      }
+    }
+
+    driveThread.join();
+
+    if (config->args.beVerbose) {
+      std::cout << "Drive thread completed" << std::endl;
+    }
+
+    // Verify GPU doorbell write (for debugging)
+    // Note: Don't dereference GPU pointer from CPU - it may cause segfault
+    // GPU printf output above confirms the write succeeded
+    if (cpu_doorbell_ptr && sqDoorBell) {
+      HIP_CHECK(hipDeviceSynchronize()); // Ensure GPU kernel completes
+      usleep(50000);                     // 50ms delay
+
+      // Only read from CPU pointer (safe)
+      uint32_t cpu_doorbell_val = *cpu_doorbell_ptr;
+
+      std::cout << "\n=== GPU Doorbell Verification ===" << std::endl;
+      std::cout << "GPU doorbell ptr: " << (void*)sqDoorBell
+                << " (GPU-only, don't dereference from CPU)" << std::endl;
+      std::cout << "CPU doorbell ptr: " << (void*)cpu_doorbell_ptr
+                << " value: " << cpu_doorbell_val << std::endl;
+      std::cout << "  ✅ GPU doorbell write SUCCESS (confirmed by GPU printf "
+                   "output above)"
+                << std::endl;
+      std::cout << "  GPU read doorbell, wrote incremented value, and read it "
+                   "back successfully!"
+                << std::endl;
+    }
+
+    // GPU-direct mode: GPU already wrote directly to hardware doorbell
+    // (CPU-hybrid mode removed)
+    if (cpu_doorbell_ptr && config->args.useRealHardware) {
       if (config->args.beVerbose) {
-        std::cout << "  ⚠️  WARNING: Stale doorbell detected (current="
-                  << current_tail << ")" << std::endl;
-        std::cout << "  Advancing tail from " << current_tail << " to "
-                  << tail_to_write << std::endl;
+        std::cout << "GPU-direct mode: doorbell written by device code"
+                  << std::endl;
+      }
+    }
+
+    // Only join emulate thread if it was created (emulated mode)
+    if (!config->args.useRealHardware) {
+      emulateThread.join();
+      if (config->args.beVerbose) {
+        std::cout << "Emulate thread completed" << std::endl;
       }
     } else {
-      tail_to_write = (uint32_t)config->args.nIterations;
-    }
-
-    // Write tail to hardware doorbell register
-    // This tells NVMe controller to process the commands
-    *cpu_doorbell_ptr = tail_to_write;
-    __sync_synchronize(); // Memory barrier to ensure doorbell write completes
-
-    if (config->args.beVerbose) {
-      uint32_t readback = *cpu_doorbell_ptr;
-      std::cout << "  Doorbell written: " << tail_to_write << " (0x" << std::hex
-                << tail_to_write << std::dec << ")" << ", readback: 0x"
-                << std::hex << readback << std::dec << std::endl;
-
-      // Read SQ doorbell register value to verify
-      uint32_t sq_db_val = *cpu_doorbell_ptr;
-      std::cout << "  SQ doorbell current value: 0x" << std::hex << sq_db_val
-                << std::dec << std::endl;
-
-      // Dump first SQE to verify it's in memory
-      struct nvme_sqe* sqe0 = reinterpret_cast<struct nvme_sqe*>(&sqQueue[0]);
-      std::cout << "  Debug: SQE[0] in memory:" << std::endl;
-      std::cout << "    opcode=" << (int)sqe0->opcode
-                << " cid=" << sqe0->command_id << " nsid=" << sqe0->nsid
-                << std::endl;
-      std::cout << "    prp1=0x" << std::hex << sqe0->dptr.prp.prp1
-                << " prp2=0x" << sqe0->dptr.prp.prp2 << std::dec << std::endl;
-      std::cout << "    slba=0x" << std::hex
-                << ((uint64_t)sqe0->cdw11 << 32 | sqe0->cdw10) << std::dec
-                << std::endl;
-
-      std::cout << "  ✅ NVMe controller should process " << tail_to_write
-                << " commands" << std::endl;
-    }
-#endif
-  }
-
-  // Only join emulate thread if it was created (emulated mode)
-  if (!config->args.useRealHardware) {
-    emulateThread.join();
-    if (config->args.beVerbose) {
-      std::cout << "Emulate thread completed" << std::endl;
-    }
-  } else {
-    if (config->args.beVerbose) {
-      std::cout << "Real hardware mode - polling for NVMe completions..."
-                << std::endl;
+      if (config->args.beVerbose) {
+        std::cout << "Real hardware mode - polling for NVMe completions..."
+                  << std::endl;
+      }
 
       // Poll the Completion Queue for all expected completions
       uint16_t expected_completions = config->args.nIterations;
@@ -2304,6 +2259,9 @@ std::endl; #endif
                       << std::dec << std::endl;
           }
 
+          // Note: endTime is now recorded on GPU side using GPU wall clock
+          // The CPU polling loop just tracks completions, timing is done on GPU
+
           completions_received++;
           cq_head++;
 
@@ -2353,149 +2311,326 @@ std::endl; #endif
       // Verify read data if requested
       if (config->args.verifyReads && usingDataBuffers &&
           (config->readBufferCpu || readBuffer) && completions_received > 0) {
-        std::cout << "\n=== Verifying Read Data ===" << std::endl;
+        // GPU-based verification (no CPU buffer access)
+        if (config->args.gpuVerifyReads && readBuffer) {
+          std::cout << "\n=== Verifying Read Data (GPU-based) ===" << std::endl;
 
-        // Parse pattern string to enum
-        enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
-        if (config->args.testPattern == "zeros") {
-          pattern = NVME_PATTERN_ZEROS;
-        } else if (config->args.testPattern == "ones") {
-          pattern = NVME_PATTERN_ONES;
-        } else if (config->args.testPattern == "random") {
-          pattern = NVME_PATTERN_RANDOM;
-        } else if (config->args.testPattern == "block_id") {
-          pattern = NVME_PATTERN_BLOCK_ID;
-        } else if (config->args.testPattern == "lfsr") {
-          pattern = NVME_PATTERN_LFSR;
-        }
+          // Parse pattern string to enum
+          enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+          if (config->args.testPattern == "zeros") {
+            pattern = NVME_PATTERN_ZEROS;
+          } else if (config->args.testPattern == "ones") {
+            pattern = NVME_PATTERN_ONES;
+          } else if (config->args.testPattern == "random") {
+            pattern = NVME_PATTERN_RANDOM;
+          } else if (config->args.testPattern == "block_id") {
+            pattern = NVME_PATTERN_BLOCK_ID;
+          } else if (config->args.testPattern == "lfsr") {
+            pattern = NVME_PATTERN_LFSR;
+          }
 
-        // Use CPU-accessible read buffer (original mmap pointer, not
-        // GPU-locked) Like working test: use CPU pointer for CPU verification
-        uint8_t* verify_buf = config->readBufferCpu ? config->readBufferCpu
-                                                    : readBuffer;
+          // Allocate device memory for verification results
+          uint32_t* d_verifiedCount;
+          uint32_t* d_mismatchCount;
+          uint32_t h_verifiedCount = 0;
+          uint32_t h_mismatchCount = 0;
 
-        // Extract LBAs from SQEs to verify each read block
-        // Note: This assumes sequential or known LBA pattern
-        uint32_t mismatches = 0;
-        uint32_t total_bytes_checked = 0;
-        uint32_t blocks_to_verify = std::min(
-          (uint32_t)completions_received,
-          (uint32_t)(config->args.dataBufferSize / config->args.nvmeBlockSize));
+          HIP_CHECK(hipMalloc(&d_verifiedCount, sizeof(uint32_t)));
+          HIP_CHECK(hipMalloc(&d_mismatchCount, sizeof(uint32_t)));
+          HIP_CHECK(hipMemset(d_verifiedCount, 0, sizeof(uint32_t)));
+          HIP_CHECK(hipMemset(d_mismatchCount, 0, sizeof(uint32_t)));
 
-        std::cout << "  Verifying " << blocks_to_verify << " blocks ("
-                  << (blocks_to_verify * config->args.nvmeBlockSize)
-                  << " bytes)..." << std::endl;
+          // Get SQEs and CQEs for GPU verification
+          volatile sqeType* sq_for_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig)
+              ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
+              : sqQueue;
+          volatile cqeType* cq_for_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+              ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+              : cqQueue;
 
-        // For each completed command, verify the read data
-        // We need to extract LBA from SQE - for now, assume sequential or
-        // extract from SQEs
-        volatile cqeType* cq_to_verify =
-          (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
-            ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
-            : cqQueue;
-        volatile sqeType* sq_to_verify =
-          (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig)
-            ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
-            : sqQueue;
+          // Count total read blocks for kernel launch
+          uint32_t totalReadBlocks =
+            std::min((uint32_t)completions_received,
+                     (uint32_t)(config->args.dataBufferSize /
+                                config->args.nvmeBlockSize));
 
-        uint16_t verify_cq_head = 0;
-        bool verify_phase = true;
-        uint32_t verified_blocks = 0;
+          std::cout << "  Verifying " << totalReadBlocks << " blocks ("
+                    << (totalReadBlocks * config->args.nvmeBlockSize)
+                    << " bytes) on GPU..." << std::endl;
 
-        for (uint32_t i = 0;
-             i < completions_received && verified_blocks < blocks_to_verify;
-             i++) {
-          volatile struct nvme_cqe* cqe =
-            reinterpret_cast<volatile struct nvme_cqe*>(
-              &cq_to_verify[verify_cq_head]);
+          // Launch GPU verification kernel
+          uint32_t threadsPerBlock = 256;
+          uint32_t numBlocks = (totalReadBlocks + threadsPerBlock - 1) /
+                               threadsPerBlock;
 
-          if ((cqe->status & 0x1) == verify_phase) {
-            uint16_t cid = cqe->command_id;
+          nvme_ep_verify_reads_gpu<<<numBlocks, threadsPerBlock>>>(
+            readBuffer,
+            reinterpret_cast<void*>(const_cast<sqeType*>(sq_for_verify)),
+            reinterpret_cast<void*>(const_cast<cqeType*>(cq_for_verify)),
+            completions_received, config->args.nvmeBlockSize, pattern,
+            config->args.lfsrSeed, d_verifiedCount, d_mismatchCount);
 
-            // Get corresponding SQE to extract LBA
-            volatile struct nvme_sqe* sqe =
-              reinterpret_cast<volatile struct nvme_sqe*>(&sq_to_verify[cid]);
+          HIP_CHECK(hipGetLastError());
+          HIP_CHECK(hipDeviceSynchronize());
 
-            // Extract LBA from SQE (cdw10 and cdw11)
-            uint64_t lba = ((uint64_t)sqe->cdw11 << 32) | sqe->cdw10;
-            uint32_t nlb = (sqe->cdw12 & 0xFFFF) +
-                           1; // Number of logical blocks
+          // Copy results back to host
+          HIP_CHECK(hipMemcpy(&h_verifiedCount, d_verifiedCount,
+                              sizeof(uint32_t), hipMemcpyDeviceToHost));
+          HIP_CHECK(hipMemcpy(&h_mismatchCount, d_mismatchCount,
+                              sizeof(uint32_t), hipMemcpyDeviceToHost));
 
-            // Verify each block in this command
-            for (uint32_t block = 0;
-                 block < nlb && verified_blocks < blocks_to_verify; block++) {
-              uint64_t block_lba = lba + block;
-              uint64_t offset_in_buffer = verified_blocks *
+          // Cleanup
+          HIP_CHECK(hipFree(d_verifiedCount));
+          HIP_CHECK(hipFree(d_mismatchCount));
+
+          // Report results
+          uint32_t total_bytes_checked = totalReadBlocks *
+                                         config->args.nvmeBlockSize;
+          if (h_mismatchCount == 0) {
+            std::cout << "\n✅ GPU Verification SUCCESS: All reads matched "
+                      << "expected pattern!" << std::endl;
+            std::cout << "  ✓ Verified " << totalReadBlocks << " blocks ("
+                      << total_bytes_checked << " bytes)" << std::endl;
+          } else {
+            std::cerr << "\n❌ GPU Verification FAILED: " << h_mismatchCount
+                      << " mismatches found out of " << total_bytes_checked
+                      << " bytes checked (" << totalReadBlocks << " blocks)"
+                      << std::endl;
+            double mismatch_rate = (double)h_mismatchCount /
+                                   total_bytes_checked * 100.0;
+            std::cerr << "  Mismatch rate: " << std::fixed
+                      << std::setprecision(2) << mismatch_rate << "%"
+                      << std::endl;
+          }
+
+          // Store verified reads count for statistics display
+          config->args.verifiedReadsCount = h_verifiedCount;
+        } else {
+          // CPU-based verification (original implementation)
+          std::cout << "\n=== Verifying Read Data ===" << std::endl;
+
+          // Warn if in read-only mode (data must have been written beforehand)
+          std::cout << "\n=== Verifying Read Data ===" << std::endl;
+
+          // Warn if in read-only mode (data must have been written beforehand)
+          if (config->args.readOnlyMode) {
+            std::cout << "⚠️  WARNING: --verify-reads is enabled in "
+                      << "--read-only mode." << std::endl;
+            std::cout << "   This assumes data was previously written to the "
+                      << "target LBAs" << std::endl;
+            std::cout << "   using the same --test-pattern ("
+                      << config->args.testPattern << ")";
+            if (config->args.testPattern == "lfsr") {
+              std::cout << " and --lfsr-seed (0x" << std::hex
+                        << config->args.lfsrSeed << std::dec << ")";
+            }
+            std::cout << "." << std::endl;
+            std::cout << "   If verification fails, ensure writes were "
+                      << "performed first." << std::endl;
+          }
+
+          // Parse pattern string to enum
+          enum nvme_test_pattern pattern = NVME_PATTERN_SEQUENTIAL;
+          if (config->args.testPattern == "zeros") {
+            pattern = NVME_PATTERN_ZEROS;
+          } else if (config->args.testPattern == "ones") {
+            pattern = NVME_PATTERN_ONES;
+          } else if (config->args.testPattern == "random") {
+            pattern = NVME_PATTERN_RANDOM;
+          } else if (config->args.testPattern == "block_id") {
+            pattern = NVME_PATTERN_BLOCK_ID;
+          } else if (config->args.testPattern == "lfsr") {
+            pattern = NVME_PATTERN_LFSR;
+          }
+
+          // Use CPU-accessible read buffer (original mmap pointer, not
+          // GPU-locked) Like working test: use CPU pointer for CPU verification
+          uint8_t* verify_buf = config->readBufferCpu ? config->readBufferCpu
+                                                      : readBuffer;
+
+          // Extract LBAs from SQEs to verify each read block
+          // Note: This assumes sequential or known LBA pattern
+          uint32_t mismatches = 0;
+          uint32_t total_bytes_checked = 0;
+          uint32_t verified_reads_count = 0; // Count of successfully verified
+                                             // reads
+          uint32_t blocks_to_verify =
+            std::min((uint32_t)completions_received,
+                     (uint32_t)(config->args.dataBufferSize /
+                                config->args.nvmeBlockSize));
+
+          std::cout << "  Verifying " << blocks_to_verify << " blocks ("
+                    << (blocks_to_verify * config->args.nvmeBlockSize)
+                    << " bytes)..." << std::endl;
+
+          // For each completed command, verify the read data
+          // We need to extract LBA from SQE - for now, assume sequential or
+          // extract from SQEs
+          volatile cqeType* cq_to_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaCqOrig)
+              ? static_cast<volatile cqeType*>(config->kernelDmaCqOrig)
+              : cqQueue;
+          volatile sqeType* sq_to_verify =
+            (kernel_ctx && kernel_ctx->mem_fd == -2 && config->kernelDmaSqOrig)
+              ? static_cast<volatile sqeType*>(config->kernelDmaSqOrig)
+              : sqQueue;
+
+          uint16_t verify_cq_head = 0;
+          bool verify_phase = true;
+          uint32_t verified_blocks = 0;
+
+          for (uint32_t i = 0;
+               i < completions_received && verified_blocks < blocks_to_verify;
+               i++) {
+            volatile struct nvme_cqe* cqe =
+              reinterpret_cast<volatile struct nvme_cqe*>(
+                &cq_to_verify[verify_cq_head]);
+
+            if ((cqe->status & 0x1) == verify_phase) {
+              uint16_t cid = cqe->command_id;
+
+              // Get corresponding SQE to extract LBA
+              volatile struct nvme_sqe* sqe =
+                reinterpret_cast<volatile struct nvme_sqe*>(&sq_to_verify[cid]);
+
+              // Extract LBA from SQE (cdw10 and cdw11)
+              uint64_t lba = ((uint64_t)sqe->cdw11 << 32) | sqe->cdw10;
+              uint32_t nlb = (sqe->cdw12 & 0xFFFF) +
+                             1; // Number of logical blocks
+
+              // Verify each block in this command
+              for (uint32_t block = 0;
+                   block < nlb && verified_blocks < blocks_to_verify; block++) {
+                uint64_t block_lba = lba + block;
+                uint64_t offset_in_buffer = verified_blocks *
+                                            config->args.nvmeBlockSize;
+                uint8_t* block_buf = verify_buf + offset_in_buffer;
+
+                // Calculate offset for pattern generation (LBA * block_size)
+                uint64_t pattern_offset = block_lba *
                                           config->args.nvmeBlockSize;
-              uint8_t* block_buf = verify_buf + offset_in_buffer;
 
-              // Calculate offset for pattern generation (LBA * block_size)
-              uint64_t pattern_offset = block_lba * config->args.nvmeBlockSize;
+                // Verify this block
+                size_t error_offset = 0;
+                bool verified = nvme_verify_pattern(block_buf,
+                                                    config->args.nvmeBlockSize,
+                                                    pattern, pattern_offset,
+                                                    &error_offset,
+                                                    config->args.lfsrSeed);
 
-              // Verify this block
-              size_t error_offset = 0;
-              bool verified = nvme_verify_pattern(block_buf,
-                                                  config->args.nvmeBlockSize,
-                                                  pattern, pattern_offset,
-                                                  &error_offset,
-                                                  config->args.lfsrSeed);
+                total_bytes_checked += config->args.nvmeBlockSize;
 
-              total_bytes_checked += config->args.nvmeBlockSize;
-
-              if (!verified) {
-                if (mismatches < 10) {
-                  // Regenerate expected value for error message
-                  uint8_t expected_byte = 0;
-                  switch (pattern) {
-                    case NVME_PATTERN_LFSR: {
-                      uint64_t lba = block_lba;
-                      uint32_t base_seed = (uint32_t)(lba * 0x12345678);
-                      uint32_t seed = base_seed ^ config->args.lfsrSeed; // XOR
-                      uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed +
-                                                error_offset);
-                      rng ^= rng >> 16;
-                      rng *= 0x85ebca6b;
-                      rng ^= rng >> 13;
-                      rng *= 0xc2b2ae35;
-                      rng ^= rng >> 16;
-                      expected_byte = (uint8_t)(rng & 0xFF);
-                      break;
+                if (verified) {
+                  verified_reads_count++; // Count successfully verified reads
+                } else {
+                  mismatches++;
+                  // Show first 20 mismatches with details only if verbose
+                  if (config->args.beVerbose && mismatches <= 20) {
+                    // Regenerate expected value for error message
+                    uint8_t expected_byte = 0;
+                    switch (pattern) {
+                      case NVME_PATTERN_LFSR: {
+                        uint64_t lba = block_lba;
+                        uint32_t base_seed = (uint32_t)(lba * 0x12345678);
+                        uint32_t seed = base_seed ^
+                                        config->args.lfsrSeed; // XOR
+                        uint32_t rng = (uint32_t)(lba * 0x9e3779b9 + seed +
+                                                  error_offset);
+                        rng ^= rng >> 16;
+                        rng *= 0x85ebca6b;
+                        rng ^= rng >> 13;
+                        rng *= 0xc2b2ae35;
+                        rng ^= rng >> 16;
+                        expected_byte = (uint8_t)(rng & 0xFF);
+                        break;
+                      }
+                      default:
+                        // For other patterns, regenerate expected value
+                        // Calculate expected based on pattern
+                        uint64_t pattern_offset = block_lba *
+                                                    config->args.nvmeBlockSize +
+                                                  error_offset;
+                        switch (pattern) {
+                          case NVME_PATTERN_SEQUENTIAL:
+                            expected_byte = (uint8_t)(pattern_offset & 0xFF);
+                            break;
+                          case NVME_PATTERN_ZEROS:
+                            expected_byte = 0x00;
+                            break;
+                          case NVME_PATTERN_ONES:
+                            expected_byte = 0xFF;
+                            break;
+                          case NVME_PATTERN_BLOCK_ID:
+                            expected_byte = (uint8_t)(block_lba & 0xFF);
+                            break;
+                          default:
+                            expected_byte = block_buf[error_offset];
+                            break;
+                        }
+                        break;
                     }
-                    default:
-                      // For other patterns, use nvme_verify_pattern logic
-                      // Simplified: just show actual value
-                      expected_byte = block_buf[error_offset];
-                      break;
+                    std::cerr << "  ❌ Mismatch #" << mismatches << " at LBA "
+                              << block_lba << ", byte " << error_offset
+                              << ": expected 0x" << std::hex << std::setw(2)
+                              << std::setfill('0') << (int)expected_byte
+                              << ", got 0x" << std::setw(2) << std::setfill('0')
+                              << (int)block_buf[error_offset] << std::dec
+                              << std::endl;
+                  } else if (config->args.beVerbose && mismatches == 21) {
+                    std::cerr << "  ... (suppressing further mismatch details, "
+                              << "showing summary at end)" << std::endl;
                   }
-                  std::cerr << "  ❌ Mismatch at LBA " << block_lba << ", byte "
-                            << error_offset << ": expected 0x" << std::hex
-                            << (int)expected_byte << ", got 0x"
-                            << (int)block_buf[error_offset] << std::dec
-                            << std::endl;
                 }
-                mismatches++;
+
+                verified_blocks++;
               }
 
-              verified_blocks++;
-            }
-
-            verify_cq_head++;
-            if (verify_cq_head >= config->args.completeQueueLen) {
-              verify_cq_head = 0;
-              verify_phase = !verify_phase;
+              verify_cq_head++;
+              if (verify_cq_head >= config->args.completeQueueLen) {
+                verify_cq_head = 0;
+                verify_phase = !verify_phase;
+              }
             }
           }
-        }
 
-        if (mismatches == 0) {
-          std::cout << "✅ All " << total_bytes_checked
-                    << " bytes verified successfully!" << std::endl;
-          std::cout << "  Verified " << verified_blocks << " blocks"
-                    << std::endl;
-        } else {
-          std::cerr << "❌ Verification failed: " << mismatches
-                    << " mismatches out of " << total_bytes_checked
-                    << " bytes checked" << std::endl;
+          if (mismatches == 0) {
+            std::cout
+              << "\n✅ Verification SUCCESS: All reads matched expected "
+              << "pattern!" << std::endl;
+            std::cout << "  ✓ Verified " << verified_blocks << " blocks ("
+                      << total_bytes_checked << " bytes)" << std::endl;
+            std::cout << "  ✓ Pattern: " << config->args.testPattern;
+            if (config->args.testPattern == "lfsr") {
+              std::cout << " (seed: 0x" << std::hex << config->args.lfsrSeed
+                        << std::dec << ")";
+            }
+            std::cout << std::endl;
+          } else {
+            std::cerr << "\n❌ Verification FAILED: " << mismatches
+                      << " mismatches found out of " << total_bytes_checked
+                      << " bytes checked (" << verified_blocks << " blocks)"
+                      << std::endl;
+            std::cerr << "  Pattern: " << config->args.testPattern;
+            if (config->args.testPattern == "lfsr") {
+              std::cerr << " (seed: 0x" << std::hex << config->args.lfsrSeed
+                        << std::dec << ")";
+            }
+            std::cerr << std::endl;
+            if (config->args.beVerbose && mismatches > 20) {
+              std::cerr << "  (First 20 mismatches shown above, "
+                        << (mismatches - 20) << " more suppressed)"
+                        << std::endl;
+            }
+            double mismatch_rate = (double)mismatches / total_bytes_checked *
+                                   100.0;
+            std::cerr << "  Mismatch rate: " << std::fixed
+                      << std::setprecision(2) << mismatch_rate << "%"
+                      << std::endl;
+          }
+          // Store verified reads count for statistics display
+          config->args.verifiedReadsCount = verified_reads_count;
         }
       }
     }
@@ -2503,15 +2638,25 @@ std::endl; #endif
 
   HIP_CHECK(hipDeviceSynchronize());
 
-  HIP_CHECK(hipMemcpy(config->stats.startTime, d_startTime,
-                      config->args.nIterations * sizeof(unsigned long long int),
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(config->stats.endTime, d_endTime,
-                      config->args.nIterations * sizeof(unsigned long long int),
-                      hipMemcpyDeviceToHost));
+  if (d_startTime) {
+    HIP_CHECK(
+      hipMemcpy(config->stats.startTime, d_startTime,
+                config->args.nIterations * sizeof(unsigned long long int),
+                hipMemcpyDeviceToHost));
+  }
+  if (d_endTime) {
+    HIP_CHECK(
+      hipMemcpy(config->stats.endTime, d_endTime,
+                config->args.nIterations * sizeof(unsigned long long int),
+                hipMemcpyDeviceToHost));
+  }
 
-  HIP_CHECK(hipFree(d_startTime));
-  HIP_CHECK(hipFree(d_endTime));
+  if (d_startTime) {
+    HIP_CHECK(hipFree(d_startTime));
+  }
+  if (d_endTime) {
+    HIP_CHECK(hipFree(d_endTime));
+  }
 
   // Free data buffers if allocated
   if (usingDataBuffers) {
@@ -2627,6 +2772,8 @@ int main(int argc, char** argv) {
   config.args.genHistogram = false;
   config.args.beVerbose = false;
   config.args.debug = false;
+  config.args.verifiedReadsCount = UINT_MAX; // Sentinel: UINT_MAX = not
+                                             // attempted
 
   // Initialize endpoint-specific configs with defaults
   config.epConfigs.nvmeConfig = nvme_ep::NvmeEpConfig();
@@ -2679,12 +2826,9 @@ int main(int argc, char** argv) {
     ->default_str("")
     ->group(global_group);
 
-  app
-    .add_option("-n, --iterations", config.args.nIterations,
-                "Number of iterations to run the test.")
-    ->default_val(128)
-    ->check(CLI::PositiveNumber)
-    ->group(global_group);
+  // Note: iterations is now endpoint-specific
+  // NVMe endpoint uses --read-io and --write-io
+  // Other endpoints may have their own iteration options
 
   app
     .add_option("-m, --memory", config.args.memoryType,
@@ -2788,7 +2932,8 @@ int main(int argc, char** argv) {
     std::cerr
       << "Warning: HSA initialization failed. GPU doorbell will not work."
       << std::endl;
-    std::cerr << "Continuing anyway (may fall back to CPU-hybrid mode)..."
+    std::cerr << "Error: HSA is required for GPU-direct mode (CPU-hybrid mode "
+                 "removed)."
               << std::endl;
   }
 
@@ -2802,6 +2947,12 @@ int main(int argc, char** argv) {
   // If no endpoint specified at all, use default
   if (config.args.endpoint.empty()) {
     config.args.endpoint = "test-ep";
+  }
+
+  // Set default iterations for non-NVMe endpoints (if not set)
+  // NVMe endpoint will override this with readIo + writeIo
+  if (config.args.nIterations == 0) {
+    config.args.nIterations = 128; // Default for test-ep and other endpoints
   }
 
   // List available endpoints if "list" is specified
@@ -2848,6 +2999,7 @@ int main(int argc, char** argv) {
     config.args.verifyTrace = config.epConfigs.nvmeConfig.verifyTrace;
     config.args.traceFilePath = config.epConfigs.nvmeConfig.traceFilePath;
     config.args.verifyReads = config.epConfigs.nvmeConfig.verifyReads;
+    config.args.gpuVerifyReads = config.epConfigs.nvmeConfig.gpuVerifyReads;
 
     // Validate NVMe endpoint configuration
     std::string validation_error = nvme_ep::validateConfig(
@@ -3252,12 +3404,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Calculate read/write iterations for NVMe endpoint
+  unsigned readIterations = 0;
+  unsigned writeIterations = 0;
+  if (endpointType == EndpointType::NVME_EP) {
+    // Use the endpoint-specific readIo and writeIo values
+    // But respect read-only/write-only mode flags
+    if (config.args.readOnlyMode) {
+      // Read-only mode: only reads, no writes
+      readIterations = config.epConfigs.nvmeConfig.readIo;
+      writeIterations = 0;
+    } else if (config.args.writeOnlyMode) {
+      // Write-only mode: only writes, no reads
+      readIterations = 0;
+      writeIterations = config.epConfigs.nvmeConfig.writeIo;
+    } else {
+      // Normal mode: use both readIo and writeIo
+      readIterations = config.epConfigs.nvmeConfig.readIo;
+      writeIterations = config.epConfigs.nvmeConfig.writeIo;
+    }
+  }
+
   // Generate histogram and statistics if requested
   if (config.args.genHistogram && config.args.nIterations > 0) {
-    axxioPrintHistogram(durations, config.args.nIterations);
+    axxioPrintHistogram(durations, config.args.nIterations, readIterations,
+                        writeIterations, config.args.verifiedReadsCount);
   } else if (config.args.nIterations > 0) {
     // Always print statistics even without histogram
-    axxioPrintStatistics(durations);
+    axxioPrintStatistics(durations, config.args.nIterations, readIterations,
+                         writeIterations, config.args.verifiedReadsCount);
   }
 
   free(config.stats.startTime);

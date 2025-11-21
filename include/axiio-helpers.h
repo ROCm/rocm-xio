@@ -21,8 +21,14 @@
   }
 
 void axxioPrintDeviceInfo();
-void axxioPrintStatistics(const std::vector<double>& durations);
+void axxioPrintStatistics(const std::vector<double>& durations,
+                          unsigned totalIterations = 0,
+                          unsigned readIterations = 0,
+                          unsigned writeIterations = 0,
+                          unsigned verifiedReadsCount = 0);
 void axxioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations);
+                         unsigned nIterations, unsigned readIterations = 0,
+                         unsigned writeIterations = 0,
+                         unsigned verifiedReadsCount = 0);
 
 #endif // AXIIO_HELPERS_H

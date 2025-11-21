@@ -224,14 +224,7 @@ The system uses different memory types based on operational mode:
     commands                      from here
 ```
 
-**CPU-Hybrid Mode:**
-```
-┌────────────────────┐      ┌─────────────────┐
-│  GPU Memory        │ copy │  DMA Memory     │
-│  (hipHostMalloc)   ├─────►│  (kernel)       │
-│  - GPU accessible  │ CPU  │  - NVMe DMA     │
-└────────────────────┘      └─────────────────┘
-```
+**Note**: CPU-hybrid mode has been removed. The system now always uses GPU-direct mode and will fail if exclusive mode is not available.
 
 ### 6. Atomics and Synchronization
 
@@ -312,10 +305,7 @@ __global__ void write_doorbell_kernel(volatile uint32_t* doorbell, uint32_t valu
 - **CPU Overhead**: Zero (no CPU involvement)
 - **Scalability**: Excellent (parallel GPU threads)
 
-### CPU-Hybrid Mode (fallback)
-- **Doorbell Latency**: ~100 nanoseconds (CPU write)
-- **CPU Overhead**: One CPU core monitors GPU staging area
-- **Scalability**: Good (CPU copies commands, rings doorbell)
+**Note**: CPU-hybrid mode has been removed. The system now always uses GPU-direct mode.
 
 ### Bottlenecks
 1. **PCIe Bandwidth**: Shared between GPU compute and I/O
@@ -339,7 +329,7 @@ make lint              # Run linting checks
 
 **Compilation Flags:**
 
-- `-DGPU_DIRECT_DOORBELL=1`: Enable GPU-direct doorbell code paths
+- GPU-direct doorbell mode is always enabled (no compile-time flag)
 - `-fgpu-rdc`: Enable GPU relocatable device code
 - `-Iendpoints/*`: Include all endpoint headers
 
