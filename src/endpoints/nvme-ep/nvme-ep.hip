@@ -6,6 +6,10 @@
 #include "axiio-endpoint.h"
 #include "nvme-ep.h"
 
+// Global debug flag (defined here, declared in nvme-ep.h)
+// Must be outside namespace to match extern declaration
+__device__ bool g_nvme_ep_debug = false;
+
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
 

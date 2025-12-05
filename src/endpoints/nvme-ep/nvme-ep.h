@@ -315,7 +315,9 @@ enum nvme_test_pattern {
   NVME_PATTERN_LFSR = 5        // LFSR-based deterministic pattern
 };
 
-// Forward declaration of global debug flag (defined in nvme-ep.hip)
+// Global debug flag (defined in nvme-ep.hip)
+// Note: This needs to be accessible across translation units, so it's declared here
+// and defined in nvme-ep.hip
 extern __device__ bool g_nvme_ep_debug;
 
 // Generate test data pattern
