@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-// Endpoint IDs for runtime selection
-enum class EndpointType { TEST_EP, NVME_EP, SDMA_EP, RDMA_EP, UNKNOWN };
+// Include auto-generated EndpointType enum
+#include "axiio-endpoint-registry-gen.h"
 
 // Endpoint information structure
 struct EndpointInfo {
