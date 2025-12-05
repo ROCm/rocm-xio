@@ -10,7 +10,7 @@ rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) \
 	$(filter $(subst *,%,$2),$d))
 
 # Directories
-INCLUDE_DIR := include
+INCLUDE_DIR := src/include
 BIN_DIR := bin
 LIB_DIR := lib
 BUILD_DIR ?= build
@@ -32,9 +32,9 @@ CLANGXX ?= /opt/rocm/llvm/bin/clang++
 CLANG_FORMAT ?= clang-format
 
 # Project directories
-ENDPOINTS_DIR := endpoints
-COMMON_DIR := common
-TESTER_DIR := tester
+ENDPOINTS_DIR := src/endpoints
+COMMON_DIR := src/common
+TESTER_DIR := src/tester
 
 # Automatically discover all available endpoints from subdirectories
 VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
@@ -68,7 +68,7 @@ LIB_SOURCES := $(filter-out $(ENDPOINT_DISPATCH_GEN),$(call rwildcard,$(COMMON_D
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 
 # Add the generated endpoint-dispatch object explicitly
-ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/common/endpoint-dispatch.o
+ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/src/common/endpoint-dispatch.o
 LIB_OBJECTS += $(ENDPOINT_DISPATCH_OBJ)
 
 # Tester source file
@@ -136,7 +136,7 @@ $(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
 fetch-nvme-headers: $(NVME_KERNEL_HEADERS)
 	@echo ""
 	@echo "NVMe kernel headers downloaded to $(EXTERNAL_HEADERS_DIR)/"
-	@echo "These are for reference only - the nvme-ep definitions are in endpoints/nvme-ep/nvme-ep.h"
+	@echo "These are for reference only - the nvme-ep definitions are in src/endpoints/nvme-ep/nvme-ep.h"
 
 # Download RDMA headers from rdma-core repository
 $(RDMA_HEADERS): scripts/fetch-rdma-headers.sh
@@ -153,7 +153,7 @@ $(RDMA_VENDOR_HEADERS): $(RDMA_HEADERS) scripts/generate-rdma-vendor-headers.sh
 fetch-rdma-headers: $(RDMA_HEADERS) $(RDMA_VENDOR_HEADERS)
 	@echo ""
 	@echo "RDMA provider headers downloaded to $(RDMA_HEADERS_DIR)/"
-	@echo "These are for reference only - the rdma-ep definitions are in endpoints/rdma-ep/rdma-ep.h"
+	@echo "These are for reference only - the rdma-ep definitions are in src/endpoints/rdma-ep/rdma-ep.h"
 	@echo "Vendor-specific headers auto-generated: mlx/, bnxt/, ionic/, pvrdma/"
 
 .PHONY: fetch-external-headers
@@ -184,7 +184,7 @@ rdma-ep-tester: $(RDMA_TESTER)
 	@echo "Built RDMA endpoint tester: $(RDMA_TESTER)"
 
 # Make RDMA endpoint depend on vendor headers
-$(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
+$(BUILD_DIR)/src/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
 
 # Make endpoint-dispatch.o depend on the generated dispatch file
 $(ENDPOINT_DISPATCH_OBJ): $(ENDPOINT_DISPATCH_GEN)
@@ -239,7 +239,7 @@ lint-format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
-		-not -path './include/external/*' \
+		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
 		&& echo "✓ All files pass clang-format check" \
@@ -257,7 +257,7 @@ format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
-		-not -path './include/external/*' \
+		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) -i --style=file
 	@echo "✓ Formatting complete"
