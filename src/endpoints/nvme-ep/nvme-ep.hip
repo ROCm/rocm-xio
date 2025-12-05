@@ -18,15 +18,9 @@ __host__ AxiioEndpoint createEndpoint() {
   return AxiioEndpoint(EndpointType::NVME_EP);
 }
 
-// Use types from axiio-endpoint.h (generic queue structures)
-typedef sqeType_s sqeType;
-typedef cqeType_s cqeType;
-
-// Static assert to ensure our queue types can hold NVMe structures
-static_assert(sizeof(sqeType) >= sizeof(struct nvme_sqe),
-              "sqeType must be at least 64 bytes for NVMe SQE");
-static_assert(sizeof(cqeType) >= sizeof(struct nvme_cqe),
-              "cqeType must be at least 16 bytes for NVMe CQE");
+// Use types from nvme-ep.h
+typedef struct nvme_sqe sqeType;
+typedef struct nvme_cqe cqeType;
 
 // Verify that the queue entry sizes match nvme-ep expectations
 static_assert(sizeof(sqeType) == NVME_EP_SQE_SIZE, "nvme-ep SQE size mismatch");
@@ -36,43 +30,14 @@ static_assert(sizeof(cqeType) == NVME_EP_CQE_SIZE, "nvme-ep CQE size mismatch");
 // NVMe-specific helper functions
 //
 
-// Extract NVMe SQE from generic sqeType
-__host__ __device__ static inline struct nvme_sqe* nvme_sqe_from_generic(
-  sqeType* sqe) {
-  return reinterpret_cast<struct nvme_sqe*>(sqe);
-}
-
-// Extract NVMe CQE from generic cqeType
-__host__ __device__ static inline struct nvme_cqe* nvme_cqe_from_generic(
-  cqeType* cqe) {
-  return reinterpret_cast<struct nvme_cqe*>(cqe);
-}
-
-// Extract const NVMe SQE from generic sqeType
-__host__ __device__ static inline const struct nvme_sqe*
-nvme_sqe_from_generic_const(const sqeType* sqe) {
-  return reinterpret_cast<const struct nvme_sqe*>(sqe);
-}
-
-// Extract const NVMe CQE from generic cqeType
-__host__ __device__ static inline const struct nvme_cqe*
-nvme_cqe_from_generic_const(const cqeType* cqe) {
-  return reinterpret_cast<const struct nvme_cqe*>(cqe);
-}
-
 // Compare two NVMe SQEs by command ID
 __host__ __device__ bool nvme_sqe_equal(const sqeType* a, const sqeType* b) {
-  const struct nvme_sqe* sqe_a = nvme_sqe_from_generic_const(a);
-  const struct nvme_sqe* sqe_b = nvme_sqe_from_generic_const(b);
-  return (sqe_a->command_id == sqe_b->command_id &&
-          sqe_a->opcode == sqe_b->opcode);
+  return (a->command_id == b->command_id && a->opcode == b->opcode);
 }
 
 // Compare two NVMe CQEs by command ID
 __host__ __device__ bool nvme_cqe_equal(const cqeType* a, const cqeType* b) {
-  const struct nvme_cqe* cqe_a = nvme_cqe_from_generic_const(a);
-  const struct nvme_cqe* cqe_b = nvme_cqe_from_generic_const(b);
-  return (cqe_a->command_id == cqe_b->command_id);
+  return (a->command_id == b->command_id);
 }
 
 
@@ -134,12 +99,9 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
   sqeType sqeNew;
   while (true) {
     sqeNew = sqeRead(sqeAddress);
-    const struct nvme_sqe* nvme_new = nvme_sqe_from_generic_const(&sqeNew);
-    const struct nvme_sqe* nvme_last = nvme_sqe_from_generic_const(&sqeLast);
-
     // Check if we got a new command (different command ID or different opcode)
-    if (nvme_new->command_id != nvme_last->command_id ||
-        nvme_new->opcode != nvme_last->opcode) {
+    if (sqeNew.command_id != sqeLast.command_id ||
+        sqeNew.opcode != sqeLast.opcode) {
       return sqeNew;
     }
   }
@@ -151,11 +113,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
   cqeType cqeNew;
   while (true) {
     cqeNew = cqeRead(cqeAddress);
-    const struct nvme_cqe* nvme_new = nvme_cqe_from_generic_const(&cqeNew);
-    const struct nvme_cqe* nvme_last = nvme_cqe_from_generic_const(&cqeLast);
-
     // Check if we got a new completion (different command ID)
-    if (nvme_new->command_id != nvme_last->command_id) {
+    if (cqeNew.command_id != cqeLast.command_id) {
       return cqeNew;
     }
   }
@@ -166,33 +125,30 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
   cqeType result = {}; // Zero initialize
 
-  const struct nvme_sqe* sqe = nvme_sqe_from_generic_const(sqeData);
-  struct nvme_cqe* cqe = nvme_cqe_from_generic(&result);
-
   // Set command ID to match the SQE
-  cqe->command_id = sqe->command_id;
+  result.command_id = sqeData->command_id;
 
   // Set result based on command type (simulated behavior)
-  switch (sqe->opcode) {
+  switch (sqeData->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
       // For read/write, result could be number of blocks transferred
-      cqe->result = sqe->cdw12 + 1; // NLB is 0-based
+      result.result = sqeData->cdw12 + 1; // NLB is 0-based
       break;
     case NVME_CMD_FLUSH:
-      cqe->result = 0;
+      result.result = 0;
       break;
     default:
-      cqe->result = 0;
+      result.result = 0;
       break;
   }
 
   // Set status to success (Phase=1, SC=0, SCT=0)
-  cqe->status = NVME_STATUS_MAKE(1, NVME_SC_SUCCESS, NVME_SCT_GENERIC);
+  result.status = NVME_STATUS_MAKE(1, NVME_SC_SUCCESS, NVME_SCT_GENERIC);
 
   // Set SQ head/ID (for testing, just mirror command ID)
-  cqe->sq_head = sqe->command_id;
-  cqe->sq_id = 0;
+  result.sq_head = sqeData->command_id;
+  result.sq_id = 0;
 
   return result;
 }
@@ -208,8 +164,6 @@ __host__ __device__ unsigned long long int wall_clock64() {
 } // namespace nvme_ep
 
 // Export nvme-ep functions for runtime dispatch
-extern "C" {
-
 //
 // Emulate Endpoint - Acts as NVMe controller
 // Polls for SQEs from the GPU, generates CQEs in response
@@ -218,17 +172,21 @@ extern "C" {
 // For real hardware testing, the actual NVMe controller handles data transfer
 //
 __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 sqeType_s* sqeAddr,
-                                                 cqeType_s* cqeAddr) {
+                                                 void* sqeAddr,
+                                                 void* cqeAddr) {
   nvme_ep::sqeType sqeNew = {};
   nvme_ep::sqeType sqeOld = {};
   nvme_ep::cqeType cqeLocal = {}; // Zero-initialize
 
-  // Read initial queue state to sync with tester initialization
-  sqeOld = nvme_ep::sqeRead((volatile nvme_ep::sqeType*)sqeAddr);
-  cqeLocal = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqeAddr);
+  // Cast void* to endpoint-specific types
+  nvme_ep::sqeType* sqePtr = static_cast<nvme_ep::sqeType*>(sqeAddr);
+  nvme_ep::cqeType* cqePtr = static_cast<nvme_ep::cqeType*>(cqeAddr);
 
-  struct nvme_sqe* sqe_old = nvme_ep::nvme_sqe_from_generic(&sqeOld);
+  // Read initial queue state to sync with tester initialization
+  sqeOld = nvme_ep::sqeRead((volatile nvme_ep::sqeType*)sqePtr);
+  cqeLocal = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqePtr);
+
+  struct nvme_sqe* sqe_old = &sqeOld;
 
   // If queue is zero-initialized, set to expect first command (ID = 1)
   if (sqe_old->command_id == 0 && sqe_old->opcode == 0) {
@@ -241,13 +199,10 @@ __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
   // Keep processing commands until we get the stop command
   while (true) {
     // Poll for new command from GPU
-    sqeNew = nvme_ep::sqePoll(sqeOld, (volatile nvme_ep::sqeType*)sqeAddr);
-
-    const struct nvme_sqe* sqe_new = nvme_ep::nvme_sqe_from_generic_const(
-      &sqeNew);
+    sqeNew = nvme_ep::sqePoll(sqeOld, (volatile nvme_ep::sqeType*)sqePtr);
 
     // Check for stop command (opcode 0xFF)
-    if (sqe_new->opcode == 0xFF) {
+    if (sqeNew.opcode == 0xFF) {
       break;
     }
 
@@ -255,7 +210,7 @@ __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
     cqeLocal = nvme_ep::cqeGenFromSqe(&sqeNew);
 
     // Write completion back
-    nvme_ep::cqeWrite(cqeLocal, (nvme_ep::cqeType*)cqeAddr);
+    nvme_ep::cqeWrite(cqeLocal, cqePtr);
 
     // Update old to current for next poll
     sqeOld = sqeNew;
@@ -277,7 +232,7 @@ __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
 // If readBuffer/writeBuffer are NULL, uses dummy PRP addresses
 //
 __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
-  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+  unsigned sqeIterations, void* sqeAddr, void* cqeAddr,
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
   uint32_t blockSize, enum nvme_test_pattern pattern, uint64_t readBufferDma,
@@ -293,11 +248,15 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
            (unsigned long long)writeBufferDma);
   }
 
+  // Cast void* to endpoint-specific types
+  nvme_ep::sqeType* sqePtr = static_cast<nvme_ep::sqeType*>(sqeAddr);
+  nvme_ep::cqeType* cqePtr = static_cast<nvme_ep::cqeType*>(cqeAddr);
+
   nvme_ep::sqeType sqeLocal = {};
   nvme_ep::cqeType cqeLocal = {};
 
-  struct nvme_sqe* sqe = nvme_ep::nvme_sqe_from_generic(&sqeLocal);
-  struct nvme_cqe* cqe = nvme_ep::nvme_cqe_from_generic(&cqeLocal);
+  struct nvme_sqe* sqe = &sqeLocal;
+  struct nvme_cqe* cqe = &cqeLocal;
 
   if (g_nvme_ep_debug) {
     printf("GPU: Local structures initialized\n");
@@ -359,7 +318,7 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   if (g_nvme_ep_debug) {
     printf("GPU: Starting command loop: sqeIterations=%u, queue_size=%u\n",
            sqeIterations, queue_size);
-    printf("GPU: sqeAddr=%p, cqeAddr=%p\n", sqeAddr, cqeAddr);
+    printf("GPU: sqeAddr=%p, cqeAddr=%p\n", sqePtr, cqePtr);
   }
 
   // Issue read/write commands
@@ -454,10 +413,10 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 
     // Submit command to queue at the current tail position
     if (g_nvme_ep_debug) {
-      printf("GPU: About to write SQE to sqeAddr[%u]=%p\n", sq_tail,
-             &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+      printf("GPU: About to write SQE to sqePtr[%u]=%p\n", sq_tail,
+             &sqePtr[sq_tail]);
     }
-    nvme_ep::sqeWrite(sqeLocal, &((nvme_ep::sqeType*)sqeAddr)[sq_tail]);
+    nvme_ep::sqeWrite(sqeLocal, &sqePtr[sq_tail]);
     if (g_nvme_ep_debug) {
       printf("GPU: SQE written successfully\n");
     }
@@ -479,7 +438,7 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 // This version uses dummy PRP addresses for backward compatibility
 //
 __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
-                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+                                      void* sqeAddr, void* cqeAddr,
                                       unsigned long long int* startTime,
                                       unsigned long long int* endTime) {
   // Call the buffer-aware version with NULL pointers (dummy mode)
@@ -490,12 +449,10 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
                                          0);
 }
 
-} // extern "C"
-
-// GPU kernel for verifying read data (must be outside extern "C" for C++
-// linkage) Each thread verifies one block from completed read commands
+// GPU kernel for verifying read data
+// Each thread verifies one block from completed read commands
 // Simplified: assumes sequential buffer layout matching read command order
-extern "C" __global__ void nvme_ep_verify_reads_gpu(
+__global__ void nvme_ep_verify_reads_gpu(
   const uint8_t* readBuffer, void* sqeAddr_ptr, void* cqeAddr_ptr,
   uint32_t numCompletions, uint32_t blockSize, enum nvme_test_pattern pattern,
   uint32_t lfsr_seed, uint32_t* verifiedCount, uint32_t* mismatchCount) {
@@ -511,14 +468,12 @@ extern "C" __global__ void nvme_ep_verify_reads_gpu(
 
   // Find which read command contains this thread's block
   for (uint32_t i = 0; i < numCompletions; i++) {
-    const struct nvme_cqe* cqe = nvme_ep::nvme_cqe_from_generic_const(
-      &cqeAddr[cqeIdx]);
+          const cqeType* cqe = &cqeAddr[cqeIdx];
     uint16_t cid = cqe->command_id;
 
     // Skip stop command and invalid CIDs
     if (cid != 0xFFFF && cid > 0 && cid <= numCompletions) {
-      const struct nvme_sqe* sqe = nvme_ep::nvme_sqe_from_generic_const(
-        &sqeAddr[cid - 1]);
+      const sqeType* sqe = &sqeAddr[cid - 1];
 
       // Only verify read commands
       if (sqe->opcode == NVME_CMD_READ) {

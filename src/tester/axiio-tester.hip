@@ -79,16 +79,9 @@ int main(int argc, char** argv) {
     std::cout << "Iterations: " << iterations << std::endl;
   }
 
-  // Get queue entry sizes
-  // Since all endpoints are built together, we use the maximum sizes
-  // to ensure compatibility with all endpoints:
-  // - TEST_EP: 32/32 bytes
-  // - NVME_EP: 64/16 bytes  
-  // - RDMA_EP: 64/64 bytes
-  // - SDMA_EP: 32/16 bytes
-  // Maximum: 64/64 bytes
-  constexpr size_t sqeSize = 64;
-  constexpr size_t cqeSize = 64;
+  // Get queue entry sizes from endpoint
+  size_t sqeSize = endpoint.getSubmissionQueueEntrySize();
+  size_t cqeSize = endpoint.getCompletionQueueEntrySize();
 
   if (verbose) {
     std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
@@ -136,8 +129,8 @@ int main(int argc, char** argv) {
     std::cout << "Launching GPU kernel..." << std::endl;
   }
 
-  // Launch GPU kernel
-  hipLaunchKernelGGL(test_endpoint_kernel, dim3(1), dim3(1), 0, 0,
+  // Launch GPU kernel with multiple threads available for endpoints to use
+  hipLaunchKernelGGL(test_endpoint_kernel, dim3(1), dim3(2), 0, 0,
                      *deviceEndpoint, iterations, deviceSqeAddr, deviceCqeAddr,
                      deviceStartTime, deviceEndTime);
   HIP_CHECK(hipDeviceSynchronize());

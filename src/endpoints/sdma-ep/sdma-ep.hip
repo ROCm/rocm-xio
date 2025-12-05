@@ -19,9 +19,9 @@ __host__ AxiioEndpoint createEndpoint() {
   return AxiioEndpoint(EndpointType::SDMA_EP);
 }
 
-// Use types from axiio-endpoint.h (generic queue structures)
-typedef sqeType_s sqeType;
-typedef cqeType_s cqeType;
+// Use types from sdma-ep.h
+typedef struct sdma_sqe sqeType;
+typedef struct sdma_cqe cqeType;
 
 // Verify that the queue entry sizes match sdma-ep expectations
 static_assert(sizeof(sqeType) == SDMA_EP_SQE_SIZE, "sdma-ep SQE size mismatch");
@@ -37,41 +37,14 @@ static_assert(sizeof(cqeType) >= sizeof(struct sdma_cqe),
 // SDMA-specific helper functions
 //
 
-// Cast generic sqeType to SDMA sqe
-__host__ __device__ static inline struct sdma_sqe* sdma_sqe_from_generic(
-  sqeType* sqe) {
-  return reinterpret_cast<struct sdma_sqe*>(sqe);
-}
-
-__host__ __device__ static inline const struct sdma_sqe*
-sdma_sqe_from_generic_const(const sqeType* sqe) {
-  return reinterpret_cast<const struct sdma_sqe*>(sqe);
-}
-
-// Cast generic cqeType to SDMA cqe
-__host__ __device__ static inline struct sdma_cqe* sdma_cqe_from_generic(
-  cqeType* cqe) {
-  return reinterpret_cast<struct sdma_cqe*>(cqe);
-}
-
-__host__ __device__ static inline const struct sdma_cqe*
-sdma_cqe_from_generic_const(const cqeType* cqe) {
-  return reinterpret_cast<const struct sdma_cqe*>(cqe);
-}
-
 // Helper function to compare SDMA commands (by command_id and opcode)
 __host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b) {
-  const struct sdma_sqe* sqe_a = sdma_sqe_from_generic_const(a);
-  const struct sdma_sqe* sqe_b = sdma_sqe_from_generic_const(b);
-  return (sqe_a->command_id == sqe_b->command_id) &&
-         (sqe_a->opcode == sqe_b->opcode);
+  return (a->command_id == b->command_id) && (a->opcode == b->opcode);
 }
 
 // Helper function to compare SDMA completions (by command_id)
 __host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b) {
-  const struct sdma_cqe* cqe_a = sdma_cqe_from_generic_const(a);
-  const struct sdma_cqe* cqe_b = sdma_cqe_from_generic_const(b);
-  return cqe_a->command_id == cqe_b->command_id;
+  return a->command_id == b->command_id;
 }
 
 // Read SDMA SQE from volatile memory (byte-by-byte for safety)
@@ -147,9 +120,9 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 // Generate SDMA completion from submission (simulate SDMA controller)
 __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
                                           uint64_t timestamp) {
-  const struct sdma_sqe* sqe = sdma_sqe_from_generic_const(sqeData);
+  const sqeType* sqe = sqeData;
   cqeType result = {};
-  struct sdma_cqe* cqe = sdma_cqe_from_generic(&result);
+  struct sdma_cqe* cqe = &result; // cqeType is struct sdma_cqe
 
   // Simulate successful SDMA operation
   cqe->command_id = sqe->command_id;
@@ -175,26 +148,27 @@ __host__ __device__ unsigned long long int wall_clock64() {
 } // namespace sdma_ep
 
 // Export sdma-ep functions for runtime dispatch
-extern "C" {
-
 __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 sqeType_s* sqeAddr,
-                                                 cqeType_s* cqeAddr) {
+                                                 void* sqeAddr,
+                                                 void* cqeAddr) {
+  // Cast void* to endpoint-specific types
+  sdma_ep::sqeType* sqePtr = static_cast<sdma_ep::sqeType*>(sqeAddr);
+  sdma_ep::cqeType* cqePtr = static_cast<sdma_ep::cqeType*>(cqeAddr);
+
   // Read initial queue state to synchronize with tester's initialization
   sdma_ep::sqeType sqeOld = sdma_ep::sqeRead(
-    (volatile sdma_ep::sqeType*)sqeAddr);
+    (volatile sdma_ep::sqeType*)sqePtr);
   sdma_ep::cqeType cqeLocal = sdma_ep::cqeRead(
-    (volatile sdma_ep::cqeType*)cqeAddr);
+    (volatile sdma_ep::cqeType*)cqePtr);
   sdma_ep::sqeType sqeNew;
 
   unsigned commands_processed = 0;
 
   // Loop indefinitely until stop command (opcode 0xFF)
   while (true) {
-    sqeNew = sdma_ep::sqePoll(sqeOld, (volatile sdma_ep::sqeType*)sqeAddr);
+    sqeNew = sdma_ep::sqePoll(sqeOld, (volatile sdma_ep::sqeType*)sqePtr);
 
-    const struct sdma_sqe* sqe_new = sdma_ep::sdma_sqe_from_generic_const(
-      &sqeNew);
+    const sdma_ep::sqeType* sqe_new = &sqeNew;
 
     // Check for stop command (opcode 0xFF)
     if (sqe_new->opcode == 0xFF) {
@@ -204,7 +178,7 @@ __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
     // Process the SDMA command
     uint64_t timestamp = sdma_ep::wall_clock64();
     cqeLocal = sdma_ep::cqeGenFromSqe(&sqeNew, timestamp);
-    sdma_ep::cqeWrite(cqeLocal, (sdma_ep::cqeType*)cqeAddr);
+    sdma_ep::cqeWrite(cqeLocal, cqePtr);
 
     sqeOld = sqeNew;
     commands_processed++;
@@ -217,14 +191,18 @@ __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 __device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
-                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+                                      void* sqeAddr, void* cqeAddr,
                                       unsigned long long int* startTime,
                                       unsigned long long int* endTime) {
+  // Cast void* to endpoint-specific types
+  sdma_ep::sqeType* sqePtr = static_cast<sdma_ep::sqeType*>(sqeAddr);
+  sdma_ep::cqeType* cqePtr = static_cast<sdma_ep::cqeType*>(cqeAddr);
+
   sdma_ep::sqeType sqeLocal = {};
   sdma_ep::cqeType cqeLocal = {};
 
-  struct sdma_sqe* sqe = sdma_ep::sdma_sqe_from_generic(&sqeLocal);
-  struct sdma_cqe* cqe = sdma_ep::sdma_cqe_from_generic(&cqeLocal);
+  struct sdma_sqe* sqe = &sqeLocal;
+  struct sdma_cqe* cqe = &cqeLocal;
 
   // Initialize CQE with invalid command_id for first poll
   cqe->command_id = 0xFFFFFFFF;
@@ -254,8 +232,8 @@ __device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
 
     // Submit command and wait for completion
     startTime[i] = sdma_ep::wall_clock64();
-    sdma_ep::sqeWrite(sqeLocal, (sdma_ep::sqeType*)sqeAddr);
-    cqeLocal = sdma_ep::cqePoll(cqeLocal, (volatile sdma_ep::cqeType*)cqeAddr);
+    sdma_ep::sqeWrite(sqeLocal, sqePtr);
+    cqeLocal = sdma_ep::cqePoll(cqeLocal, (volatile sdma_ep::cqeType*)cqePtr);
     endTime[i] = sdma_ep::wall_clock64();
 
     // Verify completion
@@ -273,7 +251,5 @@ __device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
   // Send stop command (opcode 0xFF, command_id 0xFFFF)
   sqe->opcode = 0xFF;
   sqe->command_id = 0xFFFF;
-  sdma_ep::sqeWrite(sqeLocal, (sdma_ep::sqeType*)sqeAddr);
+  sdma_ep::sqeWrite(sqeLocal, sqePtr);
 }
-
-} // extern "C"
