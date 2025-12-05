@@ -5,18 +5,6 @@ lib/
 *.o
 *.a
 
-# Kernel module build artifacts
-kernel-module/*.ko
-kernel-module/*.mod
-kernel-module/*.mod.c
-kernel-module/*.mod.o
-kernel-module/.*.cmd
-kernel-module/Module.symvers
-kernel-module/modules.order
-kernel-module/.tmp_versions/
-kernel-module/test_axiio_ioctl
-kernel-module/test_gpu_doorbell
-
 # Generated files
 src/include/axiio-endpoint-registry-gen.h
 src/common/endpoint-dispatch.hip

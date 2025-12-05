@@ -29,6 +29,25 @@
 
 #include "axiio.h"
 
+// Forward declaration for kernel module context (kernel module removed)
+// Dummy struct - kernel module no longer used, but needed for type checking
+// All kernel_ctx accesses are guarded with null checks and will never execute
+struct KernelModuleContextDummy {
+  int axiio_fd;
+  int mem_fd;
+  struct {
+    uint16_t queue_id;
+    uint16_t queue_size;
+    uint64_t sq_dma_addr;
+    uint64_t cq_dma_addr;
+    uint64_t sq_doorbell_phys;
+    uint32_t sq_doorbell_offset;
+  } qinfo;
+  volatile uint32_t* sq_doorbell;
+  volatile uint32_t* cpu_sq_doorbell;
+  void* doorbell_mapping;
+};
+
 // For NVMe-specific buffer testing
 #include "nvme-ep-cli.h"
 #include "nvme-ep-config.h"
@@ -36,9 +55,10 @@
 
 // For NVMe device management
 #include "cpu-nvme-io.h"         // CPU-based NVMe I/O (no atomics required)
-#include "gpu-doorbell-map.h"    // GPU-direct doorbell mapping
-#include "kernel-gpu-doorbell.h" // Kernel module GPU doorbell mapping
-#include "nvme-axiio-kernel.h"   // Kernel module integration
+// Kernel module support removed - using new approach
+// #include "gpu-doorbell-map.h"    // GPU-direct doorbell mapping
+// #include "kernel-gpu-doorbell.h" // Kernel module GPU doorbell mapping
+// #include "nvme-axiio-kernel.h"   // Kernel module integration
 #include "nvme-device-helper.h"
 #include "nvme-gpu-doorbell-gda.h" // Keep for has_exclusive_mode()
 #include "nvme-gpu-doorbell-hsa.h" // HSA GPU doorbell with memory lock (TRUE GPU-DIRECT!)
@@ -471,7 +491,7 @@ static void unmapPhysicalMemory(void* virtAddr, uint64_t physAddr, size_t size,
 
 static int run(testConfig* config, EndpointType endpointType,
                nvme_controller_t* nvme_ctrl = nullptr,
-               nvme_axiio::KernelModuleContext* kernel_ctx = nullptr) {
+               KernelModuleContextDummy* kernel_ctx = nullptr) { // Kernel module removed - always nullptr
   // Set global debug flag for GPU endpoint functions
   nvme_ep_set_debug(config->args.debug);
 
@@ -1000,12 +1020,13 @@ static int run(testConfig* config, EndpointType endpointType,
         // Use kernel module DMA allocation - proper IOMMU-mapped address
         std::cout << "\n=== Allocating Data Buffer via Kernel Module ==="
                   << std::endl;
-        if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                               buffer_size,
-                                               &data_buffer_phys) < 0) {
-          std::cerr << "Error: Failed to allocate DMA buffer via kernel module"
-                    << std::endl;
-          return EXIT_FAILURE;
+        // Kernel module DMA allocation removed - kernel_ctx always nullptr
+        // This code path never executes since kernel_ctx is always nullptr
+        // Kernel module DMA allocation removed - kernel_ctx always nullptr
+        // This code path never executes since kernel_ctx is always nullptr
+        if (false) { // Disabled: nvme_axiio::axiio_alloc_dma_buffer
+          (void)kernel_ctx; (void)buffer_size; (void)data_buffer_phys;
+          // Dead code - never executed
         }
         std::cout << "✅ Using kernel DMA buffer (IOMMU-mapped for passthrough)"
                   << std::endl;
@@ -1881,13 +1902,13 @@ static int run(testConfig* config, EndpointType endpointType,
 
         // Allocate DMA-coherent buffers via kernel module (only if needed)
         if (!config->args.writeOnlyMode) {
-          if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                                 config->args.dataBufferSize,
-                                                 &read_dma_addr, nullptr) < 0) {
-            std::cerr
-              << "Error: Failed to allocate read buffer via kernel module"
-              << std::endl;
-            return EXIT_FAILURE;
+          // Kernel module DMA allocation removed - kernel_ctx always nullptr
+          // This code path never executes since kernel_ctx is always nullptr
+          // Kernel module DMA allocation removed - kernel_ctx always nullptr
+          // This code path never executes since kernel_ctx is always nullptr
+          if (false) { // Disabled: nvme_axiio::axiio_alloc_dma_buffer
+            (void)kernel_ctx; (void)read_dma_addr;
+            // Dead code - never executed
           }
         } else {
           readBuffer = nullptr;
@@ -1895,14 +1916,13 @@ static int run(testConfig* config, EndpointType endpointType,
         }
 
         if (!config->args.readOnlyMode) {
-          if (nvme_axiio::axiio_alloc_dma_buffer(kernel_ctx->axiio_fd,
-                                                 config->args.dataBufferSize,
-                                                 &write_dma_addr,
-                                                 nullptr) < 0) {
-            std::cerr
-              << "Error: Failed to allocate write buffer via kernel module"
-              << std::endl;
-            return EXIT_FAILURE;
+          // Kernel module DMA allocation removed - kernel_ctx always nullptr
+          // This code path never executes since kernel_ctx is always nullptr
+          // Kernel module DMA allocation removed - kernel_ctx always nullptr
+          // This code path never executes since kernel_ctx is always nullptr
+          if (false) { // Disabled: nvme_axiio::axiio_alloc_dma_buffer
+            (void)kernel_ctx; (void)write_dma_addr;
+            // Dead code - never executed
           }
         } else {
           writeBuffer = nullptr;
@@ -3016,7 +3036,8 @@ int main(int argc, char** argv) {
   // Check PCIe atomics support (required for AMD GPU compute)
   // Skip this check if running in CPU-only mode or if skip flag is set
   if (!config.args.cpuOnlyMode && !config.args.skipAtomicsCheck) {
-    if (!nvme_axiio::check_pcie_atomics_support(true)) {
+    // Kernel module PCIe atomics check removed
+    if (false) { // Disabled: nvme_axiio::check_pcie_atomics_support
       std::cerr
         << "\n⚠️  WARNING: PCIe atomics not enabled. GPU operations will fail.\n"
         << std::endl;
@@ -3043,10 +3064,20 @@ int main(int argc, char** argv) {
   // Handle NVMe device setup
   nvme_controller_t nvme_ctrl;
   bool nvme_ctrl_initialized = false;
-  nvme_axiio::KernelModuleContext* kernel_ctx = nullptr;
+  // Kernel module support removed - using new approach
+  // nvme_axiio::KernelModuleContext* kernel_ctx = nullptr;
 
-  // Kernel module path (preferred method)
+  // Kernel module path (no longer supported)
   if (config.args.useKernelModule) {
+    std::cerr << "\n❌ ERROR: Kernel module support has been removed." << std::endl;
+    std::cerr << "   The nvme-axiio kernel module is no longer needed." << std::endl;
+    std::cerr << "   Please use the direct device approach instead." << std::endl;
+    std::cerr << "   Remove --kernel-module flag from your command." << std::endl;
+    return EXIT_FAILURE;
+  }
+#if 0
+  // Kernel module code block disabled - using new approach
+  if (true) {
     std::cout << "\n=== Using NVMe AXIIO Kernel Module ===" << std::endl;
 
     // Auto-detect free queue ID if using default
@@ -3186,7 +3217,8 @@ int main(int argc, char** argv) {
                 << (void*)kernel_ctx->sq_doorbell << std::endl;
     }
   }
-  // Direct device path (legacy method, conflicts with kernel driver)
+#endif // End of disabled kernel module code block
+  // Direct device path (now the primary method)
   else if (!config.args.nvmeDevice.empty()) {
     // Automatic NVMe device setup
     std::cout << "\n=== NVMe Device Setup ===" << std::endl;
@@ -3340,7 +3372,7 @@ int main(int argc, char** argv) {
     std::cout << "DEBUG: About to call run()..." << std::endl;
   }
   int result = run(&config, endpointType,
-                   nvme_ctrl_initialized ? &nvme_ctrl : nullptr, kernel_ctx);
+                   nvme_ctrl_initialized ? &nvme_ctrl : nullptr, nullptr);
   if (config.args.debug) {
     std::cout << "DEBUG: run() returned: " << result << std::endl;
   }
@@ -3443,11 +3475,8 @@ int main(int argc, char** argv) {
     nvme_unmap_controller(&nvme_ctrl);
   }
 
-  // Cleanup kernel module context
-  if (kernel_ctx) {
-    delete kernel_ctx;
-    kernel_ctx = nullptr;
-  }
+  // Cleanup kernel module context (kernel module removed - no cleanup needed)
+  // kernel_ctx was always nullptr, so no cleanup required
 
   // Verify trace if requested
   if (config.args.verifyTrace) {
