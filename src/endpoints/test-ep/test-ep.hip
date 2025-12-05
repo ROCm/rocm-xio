@@ -3,11 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <cstring>
-#include <iostream>
-
-#include <hip/hip_runtime.h>
-
 #include "axiio-endpoints.h"
 #include "test-ep.h"
 

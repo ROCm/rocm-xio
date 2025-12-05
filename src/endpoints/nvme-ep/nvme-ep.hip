@@ -3,14 +3,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <cstring>
-#include <iostream>
-
-#include <hip/hip_runtime.h>
-
-// Global debug flag for GPU device functions (declared before extern "C")
-__device__ bool g_nvme_ep_debug = false;
-
 #include "axiio-endpoints.h"
 #include "nvme-ep.h"
 
@@ -74,15 +66,6 @@ __host__ __device__ bool nvme_cqe_equal(const cqeType* a, const cqeType* b) {
   return (cqe_a->command_id == cqe_b->command_id);
 }
 
-// Helper function to compare sqeType structs (legacy compatibility)
-__host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b) {
-  return nvme_sqe_equal(a, b);
-}
-
-// Helper function to compare cqeType structs (legacy compatibility)
-__host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b) {
-  return nvme_cqe_equal(a, b);
-}
 
 // Read SQE - copies entire NVMe command structure
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
@@ -498,15 +481,6 @@ __device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
                                          0);
 }
 
-// Host function to set debug flag
-__host__ void nvme_ep_set_debug(bool debug) {
-  // Copy debug flag to device global variable
-  // Note: HIP_SYMBOL is a macro that resolves the symbol name
-  hipError_t err = hipMemcpyToSymbol(HIP_SYMBOL(g_nvme_ep_debug), &debug,
-                                     sizeof(bool), 0, hipMemcpyHostToDevice);
-  (void)err; // Suppress unused warning
-}
-
 } // extern "C"
 
 // GPU kernel for verifying read data (must be outside extern "C" for C++
@@ -575,6 +549,4 @@ extern "C" __global__ void nvme_ep_verify_reads_gpu(
       cqeIdx = 0;
     }
   }
-
-  // Thread has no block to verify (more threads than blocks)
 }
