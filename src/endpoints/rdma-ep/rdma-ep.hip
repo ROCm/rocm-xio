@@ -42,9 +42,9 @@ __host__ AxiioEndpoint createEndpoint() {
   return AxiioEndpoint(EndpointType::RDMA_EP);
 }
 
-// Use types from axiio-endpoint.h (generic queue structures)
-typedef sqeType_s sqeType;
-typedef cqeType_s cqeType;
+// Use types from rdma-ep.h
+typedef struct rdma_wqe sqeType;
+typedef struct rdma_cqe cqeType;
 
 // Verify that the queue entry sizes match rdma-ep expectations
 static_assert(sizeof(sqeType) == RDMA_EP_SQE_SIZE, "rdma-ep SQE size mismatch");
@@ -60,40 +60,14 @@ static_assert(sizeof(cqeType) >= sizeof(struct rdma_cqe),
 // RDMA-specific helper functions
 //
 
-// Cast generic sqeType to RDMA wqe
-__host__ __device__ static inline struct rdma_wqe* rdma_wqe_from_generic(
-  sqeType* sqe) {
-  return reinterpret_cast<struct rdma_wqe*>(sqe);
-}
-
-__host__ __device__ static inline const struct rdma_wqe*
-rdma_wqe_from_generic_const(const sqeType* sqe) {
-  return reinterpret_cast<const struct rdma_wqe*>(sqe);
-}
-
-// Cast generic cqeType to RDMA cqe
-__host__ __device__ static inline struct rdma_cqe* rdma_cqe_from_generic(
-  cqeType* cqe) {
-  return reinterpret_cast<struct rdma_cqe*>(cqe);
-}
-
-__host__ __device__ static inline const struct rdma_cqe*
-rdma_cqe_from_generic_const(const cqeType* cqe) {
-  return reinterpret_cast<const struct rdma_cqe*>(cqe);
-}
-
 // Helper function to compare RDMA commands (by wqe_id and opcode)
 __host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b) {
-  const struct rdma_wqe* wqe_a = rdma_wqe_from_generic_const(a);
-  const struct rdma_wqe* wqe_b = rdma_wqe_from_generic_const(b);
-  return (wqe_a->wqe_id == wqe_b->wqe_id) && (wqe_a->opcode == wqe_b->opcode);
+  return (a->wqe_id == b->wqe_id) && (a->opcode == b->opcode);
 }
 
 // Helper function to compare RDMA completions (by wqe_id)
 __host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b) {
-  const struct rdma_cqe* cqe_a = rdma_cqe_from_generic_const(a);
-  const struct rdma_cqe* cqe_b = rdma_cqe_from_generic_const(b);
-  return cqe_a->wqe_id == cqe_b->wqe_id;
+  return a->wqe_id == b->wqe_id;
 }
 
 // Read RDMA WQE from volatile memory (byte-by-byte for safety)
@@ -169,9 +143,9 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 // Generate RDMA completion from work request (simulate RDMA NIC)
 __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
                                           uint64_t timestamp) {
-  const struct rdma_wqe* wqe = rdma_wqe_from_generic_const(sqeData);
+  const sqeType* wqe = sqeData;
   cqeType result = {};
-  struct rdma_cqe* cqe = rdma_cqe_from_generic(&result);
+  struct rdma_cqe* cqe = &result; // cqeType is struct rdma_cqe
 
   // Simulate successful RDMA operation
   cqe->wqe_id = wqe->wqe_id;
@@ -231,26 +205,27 @@ __host__ __device__ unsigned long long int wall_clock64() {
 } // namespace rdma_ep
 
 // Export rdma-ep functions for runtime dispatch
-extern "C" {
-
 __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 sqeType_s* sqeAddr,
-                                                 cqeType_s* cqeAddr) {
+                                                 void* sqeAddr,
+                                                 void* cqeAddr) {
+  // Cast void* to endpoint-specific types
+  rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
+  rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
+
   // Read initial queue state to synchronize with tester's initialization
   rdma_ep::sqeType sqeOld = rdma_ep::sqeRead(
-    (volatile rdma_ep::sqeType*)sqeAddr);
+    (volatile rdma_ep::sqeType*)sqePtr);
   rdma_ep::cqeType cqeLocal = rdma_ep::cqeRead(
-    (volatile rdma_ep::cqeType*)cqeAddr);
+    (volatile rdma_ep::cqeType*)cqePtr);
   rdma_ep::sqeType sqeNew;
 
   unsigned commands_processed = 0;
 
   // Loop indefinitely until stop command (opcode 0xFF)
   while (true) {
-    sqeNew = rdma_ep::sqePoll(sqeOld, (volatile rdma_ep::sqeType*)sqeAddr);
+    sqeNew = rdma_ep::sqePoll(sqeOld, (volatile rdma_ep::sqeType*)sqePtr);
 
-    const struct rdma_wqe* wqe_new = rdma_ep::rdma_wqe_from_generic_const(
-      &sqeNew);
+    const rdma_ep::sqeType* wqe_new = &sqeNew;
 
     // Check for stop command (opcode 0xFF)
     if (wqe_new->opcode == 0xFF) {
@@ -260,7 +235,7 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
     // Process the RDMA command
     uint64_t timestamp = rdma_ep::wall_clock64();
     cqeLocal = rdma_ep::cqeGenFromSqe(&sqeNew, timestamp);
-    rdma_ep::cqeWrite(cqeLocal, (rdma_ep::cqeType*)cqeAddr);
+    rdma_ep::cqeWrite(cqeLocal, cqePtr);
 
     sqeOld = sqeNew;
     commands_processed++;
@@ -273,14 +248,18 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 __device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
-                                      sqeType_s* sqeAddr, sqeType_s* cqeAddr,
+                                      void* sqeAddr, void* cqeAddr,
                                       unsigned long long int* startTime,
                                       unsigned long long int* endTime) {
+  // Cast void* to endpoint-specific types
+  rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
+  rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
+
   rdma_ep::sqeType sqeLocal = {};
   rdma_ep::cqeType cqeLocal = {};
 
-  struct rdma_wqe* wqe = rdma_ep::rdma_wqe_from_generic(&sqeLocal);
-  struct rdma_cqe* cqe = rdma_ep::rdma_cqe_from_generic(&cqeLocal);
+  struct rdma_wqe* wqe = &sqeLocal;
+  struct rdma_cqe* cqe = &cqeLocal;
 
   // Initialize CQE with invalid wqe_id for first poll
   cqe->wqe_id = 0xFFFF;
@@ -342,8 +321,8 @@ __device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
 
     // Submit command and wait for completion
     startTime[i] = rdma_ep::wall_clock64();
-    rdma_ep::sqeWrite(sqeLocal, (rdma_ep::sqeType*)sqeAddr);
-    cqeLocal = rdma_ep::cqePoll(cqeLocal, (volatile rdma_ep::cqeType*)cqeAddr);
+    rdma_ep::sqeWrite(sqeLocal, sqePtr);
+    cqeLocal = rdma_ep::cqePoll(cqeLocal, (volatile rdma_ep::cqeType*)cqePtr);
     endTime[i] = rdma_ep::wall_clock64();
 
     // Verify completion
@@ -361,7 +340,5 @@ __device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
   // Send stop command (opcode 0xFF, wqe_id 0xFFFF)
   wqe->opcode = 0xFF;
   wqe->wqe_id = 0xFFFF;
-  rdma_ep::sqeWrite(sqeLocal, (rdma_ep::sqeType*)sqeAddr);
+  rdma_ep::sqeWrite(sqeLocal, sqePtr);
 }
-
-} // extern "C"

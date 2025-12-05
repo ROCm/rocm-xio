@@ -10,10 +10,6 @@
 
 #include <hip/hip_runtime.h>
 
-// Forward declarations (actual definitions are in axiio-endpoint.h)
-struct sqeType_s;
-struct cqeType_s;
-
 /*
  * NVMe Definitions for AxIIO nvme-ep Endpoint
  *
@@ -488,31 +484,31 @@ __host__ __device__ static inline bool nvme_verify_pattern(
 //
 
 // Standard drive endpoint (uses dummy PRPs)
-extern "C" __device__ void nvme_ep_driveEndpoint(
-  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+__device__ void nvme_ep_driveEndpoint(
+  unsigned sqeIterations, void* sqeAddr, void* cqeAddr,
   unsigned long long int* startTime, unsigned long long int* endTime);
 
 // Drive endpoint with data buffers (uses real PRPs)
 // Returns final sq_tail value for doorbell ringing
-extern "C" __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
-  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+__device__ uint16_t nvme_ep_driveEndpointWithBuffers(
+  unsigned sqeIterations, void* sqeAddr, void* cqeAddr,
   unsigned long long int* startTime, unsigned long long int* endTime,
   uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
   uint32_t blockSize, enum nvme_test_pattern pattern, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsr_seed = 0);
 
 // Emulate endpoint
-extern "C" __host__ __device__ void nvme_ep_emulateEndpoint(
-  unsigned sqeIterations, sqeType_s* sqeAddr, cqeType_s* cqeAddr);
+__host__ __device__ void nvme_ep_emulateEndpoint(
+  unsigned sqeIterations, void* sqeAddr, void* cqeAddr);
 
 // Host function to set global debug flag for GPU endpoint functions
-extern "C" __host__ void nvme_ep_set_debug(bool debug);
+__host__ void nvme_ep_set_debug(bool debug);
 
 // GPU-based read verification kernel
 // Verifies read data matches expected pattern using LFSR/seed without CPU
 // touching buffers Returns verified count and mismatch count via output
 // parameters
-extern "C" __global__ void nvme_ep_verify_reads_gpu(
+__global__ void nvme_ep_verify_reads_gpu(
   const uint8_t* readBuffer, void* sqeAddr, void* cqeAddr,
   uint32_t numCompletions, uint32_t blockSize, enum nvme_test_pattern pattern,
   uint32_t lfsr_seed, uint32_t* verifiedCount, uint32_t* mismatchCount);

@@ -15,8 +15,8 @@ __host__ AxiioEndpoint createEndpoint() {
 }
 
 // Use types from test-ep.h
-typedef sqeType_s sqeType;
-typedef cqeType_s cqeType;
+typedef struct test_sqe sqeType;
+typedef struct test_cqe cqeType;
 
 // Verify that the queue entry sizes match test-ep expectations
 static_assert(sizeof(sqeType) == TEST_EP_SQE_SIZE, "test-ep SQE size mismatch");
@@ -104,11 +104,9 @@ __host__ __device__ unsigned long long int wall_clock64() {
 } // namespace test_ep
 
 // Export test-ep functions for runtime dispatch
-extern "C" {
-
 __host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 sqeType_s* sqeAddr,
-                                                 cqeType_s* cqeAddr) {
+                                                 void* sqeAddr,
+                                                 void* cqeAddr) {
   test_ep::sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, 0xbeefdead, {0}};
   test_ep::sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, 0xf000f000, {0}};
   test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
@@ -123,24 +121,90 @@ __host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 __device__ void test_ep_driveEndpoint(unsigned sqeIterations,
-                                      sqeType_s* sqeAddr, cqeType_s* cqeAddr,
+                                      void* sqeAddr, void* cqeAddr,
                                       unsigned long long int* startTime,
                                       unsigned long long int* endTime) {
-  test_ep::sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
-  test_ep::cqeType cqeLocal = {TEST_EP_MAGIC_ID, 0, 0xdeadbeef, {0}};
-  test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
-  unsigned sqeCount = 0;
+  // Cast void* to endpoint-specific types
+  test_ep::sqeType* sqePtr = static_cast<test_ep::sqeType*>(sqeAddr);
+  test_ep::cqeType* cqePtr = static_cast<test_ep::cqeType*>(cqeAddr);
 
-  while (sqeCount < sqeIterations) {
-    sqeLocal.entryId = sqeCount;
-    startTime[sqeCount] = wall_clock64();
-    test_ep::sqeWrite(sqeLocal, (test_ep::sqeType*)sqeAddr);
-    cqeLocal = test_ep::cqePoll(cqeLocal, (volatile test_ep::cqeType*)cqeAddr);
-    endTime[sqeCount] = wall_clock64();
-    sqeCount++;
-    sqeLocal.dataPayload = 0xbeefdeaf + sqeCount;
+  // Use cooperative threading: thread 0 generates SQEs, thread 1 processes them
+  // If only one thread is available, it will handle both roles sequentially
+  const bool isProducer = (blockDim.x >= 2) ? (threadIdx.x == 0) : true;
+  const bool isConsumer = (blockDim.x >= 2) ? (threadIdx.x == 1) : true;
+
+  if (isProducer) {
+    // Producer: Generate SQEs
+    test_ep::sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
+    test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
+    
+    for (unsigned sqeCount = 0; sqeCount < sqeIterations; sqeCount++) {
+      sqeLocal.entryId = sqeCount;
+      sqeLocal.dataPayload = 0xbeefdeaf + sqeCount;
+      
+      // Record start time before writing SQE
+      startTime[sqeCount] = test_ep::wall_clock64();
+      
+      // Write submission queue entry
+      test_ep::sqeWrite(sqeLocal, sqePtr);
+      
+      // Memory fence to ensure SQE is visible to consumer thread
+      __threadfence();
+      
+      // If single-threaded, process immediately
+      if (blockDim.x < 2) {
+        test_ep::cqeType cqeLocal = test_ep::cqeGenFromSqe(&sqeLocal);
+        endTime[sqeCount] = test_ep::wall_clock64();
+        test_ep::cqeWrite(cqeLocal, cqePtr);
+      }
+    }
+    
+    // Write stop command to signal completion (only needed for multi-threaded)
+    if (blockDim.x >= 2) {
+      test_ep::sqeWrite(sqeStop, sqePtr);
+      __threadfence();
+    }
   }
-  test_ep::sqeWrite(sqeStop, (test_ep::sqeType*)sqeAddr);
+  
+  if (isConsumer && blockDim.x >= 2) {
+    // Consumer: Poll for SQEs and generate CQEs (only in multi-threaded mode)
+    // Initialize with a value that won't match any real SQE
+    test_ep::sqeType sqeOld = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xFFFFFFFFFFFFFFFF, {0}};
+    test_ep::sqeType sqeNew;
+    test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
+    unsigned cqeCount = 0;
+    
+    // Read initial state to sync with producer
+    sqeOld = test_ep::sqeRead((volatile test_ep::sqeType*)sqePtr);
+    
+    while (cqeCount < sqeIterations) {
+      // Poll for new SQE (waits until it detects a change)
+      sqeNew = test_ep::sqePoll(sqeOld, (volatile test_ep::sqeType*)sqePtr);
+      
+      // Check for stop command
+      if (test_ep::sqeEqual(&sqeNew, &sqeStop)) {
+        break;
+      }
+      
+      // Generate completion from SQE
+      test_ep::cqeType cqeLocal = test_ep::cqeGenFromSqe(&sqeNew);
+      
+      // Record end time before writing CQE
+      // Use entryId to index into the timing array
+      if (sqeNew.entryId < sqeIterations) {
+        endTime[sqeNew.entryId] = test_ep::wall_clock64();
+      }
+      
+      // Write completion queue entry
+      test_ep::cqeWrite(cqeLocal, cqePtr);
+      
+      sqeOld = sqeNew;
+      cqeCount++;
+    }
+  }
+  
+  // Synchronize threads before returning
+  if (blockDim.x >= 2) {
+    __syncthreads();
+  }
 }
-
-} // extern "C"

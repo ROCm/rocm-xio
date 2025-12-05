@@ -147,11 +147,9 @@ for ep in $ENDPOINTS; do
   cat >> "$DISPATCH_OUTPUT" << FORWARD_EOF
 
 // Forward declarations for ${ep} functions
-extern "C" {
-__device__ void ${EP_UNDERSCORE}_driveEndpoint(unsigned, sqeType_s*, cqeType_s*,
+__device__ void ${EP_UNDERSCORE}_driveEndpoint(unsigned, void*, void*,
                                       unsigned long long int*,
                                       unsigned long long int*);
-}
 FORWARD_EOF
 done
 
@@ -162,8 +160,8 @@ cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_START'
 __device__ void driveDispatch(
   EndpointType type,
   unsigned iterations,
-  sqeType_s* submissionQueue,
-  cqeType_s* completionQueue,
+  void* submissionQueue,
+  void* completionQueue,
   unsigned long long int* startTimes,
   unsigned long long int* endTimes) {
   switch (type) {
