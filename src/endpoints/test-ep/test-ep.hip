@@ -9,6 +9,11 @@
 // Namespace all test-ep implementation to avoid conflicts
 namespace test_ep {
 
+// Helper function to create AxiioEndpoint object for this endpoint
+__host__ AxiioEndpoint createEndpoint() {
+  return AxiioEndpoint(EndpointType::TEST_EP);
+}
+
 // Use types from test-ep.h
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;

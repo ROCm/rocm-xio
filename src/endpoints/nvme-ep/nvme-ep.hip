@@ -9,6 +9,11 @@
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
 
+// Helper function to create AxiioEndpoint object for this endpoint
+__host__ AxiioEndpoint createEndpoint() {
+  return AxiioEndpoint(EndpointType::NVME_EP);
+}
+
 // Use types from axiio-endpoint.h (generic queue structures)
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;

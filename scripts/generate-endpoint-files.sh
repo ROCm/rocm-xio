@@ -1,9 +1,5 @@
 #!/bin/bash
-# Generate all endpoint-related files (registry, dispatch, includes)
-# This script consolidates the functionality of:
-#   - generate-endpoint-registry.sh
-#   - generate-endpoint-dispatch.sh
-#   - generate-endpoint-includes.sh
+# Generate all endpoint-related files
 
 ENDPOINTS_DIR="$1"
 REGISTRY_OUTPUT="$2"
@@ -152,8 +148,6 @@ for ep in $ENDPOINTS; do
 
 // Forward declarations for ${ep} functions
 extern "C" {
-__host__ __device__ void ${EP_UNDERSCORE}_emulateEndpoint(unsigned, sqeType_s*,
-                                                 cqeType_s*);
 __device__ void ${EP_UNDERSCORE}_driveEndpoint(unsigned, sqeType_s*, cqeType_s*,
                                       unsigned long long int*,
                                       unsigned long long int*);
@@ -161,14 +155,19 @@ __device__ void ${EP_UNDERSCORE}_driveEndpoint(unsigned, sqeType_s*, cqeType_s*,
 FORWARD_EOF
 done
 
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_EMULATE_START'
+cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_START'
 
-// Static dispatch implementations that don't require object dereferencing
-__host__ __device__ void AxiioEndPoint::emulateEndpointDispatch(
-  EndpointType type, unsigned sqeIterations, sqeType* sqeAddr,
-  cqeType* cqeAddr) {
+// Internal dispatch function for AxiioEndpoint::drive()
+// This function routes calls to the correct endpoint-specific implementation
+__device__ void driveDispatch(
+  EndpointType type,
+  unsigned iterations,
+  sqeType_s* submissionQueue,
+  cqeType_s* completionQueue,
+  unsigned long long int* startTimes,
+  unsigned long long int* endTimes) {
   switch (type) {
-DISPATCH_EMULATE_START
+DISPATCH_DRIVE_START
 
 FIRST_EP=""
 for ep in $ENDPOINTS; do
@@ -181,41 +180,8 @@ for ep in $ENDPOINTS; do
   
   cat >> "$DISPATCH_OUTPUT" << CASE_EOF
     case EndpointType::${EP_UPPER}:
-      ${EP_UNDERSCORE}_emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);
-      break;
-CASE_EOF
-done
-
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_EMULATE_END'
-    default:
-      // Default to first discovered endpoint
-DISPATCH_EMULATE_END
-
-echo "      ${FIRST_EP}_emulateEndpoint(sqeIterations, sqeAddr, cqeAddr);" >> "$DISPATCH_OUTPUT"
-
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_EMULATE_CLOSE'
-      break;
-  }
-}
-
-DISPATCH_EMULATE_CLOSE
-
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_START'
-
-__device__ void AxiioEndPoint::driveEndpointDispatch(
-  EndpointType type, unsigned sqeIterations, sqeType* sqeAddr, cqeType* cqeAddr,
-  unsigned long long int* startTime, unsigned long long int* endTime) {
-  switch (type) {
-DISPATCH_DRIVE_START
-
-for ep in $ENDPOINTS; do
-  EP_UPPER=$(echo "$ep" | tr '[:lower:]-' '[:upper:]_')
-  EP_UNDERSCORE=$(echo "$ep" | tr '-' '_')
-  
-  cat >> "$DISPATCH_OUTPUT" << CASE_EOF
-    case EndpointType::${EP_UPPER}:
-      ${EP_UNDERSCORE}_driveEndpoint(sqeIterations, sqeAddr, cqeAddr, startTime,
-                            endTime);
+      ${EP_UNDERSCORE}_driveEndpoint(iterations, submissionQueue, completionQueue,
+                            startTimes, endTimes);
       break;
 CASE_EOF
 done
@@ -225,8 +191,8 @@ cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_END'
       // Default to first discovered endpoint
 DISPATCH_DRIVE_END
 
-echo "      ${FIRST_EP}_driveEndpoint(sqeIterations, sqeAddr, cqeAddr, startTime," >> "$DISPATCH_OUTPUT"
-echo "                            endTime);" >> "$DISPATCH_OUTPUT"
+echo "      ${FIRST_EP}_driveEndpoint(iterations, submissionQueue, completionQueue," >> "$DISPATCH_OUTPUT"
+echo "                            startTimes, endTimes);" >> "$DISPATCH_OUTPUT"
 
 cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_CLOSE'
       break;
@@ -234,24 +200,6 @@ cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_CLOSE'
 }
 
 DISPATCH_DRIVE_CLOSE
-
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_WRAPPERS_EOF'
-
-// Member function wrappers (require object in GPU-accessible memory)
-__host__ __device__ void AxiioEndPoint::emulateEndpoint(unsigned sqeIterations,
-                                                        sqeType* sqeAddr,
-                                                        cqeType* cqeAddr) {
-  emulateEndpointDispatch(endpointType, sqeIterations, sqeAddr, cqeAddr);
-}
-
-__device__ void AxiioEndPoint::driveEndpoint(unsigned sqeIterations,
-                                             sqeType* sqeAddr, cqeType* cqeAddr,
-                                             unsigned long long int* startTime,
-                                             unsigned long long int* endTime) {
-  driveEndpointDispatch(endpointType, sqeIterations, sqeAddr, cqeAddr,
-                        startTime, endTime);
-}
-DISPATCH_WRAPPERS_EOF
 
 echo "Generated endpoint dispatch: $DISPATCH_OUTPUT"
 

@@ -34,4 +34,7 @@ void listAvailableEndpoints();
 // Validate endpoint name
 bool isValidEndpoint(const std::string& name);
 
+// Get EndpointInfo from EndpointType
+EndpointInfo getEndpointInfo(EndpointType type);
+
 #endif // AXIIO_ENDPOINT_REGISTRY_H
