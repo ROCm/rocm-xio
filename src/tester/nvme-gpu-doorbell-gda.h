@@ -9,6 +9,7 @@
 #ifndef NVME_GPU_DOORBELL_GDA_H
 #define NVME_GPU_DOORBELL_GDA_H
 
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 
@@ -17,10 +18,21 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// Use kernel's definition from nvme_axiio.h
-// (included via nvme-axiio-kernel.h)
+// Kernel module removed - define struct locally
 #ifndef NVME_AXIIO_GET_GPU_DOORBELL
 #define NVME_AXIIO_MAGIC 'N'
+struct nvme_gpu_doorbell_info {
+  uint16_t queue_id;
+  uint8_t is_sq;
+  int32_t gpu_fd;
+  uint64_t doorbell_bus_addr;
+  uint64_t doorbell_phys_addr;
+  uint64_t doorbell_phys;  // Alias for doorbell_phys_addr
+  uint32_t doorbell_offset;
+  void* doorbell_virt_addr;
+  uint64_t mmap_offset;
+  uint64_t mmap_size;
+};
 #define NVME_AXIIO_GET_GPU_DOORBELL                                            \
   _IOWR(NVME_AXIIO_MAGIC, 9, struct nvme_gpu_doorbell_info)
 #endif
