@@ -12,10 +12,9 @@ $(BIN_DIR):
 all: $(BIN_DIR)/$(TARGET)
 
 $(BIN_DIR)/$(TARGET): simple-test.hip simple-test.h | $(BIN_DIR)
-	$(HIPCXX) $(CXXFLAGS) -o $@ $<
+	$(HIPCXX) $(CXXFLAGS) -lhsa-runtime64 -o $@ $<
 
 clean:
 	@rm -f $(BIN_DIR)/$(TARGET)
 
 .PHONY: all clean
-
