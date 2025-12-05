@@ -8,13 +8,13 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio-endpoints.h"
+#include "axiio-endpoint.h"
 #include "sdma-ep.h"
 
 // Namespace all sdma-ep implementation to avoid conflicts
 namespace sdma_ep {
 
-// Use types from axiio-endpoints.h (generic queue structures)
+// Use types from axiio-endpoint.h (generic queue structures)
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;
 

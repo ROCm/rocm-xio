@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "axiio-endpoints.h"
+#include "axiio-endpoint.h"
 #include "test-ep.h"
 
 // Namespace all test-ep implementation to avoid conflicts

@@ -3,17 +3,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef AXIIO_ENDPOINTS_H
-#define AXIIO_ENDPOINTS_H
+#ifndef AXIIO_ENDPOINT_H
+#define AXIIO_ENDPOINT_H
 
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
 
 #include "axiio-endpoint-registry.h"
-
-// Include endpoint-specific headers to get their size definitions
-// AUTO-GENERATED SECTION - DO NOT EDIT MANUALLY
+// AUTO-GENERATED - DO NOT EDIT MANUALLY
 #include "axiio-endpoint-includes-gen.h"
 
 // Calculate padding sizes
@@ -38,7 +36,10 @@ struct cqeType_s {
   uint8_t padField[AXIIO_CQE_PAD_SIZE];
 } __attribute__((packed));
 
-class axiioEndPoint {
+/*
+  * AXIIO Endpoint Class
+*/
+class AxiioEndPoint {
 public:
   typedef struct sqeType_s sqeType;
   typedef struct cqeType_s cqeType;
@@ -47,9 +48,9 @@ public:
   EndpointType endpointType;
 
   // Constructor
-  __host__ __device__ axiioEndPoint() : endpointType(EndpointType::TEST_EP) {
+  __host__ __device__ AxiioEndPoint() : endpointType(EndpointType::TEST_EP) {
   }
-  __host__ __device__ axiioEndPoint(EndpointType type) : endpointType(type) {
+  __host__ __device__ AxiioEndPoint(EndpointType type) : endpointType(type) {
   }
 
   // Dispatch functions - these read endpointType from the object
@@ -71,4 +72,5 @@ public:
                                                           cqeType*);
 };
 
-#endif // AXIIO_ENDPOINTS_H
+#endif // AXIIO_ENDPOINT_H
+

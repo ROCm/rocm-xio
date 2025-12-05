@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "axiio-endpoints.h"
+#include "axiio-endpoint.h"
 #include "nvme-ep.h"
 
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
 
-// Use types from axiio-endpoints.h (generic queue structures)
+// Use types from axiio-endpoint.h (generic queue structures)
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;
 
