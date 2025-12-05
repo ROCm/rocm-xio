@@ -10,7 +10,7 @@
 
 #include <hip/hip_runtime.h>
 
-// Forward declarations (actual definitions are in axiio-endpoints.h)
+// Forward declarations (actual definitions are in axiio-endpoint.h)
 struct sqeType_s;
 struct cqeType_s;
 

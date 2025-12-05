@@ -10,7 +10,7 @@
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 
-#include "axiio-endpoints.h"
+#include "axiio-endpoint.h"
 #include "axiio-helpers.h"
 
 #endif // AXIIO_H

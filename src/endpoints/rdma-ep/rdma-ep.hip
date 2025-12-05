@@ -8,7 +8,7 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio-endpoints.h"
+#include "axiio-endpoint.h"
 #include "rdma-ep.h"
 
 // Include vendor-specific headers
@@ -37,7 +37,7 @@
 // Namespace all rdma-ep implementation to avoid conflicts
 namespace rdma_ep {
 
-// Use types from axiio-endpoints.h (generic queue structures)
+// Use types from axiio-endpoint.h (generic queue structures)
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;
 
