@@ -76,7 +76,8 @@ TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
 TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.hip=.o)
 # Tester depends on endpoint headers it includes (all endpoint headers)
 TESTER_HEADERS := $(call rwildcard,$(ENDPOINTS_DIR),*.h) \
-                  $(call rwildcard,$(INCLUDE_DIR),*.h)
+                  $(call rwildcard,$(INCLUDE_DIR),*.h) \
+				  $(call rwildcard,$(TESTER_DIR),*.h)
 
 # GPU architecture
 OFFLOAD_ARCH ?=
