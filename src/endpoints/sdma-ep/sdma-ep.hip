@@ -14,6 +14,11 @@
 // Namespace all sdma-ep implementation to avoid conflicts
 namespace sdma_ep {
 
+// Helper function to create AxiioEndpoint object for this endpoint
+__host__ AxiioEndpoint createEndpoint() {
+  return AxiioEndpoint(EndpointType::SDMA_EP);
+}
+
 // Use types from axiio-endpoint.h (generic queue structures)
 typedef sqeType_s sqeType;
 typedef cqeType_s cqeType;

@@ -60,3 +60,15 @@ void listAvailableEndpoints() {
 bool isValidEndpoint(const std::string& name) {
   return getEndpointType(name) != EndpointType::UNKNOWN;
 }
+
+// Helper function to get EndpointInfo from EndpointType
+EndpointInfo getEndpointInfo(EndpointType type) {
+  const auto& registry = getEndpointRegistry();
+  for (const auto& ep : registry) {
+    if (ep.type == type) {
+      return ep;
+    }
+  }
+  // Return unknown endpoint if not found
+  return EndpointInfo{"unknown", "Unknown endpoint", EndpointType::UNKNOWN};
+}
