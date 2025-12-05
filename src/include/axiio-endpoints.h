@@ -13,27 +13,8 @@
 #include "axiio-endpoint-registry.h"
 
 // Include endpoint-specific headers to get their size definitions
-#if defined(AXIIO_ENDPOINT_TEST)
-#include "test-ep.h"
-#define AXIIO_SQE_SIZE TEST_EP_SQE_SIZE
-#define AXIIO_CQE_SIZE TEST_EP_CQE_SIZE
-#elif defined(AXIIO_ENDPOINT_NVME)
-#include "nvme-ep.h"
-#define AXIIO_SQE_SIZE NVME_EP_SQE_SIZE
-#define AXIIO_CQE_SIZE NVME_EP_CQE_SIZE
-#elif defined(AXIIO_ENDPOINT_SDMA)
-#include "sdma-ep.h"
-#define AXIIO_SQE_SIZE SDMA_EP_SQE_SIZE
-#define AXIIO_CQE_SIZE SDMA_EP_CQE_SIZE
-#elif defined(AXIIO_ENDPOINT_RDMA)
-#include "rdma-ep.h"
-#define AXIIO_SQE_SIZE RDMA_EP_SQE_SIZE
-#define AXIIO_CQE_SIZE RDMA_EP_CQE_SIZE
-#else
-// Default sizes if no specific endpoint is defined
-#define AXIIO_SQE_SIZE 64
-#define AXIIO_CQE_SIZE 16
-#endif
+// AUTO-GENERATED SECTION - DO NOT EDIT MANUALLY
+#include "axiio-endpoint-includes-gen.h"
 
 // Calculate padding sizes
 // Fixed fields: magicID (1) + entryId (2) + timeStamp (8) + dataPayload (8) =
