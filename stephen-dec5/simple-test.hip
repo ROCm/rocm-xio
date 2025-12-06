@@ -443,43 +443,6 @@ int main(int argc, char** argv) {
             << (gpuWriteToDevice ? "device" : "host") 
             << ", CPU write: " << (cpuWriteToDevice ? "device" : "host") 
             << ")" << std::endl;
-  
-  // Warn about mode 3 limitation
-  if (gpuWriteToDevice && cpuWriteToDevice) {
-    std::cerr << "\n*** WARNING: Mode 3 is NOT SUPPORTED ***" << std::endl;
-    std::cerr << "Mode 3 (both GPU and CPU write to device memory) does NOT "
-              << "work correctly." << std::endl;
-    std::cerr << "\nRoot Cause: GPU-side memory visibility limitation" 
-              << std::endl;
-    std::cerr << "  When the GPU writes to device memory, it cannot see "
-              << "CPU writes to device memory" << std::endl;
-    std::cerr << "  via DMA-BUF mmap, even with uncached device memory "
-              << "allocation." << std::endl;
-    std::cerr << "\nAttempted Solutions (all failed):" << std::endl;
-    std::cerr << "  - DMA-BUF sync with proper flags" << std::endl;
-    std::cerr << "  - CPU cache flushing" << std::endl;
-    std::cerr << "  - msync with invalidate" << std::endl;
-    std::cerr << "  - madvise hints" << std::endl;
-    std::cerr << "  - Multiple GPU reads with memory barriers" << std::endl;
-    std::cerr << "  - Writing/reading from host memory" << std::endl;
-    std::cerr << "  - Uncached device memory allocation "
-              << "(hipDeviceMallocUncached)" << std::endl;
-    std::cerr << "\nWorking Modes:" << std::endl;
-    std::cerr << "  Mode 0 (GPU->host, CPU->host): WORKS" << std::endl;
-    std::cerr << "  Mode 1 (GPU->device, CPU->host): WORKS" << std::endl;
-    std::cerr << "  Mode 2 (GPU->host, CPU->device): WORKS" << std::endl;
-    std::cerr << "\nFailed Mode:" << std::endl;
-    std::cerr << "  Mode 3 (GPU->device, CPU->device): FAILS - GPU cannot "
-              << "see CPU writes" << std::endl;
-    std::cerr << "\nThis appears to be a fundamental GPU-side memory "
-              << "scope/visibility limitation." << std::endl;
-    std::cerr << "CPU-side synchronization works correctly (proven by mode 2)."
-              << std::endl;
-    std::cerr << "The GPU simply cannot see CPU writes to device memory when "
-              << "it has" << std::endl;
-    std::cerr << "previously written to device memory, regardless of caching "
-              << "or sync mechanisms.\n" << std::endl;
-  }
 
   // Allocate memory for communication based on mode
   // All device memory now uses HSA fine-grained memory (directly CPU accessible)
