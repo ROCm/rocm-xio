@@ -15,13 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <unistd.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <linux/dma-buf.h>
-#include <sys/ioctl.h>
+#include <getopt.h>
 #include <hsa/hsa.h>
-#include <hsa/hsa_ext_amd.h>
 #include "simple-test.h"
 
 #define HIP_CHECK(call)                                                       \
@@ -58,14 +53,6 @@ static inline void formatTime(double timeNs, double& value,
     unit = " ns";
   }
 }
-
-// Structure to track mapped device memory with DMA-BUF
-struct MappedDeviceMemory {
-  void* cpu_ptr;      // CPU virtual pointer (adjusted for offset)
-  void* mapped_base;   // Base of mapped region (for munmap)
-  size_t mapped_size; // Size of mapped region
-  int dmabuf_fd;      // DMA-BUF file descriptor (for sync ioctls)
-};
 
 // Allocate device memory using HSA runtime directly
 // This may give us more control over memory properties
@@ -169,116 +156,15 @@ static hsa_status_t allocateHsaDeviceMemory(size_t size, void** ptr) {
   return status;
 }
 
-// Export VRAM allocation as DMA-BUF and map to CPU virtual address
-// Returns mapped memory info on success, nullptr on failure
-static MappedDeviceMemory* mapDeviceMemoryToCpu(void* devicePtr, size_t size) {
-  hsa_status_t status;
-  hipDeviceptr_t aligned_ptr;
-  const size_t host_page_size = sysconf(_SC_PAGESIZE);
-  uint64_t offset;
-  size_t aligned_size;
-  void* cpu_ptr = nullptr;
-  MappedDeviceMemory* mapped = nullptr;
-  
-  // Round down to host page size for dmabuf alignment
-  aligned_ptr = (hipDeviceptr_t)((uintptr_t)devicePtr & 
-                                  ~(host_page_size - 1));
-  offset = (uintptr_t)devicePtr - (uintptr_t)aligned_ptr;
-  aligned_size = (size + offset + host_page_size - 1) & 
-                 ~(host_page_size - 1);
-  
-  // Export as DMA-BUF using HSA runtime
-  int dmabuf_fd = -1;
-  status = hsa_amd_portable_export_dmabuf((void*)aligned_ptr, aligned_size,
-                                           &dmabuf_fd, &offset);
-  if (status != HSA_STATUS_SUCCESS) {
-    std::cerr << "Error: hsa_amd_portable_export_dmabuf failed "
-              << "(status=" << status << ")" << std::endl;
-    return nullptr;
-  }
-  
-  // Map DMA-BUF to CPU virtual address space
-  // Use MAP_SHARED for shared access between CPU and GPU
-  cpu_ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
-                 MAP_SHARED, dmabuf_fd, 0);
-  
-  if (cpu_ptr == MAP_FAILED) {
-    std::cerr << "Error: mmap failed for DMA-BUF: " 
-              << strerror(errno) << std::endl;
-    close(dmabuf_fd);
-    return nullptr;
-  }
-  
-  // Try to mark memory as needing to be written through to device
-  // This may help ensure GPU sees CPU writes
-  if (madvise(cpu_ptr, aligned_size, MADV_WILLNEED) != 0) {
-    std::cerr << "Warning: madvise MADV_WILLNEED failed: " 
-              << strerror(errno) << std::endl;
-  }
-  
-  // Allocate structure to track mapping
-  mapped = new MappedDeviceMemory;
-  mapped->mapped_base = cpu_ptr;
-  mapped->mapped_size = aligned_size;
-  mapped->dmabuf_fd = dmabuf_fd;
-  mapped->cpu_ptr = (char*)cpu_ptr + offset;
-  
-  return mapped;
-}
-
-// Synchronize DMA-BUF for CPU access (call before reading/writing)
-static void syncDmaBufStart(MappedDeviceMemory* mapped, bool isWrite = false) {
-  struct dma_buf_sync sync = {0};
-  // Use WRITE flag for writes, READ for reads
-  sync.flags = DMA_BUF_SYNC_START | 
-               (isWrite ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ);
-  if (ioctl(mapped->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
-    std::cerr << "Warning: DMA_BUF_IOCTL_SYNC START failed: " 
-              << strerror(errno) << std::endl;
-  }
-}
-
-// Synchronize DMA-BUF after CPU access (call after reading/writing)
-static void syncDmaBufEnd(MappedDeviceMemory* mapped, bool isWrite = false) {
-  struct dma_buf_sync sync = {0};
-  // Use WRITE flag for writes, RW for reads
-  sync.flags = DMA_BUF_SYNC_END | 
-               (isWrite ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ);
-  // Retry sync if it fails (can fail with EAGAIN)
-  int retries = 10;
-  while (retries > 0) {
-    if (ioctl(mapped->dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync) == 0) {
-      break;
-    }
-    if (errno != EAGAIN && errno != EINTR) {
-      std::cerr << "Warning: DMA_BUF_IOCTL_SYNC END failed: " 
-                << strerror(errno) << std::endl;
-      break;
-    }
-    retries--;
-    std::this_thread::sleep_for(std::chrono::microseconds(10));
-  }
-}
-
-// Flush CPU cache for a memory region
-static void flushCpuCache(void* ptr, size_t size) {
-  // Use GCC builtin to flush cache
-  // This ensures CPU writes are visible to other devices
-  __builtin___clear_cache((char*)ptr, (char*)ptr + size);
-}
 
 // CPU thread function that polls for GPU messages and responds
 void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
                CpuToGpuMsg* cpuToGpuHost, CpuToGpuMsg* cpuToGpuDevice,
                unsigned iterations, bool gpuWriteToDevice,
-               bool cpuWriteToDevice,
-               MappedDeviceMemory* gpuToCpuMapped,
-               MappedDeviceMemory* cpuToGpuMapped,
-               bool gpuToCpuUsedHsa,
-               bool cpuToGpuUsedHsa) {
+               bool cpuWriteToDevice) {
   // CPU always uses host pointers
-  // For HSA fine-grained memory, pointer is directly accessible (no DMA-BUF)
-  // For HIP device memory, pointer is mapped via DMA-BUF
+  // All device memory now uses HSA fine-grained memory, which is directly
+  // accessible by CPU and automatically coherent
   volatile GpuToCpuMsg* volatileGpuToCpu = gpuToCpuHost;
   volatile CpuToGpuMsg* volatileCpuToGpu = cpuToGpuHost;
   GpuToCpuMsg lastMsg = {};
@@ -289,15 +175,11 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     GpuToCpuMsg currentMsg;
     uint64_t lastGpuTimeSeen = (i == 0) ? 0 : lastMsg.gpuTime;
     
-    // For mode 1 (GPU->device, CPU->host), sync DMA-BUF once per iteration
-    // before polling, rather than on every poll iteration
-    if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
-      syncDmaBufStart(gpuToCpuMapped, false); // false = read
-    }
-    
     unsigned poll_count = 0;
     while (true) {
       // Read the message atomically from volatile pointer
+      // For mode 1 (GPU->device, CPU->host), DMA-BUF mapped memory is
+      // coherent for reads, so no sync needed
       currentMsg.magic = volatileGpuToCpu->magic;
       currentMsg.iteration = volatileGpuToCpu->iteration;
       currentMsg.gpuTime = volatileGpuToCpu->gpuTime;
@@ -316,12 +198,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
       // Yield to avoid busy-waiting too aggressively
       std::this_thread::yield();
     }
-    
-    // Sync DMA-BUF after reading if device memory via HIP (not HSA)
-    // HSA fine-grained memory is automatically coherent, no sync needed
-    if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
-      syncDmaBufEnd(gpuToCpuMapped, false); // false = read
-    }
 
     // Get CPU wall clock time when message is received (before processing)
     uint64_t cpuTime = getCpuTime();
@@ -329,43 +205,13 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     // Process the message (simple function: invert the first data word)
     // The response includes CPU time which is recorded when message received
     (void)currentMsg.data[0]; // Processed but not used in response
-
-    // If writing to device memory via HIP (not HSA), sync DMA-BUF before writing
-    // HSA fine-grained memory is automatically coherent, no sync needed
-    if (cpuWriteToDevice && cpuToGpuMapped && !cpuToGpuUsedHsa) {
-      syncDmaBufStart(cpuToGpuMapped, true); // true = write
-    }
     
     // Write response to memory atomically
+    // HSA fine-grained memory is automatically coherent, no sync needed
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
     __sync_synchronize(); // Ensure magic is written before cpuTime
     volatileCpuToGpu->cpuTime = cpuTime;
     __sync_synchronize(); // Ensure write is visible
-    
-    // Sync DMA-BUF after writing if device memory via HIP (not HSA)
-    // HSA fine-grained memory is automatically coherent, no sync needed
-    if (cpuWriteToDevice && cpuToGpuMapped && !cpuToGpuUsedHsa) {
-      // For mode 2 (GPU->host, CPU->device), minimal sync is sufficient
-      // For mode 3 (GPU->device, CPU->device), we need more aggressive sync
-      if (gpuWriteToDevice) {
-        // Mode 3: Aggressive sync needed due to GPU cache coherency issues
-        flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
-        __sync_synchronize();
-        msync(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
-              MS_SYNC | MS_INVALIDATE);
-        syncDmaBufEnd(cpuToGpuMapped, true);
-        __sync_synchronize();
-        flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
-        __sync_synchronize();
-        madvise(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
-                MADV_DONTNEED);
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-      } else {
-        // Mode 2: Minimal sync - just DMA-BUF sync is sufficient
-        // GPU writes to host memory, so no GPU cache coherency issues
-        syncDmaBufEnd(cpuToGpuMapped, true);
-      }
-    }
 
     lastMsg = currentMsg;
   }
@@ -636,12 +482,11 @@ int main(int argc, char** argv) {
   }
 
   // Allocate memory for communication based on mode
+  // All device memory now uses HSA fine-grained memory (directly CPU accessible)
   GpuToCpuMsg* gpuToCpuHost = nullptr; // Host pointer (CPU uses this)
   GpuToCpuMsg* gpuToCpuDevice = nullptr; // Device pointer (GPU uses this)
   CpuToGpuMsg* cpuToGpuHost = nullptr; // Host pointer (CPU uses this)
   CpuToGpuMsg* cpuToGpuDevice = nullptr; // Device pointer (GPU uses this)
-  MappedDeviceMemory* gpuToCpuMapped = nullptr; // Track DMA-BUF mapping
-  MappedDeviceMemory* cpuToGpuMapped = nullptr; // Track DMA-BUF mapping
   unsigned long long int* startTimes = nullptr;
   unsigned long long int* cpuTimes = nullptr;
 
@@ -658,55 +503,19 @@ int main(int argc, char** argv) {
     size_t gpuToCpuSize = ((sizeof(GpuToCpuMsg) + host_page_size - 1) / 
                            host_page_size) * host_page_size;
     
-    if (cpuWriteToDevice) {
-      // Mode 3: Use HSA fine-grained memory - CPU can access pointer directly!
-      // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
-      hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
-                                                        (void**)&gpuToCpuDevice);
-      if (hsa_status == HSA_STATUS_SUCCESS) {
-        std::cerr << "Info: Using HSA fine-grained memory for GPU->CPU buffer "
-                  << "in mode 3 (CPU can access directly, no DMA-BUF needed)"
-                  << std::endl;
-        gpuToCpuUsedHsa = true;
-        // HSA fine-grained memory pointer can be used directly by CPU
-        gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
-        memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
-      } else {
-        // Fall back to HIP uncached + DMA-BUF
-        std::cerr << "Warning: HSA memory allocation failed (" << hsa_status 
-                  << "), falling back to HIP uncached + DMA-BUF" << std::endl;
-        hipError_t err = hipExtMallocWithFlags((void**)&gpuToCpuDevice, 
-                                               gpuToCpuSize,
-                                               hipDeviceMallocUncached);
-        if (err != hipSuccess) {
-          std::cerr << "Error: hipExtMallocWithFlags(Uncached) failed: " 
-                    << hipGetErrorString(err) << std::endl;
-          return EXIT_FAILURE;
-        }
-        HIP_CHECK(hipMemset(gpuToCpuDevice, 0, gpuToCpuSize));
-        gpuToCpuMapped = mapDeviceMemoryToCpu(gpuToCpuDevice, 
-                                               sizeof(GpuToCpuMsg));
-        if (!gpuToCpuMapped || !gpuToCpuMapped->cpu_ptr) {
-          std::cerr << "Error: Failed to map GPU->CPU device memory to CPU" 
-                    << std::endl;
-          HIP_CHECK(hipFree(gpuToCpuDevice));
-          return EXIT_FAILURE;
-        }
-        gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuMapped->cpu_ptr;
-      }
-    } else {
-      // Mode 1: regular HIP allocation + DMA-BUF mapping
-      HIP_CHECK(hipMalloc((void**)&gpuToCpuDevice, gpuToCpuSize));
-      HIP_CHECK(hipMemset(gpuToCpuDevice, 0, gpuToCpuSize));
-      gpuToCpuMapped = mapDeviceMemoryToCpu(gpuToCpuDevice, sizeof(GpuToCpuMsg));
-      if (!gpuToCpuMapped || !gpuToCpuMapped->cpu_ptr) {
-        std::cerr << "Error: Failed to map GPU->CPU device memory to CPU" 
-                  << std::endl;
-        HIP_CHECK(hipFree(gpuToCpuDevice));
-        return EXIT_FAILURE;
-      }
-      gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuMapped->cpu_ptr;
+    // Use HSA fine-grained memory for all device memory modes
+    // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
+    hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
+                                                      (void**)&gpuToCpuDevice);
+    if (hsa_status != HSA_STATUS_SUCCESS) {
+      std::cerr << "Error: HSA memory allocation failed for GPU->CPU buffer: " 
+                << hsa_status << std::endl;
+      return EXIT_FAILURE;
     }
+    gpuToCpuUsedHsa = true;
+    // HSA fine-grained memory pointer can be used directly by CPU
+    gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
+    memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
     
     // In mode 3, allocate separate host memory for GPU to write to
     // This tests if writing to host memory affects GPU cache behavior
@@ -732,93 +541,25 @@ int main(int argc, char** argv) {
     size_t cpuToGpuSize = ((sizeof(CpuToGpuMsg) + host_page_size - 1) / 
                            host_page_size) * host_page_size;
     
-    if (gpuWriteToDevice) {
-      // Mode 3: Use HSA fine-grained memory - CPU can access pointer directly!
-      // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
-      hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
-                                                        (void**)&cpuToGpuDevice);
-      if (hsa_status == HSA_STATUS_SUCCESS) {
-        std::cerr << "Info: Using HSA fine-grained memory for CPU->GPU buffer "
-                  << "in mode 3 (CPU can access directly, no DMA-BUF needed)"
-                  << std::endl;
-        cpuToGpuUsedHsa = true;
-        // HSA fine-grained memory pointer can be used directly by CPU
-        cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuDevice;
-        memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
+    // Use HSA fine-grained memory for all device memory modes
+    // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
+    hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
+                                                      (void**)&cpuToGpuDevice);
+    if (hsa_status != HSA_STATUS_SUCCESS) {
+      std::cerr << "Error: HSA memory allocation failed for CPU->GPU buffer: " 
+                << hsa_status << std::endl;
+      // Cleanup GPU->CPU buffer
+      if (gpuWriteToDevice) {
+        hsa_memory_free(gpuToCpuDevice);
       } else {
-        // Fall back to HIP uncached + DMA-BUF
-        std::cerr << "Warning: HSA memory allocation failed (" << hsa_status 
-                  << "), falling back to HIP uncached + DMA-BUF" << std::endl;
-        hipError_t err = hipExtMallocWithFlags((void**)&cpuToGpuDevice, 
-                                               cpuToGpuSize,
-                                               hipDeviceMallocUncached);
-        if (err != hipSuccess) {
-          std::cerr << "Error: hipExtMallocWithFlags(Uncached) failed: " 
-                    << hipGetErrorString(err) << std::endl;
-          // Cleanup GPU->CPU buffer
-          if (gpuWriteToDevice) {
-            if (gpuToCpuUsedHsa) {
-              hsa_memory_free(gpuToCpuDevice);
-            } else {
-              HIP_CHECK(hipFree(gpuToCpuDevice));
-              if (gpuToCpuMapped) {
-                munmap(gpuToCpuMapped->mapped_base, gpuToCpuMapped->mapped_size);
-                close(gpuToCpuMapped->dmabuf_fd);
-                delete gpuToCpuMapped;
-              }
-            }
-          }
-          return EXIT_FAILURE;
-        }
-        HIP_CHECK(hipMemset(cpuToGpuDevice, 0, cpuToGpuSize));
-        cpuToGpuMapped = mapDeviceMemoryToCpu(cpuToGpuDevice, 
-                                               sizeof(CpuToGpuMsg));
-        if (!cpuToGpuMapped || !cpuToGpuMapped->cpu_ptr) {
-          std::cerr << "Error: Failed to map CPU->GPU device memory to CPU" 
-                    << std::endl;
-          HIP_CHECK(hipFree(cpuToGpuDevice));
-          // Cleanup GPU->CPU buffer
-          if (gpuWriteToDevice) {
-            if (gpuToCpuUsedHsa) {
-              hsa_memory_free(gpuToCpuDevice);
-            } else {
-              HIP_CHECK(hipFree(gpuToCpuDevice));
-              if (gpuToCpuMapped) {
-                munmap(gpuToCpuMapped->mapped_base, gpuToCpuMapped->mapped_size);
-                close(gpuToCpuMapped->dmabuf_fd);
-                delete gpuToCpuMapped;
-              }
-            }
-          }
-          return EXIT_FAILURE;
-        }
-        cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuMapped->cpu_ptr;
+        HIP_CHECK(hipHostFree(gpuToCpuHost));
       }
-    } else {
-      // Mode 2: regular HIP allocation + DMA-BUF mapping
-      HIP_CHECK(hipMalloc((void**)&cpuToGpuDevice, cpuToGpuSize));
-      HIP_CHECK(hipMemset(cpuToGpuDevice, 0, cpuToGpuSize));
-      cpuToGpuMapped = mapDeviceMemoryToCpu(cpuToGpuDevice, sizeof(CpuToGpuMsg));
-      if (!cpuToGpuMapped || !cpuToGpuMapped->cpu_ptr) {
-        std::cerr << "Error: Failed to map CPU->GPU device memory to CPU" 
-                  << std::endl;
-        HIP_CHECK(hipFree(cpuToGpuDevice));
-        if (gpuWriteToDevice) {
-          if (gpuToCpuUsedHsa) {
-            hsa_memory_free(gpuToCpuDevice);
-          } else {
-            HIP_CHECK(hipFree(gpuToCpuDevice));
-            if (gpuToCpuMapped) {
-              munmap(gpuToCpuMapped->mapped_base, gpuToCpuMapped->mapped_size);
-              close(gpuToCpuMapped->dmabuf_fd);
-              delete gpuToCpuMapped;
-            }
-          }
-        }
-        return EXIT_FAILURE;
-      }
-      cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuMapped->cpu_ptr;
+      return EXIT_FAILURE;
     }
+    cpuToGpuUsedHsa = true;
+    // HSA fine-grained memory pointer can be used directly by CPU
+    cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuDevice;
+    memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
   } else {
     // Host memory: use hipHostMalloc (CPU accessible, GPU can access via PCIe)
     HIP_CHECK(hipHostMalloc((void**)&cpuToGpuHost, sizeof(CpuToGpuMsg),
@@ -846,9 +587,7 @@ int main(int argc, char** argv) {
   // Launch CPU thread first
   std::thread cpuThreadHandle(cpuThread, gpuToCpuHost, gpuToCpuDevice,
                               cpuToGpuHost, cpuToGpuDevice, iterations,
-                              gpuWriteToDevice, cpuWriteToDevice,
-                              gpuToCpuMapped, cpuToGpuMapped,
-                              gpuToCpuUsedHsa, cpuToGpuUsedHsa);
+                              gpuWriteToDevice, cpuWriteToDevice);
 
   // Small delay to ensure CPU thread is ready
   std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -1052,35 +791,15 @@ int main(int argc, char** argv) {
     HIP_CHECK(hipHostFree(gpuToCpuHostForWrite));
   }
   if (gpuWriteToDevice) {
-    if (gpuToCpuUsedHsa) {
-      // HSA memory: free directly, no DMA-BUF unmapping needed
-      hsa_memory_free(gpuToCpuDevice);
-    } else {
-      // HIP memory: unmap DMA-BUF if device memory was mapped
-      if (gpuToCpuMapped) {
-        munmap(gpuToCpuMapped->mapped_base, gpuToCpuMapped->mapped_size);
-        close(gpuToCpuMapped->dmabuf_fd);
-        delete gpuToCpuMapped;
-      }
-      HIP_CHECK(hipFree(gpuToCpuDevice));
-    }
+    // HSA memory: free directly
+    hsa_memory_free(gpuToCpuDevice);
   } else {
     HIP_CHECK(hipHostFree(gpuToCpuHost));
   }
   
   if (cpuWriteToDevice) {
-    if (cpuToGpuUsedHsa) {
-      // HSA memory: free directly, no DMA-BUF unmapping needed
-      hsa_memory_free(cpuToGpuDevice);
-    } else {
-      // HIP memory: unmap DMA-BUF if device memory was mapped
-      if (cpuToGpuMapped) {
-        munmap(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size);
-        close(cpuToGpuMapped->dmabuf_fd);
-        delete cpuToGpuMapped;
-      }
-      HIP_CHECK(hipFree(cpuToGpuDevice));
-    }
+    // HSA memory: free directly
+    hsa_memory_free(cpuToGpuDevice);
   } else {
     HIP_CHECK(hipHostFree(cpuToGpuHost));
   }
