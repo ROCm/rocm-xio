@@ -56,7 +56,8 @@ static inline void formatTime(double timeNs, double& value,
 
 // Allocate device memory using HSA runtime directly
 // This may give us more control over memory properties
-static hsa_status_t allocateHsaDeviceMemory(size_t size, void** ptr) {
+static hsa_status_t allocateHsaDeviceMemory(size_t size, void** ptr,
+                                            const char* direction) {
   hsa_status_t status;
   
   // Initialize HSA runtime (safe to call multiple times)
@@ -146,9 +147,11 @@ static hsa_status_t allocateHsaDeviceMemory(size_t size, void** ptr) {
   uint32_t global_flags = 0;
   hsa_region_get_info(device_region, HSA_REGION_INFO_GLOBAL_FLAGS, &global_flags);
   if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
-    std::cerr << "Info: Using HSA fine-grained global memory region" << std::endl;
+    std::cerr << "  Info: (" << direction << "):  Using HSA fine-grained "
+              << "global memory region" << std::endl;
   } else if (global_flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
-    std::cerr << "Info: Using HSA coarse-grained global memory region" << std::endl;
+    std::cerr << "  Info: (" << direction << "):  Using HSA coarse-grained "
+              << "global memory region" << std::endl;
   }
   
   // Allocate memory from device region
@@ -162,6 +165,10 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
                CpuToGpuMsg* cpuToGpuHost, CpuToGpuMsg* cpuToGpuDevice,
                unsigned iterations, bool gpuWriteToDevice,
                bool cpuWriteToDevice) {
+  (void)gpuToCpuDevice;
+  (void)cpuToGpuDevice;
+  (void)gpuWriteToDevice;
+  (void)cpuWriteToDevice;
   // CPU always uses host pointers
   // All device memory now uses HSA fine-grained memory, which is directly
   // accessible by CPU and automatically coherent
@@ -175,7 +182,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     GpuToCpuMsg currentMsg;
     uint64_t lastGpuTimeSeen = (i == 0) ? 0 : lastMsg.gpuTime;
     
-    unsigned poll_count = 0;
     while (true) {
       // Read the message atomically from volatile pointer
       // For mode 1 (GPU->device, CPU->host), DMA-BUF mapped memory is
@@ -186,8 +192,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
       for (int j = 0; j < 5; ++j) {
         currentMsg.data[j] = volatileGpuToCpu->data[j];
       }
-      
-      poll_count++;
       
       // Check if this is a new message for this iteration
       if (currentMsg.magic == GPU_TO_CPU_MAGIC &&
@@ -310,6 +314,8 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
       // First read might be cached, subsequent reads may force memory access
       uint64_t magic1 = volatileCpuToGpu->magic;
       uint64_t cpuTime1 = volatileCpuToGpu->cpuTime;
+      (void)magic1;
+      (void)cpuTime1;
       __threadfence_system();
       uint64_t magic2 = volatileCpuToGpu->magic;
       uint64_t cpuTime2 = volatileCpuToGpu->cpuTime;
@@ -456,10 +462,6 @@ int main(int argc, char** argv) {
   // Get page size for alignment
   const size_t host_page_size = sysconf(_SC_PAGESIZE);
   
-  // Track if we used HSA allocation (for cleanup)
-  bool gpuToCpuUsedHsa = false;
-  bool cpuToGpuUsedHsa = false;
-  
   // Allocate GPU->CPU message buffer
   GpuToCpuMsg* gpuToCpuHostForWrite = nullptr; // Separate host buffer for mode 3 test
   if (gpuWriteToDevice) {
@@ -469,13 +471,13 @@ int main(int argc, char** argv) {
     // Use HSA fine-grained memory for all device memory modes
     // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
     hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
-                                                      (void**)&gpuToCpuDevice);
+                                                      (void**)&gpuToCpuDevice,
+                                                      "GPU->CPU");
     if (hsa_status != HSA_STATUS_SUCCESS) {
       std::cerr << "Error: HSA memory allocation failed for GPU->CPU buffer: " 
                 << hsa_status << std::endl;
       return EXIT_FAILURE;
     }
-    gpuToCpuUsedHsa = true;
     // HSA fine-grained memory pointer can be used directly by CPU
     gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
     memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
@@ -507,7 +509,8 @@ int main(int argc, char** argv) {
     // Use HSA fine-grained memory for all device memory modes
     // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
     hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
-                                                      (void**)&cpuToGpuDevice);
+                                                      (void**)&cpuToGpuDevice,
+                                                      "CPU->GPU");
     if (hsa_status != HSA_STATUS_SUCCESS) {
       std::cerr << "Error: HSA memory allocation failed for CPU->GPU buffer: " 
                 << hsa_status << std::endl;
@@ -519,7 +522,6 @@ int main(int argc, char** argv) {
       }
       return EXIT_FAILURE;
     }
-    cpuToGpuUsedHsa = true;
     // HSA fine-grained memory pointer can be used directly by CPU
     cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuDevice;
     memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
