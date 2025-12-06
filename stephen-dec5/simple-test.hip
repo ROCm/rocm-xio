@@ -169,9 +169,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
   (void)cpuToGpuDevice;
   (void)gpuWriteToDevice;
   (void)cpuWriteToDevice;
-  // CPU always uses host pointers
-  // All device memory now uses HSA fine-grained memory, which is directly
-  // accessible by CPU and automatically coherent
   volatile GpuToCpuMsg* volatileGpuToCpu = gpuToCpuHost;
   volatile CpuToGpuMsg* volatileCpuToGpu = cpuToGpuHost;
   GpuToCpuMsg lastMsg = {};
@@ -183,9 +180,7 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     uint64_t lastGpuTimeSeen = (i == 0) ? 0 : lastMsg.gpuTime;
     
     while (true) {
-      // Read the message atomically from volatile pointer
-      // For mode 1 (GPU->device, CPU->host), DMA-BUF mapped memory is
-      // coherent for reads, so no sync needed
+
       currentMsg.magic = volatileGpuToCpu->magic;
       currentMsg.iteration = volatileGpuToCpu->iteration;
       currentMsg.gpuTime = volatileGpuToCpu->gpuTime;
@@ -213,7 +208,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     // Write response to memory atomically
     // HSA fine-grained memory is automatically coherent, no sync needed
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
-    __sync_synchronize(); // Ensure magic is written before cpuTime
     volatileCpuToGpu->cpuTime = cpuTime;
     __sync_synchronize(); // Ensure write is visible
 
@@ -226,8 +220,7 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
                           unsigned iterations,
                           unsigned long long int* startTimes,
                           unsigned long long int* cpuTimes,
-                          unsigned long long gpuClockRateKHz,
-                          GpuToCpuMsg* gpuToCpuHost) {
+                          unsigned long long gpuClockRateKHz) {
   // Only thread 0 runs
   if (threadIdx.x != 0 || blockIdx.x != 0) {
     return;
@@ -263,28 +256,11 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
       msg.data[j] = 0x123456789ABCDEF0ULL + i + j;
     }
 
-    // Write message to memory atomically
+    // Write message to memory
     *gpuToCpu = msg;
     __threadfence_system(); // Ensure write is visible
-    
-    // In mode 3, GPU writes to device memory before reading from device memory
-    // The difference from mode 2 is that in mode 2, GPU writes to host memory
-    // and reads from device memory, which works. In mode 3, GPU writes to
-    // device memory and reads from device memory, which doesn't work.
-    // Test: Also write to host memory in mode 3 to see if that affects
-    // GPU cache behavior for device memory reads
-    if (gpuToCpuHost != nullptr && gpuToCpuHost != gpuToCpu) {
-      // Mode 3: write to both device and host memory
-      *gpuToCpuHost = msg;
-      __threadfence_system(); // Ensure host write is visible
-    }
-    
-    __threadfence_system();
-    __threadfence(); // Additional device-level fence
-    __threadfence_system(); // System-level fence again
 
     // Poll for CPU response with timeout
-    unsigned poll_count = 0;
     bool timeoutReached = false;
     while (true) {
       // Check for timeout: 100ms elapsed
@@ -294,43 +270,18 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
         break;
       }
       
-      // GPU-side memory scope issue: After writing to device memory,
-      // GPU may cache device memory reads. Try reading from host memory
-      // first (if available) to potentially reset cache state before
-      // reading from device memory.
-      if (gpuToCpuHost != nullptr && gpuToCpuHost != gpuToCpu) {
-        // Read from host memory first to potentially affect GPU cache state
-        volatile uint64_t dummy = ((volatile GpuToCpuMsg*)gpuToCpuHost)->magic;
-        (void)dummy;
-        __threadfence_system();
-      }
-      
       // Read response atomically from volatile pointer
       // Use system fence before read to ensure we see latest device memory
       // This is especially important when CPU writes to device memory (mode 3)
       __threadfence_system();
-      
-      // Read multiple times to potentially bypass GPU cache
-      // First read might be cached, subsequent reads may force memory access
-      uint64_t magic1 = volatileCpuToGpu->magic;
-      uint64_t cpuTime1 = volatileCpuToGpu->cpuTime;
-      (void)magic1;
-      (void)cpuTime1;
-      __threadfence_system();
-      uint64_t magic2 = volatileCpuToGpu->magic;
-      uint64_t cpuTime2 = volatileCpuToGpu->cpuTime;
-      __threadfence_system();
+ 
+      uint64_t magic = volatileCpuToGpu->magic;
+      uint64_t cpuTime = volatileCpuToGpu->cpuTime;
       // Use the second read (more likely to be from memory)
-      currentResponse.magic = magic2;
-      currentResponse.cpuTime = cpuTime2;
-      
-      __threadfence_system();
-      
-      poll_count++;
+      currentResponse.magic = magic;
+      currentResponse.cpuTime = cpuTime;
       
       // Check if this is a new response
-      // For device memory (mode 3), CPU writes via DMA-BUF mmap, so GPU
-      // might need multiple reads to see the write
       if (currentResponse.magic == CPU_TO_GPU_MAGIC) {
         if (currentResponse.cpuTime != 0) {
           // Accept if this is a new response (cpuTime changed)
@@ -342,15 +293,8 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
           }
         }
       }
-      
-      // Add a small delay every N polls to allow CPU writes to propagate
-      // This is especially important for DMA-BUF mmap writes
-      if (poll_count % 10000 == 0) {
-        // Use a memory barrier to ensure we don't optimize away the read
-        __threadfence_system();
-      }
+
     }
-    
     // If timeout reached, record 0 as CPU time to indicate timeout
     if (timeoutReached) {
       cpuTimes[i] = 0;
@@ -560,8 +504,7 @@ int main(int argc, char** argv) {
   // Launch GPU kernel (1 block, 1 thread)
   // Pass gpuToCpuHostForWrite for mode 3 test (write to both device and host)
   hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(1), 0, 0, gpuToCpu, cpuToGpu,
-                      iterations, startTimes, cpuTimes, gpuWallClockRateKHz,
-                      gpuToCpuHostForWrite);
+                      iterations, startTimes, cpuTimes, gpuWallClockRateKHz);
 
   // Check for kernel launch errors
   hipError_t err = hipGetLastError();
