@@ -209,7 +209,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     // HSA fine-grained memory is automatically coherent, no sync needed
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
     volatileCpuToGpu->cpuTime = cpuTime;
-    __sync_synchronize(); // Ensure write is visible
 
     lastMsg = currentMsg;
   }
@@ -269,18 +268,11 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
         timeoutReached = true;
         break;
       }
-      
-      // Read response atomically from volatile pointer
-      // Use system fence before read to ensure we see latest device memory
-      // This is especially important when CPU writes to device memory (mode 3)
-      __threadfence_system();
  
       uint64_t magic = volatileCpuToGpu->magic;
       uint64_t cpuTime = volatileCpuToGpu->cpuTime;
-      // Use the second read (more likely to be from memory)
       currentResponse.magic = magic;
       currentResponse.cpuTime = cpuTime;
-      
       // Check if this is a new response
       if (currentResponse.magic == CPU_TO_GPU_MAGIC) {
         if (currentResponse.cpuTime != 0) {
@@ -302,7 +294,6 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
     } else {
       lastResponse = currentResponse;
       lastCpuTime = currentResponse.cpuTime;
-      
       // Record CPU time from response
       cpuTimes[i] = currentResponse.cpuTime;
     }
@@ -312,7 +303,7 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
 int main(int argc, char** argv) {
   unsigned iterations = 10;
   bool verbose = false;
-  unsigned memoryMode = 0; // Default: GPU writes to host, CPU writes to host
+  unsigned memoryMode = 0;
   int opt;
 
   // Parse command line options
@@ -395,7 +386,7 @@ int main(int argc, char** argv) {
             << ")" << std::endl;
 
   // Allocate memory for communication based on mode
-  // All device memory now uses HSA fine-grained memory (directly CPU accessible)
+  // All device memory uses HSA fine-grained memory (directly CPU accessible)
   GpuToCpuMsg* gpuToCpuHost = nullptr; // Host pointer (CPU uses this)
   GpuToCpuMsg* gpuToCpuDevice = nullptr; // Device pointer (GPU uses this)
   CpuToGpuMsg* cpuToGpuHost = nullptr; // Host pointer (CPU uses this)
@@ -407,7 +398,6 @@ int main(int argc, char** argv) {
   const size_t host_page_size = sysconf(_SC_PAGESIZE);
   
   // Allocate GPU->CPU message buffer
-  GpuToCpuMsg* gpuToCpuHostForWrite = nullptr; // Separate host buffer for mode 3 test
   if (gpuWriteToDevice) {
     size_t gpuToCpuSize = ((sizeof(GpuToCpuMsg) + host_page_size - 1) / 
                            host_page_size) * host_page_size;
@@ -425,15 +415,7 @@ int main(int argc, char** argv) {
     // HSA fine-grained memory pointer can be used directly by CPU
     gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
     memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
-    
-    // In mode 3, allocate separate host memory for GPU to write to
-    // This tests if writing to host memory affects GPU cache behavior
-    if (cpuWriteToDevice) {
-      HIP_CHECK(hipHostMalloc((void**)&gpuToCpuHostForWrite, 
-                              sizeof(GpuToCpuMsg),
-                              hipHostMallocDefault));
-      memset(gpuToCpuHostForWrite, 0, sizeof(GpuToCpuMsg));
-    }
+
   } else {
     // Host memory: use hipHostMalloc (CPU accessible, GPU can access via PCIe)
     HIP_CHECK(hipHostMalloc((void**)&gpuToCpuHost, sizeof(GpuToCpuMsg),
@@ -695,9 +677,6 @@ int main(int argc, char** argv) {
   }
 
   // Cleanup
-  if (gpuToCpuHostForWrite != nullptr) {
-    HIP_CHECK(hipHostFree(gpuToCpuHostForWrite));
-  }
   if (gpuWriteToDevice) {
     // HSA memory: free directly
     hsa_memory_free(gpuToCpuDevice);
