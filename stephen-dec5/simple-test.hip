@@ -284,23 +284,19 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
   GpuToCpuMsg lastMsg = {};
   lastMsg.iteration = 0xFFFFFFFF; // Initialize to invalid value
 
-  std::cerr << "[CPU] Thread started, iterations=" << iterations 
-            << ", gpuWriteToDevice=" << gpuWriteToDevice
-            << ", cpuWriteToDevice=" << cpuWriteToDevice << std::endl;
-
   for (unsigned i = 0; i < iterations; ++i) {
-    std::cerr << "[CPU] Starting iteration " << i << std::endl;
     // Poll for new GPU message
     GpuToCpuMsg currentMsg;
     uint64_t lastGpuTimeSeen = (i == 0) ? 0 : lastMsg.gpuTime;
     
+    // For mode 1 (GPU->device, CPU->host), sync DMA-BUF once per iteration
+    // before polling, rather than on every poll iteration
+    if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
+      syncDmaBufStart(gpuToCpuMapped, false); // false = read
+    }
+    
     unsigned poll_count = 0;
     while (true) {
-      // If GPU writes to device memory via HIP (not HSA), sync DMA-BUF before reading
-      if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
-        syncDmaBufStart(gpuToCpuMapped, false); // false = read
-      }
-      
       // Read the message atomically from volatile pointer
       currentMsg.magic = volatileGpuToCpu->magic;
       currentMsg.iteration = volatileGpuToCpu->iteration;
@@ -309,35 +305,22 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
         currentMsg.data[j] = volatileGpuToCpu->data[j];
       }
       
-      // Sync DMA-BUF after reading if device memory via HIP (not HSA)
-      // HSA fine-grained memory is automatically coherent, no sync needed
-      if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
-        // Invalidate CPU cache to ensure we see GPU writes
-        flushCpuCache(gpuToCpuHost, sizeof(GpuToCpuMsg));
-        __sync_synchronize(); // Ensure cache flush completes
-        syncDmaBufEnd(gpuToCpuMapped, false); // false = read
-      }
-      
-      // Debug output every 100000 polls
-      if (poll_count % 100000 == 0 && poll_count > 0) {
-        std::cerr << "[CPU] Iteration " << i << " poll " << poll_count 
-                  << ": magic=0x" << std::hex << currentMsg.magic << std::dec
-                  << ", iter=" << currentMsg.iteration
-                  << ", gpuTime=" << currentMsg.gpuTime
-                  << ", lastGpuTime=" << lastGpuTimeSeen << std::endl;
-      }
       poll_count++;
       
       // Check if this is a new message for this iteration
       if (currentMsg.magic == GPU_TO_CPU_MAGIC &&
           currentMsg.iteration == i &&
           currentMsg.gpuTime != lastGpuTimeSeen) {
-        std::cerr << "[CPU] Received message for iteration " << i 
-                  << " after " << poll_count << " polls" << std::endl;
         break;
       }
       // Yield to avoid busy-waiting too aggressively
       std::this_thread::yield();
+    }
+    
+    // Sync DMA-BUF after reading if device memory via HIP (not HSA)
+    // HSA fine-grained memory is automatically coherent, no sync needed
+    if (gpuWriteToDevice && gpuToCpuMapped && !gpuToCpuUsedHsa) {
+      syncDmaBufEnd(gpuToCpuMapped, false); // false = read
     }
 
     // Get CPU wall clock time when message is received (before processing)
@@ -354,8 +337,6 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     }
     
     // Write response to memory atomically
-    std::cerr << "[CPU] Writing response for iteration " << i 
-              << ", cpuTime=" << cpuTime << std::endl;
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
     __sync_synchronize(); // Ensure magic is written before cpuTime
     volatileCpuToGpu->cpuTime = cpuTime;
@@ -364,40 +345,30 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
     // Sync DMA-BUF after writing if device memory via HIP (not HSA)
     // HSA fine-grained memory is automatically coherent, no sync needed
     if (cpuWriteToDevice && cpuToGpuMapped && !cpuToGpuUsedHsa) {
-      // Flush CPU cache to ensure writes are visible to GPU
-      flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
-      __sync_synchronize(); // Ensure cache flush completes
-      
-      // Use msync before DMA-BUF sync to ensure writes are flushed
-      msync(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
-            MS_SYNC | MS_INVALIDATE);
-      
-      // Now sync DMA-BUF to make writes visible to GPU
-      syncDmaBufEnd(cpuToGpuMapped, true); // true = write
-      
-      // Ensure sync completes before GPU reads
-      __sync_synchronize();
-      
-      // Flush CPU cache again after sync
-      flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
-      __sync_synchronize();
-      
-      // Try madvise to potentially invalidate GPU cache
-      // This might help force GPU to re-read from memory
-      madvise(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
-              MADV_DONTNEED);
-      
-      // Longer delay to ensure GPU sees the write
-      // This is critical for mode 3 where both buffers are device memory
-      // The delay allows DMA-BUF sync to propagate to GPU
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
-      std::cerr << "[CPU] Completed DMA-BUF sync for iteration " << i 
-                << std::endl;
+      // For mode 2 (GPU->host, CPU->device), minimal sync is sufficient
+      // For mode 3 (GPU->device, CPU->device), we need more aggressive sync
+      if (gpuWriteToDevice) {
+        // Mode 3: Aggressive sync needed due to GPU cache coherency issues
+        flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
+        __sync_synchronize();
+        msync(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
+              MS_SYNC | MS_INVALIDATE);
+        syncDmaBufEnd(cpuToGpuMapped, true);
+        __sync_synchronize();
+        flushCpuCache(cpuToGpuHost, sizeof(CpuToGpuMsg));
+        __sync_synchronize();
+        madvise(cpuToGpuMapped->mapped_base, cpuToGpuMapped->mapped_size, 
+                MADV_DONTNEED);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      } else {
+        // Mode 2: Minimal sync - just DMA-BUF sync is sufficient
+        // GPU writes to host memory, so no GPU cache coherency issues
+        syncDmaBufEnd(cpuToGpuMapped, true);
+      }
     }
 
     lastMsg = currentMsg;
   }
-  std::cerr << "[CPU] Thread completed all iterations" << std::endl;
 }
 
 // GPU kernel that runs one thread
