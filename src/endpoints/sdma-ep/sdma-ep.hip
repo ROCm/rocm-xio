@@ -8,6 +8,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint.h"
 #include "sdma-ep.h"
 
@@ -137,20 +138,13 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
   return result;
 }
 
-__host__ __device__ unsigned long long int wall_clock64() {
-#ifdef __HIP_DEVICE_COMPILE__
-  return __builtin_readcyclecounter();
-#else
-  return 0;
-#endif
-}
+// Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
 } // namespace sdma_ep
 
 // Export sdma-ep functions for runtime dispatch
 __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 void* sqeAddr,
-                                                 void* cqeAddr) {
+                                                 void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   sdma_ep::sqeType* sqePtr = static_cast<sdma_ep::sqeType*>(sqeAddr);
   sdma_ep::cqeType* cqePtr = static_cast<sdma_ep::cqeType*>(cqeAddr);
@@ -176,7 +170,11 @@ __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
     }
 
     // Process the SDMA command
-    uint64_t timestamp = sdma_ep::wall_clock64();
+#ifdef __HIP_DEVICE_COMPILE__
+    uint64_t timestamp = wall_clock64();
+#else
+    uint64_t timestamp = 0; // Host code - no timing
+#endif
     cqeLocal = sdma_ep::cqeGenFromSqe(&sqeNew, timestamp);
     sdma_ep::cqeWrite(cqeLocal, cqePtr);
 
@@ -190,10 +188,9 @@ __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
   }
 }
 
-__device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
-                                      void* sqeAddr, void* cqeAddr,
-                                      unsigned long long int* startTime,
-                                      unsigned long long int* endTime) {
+// Config-based driveEndpoint function
+__device__ void sdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
+                                      void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   sdma_ep::sqeType* sqePtr = static_cast<sdma_ep::sqeType*>(sqeAddr);
   sdma_ep::cqeType* cqePtr = static_cast<sdma_ep::cqeType*>(cqeAddr);
@@ -212,7 +209,11 @@ __device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
   uint64_t dummy_dst = 0x2000000;
   uint32_t transfer_size = 4096; // 4KB transfers
 
-  for (unsigned i = 0; i < sqeIterations; i++) {
+  // Extract timing arrays from config
+  unsigned long long int* startTime = config.startTimes;
+  unsigned long long int* endTime = config.endTimes;
+
+  for (unsigned i = 0; i < config.iterations; i++) {
     // Start command IDs at 1 to avoid conflicts with zero-initialized memory
     uint32_t cmd_id = i + 1;
 
@@ -231,10 +232,14 @@ __device__ void sdma_ep_driveEndpoint(unsigned sqeIterations,
     }
 
     // Submit command and wait for completion
-    startTime[i] = sdma_ep::wall_clock64();
+    if (startTime != nullptr) {
+      startTime[i] = wall_clock64();
+    }
     sdma_ep::sqeWrite(sqeLocal, sqePtr);
     cqeLocal = sdma_ep::cqePoll(cqeLocal, (volatile sdma_ep::cqeType*)cqePtr);
-    endTime[i] = sdma_ep::wall_clock64();
+    if (endTime != nullptr) {
+      endTime[i] = wall_clock64();
+    }
 
     // Verify completion
     if (cqe->command_id != cmd_id) {

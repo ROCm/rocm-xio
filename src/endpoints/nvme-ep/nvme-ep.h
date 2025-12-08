@@ -312,8 +312,8 @@ enum nvme_test_pattern {
 };
 
 // Global debug flag (defined in nvme-ep.hip)
-// Note: This needs to be accessible across translation units, so it's declared here
-// and defined in nvme-ep.hip
+// Note: This needs to be accessible across translation units, so it's declared
+// here and defined in nvme-ep.hip
 extern __device__ bool g_nvme_ep_debug;
 
 // Generate test data pattern
@@ -484,9 +484,10 @@ __host__ __device__ static inline bool nvme_verify_pattern(
 //
 
 // Standard drive endpoint (uses dummy PRPs)
-__device__ void nvme_ep_driveEndpoint(
-  unsigned sqeIterations, void* sqeAddr, void* cqeAddr,
-  unsigned long long int* startTime, unsigned long long int* endTime);
+__device__ void nvme_ep_driveEndpoint(unsigned sqeIterations, void* sqeAddr,
+                                      void* cqeAddr,
+                                      unsigned long long int* startTime,
+                                      unsigned long long int* endTime);
 
 // Drive endpoint with data buffers (uses real PRPs)
 // Returns final sq_tail value for doorbell ringing
@@ -498,8 +499,8 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
   uint64_t writeBufferDma, uint32_t lfsr_seed = 0);
 
 // Emulate endpoint
-__host__ __device__ void nvme_ep_emulateEndpoint(
-  unsigned sqeIterations, void* sqeAddr, void* cqeAddr);
+__host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
+                                                 void* sqeAddr, void* cqeAddr);
 
 // Host function to set global debug flag for GPU endpoint functions
 __host__ void nvme_ep_set_debug(bool debug);

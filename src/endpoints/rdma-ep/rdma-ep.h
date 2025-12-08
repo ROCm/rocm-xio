@@ -131,7 +131,7 @@ struct rdma_cqe {
   };
 
   uint64_t reserved; // Reserved for alignment
-  uint8_t pad[28]; // Padding to match RDMA_EP_CQE_SIZE (64 - 36 = 28)
+  uint8_t pad[28];   // Padding to match RDMA_EP_CQE_SIZE (64 - 36 = 28)
 } __attribute__((packed));
 
 //

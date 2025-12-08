@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint.h"
 #include "nvme-ep.h"
 
@@ -39,7 +40,6 @@ __host__ __device__ bool nvme_sqe_equal(const sqeType* a, const sqeType* b) {
 __host__ __device__ bool nvme_cqe_equal(const cqeType* a, const cqeType* b) {
   return (a->command_id == b->command_id);
 }
-
 
 // Read SQE - copies entire NVMe command structure
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
@@ -153,13 +153,7 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
   return result;
 }
 
-__host__ __device__ unsigned long long int wall_clock64() {
-#ifdef __HIP_DEVICE_COMPILE__
-  return __builtin_readcyclecounter();
-#else
-  return 0;
-#endif
-}
+// Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
 } // namespace nvme_ep
 
@@ -172,8 +166,7 @@ __host__ __device__ unsigned long long int wall_clock64() {
 // For real hardware testing, the actual NVMe controller handles data transfer
 //
 __host__ __device__ void nvme_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 void* sqeAddr,
-                                                 void* cqeAddr) {
+                                                 void* sqeAddr, void* cqeAddr) {
   nvme_ep::sqeType sqeNew = {};
   nvme_ep::sqeType sqeOld = {};
   nvme_ep::cqeType cqeLocal = {}; // Zero-initialize
@@ -409,7 +402,7 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
     }
 
     // Record start time for this command
-    startTime[i] = nvme_ep::wall_clock64();
+    startTime[i] = wall_clock64();
 
     // Submit command to queue at the current tail position
     if (g_nvme_ep_debug) {
@@ -434,19 +427,16 @@ __device__ uint16_t nvme_ep_driveEndpointWithBuffers(
 }
 
 //
-// Drive Endpoint (backward compatible) - Acts as NVMe host driver
-// This version uses dummy PRP addresses for backward compatibility
+// Config-based driveEndpoint function
 //
-__device__ void nvme_ep_driveEndpoint(unsigned sqeIterations,
-                                      void* sqeAddr, void* cqeAddr,
-                                      unsigned long long int* startTime,
-                                      unsigned long long int* endTime) {
+__device__ void nvme_ep_driveEndpoint(const AxiioEndpointConfig& config,
+                                      void* sqeAddr, void* cqeAddr) {
   // Call the buffer-aware version with NULL pointers (dummy mode)
-  // Return value ignored for backward compatibility
-  (void)nvme_ep_driveEndpointWithBuffers(sqeIterations, sqeAddr, cqeAddr,
-                                         startTime, endTime, nullptr, nullptr,
-                                         0, 512, NVME_PATTERN_SEQUENTIAL, 0, 0,
-                                         0);
+  // Note: Multi-threading and delay support can be added later
+  (void)nvme_ep_driveEndpointWithBuffers(config.iterations, sqeAddr, cqeAddr,
+                                         config.startTimes, config.endTimes,
+                                         nullptr, nullptr, 0, 512,
+                                         NVME_PATTERN_SEQUENTIAL, 0, 0, 0);
 }
 
 // GPU kernel for verifying read data
@@ -468,7 +458,7 @@ __global__ void nvme_ep_verify_reads_gpu(
 
   // Find which read command contains this thread's block
   for (uint32_t i = 0; i < numCompletions; i++) {
-          const cqeType* cqe = &cqeAddr[cqeIdx];
+    const cqeType* cqe = &cqeAddr[cqeIdx];
     uint16_t cid = cqe->command_id;
 
     // Skip stop command and invalid CIDs

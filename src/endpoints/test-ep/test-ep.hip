@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint.h"
+#include "test-ep-config.h"
 #include "test-ep.h"
 
 // Namespace all test-ep implementation to avoid conflicts
@@ -93,20 +95,11 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
   return result;
 }
 
-__host__ __device__ unsigned long long int wall_clock64() {
-#ifdef __HIP_DEVICE_COMPILE__
-  return __builtin_readcyclecounter();
-#else
-  return 0;
-#endif
-}
-
 } // namespace test_ep
 
 // Export test-ep functions for runtime dispatch
 __host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 void* sqeAddr,
-                                                 void* cqeAddr) {
+                                                 void* sqeAddr, void* cqeAddr) {
   test_ep::sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, 0xbeefdead, {0}};
   test_ep::sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, 0xf000f000, {0}};
   test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
@@ -120,91 +113,82 @@ __host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
   }
 }
 
-__device__ void test_ep_driveEndpoint(unsigned sqeIterations,
-                                      void* sqeAddr, void* cqeAddr,
-                                      unsigned long long int* startTime,
-                                      unsigned long long int* endTime) {
+// New config-based driveEndpoint function
+__device__ void test_ep_driveEndpoint(const AxiioEndpointConfig& config,
+                                      void* sqeAddr, void* cqeAddr) {
+  // Extract endpoint-specific config
+  const test_ep::TestEpConfig* epConfig =
+    static_cast<const test_ep::TestEpConfig*>(config.endpointConfig);
+  (void)epConfig; // May be used for future test-ep specific features
+
+  // Get thread ID for multi-threading
+  unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= config.numThreads) {
+    return;
+  }
+
   // Cast void* to endpoint-specific types
   test_ep::sqeType* sqePtr = static_cast<test_ep::sqeType*>(sqeAddr);
   test_ep::cqeType* cqePtr = static_cast<test_ep::cqeType*>(cqeAddr);
 
-  // Use cooperative threading: thread 0 generates SQEs, thread 1 processes them
-  // If only one thread is available, it will handle both roles sequentially
-  const bool isProducer = (blockDim.x >= 2) ? (threadIdx.x == 0) : true;
-  const bool isConsumer = (blockDim.x >= 2) ? (threadIdx.x == 1) : true;
+  // Use per-thread buffers if multi-threaded
+  test_ep::sqeType* mySqe = (config.numThreads > 1) ? &sqePtr[tid] : sqePtr;
+  test_ep::cqeType* myCqe = (config.numThreads > 1) ? &cqePtr[tid] : cqePtr;
+  (void)myCqe; // Reserved for future use when GPU generates CQEs
 
-  if (isProducer) {
-    // Producer: Generate SQEs
-    test_ep::sqeType sqeLocal = {TEST_EP_MAGIC_ID, 0, 0, 0xdeadbeef, {0}};
-    test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
-    
-    for (unsigned sqeCount = 0; sqeCount < sqeIterations; sqeCount++) {
-      sqeLocal.entryId = sqeCount;
-      sqeLocal.dataPayload = 0xbeefdeaf + sqeCount;
-      
-      // Record start time before writing SQE
-      startTime[sqeCount] = test_ep::wall_clock64();
-      
-      // Write submission queue entry
-      test_ep::sqeWrite(sqeLocal, sqePtr);
-      
-      // Memory fence to ensure SQE is visible to consumer thread
-      __threadfence();
-      
-      // If single-threaded, process immediately
-      if (blockDim.x < 2) {
-        test_ep::cqeType cqeLocal = test_ep::cqeGenFromSqe(&sqeLocal);
-        endTime[sqeCount] = test_ep::wall_clock64();
-        test_ep::cqeWrite(cqeLocal, cqePtr);
-      }
-    }
-    
-    // Write stop command to signal completion (only needed for multi-threaded)
-    if (blockDim.x >= 2) {
-      test_ep::sqeWrite(sqeStop, sqePtr);
-      __threadfence();
-    }
+  // Get per-thread timing arrays if provided
+  unsigned long long int* myStartTimes = nullptr;
+  unsigned long long int* myEndTimes = nullptr;
+  if (config.startTimes != nullptr) {
+    myStartTimes = &config.startTimes[tid * config.iterations];
   }
-  
-  if (isConsumer && blockDim.x >= 2) {
-    // Consumer: Poll for SQEs and generate CQEs (only in multi-threaded mode)
-    // Initialize with a value that won't match any real SQE
-    test_ep::sqeType sqeOld = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xFFFFFFFFFFFFFFFF, {0}};
-    test_ep::sqeType sqeNew;
-    test_ep::sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFF, 0, 0xf0f0f0f0, {0}};
-    unsigned cqeCount = 0;
-    
-    // Read initial state to sync with producer
-    sqeOld = test_ep::sqeRead((volatile test_ep::sqeType*)sqePtr);
-    
-    while (cqeCount < sqeIterations) {
-      // Poll for new SQE (waits until it detects a change)
-      sqeNew = test_ep::sqePoll(sqeOld, (volatile test_ep::sqeType*)sqePtr);
-      
-      // Check for stop command
-      if (test_ep::sqeEqual(&sqeNew, &sqeStop)) {
-        break;
-      }
-      
-      // Generate completion from SQE
-      test_ep::cqeType cqeLocal = test_ep::cqeGenFromSqe(&sqeNew);
-      
-      // Record end time before writing CQE
-      // Use entryId to index into the timing array
-      if (sqeNew.entryId < sqeIterations) {
-        endTime[sqeNew.entryId] = test_ep::wall_clock64();
-      }
-      
-      // Write completion queue entry
-      test_ep::cqeWrite(cqeLocal, cqePtr);
-      
-      sqeOld = sqeNew;
-      cqeCount++;
-    }
+  if (config.endTimes != nullptr) {
+    myEndTimes = &config.endTimes[tid * config.iterations];
   }
-  
+  (void)myEndTimes; // Reserved for future use when GPU records end times
+
+  // Calculate delay if needed
+  uint64_t delayNs = 0;
+  if (config.delayNs < 0) {
+    // Fixed delay: use absolute value
+    delayNs = static_cast<uint64_t>(-config.delayNs);
+  } else if (config.delayNs > 0) {
+    // Random delay: generate value between 0 and delayNs
+    uint64_t seed = tid * 0x9e3779b9ULL + config.iterations * 0x6c6229e6ULL +
+                    wall_clock64();
+    seed = (seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
+    delayNs = seed % (static_cast<uint64_t>(config.delayNs) + 1);
+  }
+
+  // Encode thread index in entryId (upper 16 bits) and iteration (lower 16
+  // bits) This allows CPU threads to identify which thread/iteration the
+  // message is for GPU only writes SQEs - CPU threads will poll and generate
+  // CQEs
+  for (unsigned i = 0; i < config.iterations; ++i) {
+    // Record start time before writing SQE
+    if (myStartTimes != nullptr) {
+      myStartTimes[i] = wall_clock64();
+    }
+
+    // Prepare SQE with thread index encoded
+    test_ep::sqeType sqeLocal = {};
+    sqeLocal.magicID = TEST_EP_MAGIC_ID;
+    sqeLocal.entryId = (tid << 16) | (i & 0xFFFF);
+    sqeLocal.timeStamp = wall_clock64();
+    sqeLocal.dataPayload = delayNs; // Store delay in dataPayload for CPU to
+                                    // read
+
+    // Write submission queue entry
+    test_ep::sqeWrite(sqeLocal, mySqe);
+    __threadfence_system();
+
+    // Note: CPU threads will poll for this SQE and generate the CQE
+    // GPU just waits for the CQE to appear (or times out)
+    // For now, GPU doesn't wait - CPU threads handle completions
+  }
+
   // Synchronize threads before returning
-  if (blockDim.x >= 2) {
+  if (config.numThreads > 1) {
     __syncthreads();
   }
 }

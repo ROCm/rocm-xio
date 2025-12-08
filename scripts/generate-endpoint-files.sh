@@ -131,6 +131,7 @@ cat > "$DISPATCH_OUTPUT" << 'DISPATCH_EOF'
  */
 
 #include "axiio-endpoint.h"
+#include "axiio-endpoint-config.h"
 DISPATCH_EOF
 
 echo "" >> "$DISPATCH_OUTPUT"
@@ -141,31 +142,29 @@ done
 
 echo "" >> "$DISPATCH_OUTPUT"
 
+# Forward declarations for config-based endpoint functions
+# All endpoints now use config-based dispatching
 for ep in $ENDPOINTS; do
   EP_UNDERSCORE=$(echo "$ep" | tr '-' '_')
   
   cat >> "$DISPATCH_OUTPUT" << FORWARD_EOF
 
-// Forward declarations for ${ep} functions
-__device__ void ${EP_UNDERSCORE}_driveEndpoint(unsigned, void*, void*,
-                                      unsigned long long int*,
-                                      unsigned long long int*);
+// Forward declaration for config-based ${ep} function
+__device__ void ${EP_UNDERSCORE}_driveEndpoint(const AxiioEndpointConfig&, void*, void*);
 FORWARD_EOF
 done
 
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_START'
+# Generate config-based dispatch function
+cat >> "$DISPATCH_OUTPUT" << 'CONFIG_DISPATCH_START'
 
-// Internal dispatch function for AxiioEndpoint::drive()
-// This function routes calls to the correct endpoint-specific implementation
+// Config-based dispatch function - routes to config-based endpoint functions
 __device__ void driveDispatch(
   EndpointType type,
-  unsigned iterations,
+  const AxiioEndpointConfig& config,
   void* submissionQueue,
-  void* completionQueue,
-  unsigned long long int* startTimes,
-  unsigned long long int* endTimes) {
+  void* completionQueue) {
   switch (type) {
-DISPATCH_DRIVE_START
+CONFIG_DISPATCH_START
 
 FIRST_EP=""
 for ep in $ENDPOINTS; do
@@ -176,28 +175,26 @@ for ep in $ENDPOINTS; do
     FIRST_EP="$EP_UNDERSCORE"
   fi
   
-  cat >> "$DISPATCH_OUTPUT" << CASE_EOF
+  cat >> "$DISPATCH_OUTPUT" << CONFIG_CASE_EOF
     case EndpointType::${EP_UPPER}:
-      ${EP_UNDERSCORE}_driveEndpoint(iterations, submissionQueue, completionQueue,
-                            startTimes, endTimes);
+      ${EP_UNDERSCORE}_driveEndpoint(config, submissionQueue, completionQueue);
       break;
-CASE_EOF
+CONFIG_CASE_EOF
 done
 
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_END'
+cat >> "$DISPATCH_OUTPUT" << CONFIG_DISPATCH_END
     default:
       // Default to first discovered endpoint
-DISPATCH_DRIVE_END
+CONFIG_DISPATCH_END
 
-echo "      ${FIRST_EP}_driveEndpoint(iterations, submissionQueue, completionQueue," >> "$DISPATCH_OUTPUT"
-echo "                            startTimes, endTimes);" >> "$DISPATCH_OUTPUT"
+echo "      ${FIRST_EP}_driveEndpoint(config, submissionQueue, completionQueue);" >> "$DISPATCH_OUTPUT"
 
-cat >> "$DISPATCH_OUTPUT" << 'DISPATCH_DRIVE_CLOSE'
+cat >> "$DISPATCH_OUTPUT" << 'CONFIG_DISPATCH_CLOSE'
       break;
   }
 }
 
-DISPATCH_DRIVE_CLOSE
+CONFIG_DISPATCH_CLOSE
 
 echo "Generated endpoint dispatch: $DISPATCH_OUTPUT"
 

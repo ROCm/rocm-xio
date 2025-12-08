@@ -3,29 +3,25 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "axiio-endpoint.h"
 #include "axiio-endpoint-registry.h"
+#include "axiio-endpoint.h"
 
 // Include endpoint headers for size information
-#include "test-ep.h"
 #include "nvme-ep.h"
 #include "rdma-ep.h"
 #include "sdma-ep.h"
+#include "test-ep.h"
 
 // Forward declaration for dispatch function
-__device__ void driveDispatch(
-  EndpointType type,
-  unsigned iterations,
-  void* submissionQueue,
-  void* completionQueue,
-  unsigned long long int* startTimes,
-  unsigned long long int* endTimes);
+__device__ void driveDispatch(EndpointType type,
+                              const AxiioEndpointConfig& config,
+                              void* submissionQueue, void* completionQueue);
 
 // Constructor implementations
 __host__ AxiioEndpoint::AxiioEndpoint(EndpointType type) : type_(type) {
 }
 
-__host__ AxiioEndpoint::AxiioEndpoint(const std::string& endpointName) 
+__host__ AxiioEndpoint::AxiioEndpoint(const std::string& endpointName)
   : type_(getEndpointType(endpointName)) {
 }
 
@@ -88,15 +84,10 @@ __host__ size_t getCompletionQueueEntrySize(EndpointType type) {
   }
 }
 
-// Drive method implementation - dispatches to endpoint-specific function
-__device__ void AxiioEndpoint::drive(
-  unsigned iterations,
-  void* submissionQueue,
-  void* completionQueue,
-  unsigned long long int* startTimes,
-  unsigned long long int* endTimes) {
-  
+// Drive method implementation - new config-based version
+__device__ void AxiioEndpoint::drive(const AxiioEndpointConfig& config,
+                                     void* submissionQueue,
+                                     void* completionQueue) {
   // Dispatch to endpoint-specific drive function (handles casting internally)
-  driveDispatch(type_, iterations, submissionQueue, completionQueue, startTimes, endTimes);
+  driveDispatch(type_, config, submissionQueue, completionQueue);
 }
-

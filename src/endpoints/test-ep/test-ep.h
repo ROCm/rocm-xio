@@ -34,7 +34,9 @@ struct test_cqe {
   uint8_t pad[32 - 11]; // Padding to 32 bytes
 } __attribute__((packed));
 
-static_assert(sizeof(struct test_sqe) == TEST_EP_SQE_SIZE, "test_sqe size mismatch");
-static_assert(sizeof(struct test_cqe) == TEST_EP_CQE_SIZE, "test_cqe size mismatch");
+static_assert(sizeof(struct test_sqe) == TEST_EP_SQE_SIZE,
+              "test_sqe size mismatch");
+static_assert(sizeof(struct test_cqe) == TEST_EP_CQE_SIZE,
+              "test_cqe size mismatch");
 
 #endif // TEST_EP_H
