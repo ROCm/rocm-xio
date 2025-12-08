@@ -6,6 +6,9 @@ on:
     branches:
       - main
     paths:
+      - 'src/**.hip'
+      - 'src/**.cpp'
+      - 'src/**.h'
       - '**.hip'
       - '**.cpp'
       - '**.h'
@@ -35,7 +38,7 @@ jobs:
       uses: DoozyX/clang-format-lint-action@v0.18.2
       with:
         source: '.'
-        exclude: './build ./stebates-*'
+        exclude: './build ./stebates-* ./stephen-dec5 ./src/include/external'
         extensions: 'cpp,h,hpp,c,cc,hip'
         clangFormatVersion: 18
         style: file

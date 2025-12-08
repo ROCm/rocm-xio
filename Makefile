@@ -10,7 +10,7 @@ rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) \
 	$(filter $(subst *,%,$2),$d))
 
 # Directories
-INCLUDE_DIR := include
+INCLUDE_DIR := src/include
 BIN_DIR := bin
 LIB_DIR := lib
 BUILD_DIR ?= build
@@ -32,9 +32,9 @@ CLANGXX ?= /opt/rocm/llvm/bin/clang++
 CLANG_FORMAT ?= clang-format
 
 # Project directories
-ENDPOINTS_DIR := endpoints
-COMMON_DIR := common
-TESTER_DIR := tester
+ENDPOINTS_DIR := src/endpoints
+COMMON_DIR := src/common
+TESTER_DIR := src/tester
 
 # Automatically discover all available endpoints from subdirectories
 VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
@@ -42,6 +42,7 @@ VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
 # Generated files
 ENDPOINT_REGISTRY_GEN := $(INCLUDE_DIR)/axiio-endpoint-registry-gen.h
 ENDPOINT_DISPATCH_GEN := $(COMMON_DIR)/endpoint-dispatch.hip
+ENDPOINT_INCLUDES_GEN := $(INCLUDE_DIR)/axiio-endpoint-includes-gen.h
 
 # External headers
 EXTERNAL_HEADERS_DIR := $(INCLUDE_DIR)/external
@@ -68,7 +69,7 @@ LIB_SOURCES := $(filter-out $(ENDPOINT_DISPATCH_GEN),$(call rwildcard,$(COMMON_D
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 
 # Add the generated endpoint-dispatch object explicitly
-ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/common/endpoint-dispatch.o
+ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/src/common/endpoint-dispatch.o
 LIB_OBJECTS += $(ENDPOINT_DISPATCH_OBJ)
 
 # Tester source file
@@ -76,7 +77,8 @@ TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
 TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.hip=.o)
 # Tester depends on endpoint headers it includes (all endpoint headers)
 TESTER_HEADERS := $(call rwildcard,$(ENDPOINTS_DIR),*.h) \
-                  $(call rwildcard,$(INCLUDE_DIR),*.h)
+                  $(call rwildcard,$(INCLUDE_DIR),*.h) \
+				  $(call rwildcard,$(TESTER_DIR),*.h)
 
 # GPU architecture
 OFFLOAD_ARCH ?=
@@ -113,18 +115,22 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 .PHONY: build_info
-build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN)
+build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) $(ENDPOINT_INCLUDES_GEN)
 	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
-# Generate endpoint registry from discovered endpoints
-$(ENDPOINT_REGISTRY_GEN): scripts/generate-endpoint-registry.sh | $(INCLUDE_DIR)
-	@echo "Generating endpoint registry from: $(VALID_ENDPOINTS)"
-	@./scripts/generate-endpoint-registry.sh $(ENDPOINTS_DIR) $@
+# Generate all endpoint files (registry, dispatch, includes) from discovered endpoints
+# Use a sentinel file to prevent parallel generation
+ENDPOINT_GEN_SENTINEL := $(BUILD_DIR)/.endpoint-files-generated
 
-# Generate endpoint dispatch from discovered endpoints
-$(ENDPOINT_DISPATCH_GEN): scripts/generate-endpoint-dispatch.sh | $(COMMON_DIR)
-	@echo "Generating endpoint dispatch from: $(VALID_ENDPOINTS)"
-	@./scripts/generate-endpoint-dispatch.sh $(ENDPOINTS_DIR) $@
+$(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) $(ENDPOINT_INCLUDES_GEN): \
+	$(ENDPOINT_GEN_SENTINEL)
+
+$(ENDPOINT_GEN_SENTINEL): scripts/generate-endpoint-files.sh | $(INCLUDE_DIR) $(COMMON_DIR) $(BUILD_DIR)
+	@echo "Generating endpoint files from: $(VALID_ENDPOINTS)"
+	@./scripts/generate-endpoint-files.sh $(ENDPOINTS_DIR) \
+		$(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) \
+		$(ENDPOINT_INCLUDES_GEN)
+	@touch $@
 
 # Download NVMe headers from Linux kernel
 $(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
@@ -136,7 +142,7 @@ $(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
 fetch-nvme-headers: $(NVME_KERNEL_HEADERS)
 	@echo ""
 	@echo "NVMe kernel headers downloaded to $(EXTERNAL_HEADERS_DIR)/"
-	@echo "These are for reference only - the nvme-ep definitions are in endpoints/nvme-ep/nvme-ep.h"
+	@echo "These are for reference only - the nvme-ep definitions are in src/endpoints/nvme-ep/nvme-ep.h"
 
 # Download RDMA headers from rdma-core repository
 $(RDMA_HEADERS): scripts/fetch-rdma-headers.sh
@@ -153,7 +159,7 @@ $(RDMA_VENDOR_HEADERS): $(RDMA_HEADERS) scripts/generate-rdma-vendor-headers.sh
 fetch-rdma-headers: $(RDMA_HEADERS) $(RDMA_VENDOR_HEADERS)
 	@echo ""
 	@echo "RDMA provider headers downloaded to $(RDMA_HEADERS_DIR)/"
-	@echo "These are for reference only - the rdma-ep definitions are in endpoints/rdma-ep/rdma-ep.h"
+	@echo "These are for reference only - the rdma-ep definitions are in src/endpoints/rdma-ep/rdma-ep.h"
 	@echo "Vendor-specific headers auto-generated: mlx/, bnxt/, ionic/, pvrdma/"
 
 .PHONY: fetch-external-headers
@@ -184,7 +190,7 @@ rdma-ep-tester: $(RDMA_TESTER)
 	@echo "Built RDMA endpoint tester: $(RDMA_TESTER)"
 
 # Make RDMA endpoint depend on vendor headers
-$(BUILD_DIR)/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
+$(BUILD_DIR)/src/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
 
 # Make endpoint-dispatch.o depend on the generated dispatch file
 $(ENDPOINT_DISPATCH_OBJ): $(ENDPOINT_DISPATCH_GEN)
@@ -199,9 +205,10 @@ $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 # $1: source file path
 define get_endpoint_define
 $(if $(findstring /test-ep/,$1),-DAXIIO_ENDPOINT_TEST,\
+$(if $(findstring /nvme-simple-ep/,$1),-DAXIIO_ENDPOINT_NVME_SIMPLE,\
 $(if $(findstring /nvme-ep/,$1),-DAXIIO_ENDPOINT_NVME,\
 $(if $(findstring /sdma-ep/,$1),-DAXIIO_ENDPOINT_SDMA,\
-$(if $(findstring /rdma-ep/,$1),-DAXIIO_ENDPOINT_RDMA,))))
+$(if $(findstring /rdma-ep/,$1),-DAXIIO_ENDPOINT_RDMA,)))))
 endef
 
 asm: $(LIBTARGET)
@@ -214,7 +221,8 @@ list:
 		grep -E gfx[1-9] | sort -t'x' -k2,2n | sed 's/^[ \t]*/  /'
 
 clean:
-	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR) $(ENDPOINT_REGISTRY_GEN)
+	@$(RM) -rf $(BIN_DIR) $(LIB_DIR) $(BUILD_DIR) $(ENDPOINT_REGISTRY_GEN) \
+		$(ENDPOINT_INCLUDES_GEN) $(ENDPOINT_GEN_SENTINEL)
 
 clean-external:
 	@$(RM) -rf $(EXTERNAL_HEADERS_DIR)
@@ -239,7 +247,8 @@ lint-format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
-		-not -path './include/external/*' \
+		-not -path './stephen-dec5/*' \
+		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
 		&& echo "✓ All files pass clang-format check" \
@@ -257,7 +266,8 @@ format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
-		-not -path './include/external/*' \
+		-not -path './stephen-dec5/*' \
+		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) -i --style=file
 	@echo "✓ Formatting complete"

@@ -4,7 +4,10 @@ matrix:
   aspell:
     lang: en
   sources:
-  - '**/*.md'
+  - '*.md'
+  - 'src/**/*.md'
+  - 'docs/**/*.md'
+  - 'scripts/**/*.md'
   pipeline:
   - pyspelling.filters.markdown
   dictionary:
