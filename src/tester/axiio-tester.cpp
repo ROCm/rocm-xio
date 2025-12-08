@@ -4,47 +4,19 @@
  */
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <iostream>
-#include <thread>
 #include <vector>
 
 #include <CLI/CLI.hpp>
 
-#include "axiio-endpoint-config.h"
-#include "axiio-endpoint-registry.h"
-#include "axiio-endpoint.h"
-#include "axiio-helpers.h"
-#include "axiio-tester.h"
 #include "axiio.h"
-
-// Get CPU wall clock time in nanoseconds
-// Reserved for future CPU thread support
-__attribute__((unused)) static inline uint64_t getCpuTime() {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-}
-
-// Note: CPU thread support should be implemented by endpoints themselves
-// if they need it. The tester is generic and doesn't know about endpoint
-// specifics.
-
-// GPU kernel that calls the endpoint drive function with config
-__global__ void test_endpoint_kernel(AxiioEndpoint endpoint,
-                                     AxiioEndpointConfig config,
-                                     void* submissionQueue,
-                                     void* completionQueue) {
-  endpoint.drive(config, submissionQueue, completionQueue);
-}
 
 int main(int argc, char** argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
-
   // Base configuration
   AxiioEndpointConfig baseConfig;
 
@@ -82,9 +54,7 @@ int main(int argc, char** argv) {
   app.add_flag("--histogram", printHistogram, "Generate performance histogram");
 
   std::string endpointName = "test-ep";
-  app
-    .add_option("-e,--endpoint", endpointName,
-                "Endpoint to use (test-ep, nvme-ep, rdma-ep, sdma-ep)")
+  app.add_option("-e,--endpoint", endpointName, "Endpoint to use")
     ->default_val("test-ep");
 
   bool listEndpoints = false;
@@ -115,38 +85,64 @@ int main(int argc, char** argv) {
   // Create endpoint object
   AxiioEndpoint endpoint(endpointName);
 
-  // Set up endpoint-specific configuration
-  // Note: Endpoints can register their config setup via the registry
-  // For now, we'll leave endpointConfig as nullptr and let endpoints handle it
-  // TODO: Add endpoint config registration mechanism
-  (void)baseConfig.endpointConfig; // Reserved for future endpoint config
-                                   // support
+  // Get GPU device information (like simple-test)
+  int deviceId = 0;
+  HIP_CHECK(hipGetDevice(&deviceId));
+  hipDeviceProp_t deviceProp;
+  HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
 
-  if (baseConfig.verbose) {
-    std::cout << "Using endpoint: " << endpoint.getName() << std::endl;
-    std::cout << "Description: " << endpoint.getDescription() << std::endl;
-    std::cout << "Iterations: " << baseConfig.iterations << std::endl;
-    std::cout << "Threads: " << baseConfig.numThreads << std::endl;
-    if (baseConfig.delayNs != 0) {
-      if (baseConfig.delayNs < 0) {
-        std::cout << "Delay: Fixed " << -baseConfig.delayNs << " ns"
-                  << std::endl;
-      } else {
-        std::cout << "Delay: Random 0 to " << baseConfig.delayNs << " ns"
-                  << std::endl;
-      }
+  // Get GPU wall clock frequency (in KHz)
+  int gpuWallClockRateKHz = 0;
+  HIP_CHECK(hipDeviceGetAttribute(&gpuWallClockRateKHz,
+                                  hipDeviceAttributeWallClockRate, deviceId));
+
+  // Calculate GPU clock period in nanoseconds
+  // Frequency is in KHz, so period = 1e6 / frequency_khz nanoseconds
+  double gpuClockPeriodNs = 1000000.0 /
+                            static_cast<double>(gpuWallClockRateKHz);
+
+  // Get CPU clock resolution
+  struct timespec cpuRes;
+  clock_getres(CLOCK_MONOTONIC, &cpuRes);
+  double cpuClockResolutionNs = cpuRes.tv_sec * 1000000000.0 + cpuRes.tv_nsec;
+
+  // Always print device and endpoint info (even when not verbose)
+  std::cout << "GPU Model: " << deviceProp.name << std::endl;
+  std::cout << "GPU Device ID: " << deviceId << std::endl;
+  std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
+            << std::endl;
+  std::cout << "GPU Clock Period: " << std::fixed << std::setprecision(3)
+            << gpuClockPeriodNs << " ns" << std::endl;
+  std::cout << "CPU Clock: CLOCK_MONOTONIC" << std::endl;
+  std::cout << "CPU Clock Resolution: " << std::fixed << std::setprecision(3)
+            << cpuClockResolutionNs << " ns" << std::endl;
+  std::cout << "Using endpoint: " << endpoint.getName() << std::endl;
+  std::cout << "Description: " << endpoint.getDescription() << std::endl;
+  std::cout << "Iterations: " << baseConfig.iterations << std::endl;
+  std::cout << "Threads: " << baseConfig.numThreads << std::endl;
+  if (baseConfig.delayNs != 0) {
+    if (baseConfig.delayNs < 0) {
+      std::cout << "Delay: Fixed " << -baseConfig.delayNs << " ns" << std::endl;
+    } else {
+      std::cout << "Delay: Random 0 to " << baseConfig.delayNs << " ns"
+                << std::endl;
     }
-    std::cout << "Memory Mode: " << baseConfig.memoryMode << std::endl;
   }
+
+  // Extract memory mode bits and explain them (like simple-test)
+  bool gpuWriteToDevice = (baseConfig.memoryMode & 0x1) != 0; // LSB
+  bool cpuWriteToDevice = (baseConfig.memoryMode & 0x2) != 0; // MSB
+  std::cout << "Memory Mode: " << baseConfig.memoryMode
+            << " (GPU write: " << (gpuWriteToDevice ? "device" : "host")
+            << ", CPU write: " << (cpuWriteToDevice ? "device" : "host") << ")"
+            << std::endl;
 
   // Get queue entry sizes from endpoint
   size_t sqeSize = endpoint.getSubmissionQueueEntrySize();
   size_t cqeSize = endpoint.getCompletionQueueEntrySize();
 
-  if (baseConfig.verbose) {
-    std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
-    std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
-  }
+  std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
+  std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
 
   // Allocate memory based on number of threads
   void* hostSqeAddr = nullptr;
@@ -174,82 +170,27 @@ int main(int argc, char** argv) {
   memset(hostStartTime, 0, totalTimingSize);
   memset(hostEndTime, 0, totalTimingSize);
 
-  // Allocate device memory for SQE/CQE and timing
-  void* deviceSqeAddr = nullptr;
-  void* deviceCqeAddr = nullptr;
-  unsigned long long int* deviceStartTime = nullptr;
-  unsigned long long int* deviceEndTime = nullptr;
+  // This allows both CPU and GPU to access the same memory
+  // Timing arrays are host-accessible so CPU threads can write to endTimes
+  baseConfig.startTimes = hostStartTime;
+  baseConfig.endTimes = hostEndTime;
+  baseConfig.submissionQueue = hostSqeAddr;
+  baseConfig.completionQueue = hostCqeAddr;
 
-  HIP_CHECK(hipMalloc(&deviceSqeAddr, totalSqeSize));
-  HIP_CHECK(hipMalloc(&deviceCqeAddr, totalCqeSize));
-  HIP_CHECK(hipMalloc((void**)&deviceStartTime, totalTimingSize));
-  HIP_CHECK(hipMalloc((void**)&deviceEndTime, totalTimingSize));
-
-  // Set timing arrays in config
-  baseConfig.startTimes = deviceStartTime;
-  baseConfig.endTimes = deviceEndTime;
-
-  // Copy initial buffers to device
-  HIP_CHECK(
-    hipMemcpy(deviceSqeAddr, hostSqeAddr, totalSqeSize, hipMemcpyHostToDevice));
-  HIP_CHECK(
-    hipMemcpy(deviceCqeAddr, hostCqeAddr, totalCqeSize, hipMemcpyHostToDevice));
-
-  // Copy endpoint object and config to device (needed for kernel)
-  AxiioEndpoint* deviceEndpoint = nullptr;
-  HIP_CHECK(hipMalloc((void**)&deviceEndpoint, sizeof(AxiioEndpoint)));
-  HIP_CHECK(hipMemcpy(deviceEndpoint, &endpoint, sizeof(AxiioEndpoint),
-                      hipMemcpyHostToDevice));
-
-  AxiioEndpointConfig* deviceConfig = nullptr;
-  HIP_CHECK(hipMalloc((void**)&deviceConfig, sizeof(AxiioEndpointConfig)));
-  // Create device config copy (pointers will be device pointers)
-  AxiioEndpointConfig deviceConfigCopy = baseConfig;
-  deviceConfigCopy.startTimes = deviceStartTime;
-  deviceConfigCopy.endTimes = deviceEndTime;
-  deviceConfigCopy.endpointConfig = nullptr; // Endpoint config not needed on
-                                             // device
-  HIP_CHECK(hipMemcpy(deviceConfig, &deviceConfigCopy,
-                      sizeof(AxiioEndpointConfig), hipMemcpyHostToDevice));
-
-  // Check hardware concurrency for CPU threads
-  unsigned hardwareThreads = std::thread::hardware_concurrency();
-  if (baseConfig.numThreads > hardwareThreads) {
-    std::cerr << "Warning: Requested " << baseConfig.numThreads
-              << " CPU threads but only " << hardwareThreads
-              << " hardware threads available. Performance may degrade."
-              << std::endl;
-  }
-
-  if (baseConfig.verbose) {
-    std::cout << "Launching GPU kernel..." << std::endl;
-  }
-
-  // Launch GPU kernel with config
-  // Note: If endpoints need CPU threads, they should handle that internally
-  // or via a callback mechanism. The tester is generic.
-  hipLaunchKernelGGL(test_endpoint_kernel, dim3(1), dim3(baseConfig.numThreads),
-                     0, 0, *deviceEndpoint, *deviceConfig, deviceSqeAddr,
-                     deviceCqeAddr);
-
-  // Check for kernel launch errors
-  hipError_t err = hipGetLastError();
+  // Run endpoint test - launches GPU kernel and waits for completion
+  // CPU threads are handled internally by the endpoint if needed
+  hipError_t err = endpoint.run(&baseConfig);
   if (err != hipSuccess) {
-    std::cerr << "Kernel launch failed: " << hipGetErrorString(err)
-              << std::endl;
-    HIP_CHECK(hipFree(deviceEndpoint));
-    HIP_CHECK(hipFree(deviceConfig));
+    std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
+              << " (error code: " << err << ")" << std::endl;
+    HIP_CHECK(hipHostFree(hostSqeAddr));
+    HIP_CHECK(hipHostFree(hostCqeAddr));
+    HIP_CHECK(hipHostFree(hostStartTime));
+    HIP_CHECK(hipHostFree(hostEndTime));
     return EXIT_FAILURE;
   }
 
-  // Wait for GPU kernel to complete
-  HIP_CHECK(hipDeviceSynchronize());
-
-  // Copy results back to host
-  HIP_CHECK(hipMemcpy(hostStartTime, deviceStartTime, totalTimingSize,
-                      hipMemcpyDeviceToHost));
-  HIP_CHECK(hipMemcpy(hostEndTime, deviceEndTime, totalTimingSize,
-                      hipMemcpyDeviceToHost));
+  // Timing arrays are already host-accessible, no copy needed
 
   // Print raw timing data if verbose
   if (baseConfig.verbose) {
@@ -293,11 +234,12 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Calculate durations (skip first 3 iterations per thread)
+  // Calculate durations (skip first iteration per thread, as it tends to be
+  // larger)
   std::vector<double> durations;
   for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
     unsigned baseIdx = t * baseConfig.iterations;
-    for (unsigned i = 3; i < baseConfig.iterations; ++i) {
+    for (unsigned i = 1; i < baseConfig.iterations; ++i) {
       unsigned idx = baseIdx + i;
       if (hostEndTime[idx] > hostStartTime[idx]) {
         durations.push_back((double)(hostEndTime[idx] - hostStartTime[idx]));
@@ -305,7 +247,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Print statistics
+  // Print statistics (always printed, even when not verbose)
   if (durations.size() > 0) {
     if (printHistogram) {
       axxioPrintHistogram(durations, baseConfig.iterations);
@@ -316,13 +258,10 @@ int main(int argc, char** argv) {
     std::cout << "Warning: No valid timing data collected" << std::endl;
   }
 
+  // Print completion message (like simple-test)
+  std::cout << "\nTest completed successfully!" << std::endl;
+
   // Free memory
-  HIP_CHECK(hipFree(deviceEndpoint));
-  HIP_CHECK(hipFree(deviceConfig));
-  HIP_CHECK(hipFree(deviceSqeAddr));
-  HIP_CHECK(hipFree(deviceCqeAddr));
-  HIP_CHECK(hipFree(deviceStartTime));
-  HIP_CHECK(hipFree(deviceEndTime));
   HIP_CHECK(hipHostFree(hostSqeAddr));
   HIP_CHECK(hipHostFree(hostCqeAddr));
   HIP_CHECK(hipHostFree(hostStartTime));
