@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <hsa/hsa.h>
+#include <random>
 #include "simple-test.h"
 
 #define HIP_CHECK(call)                                                       \
@@ -200,6 +201,23 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, CpuToGpuMsg* cpuToGpuHost,
     // Get CPU wall clock time when message is received
     uint64_t cpuTime = getCpuTime();
     
+    // Read delay value from data[0] (set by GPU)
+    uint64_t delayNs = currentMsg.data[0];
+    
+    // Implement delay before responding
+    if (delayNs > 0) {
+      if (delayNs < 1000000) {
+        // For delays < 1ms, use busy-wait for accuracy
+        uint64_t startTime = getCpuTime();
+        while (getCpuTime() - startTime < delayNs) {
+          // Busy-wait loop
+        }
+      } else {
+        // For larger delays, use sleep
+        std::this_thread::sleep_for(std::chrono::nanoseconds(delayNs));
+      }
+    }
+    
     // Write response to memory
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
     volatileCpuToGpu->cpuTime = cpuTime;
@@ -216,7 +234,8 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
                           unsigned long long int* startTimes,
                           unsigned long long int* cpuTimes,
                           unsigned long long gpuClockRateKHz,
-                          unsigned numThreads) {
+                          unsigned numThreads,
+                          long long delayNs) {
   // Get thread index (0 to numThreads-1)
   unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
   
@@ -254,8 +273,26 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
     msg.iteration = ((uint64_t)tid << 32) | i;
     msg.gpuTime = wall_clock64();
     
-    // Fill data payload
-    for (int j = 0; j < 5; ++j) {
+    // Calculate delay based on delayNs parameter
+    // Negative: fixed delay of |delayNs|
+    // Positive: random delay between 0 and delayNs
+    uint64_t actualDelayNs = 0;
+    if (delayNs < 0) {
+      // Fixed delay: use absolute value
+      actualDelayNs = static_cast<uint64_t>(-delayNs);
+    } else if (delayNs > 0) {
+      // Random delay: generate value between 0 and delayNs
+      // Use thread ID, iteration, and GPU time as seed for pseudo-randomness
+      uint64_t seed = tid * 0x9e3779b9ULL + i * 0x6c6229e6ULL + 
+                      wall_clock64();
+      // Simple LCG-based random number generator
+      seed = (seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
+      actualDelayNs = seed % (static_cast<uint64_t>(delayNs) + 1);
+    }
+    msg.data[0] = actualDelayNs;
+    
+    // Fill remaining data payload
+    for (int j = 1; j < 5; ++j) {
       msg.data[j] = 0x123456789ABCDEF0ULL + tid + i + j;
     }
 
@@ -305,12 +342,21 @@ int main(int argc, char** argv) {
   unsigned iterations = 10;
   bool verbose = false;
   unsigned memoryMode = 0;
+  long long delayNs = 0; // Delay: negative = fixed delay, positive = max random delay
   int opt;
 
   unsigned numThreads = 1; // Default: single thread
   
+  // Long option definitions for getopt_long
+  static struct option long_options[] = {
+    {"delay", required_argument, 0, 'd'},
+    {0, 0, 0, 0}
+  };
+  
   // Parse command line options
-  while ((opt = getopt(argc, argv, "n:vm:t:")) != -1) {
+  int option_index = 0;
+  while ((opt = getopt_long(argc, argv, "n:vm:t:d:", long_options, 
+                            &option_index)) != -1) {
     switch (opt) {
       case 'n':
         iterations = static_cast<unsigned>(atoi(optarg));
@@ -336,10 +382,18 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         break;
+      case 'd':
+        delayNs = strtoll(optarg, nullptr, 10);
+        if (delayNs == 0 && optarg[0] != '0' && optarg[0] != '-') {
+          std::cerr << "Error: invalid delay value: " << optarg 
+                    << std::endl;
+          return EXIT_FAILURE;
+        }
+        break;
       default:
         std::cerr << "Usage: " << argv[0] 
-                  << " [-n iterations] [-v] [-m mode] [-t threads]" 
-                  << std::endl;
+                  << " [-n iterations] [-v] [-m mode] [-t threads] "
+                  << "[--delay ns]" << std::endl;
         std::cerr << "  -n iterations  Number of iterations (default: 10)" 
                   << std::endl;
         std::cerr << "  -v             Verbose: show timing table" 
@@ -352,6 +406,12 @@ int main(int argc, char** argv) {
                   << "(0=host, 1=device)" << std::endl;
         std::cerr << "  -t threads     Number of GPU threads (default: 1, "
                   << "max: 32)" << std::endl;
+        std::cerr << "  --delay ns     Delay in nanoseconds for CPU response "
+                  << "(default: 0)" << std::endl;
+        std::cerr << "                  Negative: fixed delay of |delay| ns" 
+                  << std::endl;
+        std::cerr << "                  Positive: random delay 0 to delay ns" 
+                  << std::endl;
         return EXIT_FAILURE;
     }
   }
@@ -398,6 +458,14 @@ int main(int argc, char** argv) {
             << (gpuWriteToDevice ? "device" : "host") 
             << ", CPU write: " << (cpuWriteToDevice ? "device" : "host") 
             << ")" << std::endl;
+  if (delayNs != 0) {
+    if (delayNs < 0) {
+      std::cout << "  Delay: Fixed " << -delayNs << " ns" << std::endl;
+    } else {
+      std::cout << "  Delay: Random 0 to " << delayNs << " ns" 
+                << std::endl;
+    }
+  }
 
   // Allocate memory for communication based on mode
   // All device memory uses HSA fine-grained memory (directly CPU accessible)
@@ -592,13 +660,13 @@ int main(int argc, char** argv) {
     CpuToGpuMsg* cpuToGpu = cpuWriteToDevice ? cpuToGpuDevice : cpuToGpuHost;
     hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(1), 0, 0, gpuToCpu, cpuToGpu,
                         iterations, startTimes, cpuTimes, gpuWallClockRateKHz,
-                        1);
+                        1, delayNs);
   } else {
     // Multi-threaded: use arrays, launch numThreads threads
     hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(numThreads), 0, 0,
                         gpuToCpuDeviceArray, cpuToGpuDeviceArray,
                         iterations, startTimesArray, cpuTimesArray,
-                        gpuWallClockRateKHz, numThreads);
+                        gpuWallClockRateKHz, numThreads, delayNs);
   }
 
   // Check for kernel launch errors
