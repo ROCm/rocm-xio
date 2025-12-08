@@ -161,26 +161,20 @@ static hsa_status_t allocateHsaDeviceMemory(size_t size, void** ptr,
 
 
 // CPU thread function that polls for GPU messages and responds
-void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
-               CpuToGpuMsg* cpuToGpuHost, CpuToGpuMsg* cpuToGpuDevice,
-               unsigned iterations, bool gpuWriteToDevice,
-               bool cpuWriteToDevice) {
-  (void)gpuToCpuDevice;
-  (void)cpuToGpuDevice;
-  (void)gpuWriteToDevice;
-  (void)cpuWriteToDevice;
+// Each CPU thread handles one GPU thread's buffer
+void cpuThread(GpuToCpuMsg* gpuToCpuHost, CpuToGpuMsg* cpuToGpuHost,
+               unsigned iterations, unsigned threadIdx) {
   volatile GpuToCpuMsg* volatileGpuToCpu = gpuToCpuHost;
   volatile CpuToGpuMsg* volatileCpuToGpu = cpuToGpuHost;
   GpuToCpuMsg lastMsg = {};
   lastMsg.iteration = 0xFFFFFFFF; // Initialize to invalid value
+  uint64_t lastGpuTimeSeen = 0;
 
   for (unsigned i = 0; i < iterations; ++i) {
     // Poll for new GPU message
     GpuToCpuMsg currentMsg;
-    uint64_t lastGpuTimeSeen = (i == 0) ? 0 : lastMsg.gpuTime;
     
     while (true) {
-
       currentMsg.magic = volatileGpuToCpu->magic;
       currentMsg.iteration = volatileGpuToCpu->iteration;
       currentMsg.gpuTime = volatileGpuToCpu->gpuTime;
@@ -188,9 +182,14 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
         currentMsg.data[j] = volatileGpuToCpu->data[j];
       }
       
-      // Check if this is a new message for this iteration
+      // Extract thread index and iteration from encoded iteration field
+      unsigned msgThreadIdx = (currentMsg.iteration >> 32) & 0xFFFFFFFF;
+      unsigned iter = currentMsg.iteration & 0xFFFFFFFF;
+      
+      // Check if this is a new message for this thread and iteration
       if (currentMsg.magic == GPU_TO_CPU_MAGIC &&
-          currentMsg.iteration == i &&
+          msgThreadIdx == threadIdx &&
+          iter == i &&
           currentMsg.gpuTime != lastGpuTimeSeen) {
         break;
       }
@@ -198,34 +197,43 @@ void cpuThread(GpuToCpuMsg* gpuToCpuHost, GpuToCpuMsg* gpuToCpuDevice,
       std::this_thread::yield();
     }
 
-    // Get CPU wall clock time when message is received (before processing)
+    // Get CPU wall clock time when message is received
     uint64_t cpuTime = getCpuTime();
-
-    // Process the message (simple function: invert the first data word)
-    // The response includes CPU time which is recorded when message received
-    (void)currentMsg.data[0]; // Processed but not used in response
     
-    // Write response to memory atomically
-    // HSA fine-grained memory is automatically coherent, no sync needed
+    // Write response to memory
     volatileCpuToGpu->magic = CPU_TO_GPU_MAGIC;
     volatileCpuToGpu->cpuTime = cpuTime;
 
     lastMsg = currentMsg;
+    lastGpuTimeSeen = currentMsg.gpuTime;
   }
 }
 
-// GPU kernel that runs one thread
+// GPU kernel that supports multiple threads
+// Each thread uses its own buffer and encodes thread index in iteration field
 __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
                           unsigned iterations,
                           unsigned long long int* startTimes,
                           unsigned long long int* cpuTimes,
-                          unsigned long long gpuClockRateKHz) {
-  // Only thread 0 runs
-  if (threadIdx.x != 0 || blockIdx.x != 0) {
+                          unsigned long long gpuClockRateKHz,
+                          unsigned numThreads) {
+  // Get thread index (0 to numThreads-1)
+  unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  // Only process threads in range [0, numThreads)
+  if (tid >= numThreads) {
     return;
   }
-
-  volatile CpuToGpuMsg* volatileCpuToGpu = cpuToGpu;
+  
+  // Each thread uses its own buffer
+  GpuToCpuMsg* myGpuToCpu = &gpuToCpu[tid];
+  CpuToGpuMsg* myCpuToGpu = &cpuToGpu[tid];
+  unsigned long long int* myStartTimes = 
+    &startTimes[tid * iterations];
+  unsigned long long int* myCpuTimes = 
+    &cpuTimes[tid * iterations];
+  
+  volatile CpuToGpuMsg* volatileCpuToGpu = myCpuToGpu;
   GpuToCpuMsg msg = {};
   CpuToGpuMsg lastResponse = {};
   lastResponse.magic = 0; // Initialize to invalid value
@@ -233,30 +241,26 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
   uint64_t lastCpuTime = 0;
   
   // Calculate timeout: 100ms in GPU clock ticks
-  // GPU clock rate is in KHz, so rate in Hz = rate_KHz * 1000
-  // Period in ns = 1e9 / (rate_KHz * 1000) = 1e6 / rate_KHz
-  // 100ms = 100,000,000 ns
-  // Ticks = 100,000,000 / (1e6 / rate_KHz) = 100,000,000 * rate_KHz / 1e6
-  //        = 100 * rate_KHz
   unsigned long long timeoutTicks = 100ULL * gpuClockRateKHz;
 
   for (unsigned i = 0; i < iterations; ++i) {
     // Record start time for this iteration
     unsigned long long pollStartTime = wall_clock64();
-    startTimes[i] = pollStartTime;
+    myStartTimes[i] = pollStartTime;
 
     // Prepare message to CPU
+    // Encode thread index in upper 32 bits, iteration in lower 32 bits
     msg.magic = GPU_TO_CPU_MAGIC;
-    msg.iteration = i;
+    msg.iteration = ((uint64_t)tid << 32) | i;
     msg.gpuTime = wall_clock64();
     
     // Fill data payload
     for (int j = 0; j < 5; ++j) {
-      msg.data[j] = 0x123456789ABCDEF0ULL + i + j;
+      msg.data[j] = 0x123456789ABCDEF0ULL + tid + i + j;
     }
 
     // Write message to memory
-    *gpuToCpu = msg;
+    *myGpuToCpu = msg;
     __threadfence_system(); // Ensure write is visible
 
     // Poll for CPU response with timeout
@@ -279,23 +283,20 @@ __global__ void gpuKernel(GpuToCpuMsg* gpuToCpu, CpuToGpuMsg* cpuToGpu,
           // Accept if this is a new response (cpuTime changed)
           // Or if this is the first valid response (lastCpuTime was 0)
           if (currentResponse.cpuTime != lastCpuTime || lastCpuTime == 0) {
-            // Accept immediately - don't double-check as it might prevent
-            // seeing CPU writes via DMA-BUF mmap
             break;
           }
         }
       }
-
     }
     // If timeout reached, record 0 as CPU time to indicate timeout
     if (timeoutReached) {
-      cpuTimes[i] = 0;
+      myCpuTimes[i] = 0;
       lastCpuTime = 0; // Reset to allow next iteration to accept any response
     } else {
       lastResponse = currentResponse;
       lastCpuTime = currentResponse.cpuTime;
       // Record CPU time from response
-      cpuTimes[i] = currentResponse.cpuTime;
+      myCpuTimes[i] = currentResponse.cpuTime;
     }
   }
 }
@@ -306,8 +307,10 @@ int main(int argc, char** argv) {
   unsigned memoryMode = 0;
   int opt;
 
+  unsigned numThreads = 1; // Default: single thread
+  
   // Parse command line options
-  while ((opt = getopt(argc, argv, "n:vm:")) != -1) {
+  while ((opt = getopt(argc, argv, "n:vm:t:")) != -1) {
     switch (opt) {
       case 'n':
         iterations = static_cast<unsigned>(atoi(optarg));
@@ -326,9 +329,17 @@ int main(int argc, char** argv) {
           return EXIT_FAILURE;
         }
         break;
+      case 't':
+        numThreads = static_cast<unsigned>(atoi(optarg));
+        if (numThreads == 0 || numThreads > 32) {
+          std::cerr << "Error: threads must be 1-32" << std::endl;
+          return EXIT_FAILURE;
+        }
+        break;
       default:
         std::cerr << "Usage: " << argv[0] 
-                  << " [-n iterations] [-v] [-m mode]" << std::endl;
+                  << " [-n iterations] [-v] [-m mode] [-t threads]" 
+                  << std::endl;
         std::cerr << "  -n iterations  Number of iterations (default: 10)" 
                   << std::endl;
         std::cerr << "  -v             Verbose: show timing table" 
@@ -339,6 +350,8 @@ int main(int argc, char** argv) {
                   << "(0=host, 1=device)" << std::endl;
         std::cerr << "                  Bit 1 (MSB): CPU write location "
                   << "(0=host, 1=device)" << std::endl;
+        std::cerr << "  -t threads     Number of GPU threads (default: 1, "
+                  << "max: 32)" << std::endl;
         return EXIT_FAILURE;
     }
   }
@@ -380,6 +393,7 @@ int main(int argc, char** argv) {
             << std::setprecision(3) << cpuClockResolutionNs << " ns" 
             << std::endl;
   std::cout << "  Iterations: " << iterations << std::endl;
+  std::cout << "  Threads: " << numThreads << std::endl;
   std::cout << "  Memory Mode: " << memoryMode << " (GPU write: " 
             << (gpuWriteToDevice ? "device" : "host") 
             << ", CPU write: " << (cpuWriteToDevice ? "device" : "host") 
@@ -387,231 +401,413 @@ int main(int argc, char** argv) {
 
   // Allocate memory for communication based on mode
   // All device memory uses HSA fine-grained memory (directly CPU accessible)
+  // For multi-threaded mode, allocate arrays of buffers (one per thread)
   GpuToCpuMsg* gpuToCpuHost = nullptr; // Host pointer (CPU uses this)
   GpuToCpuMsg* gpuToCpuDevice = nullptr; // Device pointer (GPU uses this)
   CpuToGpuMsg* cpuToGpuHost = nullptr; // Host pointer (CPU uses this)
   CpuToGpuMsg* cpuToGpuDevice = nullptr; // Device pointer (GPU uses this)
   unsigned long long int* startTimes = nullptr;
   unsigned long long int* cpuTimes = nullptr;
+  
+  // Multi-threaded mode: arrays of buffers
+  GpuToCpuMsg* gpuToCpuHostArray = nullptr;
+  GpuToCpuMsg* gpuToCpuDeviceArray = nullptr;
+  CpuToGpuMsg* cpuToGpuHostArray = nullptr;
+  CpuToGpuMsg* cpuToGpuDeviceArray = nullptr;
+  unsigned long long int* startTimesArray = nullptr;
+  unsigned long long int* cpuTimesArray = nullptr;
 
   // Get page size for alignment
   const size_t host_page_size = sysconf(_SC_PAGESIZE);
   
-  // Allocate GPU->CPU message buffer
-  if (gpuWriteToDevice) {
-    size_t gpuToCpuSize = ((sizeof(GpuToCpuMsg) + host_page_size - 1) / 
-                           host_page_size) * host_page_size;
-    
-    // Use HSA fine-grained memory for all device memory modes
-    // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
-    hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
-                                                      (void**)&gpuToCpuDevice,
-                                                      "GPU->CPU");
-    if (hsa_status != HSA_STATUS_SUCCESS) {
-      std::cerr << "Error: HSA memory allocation failed for GPU->CPU buffer: " 
-                << hsa_status << std::endl;
-      return EXIT_FAILURE;
-    }
-    // HSA fine-grained memory pointer can be used directly by CPU
-    gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
-    memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
-
-  } else {
-    // Host memory: use hipHostMalloc (CPU accessible, GPU can access via PCIe)
-    HIP_CHECK(hipHostMalloc((void**)&gpuToCpuHost, sizeof(GpuToCpuMsg),
-                            hipHostMallocDefault));
-    memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
-    gpuToCpuDevice = gpuToCpuHost; // Same pointer for host memory
-  }
-  
-  // Use device pointer for GPU if mode requires it, otherwise use host pointer
-  GpuToCpuMsg* gpuToCpu = gpuWriteToDevice ? gpuToCpuDevice : gpuToCpuHost;
-
-  // Allocate CPU->GPU response buffer
-  if (cpuWriteToDevice) {
-    size_t cpuToGpuSize = ((sizeof(CpuToGpuMsg) + host_page_size - 1) / 
-                           host_page_size) * host_page_size;
-    
-    // Use HSA fine-grained memory for all device memory modes
-    // Fine-grained memory is coherent between CPU and GPU, no DMA-BUF needed
-    hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
-                                                      (void**)&cpuToGpuDevice,
-                                                      "CPU->GPU");
-    if (hsa_status != HSA_STATUS_SUCCESS) {
-      std::cerr << "Error: HSA memory allocation failed for CPU->GPU buffer: " 
-                << hsa_status << std::endl;
-      // Cleanup GPU->CPU buffer
-      if (gpuWriteToDevice) {
-        hsa_memory_free(gpuToCpuDevice);
-      } else {
-        HIP_CHECK(hipHostFree(gpuToCpuHost));
+  if (numThreads == 1) {
+    // Single-threaded mode: allocate single buffers
+    // Allocate GPU->CPU message buffer
+    if (gpuWriteToDevice) {
+      size_t gpuToCpuSize = ((sizeof(GpuToCpuMsg) + host_page_size - 1) / 
+                             host_page_size) * host_page_size;
+      
+      hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
+                                                        (void**)&gpuToCpuDevice,
+                                                        "GPU->CPU");
+      if (hsa_status != HSA_STATUS_SUCCESS) {
+        std::cerr << "Error: HSA memory allocation failed for GPU->CPU "
+                  << "buffer: " << hsa_status << std::endl;
+        return EXIT_FAILURE;
       }
-      return EXIT_FAILURE;
+      gpuToCpuHost = (GpuToCpuMsg*)gpuToCpuDevice;
+      memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
+    } else {
+      HIP_CHECK(hipHostMalloc((void**)&gpuToCpuHost, sizeof(GpuToCpuMsg),
+                              hipHostMallocDefault));
+      memset(gpuToCpuHost, 0, sizeof(GpuToCpuMsg));
+      gpuToCpuDevice = gpuToCpuHost;
     }
-    // HSA fine-grained memory pointer can be used directly by CPU
-    cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuDevice;
-    memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
-  } else {
-    // Host memory: use hipHostMalloc (CPU accessible, GPU can access via PCIe)
-    HIP_CHECK(hipHostMalloc((void**)&cpuToGpuHost, sizeof(CpuToGpuMsg),
+    
+    // Allocate CPU->GPU response buffer
+    if (cpuWriteToDevice) {
+      size_t cpuToGpuSize = ((sizeof(CpuToGpuMsg) + host_page_size - 1) / 
+                             host_page_size) * host_page_size;
+      
+      hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
+                                                        (void**)&cpuToGpuDevice,
+                                                        "CPU->GPU");
+      if (hsa_status != HSA_STATUS_SUCCESS) {
+        std::cerr << "Error: HSA memory allocation failed for CPU->GPU "
+                  << "buffer: " << hsa_status << std::endl;
+        if (gpuWriteToDevice) {
+          hsa_memory_free(gpuToCpuDevice);
+        } else {
+          HIP_CHECK(hipHostFree(gpuToCpuHost));
+        }
+        return EXIT_FAILURE;
+      }
+      cpuToGpuHost = (CpuToGpuMsg*)cpuToGpuDevice;
+      memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
+    } else {
+      HIP_CHECK(hipHostMalloc((void**)&cpuToGpuHost, sizeof(CpuToGpuMsg),
+                              hipHostMallocDefault));
+      memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
+      cpuToGpuDevice = cpuToGpuHost;
+    }
+    
+    // Timing buffers
+    HIP_CHECK(hipHostMalloc((void**)&startTimes,
+                            iterations * sizeof(unsigned long long int),
                             hipHostMallocDefault));
-    memset(cpuToGpuHost, 0, sizeof(CpuToGpuMsg));
-    cpuToGpuDevice = cpuToGpuHost; // Same pointer for host memory
+    HIP_CHECK(hipHostMalloc((void**)&cpuTimes,
+                            iterations * sizeof(unsigned long long int),
+                            hipHostMallocDefault));
+    memset(startTimes, 0, iterations * sizeof(unsigned long long int));
+    memset(cpuTimes, 0, iterations * sizeof(unsigned long long int));
+  } else {
+    // Multi-threaded mode: allocate arrays of buffers (one per thread)
+    // Allocate GPU->CPU message buffers
+    if (gpuWriteToDevice) {
+      size_t gpuToCpuSize = ((sizeof(GpuToCpuMsg) * numThreads + 
+                             host_page_size - 1) / host_page_size) * 
+                            host_page_size;
+      
+      hsa_status_t hsa_status = allocateHsaDeviceMemory(gpuToCpuSize, 
+                                                        (void**)&gpuToCpuDeviceArray,
+                                                        "GPU->CPU");
+      if (hsa_status != HSA_STATUS_SUCCESS) {
+        std::cerr << "Error: HSA memory allocation failed for GPU->CPU "
+                  << "buffers: " << hsa_status << std::endl;
+        return EXIT_FAILURE;
+      }
+      gpuToCpuHostArray = (GpuToCpuMsg*)gpuToCpuDeviceArray;
+      memset(gpuToCpuHostArray, 0, 
+             sizeof(GpuToCpuMsg) * numThreads);
+    } else {
+      HIP_CHECK(hipHostMalloc((void**)&gpuToCpuHostArray, 
+                              sizeof(GpuToCpuMsg) * numThreads,
+                              hipHostMallocDefault));
+      memset(gpuToCpuHostArray, 0, 
+             sizeof(GpuToCpuMsg) * numThreads);
+      gpuToCpuDeviceArray = gpuToCpuHostArray;
+    }
+    
+    // Allocate CPU->GPU response buffers
+    if (cpuWriteToDevice) {
+      size_t cpuToGpuSize = ((sizeof(CpuToGpuMsg) * numThreads + 
+                             host_page_size - 1) / host_page_size) * 
+                            host_page_size;
+      
+      hsa_status_t hsa_status = allocateHsaDeviceMemory(cpuToGpuSize, 
+                                                        (void**)&cpuToGpuDeviceArray,
+                                                        "CPU->GPU");
+      if (hsa_status != HSA_STATUS_SUCCESS) {
+        std::cerr << "Error: HSA memory allocation failed for CPU->GPU "
+                  << "buffers: " << hsa_status << std::endl;
+        if (gpuWriteToDevice) {
+          hsa_memory_free(gpuToCpuDeviceArray);
+        } else {
+          HIP_CHECK(hipHostFree(gpuToCpuHostArray));
+        }
+        return EXIT_FAILURE;
+      }
+      cpuToGpuHostArray = (CpuToGpuMsg*)cpuToGpuDeviceArray;
+      memset(cpuToGpuHostArray, 0, 
+             sizeof(CpuToGpuMsg) * numThreads);
+    } else {
+      HIP_CHECK(hipHostMalloc((void**)&cpuToGpuHostArray, 
+                              sizeof(CpuToGpuMsg) * numThreads,
+                              hipHostMallocDefault));
+      memset(cpuToGpuHostArray, 0, 
+             sizeof(CpuToGpuMsg) * numThreads);
+      cpuToGpuDeviceArray = cpuToGpuHostArray;
+    }
+    
+    // Timing buffers (per thread)
+    HIP_CHECK(hipHostMalloc((void**)&startTimesArray,
+                            iterations * numThreads * 
+                            sizeof(unsigned long long int),
+                            hipHostMallocDefault));
+    HIP_CHECK(hipHostMalloc((void**)&cpuTimesArray,
+                            iterations * numThreads * 
+                            sizeof(unsigned long long int),
+                            hipHostMallocDefault));
+    memset(startTimesArray, 0, 
+           iterations * numThreads * sizeof(unsigned long long int));
+    memset(cpuTimesArray, 0, 
+           iterations * numThreads * sizeof(unsigned long long int));
   }
-  
-  // Use device pointer for GPU if mode requires it, otherwise use host pointer
-  CpuToGpuMsg* cpuToGpu = cpuWriteToDevice ? cpuToGpuDevice : cpuToGpuHost;
 
-  // Timing buffers always in host memory
-  HIP_CHECK(hipHostMalloc((void**)&startTimes,
-                          iterations * sizeof(unsigned long long int),
-                          hipHostMallocDefault));
-  HIP_CHECK(hipHostMalloc((void**)&cpuTimes,
-                          iterations * sizeof(unsigned long long int),
-                          hipHostMallocDefault));
-  memset(startTimes, 0, iterations * sizeof(unsigned long long int));
-  memset(cpuTimes, 0, iterations * sizeof(unsigned long long int));
+  // Check hardware concurrency and warn if exceeded
+  unsigned hardwareThreads = std::thread::hardware_concurrency();
+  if (numThreads > hardwareThreads) {
+    std::cerr << "Warning: Requested " << numThreads 
+              << " CPU threads but only " << hardwareThreads 
+              << " hardware threads available. Performance may degrade."
+              << std::endl;
+  }
 
   // Ensure initialization is visible
   __sync_synchronize();
 
-  // Launch CPU thread first
-  std::thread cpuThreadHandle(cpuThread, gpuToCpuHost, gpuToCpuDevice,
-                              cpuToGpuHost, cpuToGpuDevice, iterations,
-                              gpuWriteToDevice, cpuWriteToDevice);
+  // Launch CPU threads (one per GPU thread)
+  std::vector<std::thread> cpuThreadHandles;
+  if (numThreads == 1) {
+    // Single-threaded mode
+    cpuThreadHandles.emplace_back(cpuThread, gpuToCpuHost, cpuToGpuHost,
+                                  iterations, 0);
+  } else {
+    // Multi-threaded mode: one CPU thread per GPU thread
+    for (unsigned t = 0; t < numThreads; ++t) {
+      cpuThreadHandles.emplace_back(cpuThread, 
+                                    &gpuToCpuHostArray[t],
+                                    &cpuToGpuHostArray[t],
+                                    iterations, t);
+    }
+  }
 
-  // Small delay to ensure CPU thread is ready
+  // Small delay to ensure CPU threads are ready
   std::this_thread::sleep_for(std::chrono::microseconds(100));
 
-  // Launch GPU kernel (1 block, 1 thread)
-  // Pass gpuToCpuHostForWrite for mode 3 test (write to both device and host)
-  hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(1), 0, 0, gpuToCpu, cpuToGpu,
-                      iterations, startTimes, cpuTimes, gpuWallClockRateKHz);
+  // Launch GPU kernel
+  if (numThreads == 1) {
+    // Single-threaded: use single buffers
+    GpuToCpuMsg* gpuToCpu = gpuWriteToDevice ? gpuToCpuDevice : gpuToCpuHost;
+    CpuToGpuMsg* cpuToGpu = cpuWriteToDevice ? cpuToGpuDevice : cpuToGpuHost;
+    hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(1), 0, 0, gpuToCpu, cpuToGpu,
+                        iterations, startTimes, cpuTimes, gpuWallClockRateKHz,
+                        1);
+  } else {
+    // Multi-threaded: use arrays, launch numThreads threads
+    hipLaunchKernelGGL(gpuKernel, dim3(1), dim3(numThreads), 0, 0,
+                        gpuToCpuDeviceArray, cpuToGpuDeviceArray,
+                        iterations, startTimesArray, cpuTimesArray,
+                        gpuWallClockRateKHz, numThreads);
+  }
 
   // Check for kernel launch errors
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     std::cerr << "Kernel launch failed: " << hipGetErrorString(err)
               << std::endl;
-    cpuThreadHandle.join();
+    // Join all CPU threads before exiting
+    for (auto& handle : cpuThreadHandles) {
+      handle.join();
+    }
     return EXIT_FAILURE;
   }
 
   HIP_CHECK(hipDeviceSynchronize());
 
-  // Wait for CPU thread to finish
-  cpuThreadHandle.join();
+  // Wait for all CPU threads to finish
+  for (auto& handle : cpuThreadHandles) {
+    handle.join();
+  }
 
   // Calculate deltas
-  std::vector<long long> gpuDeltas(iterations);
-  std::vector<long long> cpuDeltas(iterations);
+  std::vector<long long> gpuDeltas;
+  std::vector<long long> cpuDeltas;
   
-  gpuDeltas[0] = 0; // First iteration has no previous value
-  cpuDeltas[0] = 0;
-  
-  for (unsigned i = 1; i < iterations; ++i) {
-    gpuDeltas[i] = static_cast<long long>(startTimes[i]) - 
-                   static_cast<long long>(startTimes[i-1]);
-    cpuDeltas[i] = static_cast<long long>(cpuTimes[i]) - 
-                   static_cast<long long>(cpuTimes[i-1]);
+  if (numThreads == 1) {
+    // Single-threaded mode
+    gpuDeltas.resize(iterations);
+    cpuDeltas.resize(iterations);
+    gpuDeltas[0] = 0;
+    cpuDeltas[0] = 0;
+    
+    for (unsigned i = 1; i < iterations; ++i) {
+      gpuDeltas[i] = static_cast<long long>(startTimes[i]) - 
+                     static_cast<long long>(startTimes[i-1]);
+      cpuDeltas[i] = static_cast<long long>(cpuTimes[i]) - 
+                     static_cast<long long>(cpuTimes[i-1]);
+    }
+  } else {
+    // Multi-threaded mode: aggregate across all threads
+    gpuDeltas.resize(iterations * numThreads);
+    cpuDeltas.resize(iterations * numThreads);
+    
+    for (unsigned t = 0; t < numThreads; ++t) {
+      unsigned baseIdx = t * iterations;
+      gpuDeltas[baseIdx] = 0;
+      cpuDeltas[baseIdx] = 0;
+      
+      for (unsigned i = 1; i < iterations; ++i) {
+        unsigned idx = baseIdx + i;
+        unsigned prevIdx = baseIdx + i - 1;
+        gpuDeltas[idx] = static_cast<long long>(startTimesArray[idx]) - 
+                         static_cast<long long>(startTimesArray[prevIdx]);
+        cpuDeltas[idx] = static_cast<long long>(cpuTimesArray[idx]) - 
+                         static_cast<long long>(cpuTimesArray[prevIdx]);
+      }
+    }
   }
 
   // Print results table if verbose
   if (verbose) {
-    std::cout << "\n|-----------|-----------------|-----------------|"
-              << "-----------------|-----------------|" << std::endl;
-    std::cout << std::setw(9) << "| Iteration" << " | " << std::setw(15)
-              << "GPU Time" << " | " << std::setw(15)
-              << "CPU Time" << " | " << std::setw(15)
-              << "GPU Delta" << " | " << std::setw(17)
-              << "CPU Delta   |" << std::endl;
-    std::cout << "|-----------|-----------------|-----------------|"
-              << "-----------------|-----------------|" << std::endl;
-    for (unsigned i = 0; i < iterations; ++i) {
-      std::cout << "|" << std::setw(10) << (i + 1) << " | " << std::setw(15)
-                << startTimes[i] << " | " << std::setw(15)
-                << cpuTimes[i] << " | " << std::setw(15)
-                << gpuDeltas[i] << " | " << std::setw(15)
-                << cpuDeltas[i] << " |" << std::endl;
+    if (numThreads == 1) {
+      std::cout << "\n|-----------|-----------------|-----------------|"
+                << "-----------------|-----------------|" << std::endl;
+      std::cout << std::setw(9) << "| Iteration" << " | " << std::setw(15)
+                << "GPU Time" << " | " << std::setw(15)
+                << "CPU Time" << " | " << std::setw(15)
+                << "GPU Delta" << " | " << std::setw(17)
+                << "CPU Delta   |" << std::endl;
+      std::cout << "|-----------|-----------------|-----------------|"
+                << "-----------------|-----------------|" << std::endl;
+      for (unsigned i = 0; i < iterations; ++i) {
+        std::cout << "|" << std::setw(10) << (i + 1) << " | " 
+                  << std::setw(15)
+                  << startTimes[i] << " | " << std::setw(15)
+                  << cpuTimes[i] << " | " << std::setw(15)
+                  << gpuDeltas[i] << " | " << std::setw(15)
+                  << cpuDeltas[i] << " |" << std::endl;
+      }
+      std::cout << "|-----------|-----------------|-----------------|"
+                << "-----------------|-----------------|" << std::endl;
+    } else {
+      std::cout << "\n|--------|------------|-----------------|"
+                << "-----------------|-----------------|"
+                << "-----------------|" << std::endl;
+      std::cout << std::setw(7) << "| Thread" << " | " 
+                << std::setw(10) << "Iteration" << " | " 
+                << std::setw(15) << "GPU Time" << " | " 
+                << std::setw(15) << "CPU Time" << " | " 
+                << std::setw(15) << "GPU Delta" << " | " 
+                << std::setw(15) << "CPU Delta" << " |" << std::endl;
+      std::cout << "|--------|------------|-----------------|"
+                << "-----------------|-----------------|"
+                << "-----------------|" << std::endl;
+      for (unsigned t = 0; t < numThreads; ++t) {
+        for (unsigned i = 0; i < iterations; ++i) {
+          unsigned idx = t * iterations + i;
+          std::cout << "|" << std::setw(7) << t << " | " 
+                    << std::setw(10) << (i + 1) << " | " 
+                    << std::setw(15) << startTimesArray[idx] << " | " 
+                    << std::setw(15) << cpuTimesArray[idx] << " | " 
+                    << std::setw(15) << gpuDeltas[idx] << " | " 
+                    << std::setw(15) << cpuDeltas[idx] << " |" 
+                    << std::endl;
+        }
+      }
+      std::cout << "|--------|------------|-----------------|"
+                << "-----------------|-----------------|"
+                << "-----------------|" << std::endl;
     }
-    std::cout << "|-----------|-----------------|-----------------|"
-              << "-----------------|-----------------|" << std::endl;
   }
 
-  // Calculate statistics for deltas (skip first two elements: 
-  // index 0 is always 0, index 1 has cold start overhead)
-  // All statistics (min, max, avg, std dev) exclude the cold start iteration
-  if (iterations > 2) {
-    // GPU Delta statistics (skip first iteration with cold start)
-    auto gpuDeltaBegin = gpuDeltas.begin() + 2;
-    auto gpuDeltaEnd = gpuDeltas.end();
-    auto gpuMin = std::min_element(gpuDeltaBegin, gpuDeltaEnd);
-    auto gpuMax = std::max_element(gpuDeltaBegin, gpuDeltaEnd);
+  // Calculate statistics for deltas (skip first three elements: 
+  // index 0 is always 0, index 1 has cold start overhead,
+  // index 2 often has the max value from first iteration)
+  // All statistics (min, max, avg, std dev) exclude these iterations
+  if (iterations > 3) {
+    // Collect deltas excluding first 3 iterations for each thread
+    std::vector<long long> gpuDeltaFiltered;
+    std::vector<long long> cpuDeltaFiltered;
     
-    double gpuSum = 0.0;
-    for (auto it = gpuDeltaBegin; it != gpuDeltaEnd; ++it) {
-      gpuSum += static_cast<double>(*it);
+    if (numThreads == 1) {
+      // Single-threaded: skip first 3 elements
+      for (size_t i = 3; i < gpuDeltas.size(); ++i) {
+        gpuDeltaFiltered.push_back(gpuDeltas[i]);
+        cpuDeltaFiltered.push_back(cpuDeltas[i]);
+      }
+    } else {
+      // Multi-threaded: skip first 3 elements for each thread
+      for (unsigned t = 0; t < numThreads; ++t) {
+        unsigned baseIdx = t * iterations;
+        for (unsigned i = 3; i < iterations; ++i) {
+          unsigned idx = baseIdx + i;
+          gpuDeltaFiltered.push_back(gpuDeltas[idx]);
+          cpuDeltaFiltered.push_back(cpuDeltas[idx]);
+        }
+      }
     }
-    double gpuAvg = gpuSum / (iterations - 2);
     
-    double gpuVariance = 0.0;
-    for (auto it = gpuDeltaBegin; it != gpuDeltaEnd; ++it) {
-      double diff = static_cast<double>(*it) - gpuAvg;
-      gpuVariance += diff * diff;
-    }
-    gpuVariance /= (iterations - 2);
-    double gpuStdDev = std::sqrt(gpuVariance);
-
-    // CPU Delta statistics (skip first iteration with cold start)
-    auto cpuDeltaBegin = cpuDeltas.begin() + 2;
-    auto cpuDeltaEnd = cpuDeltas.end();
-    auto cpuMin = std::min_element(cpuDeltaBegin, cpuDeltaEnd);
-    auto cpuMax = std::max_element(cpuDeltaBegin, cpuDeltaEnd);
+    if (!gpuDeltaFiltered.empty()) {
+      auto gpuMin = std::min_element(gpuDeltaFiltered.begin(), 
+                                     gpuDeltaFiltered.end());
+      auto gpuMax = std::max_element(gpuDeltaFiltered.begin(), 
+                                     gpuDeltaFiltered.end());
     
-    double cpuSum = 0.0;
-    for (auto it = cpuDeltaBegin; it != cpuDeltaEnd; ++it) {
-      cpuSum += static_cast<double>(*it);
-    }
-    double cpuAvg = cpuSum / (iterations - 2);
-    
-    double cpuVariance = 0.0;
-    for (auto it = cpuDeltaBegin; it != cpuDeltaEnd; ++it) {
-      double diff = static_cast<double>(*it) - cpuAvg;
-      cpuVariance += diff * diff;
-    }
-    cpuVariance /= (iterations - 2);
-    double cpuStdDev = std::sqrt(cpuVariance);
+      double gpuSum = 0.0;
+      for (auto val : gpuDeltaFiltered) {
+        gpuSum += static_cast<double>(val);
+      }
+      double gpuAvg = gpuSum / gpuDeltaFiltered.size();
+      
+      double gpuVariance = 0.0;
+      for (auto val : gpuDeltaFiltered) {
+        double diff = static_cast<double>(val) - gpuAvg;
+        gpuVariance += diff * diff;
+      }
+      gpuVariance /= gpuDeltaFiltered.size();
+      double gpuStdDev = std::sqrt(gpuVariance);
 
-    // Convert GPU deltas from cycles to nanoseconds
-    double gpuMinNs = static_cast<double>(*gpuMin) * gpuClockPeriodNs;
-    double gpuMaxNs = static_cast<double>(*gpuMax) * gpuClockPeriodNs;
-    double gpuAvgNs = gpuAvg * gpuClockPeriodNs;
-    double gpuStdDevNs = gpuStdDev * gpuClockPeriodNs;
+      // CPU Delta statistics
+      auto cpuMin = std::min_element(cpuDeltaFiltered.begin(), 
+                                     cpuDeltaFiltered.end());
+      auto cpuMax = std::max_element(cpuDeltaFiltered.begin(), 
+                                     cpuDeltaFiltered.end());
+      
+      double cpuSum = 0.0;
+      for (auto val : cpuDeltaFiltered) {
+        cpuSum += static_cast<double>(val);
+      }
+      double cpuAvg = cpuSum / cpuDeltaFiltered.size();
+      
+      double cpuVariance = 0.0;
+      for (auto val : cpuDeltaFiltered) {
+        double diff = static_cast<double>(val) - cpuAvg;
+        cpuVariance += diff * diff;
+      }
+      cpuVariance /= cpuDeltaFiltered.size();
+      double cpuStdDev = std::sqrt(cpuVariance);
 
-    // CPU deltas are already in nanoseconds
-    double cpuMinNs = static_cast<double>(*cpuMin);
-    double cpuMaxNs = static_cast<double>(*cpuMax);
-    double cpuAvgNs = cpuAvg;
-    double cpuStdDevNs = cpuStdDev;
+      // Convert GPU deltas from cycles to nanoseconds
+      double gpuMinNs = static_cast<double>(*gpuMin) * gpuClockPeriodNs;
+      double gpuMaxNs = static_cast<double>(*gpuMax) * gpuClockPeriodNs;
+      double gpuAvgNs = gpuAvg * gpuClockPeriodNs;
+      double gpuStdDevNs = gpuStdDev * gpuClockPeriodNs;
 
-    // Format GPU statistics
-    double gpuMinVal, gpuMaxVal, gpuAvgVal, gpuStdDevVal;
-    const char* gpuMinUnit, *gpuMaxUnit, *gpuAvgUnit, *gpuStdDevUnit;
-    formatTime(gpuMinNs, gpuMinVal, gpuMinUnit);
-    formatTime(gpuMaxNs, gpuMaxVal, gpuMaxUnit);
-    formatTime(gpuAvgNs, gpuAvgVal, gpuAvgUnit);
-    formatTime(gpuStdDevNs, gpuStdDevVal, gpuStdDevUnit);
+      // CPU deltas are already in nanoseconds
+      double cpuMinNs = static_cast<double>(*cpuMin);
+      double cpuMaxNs = static_cast<double>(*cpuMax);
+      double cpuAvgNs = cpuAvg;
+      double cpuStdDevNs = cpuStdDev;
 
-    // Format CPU statistics
-    double cpuMinVal, cpuMaxVal, cpuAvgVal, cpuStdDevVal;
-    const char* cpuMinUnit, *cpuMaxUnit, *cpuAvgUnit, *cpuStdDevUnit;
-    formatTime(cpuMinNs, cpuMinVal, cpuMinUnit);
-    formatTime(cpuMaxNs, cpuMaxVal, cpuMaxUnit);
-    formatTime(cpuAvgNs, cpuAvgVal, cpuAvgUnit);
-    formatTime(cpuStdDevNs, cpuStdDevVal, cpuStdDevUnit);
+      // Format GPU statistics
+      double gpuMinVal, gpuMaxVal, gpuAvgVal, gpuStdDevVal;
+      const char* gpuMinUnit, *gpuMaxUnit, *gpuAvgUnit, *gpuStdDevUnit;
+      formatTime(gpuMinNs, gpuMinVal, gpuMinUnit);
+      formatTime(gpuMaxNs, gpuMaxVal, gpuMaxUnit);
+      formatTime(gpuAvgNs, gpuAvgVal, gpuAvgUnit);
+      formatTime(gpuStdDevNs, gpuStdDevVal, gpuStdDevUnit);
 
-    // Print statistics
-    std::cout << "\nDelta Statistics (Real Time):" << std::endl;
+      // Format CPU statistics
+      double cpuMinVal, cpuMaxVal, cpuAvgVal, cpuStdDevVal;
+      const char* cpuMinUnit, *cpuMaxUnit, *cpuAvgUnit, *cpuStdDevUnit;
+      formatTime(cpuMinNs, cpuMinVal, cpuMinUnit);
+      formatTime(cpuMaxNs, cpuMaxVal, cpuMaxUnit);
+      formatTime(cpuAvgNs, cpuAvgVal, cpuAvgUnit);
+      formatTime(cpuStdDevNs, cpuStdDevVal, cpuStdDevUnit);
+
+      // Print statistics
+      std::cout << "\nDelta Statistics (Real Time):" << std::endl;
     std::cout << "  GPU Delta:" << std::endl;
     std::cout << "    Min:     " << std::fixed << std::setprecision(2)
               << gpuMinVal << gpuMinUnit << " (" << *gpuMin 
@@ -643,56 +839,92 @@ int main(int argc, char** argv) {
     std::cout << "    Std Dev: " << std::fixed << std::setprecision(2)
               << cpuStdDevVal << cpuStdDevUnit << " (" << cpuStdDevNs 
               << " ns)" << std::endl;
-    // Calculate total elapsed time (first to last iteration)
-    double gpuTotalNs = static_cast<double>(startTimes[iterations-1] - 
-                                            startTimes[0]) * gpuClockPeriodNs;
-    double cpuTotalNs = static_cast<double>(cpuTimes[iterations-1] - 
-                                            cpuTimes[0]);
+      // Calculate total elapsed time (first to last iteration)
+      double gpuTotalNs, cpuTotalNs;
+      if (numThreads == 1) {
+        gpuTotalNs = static_cast<double>(startTimes[iterations-1] - 
+                                         startTimes[0]) * gpuClockPeriodNs;
+        cpuTotalNs = static_cast<double>(cpuTimes[iterations-1] - 
+                                         cpuTimes[0]);
+      } else {
+        // For multi-threaded, use average across threads
+        double gpuTotalSum = 0.0;
+        double cpuTotalSum = 0.0;
+        for (unsigned t = 0; t < numThreads; ++t) {
+          unsigned firstIdx = t * iterations;
+          unsigned lastIdx = firstIdx + iterations - 1;
+          gpuTotalSum += static_cast<double>(startTimesArray[lastIdx] - 
+                                             startTimesArray[firstIdx]) * 
+                         gpuClockPeriodNs;
+          cpuTotalSum += static_cast<double>(cpuTimesArray[lastIdx] - 
+                                              cpuTimesArray[firstIdx]);
+        }
+        gpuTotalNs = gpuTotalSum / numThreads;
+        cpuTotalNs = cpuTotalSum / numThreads;
+      }
 
-    double gpuTotalVal, cpuTotalVal;
-    const char* gpuTotalUnit, *cpuTotalUnit;
-    formatTime(gpuTotalNs, gpuTotalVal, gpuTotalUnit);
-    formatTime(cpuTotalNs, cpuTotalVal, cpuTotalUnit);
+      double gpuTotalVal, cpuTotalVal;
+      const char* gpuTotalUnit, *cpuTotalUnit;
+      formatTime(gpuTotalNs, gpuTotalVal, gpuTotalUnit);
+      formatTime(cpuTotalNs, cpuTotalVal, cpuTotalUnit);
 
-    std::cout << "\n  Total Elapsed Time (first to last iteration):" 
-              << std::endl;
-    std::cout << "    GPU Total: " << std::fixed << std::setprecision(2)
-              << gpuTotalVal << gpuTotalUnit << " (" << gpuTotalNs 
-              << " ns)" << std::endl;
-    std::cout << "    CPU Total: " << std::fixed << std::setprecision(2)
-              << cpuTotalVal << cpuTotalUnit << " (" << cpuTotalNs 
-              << " ns)" << std::endl;
-    std::cout << "    Difference: " << std::fixed << std::setprecision(2)
-              << std::abs(gpuTotalNs - cpuTotalNs) << " ns" << std::endl;
-    std::cout << "    Ratio:      " << std::fixed << std::setprecision(4)
-              << (cpuTotalNs / gpuTotalNs) << std::endl;
+      std::cout << "\n  Total Elapsed Time (first to last iteration):" 
+                << std::endl;
+      std::cout << "    GPU Total: " << std::fixed << std::setprecision(2)
+                << gpuTotalVal << gpuTotalUnit << " (" << gpuTotalNs 
+                << " ns)" << std::endl;
+      std::cout << "    CPU Total: " << std::fixed << std::setprecision(2)
+                << cpuTotalVal << cpuTotalUnit << " (" << cpuTotalNs 
+                << " ns)" << std::endl;
+      std::cout << "    Difference: " << std::fixed << std::setprecision(2)
+                << std::abs(gpuTotalNs - cpuTotalNs) << " ns" << std::endl;
+      std::cout << "    Ratio:      " << std::fixed << std::setprecision(4)
+                << (cpuTotalNs / gpuTotalNs) << std::endl;
 
-    std::cout << "\n  Delta Comparison:" << std::endl;
-    std::cout << "    GPU Avg: " << std::fixed << std::setprecision(2)
-              << gpuAvgNs << " ns" << std::endl;
-    std::cout << "    CPU Avg: " << std::fixed << std::setprecision(2)
-              << cpuAvgNs << " ns" << std::endl;
-    std::cout << "    Ratio:   " << std::fixed << std::setprecision(4)
-              << (cpuAvgNs / gpuAvgNs) << std::endl;
+      std::cout << "\n  Delta Comparison:" << std::endl;
+      std::cout << "    GPU Avg: " << std::fixed << std::setprecision(2)
+                << gpuAvgNs << " ns" << std::endl;
+      std::cout << "    CPU Avg: " << std::fixed << std::setprecision(2)
+                << cpuAvgNs << " ns" << std::endl;
+      std::cout << "    Ratio:   " << std::fixed << std::setprecision(4)
+                << (cpuAvgNs / gpuAvgNs) << std::endl;
+    }
   }
 
   // Cleanup
-  if (gpuWriteToDevice) {
-    // HSA memory: free directly
-    hsa_memory_free(gpuToCpuDevice);
+  if (numThreads == 1) {
+    // Single-threaded cleanup
+    if (gpuWriteToDevice) {
+      hsa_memory_free(gpuToCpuDevice);
+    } else {
+      HIP_CHECK(hipHostFree(gpuToCpuHost));
+    }
+    
+    if (cpuWriteToDevice) {
+      hsa_memory_free(cpuToGpuDevice);
+    } else {
+      HIP_CHECK(hipHostFree(cpuToGpuHost));
+    }
+    
+    HIP_CHECK(hipHostFree(startTimes));
+    HIP_CHECK(hipHostFree(cpuTimes));
   } else {
-    HIP_CHECK(hipHostFree(gpuToCpuHost));
+    // Multi-threaded cleanup
+    if (gpuWriteToDevice) {
+      hsa_memory_free(gpuToCpuDeviceArray);
+    } else {
+      HIP_CHECK(hipHostFree(gpuToCpuHostArray));
+    }
+    
+    if (cpuWriteToDevice) {
+      hsa_memory_free(cpuToGpuDeviceArray);
+    } else {
+      HIP_CHECK(hipHostFree(cpuToGpuHostArray));
+    }
+    
+    HIP_CHECK(hipHostFree(startTimesArray));
+    HIP_CHECK(hipHostFree(cpuTimesArray));
   }
-  
-  if (cpuWriteToDevice) {
-    // HSA memory: free directly
-    hsa_memory_free(cpuToGpuDevice);
-  } else {
-    HIP_CHECK(hipHostFree(cpuToGpuHost));
-  }
-  
-  HIP_CHECK(hipHostFree(startTimes));
-  HIP_CHECK(hipHostFree(cpuTimes));
 
   std::cout << "\nTest completed successfully!" << std::endl;
   return EXIT_SUCCESS;
