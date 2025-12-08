@@ -34,6 +34,10 @@ struct AxiioEndpointConfig {
   unsigned long long int* startTimes = nullptr;
   unsigned long long int* endTimes = nullptr;
 
+  // Queue pointers (host-accessible buffers)
+  void* submissionQueue = nullptr; // Host-accessible SQE buffer
+  void* completionQueue = nullptr; // Host-accessible CQE buffer
+
   // Endpoint-specific configuration (opaque pointer)
   // Endpoints cast this to their specific config type
   void* endpointConfig = nullptr;

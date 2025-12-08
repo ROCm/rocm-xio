@@ -41,7 +41,6 @@ VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
 
 # Generated files
 ENDPOINT_REGISTRY_GEN := $(INCLUDE_DIR)/axiio-endpoint-registry-gen.h
-ENDPOINT_DISPATCH_GEN := $(COMMON_DIR)/endpoint-dispatch.hip
 ENDPOINT_INCLUDES_GEN := $(INCLUDE_DIR)/axiio-endpoint-includes-gen.h
 
 # External headers
@@ -63,18 +62,13 @@ RDMA_VENDOR_HEADERS := $(ENDPOINTS_DIR)/rdma-ep/mlx/mlx5-rdma.h \
 # Find all source files with .hip extension
 LIB_HEADERS := $(call rwildcard,$(INCLUDE_DIR) $(ENDPOINTS_DIR),*.h)
 # Build all endpoints (automatically find all .hip files)
-# Note: rwildcard only finds existing files, so we exclude endpoint-dispatch.hip
-LIB_SOURCES := $(filter-out $(ENDPOINT_DISPATCH_GEN),$(call rwildcard,$(COMMON_DIR),*.hip)) \
+LIB_SOURCES := $(call rwildcard,$(COMMON_DIR),*.hip) \
                $(call rwildcard,$(ENDPOINTS_DIR),*.hip)
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 
-# Add the generated endpoint-dispatch object explicitly
-ENDPOINT_DISPATCH_OBJ := $(BUILD_DIR)/src/common/endpoint-dispatch.o
-LIB_OBJECTS += $(ENDPOINT_DISPATCH_OBJ)
-
 # Tester source file
-TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.hip
-TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.hip=.o)
+TESTER_SOURCE := $(TESTER_DIR)/axiio-tester.cpp
+TESTER_OBJECT := $(BUILD_DIR)/$(TESTER_SOURCE:.cpp=.o)
 # Tester depends on endpoint headers it includes (all endpoint headers)
 TESTER_HEADERS := $(call rwildcard,$(ENDPOINTS_DIR),*.h) \
                   $(call rwildcard,$(INCLUDE_DIR),*.h) \
@@ -115,21 +109,24 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 .PHONY: build_info
-build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) $(ENDPOINT_INCLUDES_GEN)
+build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN)
 	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
-# Generate all endpoint files (registry, dispatch, includes) from discovered endpoints
+# Generate all endpoint files (registry, includes) from discovered endpoints
 # Use a sentinel file to prevent parallel generation
 ENDPOINT_GEN_SENTINEL := $(BUILD_DIR)/.endpoint-files-generated
 
-$(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) $(ENDPOINT_INCLUDES_GEN): \
+$(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN): \
 	$(ENDPOINT_GEN_SENTINEL)
 
 $(ENDPOINT_GEN_SENTINEL): scripts/generate-endpoint-files.sh | $(INCLUDE_DIR) $(COMMON_DIR) $(BUILD_DIR)
 	@echo "Generating endpoint files from: $(VALID_ENDPOINTS)"
 	@./scripts/generate-endpoint-files.sh $(ENDPOINTS_DIR) \
-		$(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_DISPATCH_GEN) \
+		$(ENDPOINT_REGISTRY_GEN) \
 		$(ENDPOINT_INCLUDES_GEN)
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		$(CLANG_FORMAT) -i --style=file $(ENDPOINT_REGISTRY_GEN); \
+	fi
 	@touch $@
 
 # Download NVMe headers from Linux kernel
@@ -192,14 +189,17 @@ rdma-ep-tester: $(RDMA_TESTER)
 # Make RDMA endpoint depend on vendor headers
 $(BUILD_DIR)/src/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
 
-# Make endpoint-dispatch.o depend on the generated dispatch file
-$(ENDPOINT_DISPATCH_OBJ): $(ENDPOINT_DISPATCH_GEN)
 
 # Make all object files depend on generated registry
 $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(eval ENDPOINT_DEFINE := $(call get_endpoint_define,$<))
 	$(HIPCXX) $(CXXFLAGS) $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -c -o $@ $<
+
+# Rule for .cpp files (tester)
+$(BUILD_DIR)/%.o: %.cpp $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
 
 # Function to determine which endpoint define to use based on source path
 # $1: source file path

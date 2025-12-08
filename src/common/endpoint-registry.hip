@@ -6,7 +6,11 @@
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#include <vector>
 
+#include <hip/hip_runtime.h>
+
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint-registry-gen.h"
 #include "axiio-endpoint-registry.h"
 

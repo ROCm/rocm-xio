@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <thread>
+#include <vector>
+
 #include "axiio-endpoint-registry.h"
 #include "axiio-endpoint.h"
 
@@ -12,13 +15,32 @@
 #include "sdma-ep.h"
 #include "test-ep.h"
 
-// Forward declaration for dispatch function
-__device__ void driveDispatch(EndpointType type,
-                              const AxiioEndpointConfig& config,
-                              void* submissionQueue, void* completionQueue);
+// Forward declarations for endpoint-specific run functions
+extern hipError_t test_ep_run(AxiioEndpointConfig* config);
+extern hipError_t nvme_ep_run(AxiioEndpointConfig* config);
+extern hipError_t rdma_ep_run(AxiioEndpointConfig* config);
+extern hipError_t sdma_ep_run(AxiioEndpointConfig* config);
 
 // Constructor implementations
 __host__ AxiioEndpoint::AxiioEndpoint(EndpointType type) : type_(type) {
+  // Set run function pointer based on endpoint type - no switch in run()
+  switch (type) {
+    case EndpointType::TEST_EP:
+      runFunc_ = test_ep_run;
+      break;
+    case EndpointType::NVME_EP:
+      runFunc_ = nvme_ep_run;
+      break;
+    case EndpointType::RDMA_EP:
+      runFunc_ = rdma_ep_run;
+      break;
+    case EndpointType::SDMA_EP:
+      runFunc_ = sdma_ep_run;
+      break;
+    default:
+      runFunc_ = nullptr;
+      break;
+  }
 }
 
 __host__ AxiioEndpoint::AxiioEndpoint(const std::string& endpointName)
@@ -84,10 +106,11 @@ __host__ size_t getCompletionQueueEntrySize(EndpointType type) {
   }
 }
 
-// Drive method implementation - new config-based version
-__device__ void AxiioEndpoint::drive(const AxiioEndpointConfig& config,
-                                     void* submissionQueue,
-                                     void* completionQueue) {
-  // Dispatch to endpoint-specific drive function (handles casting internally)
-  driveDispatch(type_, config, submissionQueue, completionQueue);
+// Run method implementation
+__host__ hipError_t AxiioEndpoint::run(AxiioEndpointConfig* config) {
+  return test_ep_run(config);
+  /*if (runFunc_ == nullptr) {
+    return hipErrorNotSupported;
+  }
+  return runFunc_(config);*/
 }
