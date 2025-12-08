@@ -8,6 +8,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint.h"
 #include "rdma-ep.h"
 
@@ -194,20 +195,13 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
   return result;
 }
 
-__host__ __device__ unsigned long long int wall_clock64() {
-#ifdef __HIP_DEVICE_COMPILE__
-  return __builtin_readcyclecounter();
-#else
-  return 0;
-#endif
-}
+// Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
 } // namespace rdma_ep
 
 // Export rdma-ep functions for runtime dispatch
 __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 void* sqeAddr,
-                                                 void* cqeAddr) {
+                                                 void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
   rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
@@ -233,7 +227,11 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
     }
 
     // Process the RDMA command
-    uint64_t timestamp = rdma_ep::wall_clock64();
+#ifdef __HIP_DEVICE_COMPILE__
+    uint64_t timestamp = wall_clock64();
+#else
+    uint64_t timestamp = 0; // Host code - no timing
+#endif
     cqeLocal = rdma_ep::cqeGenFromSqe(&sqeNew, timestamp);
     rdma_ep::cqeWrite(cqeLocal, cqePtr);
 
@@ -247,10 +245,9 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
   }
 }
 
-__device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
-                                      void* sqeAddr, void* cqeAddr,
-                                      unsigned long long int* startTime,
-                                      unsigned long long int* endTime) {
+// Config-based driveEndpoint function
+__device__ void rdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
+                                      void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
   rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
@@ -276,7 +273,11 @@ __device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
                           RDMAVendor::IONIC, RDMAVendor::PVRDMA};
   int num_vendors = sizeof(vendors) / sizeof(vendors[0]);
 
-  for (unsigned i = 0; i < sqeIterations; i++) {
+  // Extract timing arrays from config
+  unsigned long long int* startTime = config.startTimes;
+  unsigned long long int* endTime = config.endTimes;
+
+  for (unsigned i = 0; i < config.iterations; i++) {
     // Start wqe IDs at 1 to avoid conflicts with zero-initialized memory
     uint16_t wqe_id = static_cast<uint16_t>(i + 1);
 
@@ -320,10 +321,14 @@ __device__ void rdma_ep_driveEndpoint(unsigned sqeIterations,
     }
 
     // Submit command and wait for completion
-    startTime[i] = rdma_ep::wall_clock64();
+    if (startTime != nullptr) {
+      startTime[i] = wall_clock64();
+    }
     rdma_ep::sqeWrite(sqeLocal, sqePtr);
     cqeLocal = rdma_ep::cqePoll(cqeLocal, (volatile rdma_ep::cqeType*)cqePtr);
-    endTime[i] = rdma_ep::wall_clock64();
+    if (endTime != nullptr) {
+      endTime[i] = wall_clock64();
+    }
 
     // Verify completion
     if (cqe->wqe_id != wqe_id) {

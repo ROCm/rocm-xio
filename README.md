@@ -5,10 +5,12 @@
 This repository contains the source code for a ROCm library that provides
 an API for Accelerator-Initiated IO (AxIIO) for AMD GPU `__device__` code.
 
-This library enables AMD GPUs to perform **direct I/O operations** to hardware devices (NVMe SSDs, RDMA NICs, SDMA engines) without CPU intervention, achieving sub-microsecond latencies.
+This library enables AMD GPUs to perform **direct I/O operations** to hardware
+devices (NVMe SSDs, RDMA NICs, SDMA engines) without CPU intervention,
+achieving sub-microsecond latencies.
 
 This library targets a number of devices which we refer to as end-points. The
-list of supported devices we can issue IO too is given in the
+list of supported devices we can issue IO to is given in the
 [endpoints](./endpoints) sub-folder.
 
 ## Quick Reference

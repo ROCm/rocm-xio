@@ -247,6 +247,7 @@ lint-format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
+		-not -path './stephen-dec5/*' \
 		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) --dry-run --Werror --style=file \
@@ -265,6 +266,7 @@ format:
 		-not -path './build/*' \
 		-not -path './.git/*' \
 		-not -path './stebates-*/*' \
+		-not -path './stephen-dec5/*' \
 		-not -path './src/include/external/*' \
 		-not -path './gda-experiments/rocSHMEM/*' \
 		| xargs $(CLANG_FORMAT) -i --style=file

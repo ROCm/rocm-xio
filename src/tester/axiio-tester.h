@@ -7,19 +7,16 @@
 #define AXIIO_TESTER_H
 
 #include <time.h>
+
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <string>
 #include <thread>
 #include <vector>
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-
 #endif // AXIIO_TESTER_H
-
-
-
-

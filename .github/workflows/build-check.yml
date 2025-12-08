@@ -38,7 +38,7 @@ jobs:
       uses: DoozyX/clang-format-lint-action@v0.18.2
       with:
         source: '.'
-        exclude: './build ./stebates-* ./src/include/external'
+        exclude: './build ./stebates-* ./stephen-dec5 ./src/include/external'
         extensions: 'cpp,h,hpp,c,cc,hip'
         clangFormatVersion: 18
         style: file
