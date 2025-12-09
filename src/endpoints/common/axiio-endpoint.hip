@@ -32,6 +32,8 @@ class TestEndpoint : public AxiioEndpoint {
 private:
   // Store doorbell queue length from CLI
   unsigned doorbell_ = 0;
+  // Store emulate flag from CLI
+  bool emulate_ = false;
 
 public:
   __host__ EndpointType getType() const override {
@@ -99,11 +101,16 @@ public:
         "Enable doorbell mode with specified queue length (0=disabled)")
       ->default_val(0)
       ->group("Endpoint Options");
+    app
+      .add_flag("--emulate", emulate_,
+                "Run kernel code on CPU instead of GPU (for testing)")
+      ->group("Endpoint Options");
   }
 
   __host__ void* initializeEndpointConfig() override {
     static test_ep::TestEpConfig testEpConfig;
     testEpConfig.doorbell = doorbell_;
+    testEpConfig.emulate = emulate_;
     return &testEpConfig;
   }
 };

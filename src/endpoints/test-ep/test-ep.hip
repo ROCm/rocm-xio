@@ -148,11 +148,20 @@ static void cpuThreadDoorbell(volatile sqeType* sqeQueue,
       uint64_t actualDelayNs = currentMsg.data[0];
 
       // Implement delay before responding
+      // Optimize delay loop to reduce getCpuTime() calls
       if (actualDelayNs > 0) {
         if (actualDelayNs < 1000000) {
+          // For short delays, spin with reduced time checks
           uint64_t startTime = getCpuTime();
-          while (getCpuTime() - startTime < actualDelayNs) {
-            // Busy-wait loop
+          uint64_t elapsed = 0;
+          uint32_t spinCount = 0;
+          while (elapsed < actualDelayNs) {
+            // Check time less frequently to reduce system call overhead
+            if (spinCount % 1000 == 0) {
+              elapsed = getCpuTime() - startTime;
+            }
+            spinCount++;
+            std::atomic_signal_fence(std::memory_order_acq_rel);
           }
         } else {
           std::this_thread::sleep_for(std::chrono::nanoseconds(actualDelayNs));
@@ -225,12 +234,20 @@ static void cpuThread(volatile sqeType* hostSqeAddr,
     uint64_t delayNs = currentMsg.data[0];
 
     // Implement delay before responding (matches simple-test)
+    // Optimize delay loop to reduce getCpuTime() calls
     if (delayNs > 0) {
       if (delayNs < 1000000) {
-        // For delays < 1ms, use busy-wait for accuracy
+        // For short delays, spin with reduced time checks
         uint64_t startTime = getCpuTime();
-        while (getCpuTime() - startTime < delayNs) {
-          // Busy-wait loop
+        uint64_t elapsed = 0;
+        uint32_t spinCount = 0;
+        while (elapsed < delayNs) {
+          // Check time less frequently to reduce system call overhead
+          if (spinCount % 1000 == 0) {
+            elapsed = getCpuTime() - startTime;
+          }
+          spinCount++;
+          std::atomic_signal_fence(std::memory_order_acq_rel);
         }
       } else {
         // For larger delays, use sleep
@@ -521,7 +538,231 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
   }
 }
 
+#include <atomic>
 #include <iostream>
+
+// CPU emulation of endpoint kernel - runs kernel logic on CPU threads
+// This allows testing without a GPU
+static void endpoint_kernel_cpu_emulate(
+  sqeType* sqePtr, cqeType* cqePtr, unsigned long long int* startTimes,
+  unsigned long long int* endTimes, unsigned iterations, unsigned numThreads,
+  long long delayNs, unsigned doorbell, uint32_t* doorbellAddr,
+  unsigned queueSize, unsigned threadId) {
+  // Use per-thread buffers if multi-threaded (non-doorbell mode)
+  bool doorbellMode = (doorbell > 0);
+  sqeType* mySqe = (numThreads > 1 && !doorbellMode) ? &sqePtr[threadId]
+                                                     : sqePtr;
+  cqeType* myCqe = (numThreads > 1 && !doorbellMode) ? &cqePtr[threadId]
+                                                     : cqePtr;
+  volatile cqeType* volatileCqe = myCqe;
+
+  // Get per-thread timing arrays if provided
+  unsigned long long int* myStartTimes = nullptr;
+  unsigned long long int* myEndTimes = nullptr;
+  if (startTimes != nullptr) {
+    myStartTimes = &startTimes[threadId * iterations];
+  }
+  if (endTimes != nullptr) {
+    myEndTimes = &endTimes[threadId * iterations];
+  }
+
+  cqeType lastResponse = {};
+  lastResponse.magic = 0; // Initialize to invalid value
+  cqeType currentResponse = {};
+  uint64_t lastCpuTime = 0;
+
+  if (doorbellMode) {
+    // Doorbell mode: write SQEs to circular queue and ring doorbell
+    // Use atomic counter for sequence numbers across all threads
+    // Note: This is per-thread-call, so we need to synchronize initialization
+    static std::atomic<uint32_t> globalSeq{0};
+    // Use a barrier to synchronize threads before doorbell updates
+    static std::atomic<uint32_t> barrierCounter{0};
+    static std::atomic<uint32_t> barrierGeneration{0};
+    // Reset sequence counter at start of first iteration for first thread
+    if (threadId == 0 && iterations > 0) {
+      globalSeq.store(0, std::memory_order_relaxed);
+      barrierCounter.store(0, std::memory_order_relaxed);
+      barrierGeneration.store(0, std::memory_order_relaxed);
+    }
+
+    for (unsigned i = 0; i < iterations; ++i) {
+      // Record start time for this iteration (when SQE is posted)
+      // Use CPU time instead of GPU wall clock in emulation mode
+      uint64_t pollStartTime = getCpuTime();
+      if (myStartTimes != nullptr) {
+        myStartTimes[i] = pollStartTime;
+      }
+
+      // Prepare message to CPU
+      sqeType msg = {};
+      msg.magic = TEST_EP_MAGIC_ID;
+      msg.iteration = ((uint64_t)threadId << 32) | i;
+      uint64_t sqeGpuTime = getCpuTime(); // Use CPU time in emulation
+      msg.gpuTime = sqeGpuTime;
+
+      // Calculate delay
+      uint64_t actualDelayNs = 0;
+      if (delayNs < 0) {
+        actualDelayNs = static_cast<uint64_t>(-delayNs);
+      } else if (delayNs > 0) {
+        uint64_t seed = threadId * 0x9e3779b9ULL + i * 0x6c6229e6ULL +
+                        getCpuTime();
+        seed = (seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
+        actualDelayNs = seed % (static_cast<uint64_t>(delayNs) + 1);
+      }
+      msg.data[0] = actualDelayNs;
+
+      // Fill remaining data payload
+      for (int j = 1; j < 5; ++j) {
+        msg.data[j] = 0x123456789ABCDEF0ULL + threadId + i + j;
+      }
+
+      // Get next sequence number atomically
+      uint32_t seq = globalSeq.fetch_add(1);
+      unsigned sqeIndex = seq % queueSize;
+
+      // Write SQE
+      sqePtr[sqeIndex] = msg;
+      std::atomic_thread_fence(std::memory_order_release);
+
+      // Barrier: wait for all threads to write their SQEs before ringing
+      // doorbell Use a simple counter-based barrier optimized for low latency
+      uint32_t gen = barrierGeneration.load(std::memory_order_acquire);
+      uint32_t count = barrierCounter.fetch_add(1, std::memory_order_acq_rel) +
+                       1;
+      if (count == numThreads) {
+        // Last thread to arrive - reset counter and advance generation
+        barrierCounter.store(0, std::memory_order_release);
+        barrierGeneration.store(gen + 1, std::memory_order_release);
+      } else {
+        // Wait for all threads to arrive - spin briefly then yield
+        // Most threads should arrive quickly, so we spin first for low latency
+        for (uint32_t spin = 0; spin < 50; ++spin) {
+          if (barrierGeneration.load(std::memory_order_acquire) != gen) {
+            goto barrier_done;
+          }
+          std::atomic_signal_fence(std::memory_order_acq_rel);
+        }
+        // If still waiting after spinning, yield to avoid wasting CPU
+        while (barrierGeneration.load(std::memory_order_acquire) == gen) {
+          std::this_thread::yield();
+        }
+      barrier_done:;
+      }
+
+      // Ring doorbell after all threads in this iteration have submitted their
+      // SQE (tail = (i + 1) * numThreads)
+      // Only thread 0 updates doorbell
+      if (doorbellAddr != nullptr && threadId == 0) {
+        uint32_t tail = (i + 1) * numThreads;
+        std::atomic<uint32_t>* doorbellPtr =
+          reinterpret_cast<std::atomic<uint32_t>*>(doorbellAddr);
+        doorbellPtr->store(tail, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+      }
+
+      // Poll for CPU response in CQE queue (use same sequence number as SQE)
+      unsigned cqeIndex = seq % queueSize;
+      volatile cqeType* myCqePtr = &cqePtr[cqeIndex];
+      uint32_t expectedSeq = seq;
+
+      // Poll with minimal backoff to reduce CPU spinning while maintaining low
+      // latency
+      uint32_t spinCount = 0;
+      while (true) {
+        uint64_t magic = myCqePtr->magic;
+        uint64_t cqeValue = myCqePtr->cpuTime;
+        currentResponse.magic = magic;
+        currentResponse.cpuTime = cqeValue;
+        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+          if (cqeValue != 0) {
+            // Verify CQE corresponds to our SQE by checking sequence number
+            // matches
+            uint32_t cqeSeq = (cqeValue >> 32) & 0xFFFFFFFFULL;
+            uint64_t cqeCpuTime = cqeValue & 0xFFFFFFFFULL;
+            if (cqeSeq == expectedSeq &&
+                (cqeCpuTime != (lastCpuTime & 0xFFFFFFFFULL) ||
+                 lastCpuTime == 0)) {
+              // Record time immediately when valid CQE is detected
+              if (myEndTimes != nullptr) {
+                myEndTimes[i] = getCpuTime();
+              }
+              break;
+            }
+          }
+        }
+        // Minimal spinning then yield to reduce CPU usage
+        if (spinCount < 100) {
+          spinCount++;
+          std::atomic_signal_fence(std::memory_order_acq_rel);
+        } else {
+          std::this_thread::yield();
+        }
+      }
+      lastResponse = currentResponse;
+      lastCpuTime = currentResponse.cpuTime;
+    }
+  } else {
+    // Normal polling mode
+    for (unsigned i = 0; i < iterations; ++i) {
+      // Record start time for this iteration
+      uint64_t pollStartTime = getCpuTime();
+      if (myStartTimes != nullptr) {
+        myStartTimes[i] = pollStartTime;
+      }
+
+      // Prepare message to CPU
+      sqeType msg = {};
+      msg.magic = TEST_EP_MAGIC_ID;
+      msg.iteration = ((uint64_t)threadId << 32) | i;
+      msg.gpuTime = getCpuTime(); // Use CPU time in emulation
+
+      // Calculate delay
+      uint64_t actualDelayNs = 0;
+      if (delayNs < 0) {
+        actualDelayNs = static_cast<uint64_t>(-delayNs);
+      } else if (delayNs > 0) {
+        uint64_t seed = threadId * 0x9e3779b9ULL + i * 0x6c6229e6ULL +
+                        getCpuTime();
+        seed = (seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
+        actualDelayNs = seed % (static_cast<uint64_t>(delayNs) + 1);
+      }
+      msg.data[0] = actualDelayNs;
+
+      // Fill remaining data payload
+      for (int j = 1; j < 5; ++j) {
+        msg.data[j] = 0x123456789ABCDEF0ULL + threadId + i + j;
+      }
+
+      // Write message to memory
+      *mySqe = msg;
+      std::atomic_thread_fence(std::memory_order_release);
+
+      // Poll for CPU response
+      while (true) {
+        uint64_t magic = volatileCqe->magic;
+        uint64_t cpuTime = volatileCqe->cpuTime;
+        currentResponse.magic = magic;
+        currentResponse.cpuTime = cpuTime;
+        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+          if (currentResponse.cpuTime != 0) {
+            if (currentResponse.cpuTime != lastCpuTime || lastCpuTime == 0) {
+              break;
+            }
+          }
+        }
+      }
+      lastResponse = currentResponse;
+      lastCpuTime = currentResponse.cpuTime;
+
+      // Record time when CPU response is received
+      if (myEndTimes != nullptr) {
+        myEndTimes[i] = getCpuTime();
+      }
+    }
+  }
+}
 
 // Run method implementation for test-ep - launches GPU kernel and waits for
 // completion
@@ -532,6 +773,7 @@ hipError_t test_ep_run(AxiioEndpointConfig* config) {
   test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
     config->endpointConfig);
   unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
+  bool emulate = (testEpConfig != nullptr) ? testEpConfig->emulate : false;
 
   // Cast void* to endpoint-specific types
   sqeType* sqePtr = static_cast<sqeType*>(config->submissionQueue);
@@ -560,10 +802,29 @@ hipError_t test_ep_run(AxiioEndpointConfig* config) {
       memset(doorbellAddr, 0, sizeof(uint32_t));
     } else {
       // Allocate host memory for doorbell
-      HIP_CHECK(
-        hipHostMalloc(&doorbellAddr, sizeof(uint32_t), hipHostMallocDefault));
+      // Try HIP first, but fall back to malloc if HIP is not available
+      // (emulate mode)
+      hipError_t hipErr = hipHostMalloc(&doorbellAddr, sizeof(uint32_t),
+                                        hipHostMallocDefault);
+      if (hipErr != hipSuccess) {
+        // HIP not available (e.g., emulate mode), use regular malloc
+        doorbellAddr = static_cast<uint32_t*>(malloc(sizeof(uint32_t)));
+        if (doorbellAddr == nullptr) {
+          std::cerr << "Error: Failed to allocate doorbell memory" << std::endl;
+          return hipErrorMemoryAllocation;
+        }
+      }
       memset(doorbellAddr, 0, sizeof(uint32_t));
     }
+  }
+
+  // Get doorbell pointer for use in both modes
+  uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
+
+  // Reset doorbell before launching threads (needed for both modes)
+  if (doorbell > 0 && doorbellPtr != nullptr) {
+    *doorbellPtr = 0;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   if (config->numThreads > 0) {
@@ -585,31 +846,52 @@ hipError_t test_ep_run(AxiioEndpointConfig* config) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
 
-  // Launch GPU kernel - pass pointers directly like simple-test
-  uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
-  hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
-                     sqePtr, cqePtr, config->startTimes, config->endTimes,
-                     config->iterations, config->numThreads, config->delayNs,
-                     doorbell, doorbellPtr, queueSize);
+  hipError_t err = hipSuccess;
 
-  // Check for kernel launch errors
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    // Join CPU threads if launched
-    for (auto& thread : cpuThreadHandles) {
+  if (emulate) {
+    // Emulation mode: run kernel logic on CPU threads instead of GPU
+    std::vector<std::thread> gpuEmulationThreads;
+
+    // Launch CPU threads to emulate GPU kernel
+    for (unsigned t = 0; t < config->numThreads; ++t) {
+      gpuEmulationThreads.emplace_back(endpoint_kernel_cpu_emulate, sqePtr,
+                                       cqePtr, config->startTimes,
+                                       config->endTimes, config->iterations,
+                                       config->numThreads, config->delayNs,
+                                       doorbell, doorbellPtr, queueSize, t);
+    }
+
+    // Wait for all emulation threads to complete
+    for (auto& thread : gpuEmulationThreads) {
       thread.join();
     }
-    return err;
-  }
+  } else {
+    // Normal mode: launch GPU kernel
+    uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
+    hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
+                       sqePtr, cqePtr, config->startTimes, config->endTimes,
+                       config->iterations, config->numThreads, config->delayNs,
+                       doorbell, doorbellPtr, queueSize);
 
-  // Wait for GPU kernel to complete
-  err = hipDeviceSynchronize();
-  if (err != hipSuccess) {
-    // Join CPU threads if launched
-    for (auto& thread : cpuThreadHandles) {
-      thread.join();
+    // Check for kernel launch errors
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+      // Join CPU threads if launched
+      for (auto& thread : cpuThreadHandles) {
+        thread.join();
+      }
+      return err;
     }
-    return err;
+
+    // Wait for GPU kernel to complete
+    err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+      // Join CPU threads if launched
+      for (auto& thread : cpuThreadHandles) {
+        thread.join();
+      }
+      return err;
+    }
   }
 
   // Join CPU threads if they were launched
@@ -623,7 +905,12 @@ hipError_t test_ep_run(AxiioEndpointConfig* config) {
     if (doorbellOnDevice) {
       hsa_memory_free(doorbellAddr);
     } else {
-      HIP_CHECK(hipHostFree(doorbellAddr));
+      // Free host memory using HIP or regular free
+      hipError_t hipErr = hipHostFree(doorbellAddr);
+      if (hipErr != hipSuccess) {
+        // HIP not available (e.g., emulate mode), use regular free
+        free(doorbellAddr);
+      }
     }
   }
 

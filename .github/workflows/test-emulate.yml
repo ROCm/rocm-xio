@@ -1,0 +1,55 @@
+name: test-emulate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/**.hip'
+      - 'src/**.cpp'
+      - 'src/**.h'
+      - '**.hip'
+      - '**.cpp'
+      - '**.h'
+      - Makefile
+
+jobs:
+  test-emulate:
+    name: test-emulate for rocm-axiio
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code.
+      uses: actions/checkout@v5.0.0
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          expect \
+          hipcc \
+          libcli11-dev \
+          libstdc++-14-dev \
+          bc
+    - name: Build (with ROCm for compilation, but will run in emulate mode)
+      run: |
+        mkdir bin
+        mkdir lib
+        make CXXFLAGS+="--offload-arch=gfx942:xnack+" all
+      env:
+        HIPCXX: /usr/bin/hipcc
+        HIP_INCLUDE_DIR: /usr/include
+    - name: Run tester using test-ep in emulate mode
+      run: |
+        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 -v
+    - name: Run tester using test-ep in emulate mode with doorbell
+      run: |
+        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 -v
+    - name: Run tester using test-ep in emulate mode with doorbell and variable delay
+      run: |
+        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 --delay 10000
+    - name: Run tester using test-ep in emulate mode with doorbell and fixed delay
+      run: |
+        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 --delay -10000
+ 
+
+
