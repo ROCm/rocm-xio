@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
   // Create endpoint object
   AxiioEndpoint endpoint(endpointName);
 
-  // Get GPU device information (like simple-test)
+  // Get GPU device information
   int deviceId = 0;
   HIP_CHECK(hipGetDevice(&deviceId));
   hipDeviceProp_t deviceProp;
@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
   clock_getres(CLOCK_MONOTONIC, &cpuRes);
   double cpuClockResolutionNs = cpuRes.tv_sec * 1000000000.0 + cpuRes.tv_nsec;
 
-  // Always print device and endpoint info (even when not verbose)
+  // Print device and endpoint info
   std::cout << "GPU Model: " << deviceProp.name << std::endl;
   std::cout << "GPU Device ID: " << deviceId << std::endl;
   std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Extract memory mode bits and explain them (like simple-test)
+  // Extract memory mode bits and explain them
   bool gpuWriteToDevice = (baseConfig.memoryMode & 0x1) != 0; // LSB
   bool cpuWriteToDevice = (baseConfig.memoryMode & 0x2) != 0; // MSB
   std::cout << "Memory Mode: " << baseConfig.memoryMode
@@ -141,11 +141,10 @@ int main(int argc, char** argv) {
   // Get queue entry sizes from endpoint
   size_t sqeSize = endpoint.getSubmissionQueueEntrySize();
   size_t cqeSize = endpoint.getCompletionQueueEntrySize();
-
   std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
   std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
 
-  // Allocate memory based on number of threads
+  // Allocate queue memory
   void* hostSqeAddr = nullptr;
   void* hostCqeAddr = nullptr;
   unsigned long long int* hostStartTime = nullptr;
@@ -171,15 +170,13 @@ int main(int argc, char** argv) {
   memset(hostStartTime, 0, totalTimingSize);
   memset(hostEndTime, 0, totalTimingSize);
 
-  // This allows both CPU and GPU to access the same memory
-  // Timing arrays are host-accessible so CPU threads can write to endTimes
+  // Assign buffers to our config structure
   baseConfig.startTimes = hostStartTime;
   baseConfig.endTimes = hostEndTime;
   baseConfig.submissionQueue = hostSqeAddr;
   baseConfig.completionQueue = hostCqeAddr;
 
-  // Run endpoint test - launches GPU kernel and waits for completion
-  // CPU threads are handled internally by the endpoint if needed
+  // Run endpoint test
   hipError_t err = endpoint.run(&baseConfig);
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
@@ -190,8 +187,6 @@ int main(int argc, char** argv) {
     HIP_CHECK(hipHostFree(hostEndTime));
     return EXIT_FAILURE;
   }
-
-  // Timing arrays are already host-accessible, no copy needed
 
   // Print raw timing data if verbose
   if (baseConfig.verbose) {
@@ -241,9 +236,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Calculate durations (skip first iteration per thread, as it tends to be
-  // larger)
-  // Convert GPU wall clock ticks to nanoseconds using clock period
+  // Calculate durations (skip first iteration per thread, as it
+  // tends to be larger)
   std::vector<double> durations;
   for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
     unsigned baseIdx = t * baseConfig.iterations;
@@ -257,7 +251,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Print statistics (always printed, even when not verbose)
+  // Print statistics
   if (durations.size() > 0) {
     if (printHistogram) {
       axxioPrintHistogram(durations, baseConfig.iterations);
