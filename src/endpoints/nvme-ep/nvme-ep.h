@@ -7,8 +7,11 @@
 #define NVME_EP_H
 
 #include <cstdint>
+#include <string>
 
 #include <hip/hip_runtime.h>
+
+#include <CLI/CLI.hpp>
 
 /*
  * NVMe Definitions for AxIIO nvme-ep Endpoint
@@ -513,5 +516,377 @@ __global__ void nvme_ep_verify_reads_gpu(
   const uint8_t* readBuffer, void* sqeAddr, void* cqeAddr,
   uint32_t numCompletions, uint32_t blockSize, enum nvme_test_pattern pattern,
   uint32_t lfsr_seed, uint32_t* verifiedCount, uint32_t* mismatchCount);
+
+//
+// NVMe Endpoint Configuration Structure
+//
+
+namespace nvme_ep {
+
+/**
+ * NVMe Endpoint Configuration Structure
+ *
+ * Contains all NVMe-specific configuration options that were previously
+ * scattered in the main tester's cmdLineArgs structure.
+ */
+struct NvmeEpConfig {
+  // Device and queue configuration
+  std::string device; // NVMe device path (e.g., /dev/nvme0 or /dev/nvme-axiio)
+  bool useKernelModule; // Use kernel module (/dev/nvme-axiio)
+  uint16_t queueId;     // Queue ID to use (0=admin, 1+=IO queues)
+
+  // Physical addresses (usually auto-detected)
+  uint64_t doorbellAddr; // Physical address of doorbell register
+  uint64_t sqBaseAddr;   // Physical base address of submission queue
+  uint64_t cqBaseAddr;   // Physical base address of completion queue
+  size_t sqSize;         // Size of submission queue in bytes
+  size_t cqSize;         // Size of completion queue in bytes
+
+  // I/O operation parameters
+  uint32_t nsid;             // Namespace ID (default: 1)
+  size_t transferSize;       // Transfer size in bytes (default: 4096)
+  size_t lbaRangeGiB;        // LBA range to test in GiB (default: 1)
+  std::string accessPattern; // "sequential" or "random" (default: "random")
+  unsigned blockSize;        // Block size in bytes (default: 512)
+
+  // Data buffer configuration
+  bool useDataBuffers;   // Enable data buffer allocation
+  size_t dataBufferSize; // Size of data buffers in bytes
+
+  // Test pattern configuration
+  std::string testPattern; // Pattern: sequential, zeros, ones, random,
+                           // block_id, lfsr
+  uint32_t lfsrSeed;       // Seed for LFSR pattern (0 = derive from LBA)
+
+  // I/O operation counts
+  unsigned readIo;  // Number of read I/O operations
+  unsigned writeIo; // Number of write I/O operations
+
+  // Operation mode flags
+  bool cpuOnlyMode;         // Use CPU for command generation
+  bool hijackExistingQueue; // DANGEROUS: Use existing kernel queue
+  bool writeOnlyMode;       // Write-only mode
+  bool readOnlyMode;        // Read-only mode
+  bool skipQueueCleanup;    // Skip queue deletion on exit
+
+  // Verification options
+  bool verifyTrace;          // Verify doorbell operations in QEMU trace
+  std::string traceFilePath; // Path to QEMU trace log file
+  bool verifyReads;          // Verify read data matches expected pattern
+  bool gpuVerifyReads; // Use GPU-based verification (no CPU buffer access)
+
+  // Legacy/backward compatibility flags
+  bool useRealHardware; // Legacy: Use real NVMe hardware
+
+  // Default constructor
+  NvmeEpConfig()
+    : device(""), useKernelModule(false), queueId(63), doorbellAddr(0),
+      sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0), nsid(1),
+      transferSize(4096), lbaRangeGiB(1), accessPattern("random"),
+      blockSize(512), useDataBuffers(true), // Always use data buffers for NVMe
+      dataBufferSize(1024 * 1024)           // 1 MB default
+      ,
+      testPattern("sequential"), lfsrSeed(0), readIo(64),
+      writeIo(64), // Default: 64 reads, 64 writes
+      cpuOnlyMode(false), hijackExistingQueue(false), writeOnlyMode(false),
+      readOnlyMode(false), skipQueueCleanup(false), verifyTrace(false),
+      traceFilePath("/tmp/rocm-axiio-nvme-trace.log"), verifyReads(false),
+      gpuVerifyReads(false), useRealHardware(false) {
+  }
+};
+
+//
+// NVMe Endpoint CLI Options
+//
+
+/**
+ * Register NVMe endpoint-specific CLI options
+ *
+ * This function registers all NVMe-specific command-line options with
+ * the CLI11 parser. Options are registered with shorter names (without
+ * --nvme- prefix) for cleaner CLI, but backward-compatible aliases
+ * are also provided.
+ *
+ * @param app CLI11 App object to add options to
+ * @param config Pointer to NvmeEpConfig structure to populate
+ */
+inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
+  // Group all NVMe endpoint-specific options together
+  // This ensures they appear in their own section below global options
+  const std::string nvme_group = "NVMe Endpoint Options";
+
+  // NVMe endpoint options in alphabetical order by long name
+  app
+    .add_option("--access-pattern", config->accessPattern,
+                "Access pattern: 'sequential' or 'random'.")
+    ->default_val("random")
+    ->check(CLI::IsMember({"sequential", "random"}))
+    ->group(nvme_group);
+
+  app
+    .add_option("--block-size", config->blockSize,
+                "NVMe block size in bytes (typically 512 or 4096).")
+    ->default_val(512)
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+
+  app
+    .add_flag(
+      "--cpu-only", config->cpuOnlyMode,
+      "Use CPU for NVMe command generation (no GPU, no PCIe atomics required).")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option(
+      "--data-buffer-size", config->dataBufferSize,
+      "Size of data buffers for NVMe I/O testing (bytes). "
+      "If not specified, will be auto-calculated as "
+      "(read-io + write-io) * 8 * block-size (kernel uses 8 blocks per "
+      "operation).")
+    ->default_val(1024 * 1024) // 1 MB default
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+
+  app
+    .add_option("--device", config->device,
+                "NVMe device path (e.g., /dev/nvme0 or /dev/nvme-axiio). "
+                "Enables automatic hardware setup.")
+    ->default_val("")
+    ->group(nvme_group);
+
+  app
+    .add_flag("--hijack-existing-queue", config->hijackExistingQueue,
+              "⚠️  DANGEROUS: Use existing kernel queue without creating new "
+              "one (for testing).")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_flag("--kernel-module", config->useKernelModule,
+              "Use kernel module (/dev/nvme-axiio) for queue management "
+              "instead of direct device access.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option("--lba-range-gib", config->lbaRangeGiB,
+                "LBA range to test in GiB (e.g., 1 for first 1GiB).")
+    ->default_val(1)
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+
+  app
+    .add_option("--lfsr-seed", config->lfsrSeed,
+                "Seed for LFSR pattern generation (0 = derive from LBA). "
+                "Allows different data patterns for same LBA.")
+    ->default_val(0)
+    ->group(nvme_group);
+
+  app
+    .add_option("--nsid", config->nsid, "NVMe namespace ID for I/O operations.")
+    ->default_val(1)
+    ->check(CLI::Range(1u, 0xFFFFFFFFu))
+    ->group(nvme_group);
+
+  app
+    .add_option("--read-io", config->readIo,
+                "Number of read I/O operations to perform.")
+    ->default_val(64)
+    ->check(CLI::NonNegativeNumber)
+    ->group(nvme_group);
+
+  app
+    .add_flag(
+      "--read-only", config->readOnlyMode,
+      "Read-only mode: only allocate read buffer, issue only read commands.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option("--queue-id", config->queueId,
+                "NVMe queue ID to use (0=admin queue, 1+=IO queues). "
+                "Use high ID to avoid kernel conflicts.")
+    ->default_val(63)
+    ->check(CLI::Range(0, 65535))
+    ->group(nvme_group);
+
+  app
+    .add_flag("--skip-queue-cleanup", config->skipQueueCleanup,
+              "Skip queue deletion on exit (faster, leaves queues active).")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option("--test-pattern", config->testPattern,
+                "Data test pattern: sequential, zeros, ones, random, "
+                "block_id, lfsr. Use lfsr with --lfsr-seed for deterministic "
+                "LFSR-based patterns.")
+    ->default_val("sequential")
+    ->check([](const std::string& val) {
+      return (val == "sequential" || val == "zeros" || val == "ones" ||
+              val == "random" || val == "block_id" || val == "lfsr")
+               ? std::string()
+               : std::string("Pattern must be: sequential, zeros, ones, "
+                             "random, block_id, or lfsr");
+    })
+    ->group(nvme_group);
+
+  app
+    .add_option("--trace-file", config->traceFilePath,
+                "Path to QEMU NVMe trace log file for verification. "
+                "Default: /tmp/rocm-axiio-nvme-trace.log")
+    ->default_val("/tmp/rocm-axiio-nvme-trace.log")
+    ->group(nvme_group);
+
+  app
+    .add_option("--transfer-size", config->transferSize,
+                "Transfer size for NVMe I/O operations in bytes "
+                "(e.g., 4096 for 4KiB).")
+    ->default_val(4096)
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+
+  app
+    .add_flag("--verify-reads", config->verifyReads,
+              "Verify read data matches expected pattern after test completes. "
+              "Requires --test-pattern (and --lfsr-seed if using lfsr pattern) "
+              "to match the pattern used when data was written. If using "
+              "--read-only mode, ensure data was previously written with "
+              "matching pattern/seed.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_flag(
+      "--gpu-verify-reads", config->gpuVerifyReads,
+      "Use GPU-based verification (faster, no CPU buffer access). "
+      "Requires --verify-reads to be enabled. Uses LFSR pattern and seed "
+      "for verification entirely on GPU.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_flag(
+      "--verify-trace", config->verifyTrace,
+      "Verify doorbell operations in QEMU trace log after test completes.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  app
+    .add_option("--write-io", config->writeIo,
+                "Number of write I/O operations to perform.")
+    ->default_val(64)
+    ->check(CLI::NonNegativeNumber)
+    ->group(nvme_group);
+
+  app
+    .add_flag(
+      "--write-only", config->writeOnlyMode,
+      "Write-only mode: only allocate write buffer, issue only write commands.")
+    ->default_val(false)
+    ->default_str("")
+    ->group(nvme_group);
+
+  // Physical addresses (usually auto-detected, kept for advanced users)
+  const std::string nvme_advanced_group = "NVMe Endpoint Advanced Options";
+
+  app
+    .add_option("--cq-base", config->cqBaseAddr,
+                "Physical base address of NVMe completion queue (hex). "
+                "Auto-detected if --device is specified.")
+    ->default_val(0ULL)
+    ->group(nvme_advanced_group);
+
+  app
+    .add_option("--cq-size", config->cqSize,
+                "Size of NVMe completion queue in bytes. "
+                "Auto-detected if --device is specified.")
+    ->default_val(0ULL)
+    ->check(CLI::NonNegativeNumber)
+    ->group(nvme_advanced_group);
+
+  app
+    .add_option("--doorbell", config->doorbellAddr,
+                "Physical address of NVMe doorbell register (hex). "
+                "Auto-detected if --device is specified.")
+    ->default_val(0ULL)
+    ->group(nvme_advanced_group);
+
+  app
+    .add_option("--sq-base", config->sqBaseAddr,
+                "Physical base address of NVMe submission queue (hex). "
+                "Auto-detected if --device is specified.")
+    ->default_val(0ULL)
+    ->group(nvme_advanced_group);
+
+  app
+    .add_option("--sq-size", config->sqSize,
+                "Size of NVMe submission queue in bytes. "
+                "Auto-detected if --device is specified.")
+    ->default_val(0ULL)
+    ->check(CLI::NonNegativeNumber)
+    ->group(nvme_advanced_group);
+}
+
+/**
+ * Validate NVMe endpoint configuration
+ *
+ * @param config Pointer to NvmeEpConfig structure
+ * @return Empty string if valid, error message otherwise
+ */
+inline std::string validateConfig(NvmeEpConfig* config) {
+  if (config->writeOnlyMode && config->readOnlyMode) {
+    return "Cannot specify both --write-only and --read-only";
+  }
+
+  if (config->accessPattern != "sequential" &&
+      config->accessPattern != "random") {
+    return "Access pattern must be 'sequential' or 'random'";
+  }
+
+  // Note: useDataBuffers is always true for NVMe endpoint (data buffers are
+  // always used), so no validation needed here.
+
+  // Validate read/write I/O counts
+  // In read-only mode, writeIo should be 0 (auto-set if not explicitly set)
+  if (config->readOnlyMode && config->writeIo > 0) {
+    config->writeIo = 0; // Force writeIo to 0 in read-only mode
+  }
+  // In write-only mode, readIo should be 0 (auto-set if not explicitly set)
+  if (config->writeOnlyMode && config->readIo > 0) {
+    config->readIo = 0; // Force readIo to 0 in write-only mode
+  }
+  // Validate that at least one is non-zero
+  if (config->readIo == 0 && config->writeIo == 0) {
+    return "At least one of --read-io or --write-io must be specified (both "
+           "cannot be zero)";
+  }
+
+  if (config->verifyReads && config->writeOnlyMode) {
+    return "--verify-reads cannot be used with --write-only mode (no read "
+           "buffer available)";
+  }
+
+  if (config->gpuVerifyReads && !config->verifyReads) {
+    return "--gpu-verify-reads requires --verify-reads to be enabled";
+  }
+
+  // Note: verifyReads with readOnlyMode is valid if data was written
+  // beforehand, so we don't return an error here. A warning will be shown
+  // during verification if needed.
+
+  return ""; // Valid
+}
+
+} // namespace nvme_ep
 
 #endif // NVME_EP_H

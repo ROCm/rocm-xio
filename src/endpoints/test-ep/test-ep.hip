@@ -13,7 +13,6 @@
 #include <unistd.h>
 
 #include "axiio.h"
-#include "test-ep-config.h"
 #include "test-ep.h"
 
 // Get CPU wall clock time in nanoseconds (host-only)
