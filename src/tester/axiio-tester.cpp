@@ -17,7 +17,6 @@
 #include <CLI/CLI.hpp>
 
 #include "axiio.h"
-#include "test-ep-config.h"
 
 int main(int argc, char** argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
@@ -136,13 +135,8 @@ int main(int argc, char** argv) {
   // Initialize endpoint-specific configuration
   baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
 
-  // Get test-ep config to check emulate mode (will be used later too)
-  // Note: This is test-ep specific, but needed for GPU initialization check
-  test_ep::TestEpConfig* testEpConfigForEmulate =
-    static_cast<test_ep::TestEpConfig*>(baseConfig.endpointConfig);
-  bool emulateMode = (testEpConfigForEmulate != nullptr)
-                       ? testEpConfigForEmulate->emulate
-                       : false;
+  // Check if endpoint is in emulate mode
+  bool emulateMode = endpoint->isEmulateMode();
 
   // In emulate mode, memory mode must be 0 (host memory only)
   if (emulateMode && baseConfig.memoryMode != 0) {
@@ -221,9 +215,7 @@ int main(int argc, char** argv) {
   size_t cqeLength = endpoint->getCompletionQueueLength(&baseConfig);
 
   // Validate doorbell mode: numThreads must not exceed doorbell queue length
-  test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
-    baseConfig.endpointConfig);
-  unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
+  unsigned doorbell = endpoint->getDoorbellQueueLength();
   if (doorbell > 0 && baseConfig.numThreads > doorbell) {
     std::cerr << "Error: Number of threads (" << baseConfig.numThreads
               << ") exceeds doorbell queue length (" << doorbell << ")"

@@ -122,6 +122,16 @@ public:
   // Returns pointer to endpoint-specific config object (or nullptr if none)
   // Caller is responsible for managing the lifetime of the returned object
   __host__ virtual void* initializeEndpointConfig();
+
+  // Check if endpoint is in emulate mode (runs on CPU instead of GPU)
+  // Returns true if emulate mode is enabled, false otherwise
+  // Default implementation returns false
+  __host__ virtual bool isEmulateMode() const;
+
+  // Get doorbell queue length (if doorbell mode is enabled)
+  // Returns doorbell queue length if doorbell mode is enabled, 0 otherwise
+  // Default implementation returns 0
+  __host__ virtual unsigned getDoorbellQueueLength() const;
 };
 
 // Factory function to create endpoint instances
