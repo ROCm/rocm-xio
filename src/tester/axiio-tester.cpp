@@ -206,7 +206,10 @@ int main(int argc, char** argv) {
                   << hostStartTime[i] << " | " << std::setw(15)
                   << hostEndTime[i] << " | ";
         if (hostEndTime[i] > hostStartTime[i]) {
-          std::cout << (hostEndTime[i] - hostStartTime[i]) << std::endl;
+          double durationNs =
+              (hostEndTime[i] - hostStartTime[i]) * gpuClockPeriodNs;
+          std::cout << std::fixed << std::setprecision(3) << durationNs
+                    << " ns" << std::endl;
         } else {
           std::cout << "INVALID" << std::endl;
         }
@@ -225,7 +228,10 @@ int main(int argc, char** argv) {
                     << std::setw(15) << hostStartTime[idx] << " | "
                     << std::setw(15) << hostEndTime[idx] << " | ";
           if (hostEndTime[idx] > hostStartTime[idx]) {
-            std::cout << (hostEndTime[idx] - hostStartTime[idx]) << std::endl;
+            double durationNs =
+                (hostEndTime[idx] - hostStartTime[idx]) * gpuClockPeriodNs;
+            std::cout << std::fixed << std::setprecision(3) << durationNs
+                      << " ns" << std::endl;
           } else {
             std::cout << "INVALID" << std::endl;
           }
@@ -237,13 +243,16 @@ int main(int argc, char** argv) {
 
   // Calculate durations (skip first iteration per thread, as it tends to be
   // larger)
+  // Convert GPU wall clock ticks to nanoseconds using clock period
   std::vector<double> durations;
   for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
     unsigned baseIdx = t * baseConfig.iterations;
     for (unsigned i = 1; i < baseConfig.iterations; ++i) {
       unsigned idx = baseIdx + i;
       if (hostEndTime[idx] > hostStartTime[idx]) {
-        durations.push_back((double)(hostEndTime[idx] - hostStartTime[idx]));
+        double durationNs =
+            (hostEndTime[idx] - hostStartTime[idx]) * gpuClockPeriodNs;
+        durations.push_back(durationNs);
       }
     }
   }
