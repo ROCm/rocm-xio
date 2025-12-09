@@ -17,6 +17,11 @@
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 
+// Forward declaration for CLI11
+namespace CLI {
+class App;
+}
+
 #include "axiio-endpoint-registry.h"
 // AUTO-GENERATED - DO NOT EDIT MANUALLY
 #include "axiio-endpoint-includes-gen.h"
@@ -46,9 +51,11 @@ struct AxiioEndpointConfig {
                              // Positive: random delay 0 to delayNs
                              // Zero: no delay
   unsigned memoryMode = 0;   // Memory mode bits:
-                             // Bit 0 (LSB): GPU write location
+                             // Bit 0 (LSB): GPU write location (SQE)
                              //   (0=host, 1=device)
-                             // Bit 1 (MSB): CPU write location
+                             // Bit 1: CPU write location (CQE)
+                             //   (0=host, 1=device)
+                             // Bit 2: Doorbell location (doorbell mode only)
                              //   (0=host, 1=device)
   bool verbose = false;      // Verbose output flag
 
@@ -92,9 +99,29 @@ public:
   __host__ virtual size_t getSubmissionQueueEntrySize() const = 0;
   __host__ virtual size_t getCompletionQueueEntrySize() const = 0;
 
+  // Get queue lengths (host-only) - number of entries needed
+  // Default implementation returns numThreads for multi-threaded, 1 for
+  // single-threaded Derived classes can override for custom queue sizing (e.g.,
+  // doorbell mode)
+  __host__ virtual size_t getSubmissionQueueLength(
+    const AxiioEndpointConfig* config) const;
+  __host__ virtual size_t getCompletionQueueLength(
+    const AxiioEndpointConfig* config) const;
+
   // Run endpoint test - launches GPU kernel and waits for completion
   // Each derived class implements this to call its specific run function
   __host__ virtual hipError_t run(AxiioEndpointConfig* config) = 0;
+
+  // Configure endpoint-specific CLI options
+  // Derived classes can override this to add their own CLI flags/options
+  // Default implementation does nothing (no endpoint-specific options)
+  __host__ virtual void configureCliOptions(CLI::App& app);
+
+  // Initialize endpoint-specific configuration
+  // Called after CLI parsing to set up endpointConfig pointer
+  // Returns pointer to endpoint-specific config object (or nullptr if none)
+  // Caller is responsible for managing the lifetime of the returned object
+  __host__ virtual void* initializeEndpointConfig();
 };
 
 // Factory function to create endpoint instances
@@ -106,12 +133,13 @@ __host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
 // Helper functions
 void axiioPrintDeviceInfo();
 void axiioPrintStatistics(const std::vector<double>& durations,
-                          unsigned totalIterations = 0,
+                          unsigned totalIterations = 0, unsigned numThreads = 0,
                           unsigned readIterations = 0,
                           unsigned writeIterations = 0,
                           unsigned verifiedReadsCount = 0);
 void axiioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations, unsigned readIterations = 0,
+                         unsigned nIterations, unsigned numThreads = 0,
+                         unsigned readIterations = 0,
                          unsigned writeIterations = 0,
                          unsigned verifiedReadsCount = 0);
 
@@ -124,5 +152,14 @@ hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
                                         void** ptr);
 void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
 void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode);
+
+// HSA device memory allocation (for doorbell and other device memory needs)
+hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
+                                    const char* direction);
+
+// Extract endpoint name from command line arguments
+// This allows endpoints to add their CLI options before full parsing
+// Returns empty string if endpoint name not found in arguments
+std::string axiioExtractEndpointName(int argc, char** argv);
 
 #endif // AXIIO_H
