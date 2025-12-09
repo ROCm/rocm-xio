@@ -201,10 +201,10 @@ int main(int argc, char** argv) {
                   << hostStartTime[i] << " | " << std::setw(15)
                   << hostEndTime[i] << " | ";
         if (hostEndTime[i] > hostStartTime[i]) {
-          double durationNs =
-              (hostEndTime[i] - hostStartTime[i]) * gpuClockPeriodNs;
-          std::cout << std::fixed << std::setprecision(3) << durationNs
-                    << " ns" << std::endl;
+          double durationNs = (hostEndTime[i] - hostStartTime[i]) *
+                              gpuClockPeriodNs;
+          std::cout << std::fixed << std::setprecision(3) << durationNs << " ns"
+                    << std::endl;
         } else {
           std::cout << "INVALID" << std::endl;
         }
@@ -223,8 +223,8 @@ int main(int argc, char** argv) {
                     << std::setw(15) << hostStartTime[idx] << " | "
                     << std::setw(15) << hostEndTime[idx] << " | ";
           if (hostEndTime[idx] > hostStartTime[idx]) {
-            double durationNs =
-                (hostEndTime[idx] - hostStartTime[idx]) * gpuClockPeriodNs;
+            double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
+                                gpuClockPeriodNs;
             std::cout << std::fixed << std::setprecision(3) << durationNs
                       << " ns" << std::endl;
           } else {
@@ -244,8 +244,8 @@ int main(int argc, char** argv) {
     for (unsigned i = 1; i < baseConfig.iterations; ++i) {
       unsigned idx = baseIdx + i;
       if (hostEndTime[idx] > hostStartTime[idx]) {
-        double durationNs =
-            (hostEndTime[idx] - hostStartTime[idx]) * gpuClockPeriodNs;
+        double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
+                            gpuClockPeriodNs;
         durations.push_back(durationNs);
       }
     }
