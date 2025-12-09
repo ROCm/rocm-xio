@@ -119,9 +119,9 @@ ENDPOINT_GEN_SENTINEL := $(BUILD_DIR)/.endpoint-files-generated
 $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN): \
 	$(ENDPOINT_GEN_SENTINEL)
 
-$(ENDPOINT_GEN_SENTINEL): scripts/generate-endpoint-files.sh | $(INCLUDE_DIR) $(COMMON_DIR) $(BUILD_DIR)
+$(ENDPOINT_GEN_SENTINEL): scripts/build/generate-endpoint-files.sh | $(INCLUDE_DIR) $(COMMON_DIR) $(BUILD_DIR)
 	@echo "Generating endpoint files from: $(VALID_ENDPOINTS)"
-	@./scripts/generate-endpoint-files.sh $(ENDPOINTS_DIR) \
+	@./scripts/build/generate-endpoint-files.sh $(ENDPOINTS_DIR) \
 		$(ENDPOINT_REGISTRY_GEN) \
 		$(ENDPOINT_INCLUDES_GEN)
 	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
@@ -130,9 +130,9 @@ $(ENDPOINT_GEN_SENTINEL): scripts/generate-endpoint-files.sh | $(INCLUDE_DIR) $(
 	@touch $@
 
 # Download NVMe headers from Linux kernel
-$(NVME_KERNEL_HEADERS): scripts/fetch-nvme-headers.sh
+$(NVME_KERNEL_HEADERS): scripts/build/fetch-nvme-headers.sh
 	@echo "Fetching NVMe headers from Linux kernel repository..."
-	@./scripts/fetch-nvme-headers.sh $(EXTERNAL_HEADERS_DIR)
+	@./scripts/build/fetch-nvme-headers.sh $(EXTERNAL_HEADERS_DIR)
 	@echo "Generated external headers: $(NVME_KERNEL_HEADERS)"
 
 .PHONY: fetch-nvme-headers
@@ -142,15 +142,15 @@ fetch-nvme-headers: $(NVME_KERNEL_HEADERS)
 	@echo "These are for reference only - the nvme-ep definitions are in src/endpoints/nvme-ep/nvme-ep.h"
 
 # Download RDMA headers from rdma-core repository
-$(RDMA_HEADERS): scripts/fetch-rdma-headers.sh
+$(RDMA_HEADERS): scripts/build/fetch-rdma-headers.sh
 	@echo "Fetching RDMA provider headers from rdma-core repository..."
-	@./scripts/fetch-rdma-headers.sh $(RDMA_HEADERS_DIR)
+	@./scripts/build/fetch-rdma-headers.sh $(RDMA_HEADERS_DIR)
 	@echo "Generated RDMA headers in $(RDMA_HEADERS_DIR)/"
 
 # Generate vendor-specific RDMA headers from downloaded headers
-$(RDMA_VENDOR_HEADERS): $(RDMA_HEADERS) scripts/generate-rdma-vendor-headers.sh
+$(RDMA_VENDOR_HEADERS): $(RDMA_HEADERS) scripts/build/generate-rdma-vendor-headers.sh
 	@echo "Generating vendor-specific RDMA headers..."
-	@./scripts/generate-rdma-vendor-headers.sh $(RDMA_HEADERS_DIR) $(ENDPOINTS_DIR)/rdma-ep
+	@./scripts/build/generate-rdma-vendor-headers.sh $(RDMA_HEADERS_DIR) $(ENDPOINTS_DIR)/rdma-ep
 
 .PHONY: fetch-rdma-headers
 fetch-rdma-headers: $(RDMA_HEADERS) $(RDMA_VENDOR_HEADERS)
