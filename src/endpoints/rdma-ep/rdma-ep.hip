@@ -8,8 +8,7 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio-endpoint-config.h"
-#include "axiio-endpoint.h"
+#include "axiio.h"
 #include "rdma-ep.h"
 
 // Include vendor-specific headers
