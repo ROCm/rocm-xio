@@ -432,13 +432,13 @@ You can also run tests manually using the monitoring script:
 
 ```bash
 # Run with custom arguments
-./scripts/test-with-dmesg-monitor.sh -n 500 --verbose
+./scripts/test/test-with-dmesg-monitor.sh -n 500 --verbose
 
 # Set custom timeout (default 30s)
-TIMEOUT=60 ./scripts/test-with-dmesg-monitor.sh -n 1000
+TIMEOUT=60 ./scripts/test/test-with-dmesg-monitor.sh -n 1000
 
 # Run without environment checks
-CHECK_ENV=0 ./scripts/test-with-dmesg-monitor.sh -n 128
+CHECK_ENV=0 ./scripts/test/test-with-dmesg-monitor.sh -n 128
 ```
 
 The monitoring script will:
@@ -492,7 +492,7 @@ sudo ./bin/axiio-tester -e nvme-ep \
 
 ```bash
 # Run automated QEMU setup script
-sudo ./scripts/test-nvme-qemu.sh
+sudo ./scripts/test/test-nvme-qemu.sh
 ```
 
 #### Documentation
