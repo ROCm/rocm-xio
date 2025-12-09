@@ -25,6 +25,9 @@ all: build_info $(LIBTARGET) $(TESTER)
 HIP_INCLUDE_DIR  ?= /opt/rocm/include
 HIPCXX ?= /opt/rocm/bin/hipcc
 
+# C++ compiler for host-only code (tester)
+CXX ?= clang++
+
 # Tool variables
 AR ?= ar
 OBJDUMP ?= /opt/rocm/lib/llvm/bin/llvm-objdump
@@ -200,10 +203,15 @@ $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	$(eval ENDPOINT_DEFINE := $(call get_endpoint_define,$<))
 	$(HIPCXX) $(CXXFLAGS) $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -c -o $@ $<
 
-# Rule for .cpp files (tester)
+# Rule for .cpp files (tester) - use regular C++ compiler, not hipcc
+# Need endpoint include paths and HIP platform define, but not GPU flags
 $(BUILD_DIR)/%.o: %.cpp $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -c -o $@ $<
+	$(CXX) -std=c++17 -Wall -Wextra -Wno-unused-parameter \
+		-D__HIP_PLATFORM_AMD__ \
+		-I$(INCLUDE_DIR) -I$(HIP_INCLUDE_DIR) \
+		$(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep)) \
+		-c -o $@ $<
 
 # Function to determine which endpoint define to use based on source path
 # $1: source file path

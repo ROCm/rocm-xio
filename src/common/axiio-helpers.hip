@@ -61,8 +61,8 @@ void axiioPrintDeviceInfo() {
 }
 
 void axiioPrintStatistics(const std::vector<double>& durations,
-                          unsigned totalIterations, unsigned readIterations,
-                          unsigned writeIterations,
+                          unsigned totalIterations, unsigned numThreads,
+                          unsigned readIterations, unsigned writeIterations,
                           unsigned verifiedReadsCount) {
   if (durations.empty()) {
     return;
@@ -131,6 +131,12 @@ void axiioPrintStatistics(const std::vector<double>& durations,
               << std::endl;
   }
 
+  // Print threads if provided
+  if (numThreads > 0) {
+    std::cout << "  Threads:          " << std::setw(10) << numThreads
+              << std::endl;
+  }
+
   std::cout << "  Minimum:          " << std::setw(10) << std::fixed
             << std::setprecision(2) << min_display << time_unit << std::endl;
   std::cout << "  Maximum:          " << std::setw(10) << std::fixed
@@ -142,8 +148,8 @@ void axiioPrintStatistics(const std::vector<double>& durations,
 }
 
 void axiioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations, unsigned readIterations,
-                         unsigned writeIterations,
+                         unsigned nIterations, unsigned numThreads,
+                         unsigned readIterations, unsigned writeIterations,
                          unsigned verifiedReadsCount) {
   if (durations.empty() || nIterations == 0) {
     return;
@@ -251,13 +257,13 @@ void axiioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  axiioPrintStatistics(durations, nIterations, readIterations, writeIterations,
-                       verifiedReadsCount);
+  axiioPrintStatistics(durations, nIterations, numThreads, readIterations,
+                       writeIterations, verifiedReadsCount);
 }
 
 // Helper function to allocate HSA device memory
-static hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
-                                           const char* direction) {
+hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
+                                    const char* direction) {
   hsa_status_t status;
 
   // Initialize HSA runtime (safe to call multiple times)
@@ -458,4 +464,24 @@ void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
       HIP_CHECK(hipHostFree(ptr));
     }
   }
+}
+
+// Extract endpoint name from command line arguments
+// This allows endpoints to add their CLI options before full parsing
+// Returns empty string if endpoint name not found in arguments
+std::string axiioExtractEndpointName(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-e" || arg == "--endpoint") {
+      if (i + 1 < argc) {
+        return std::string(argv[i + 1]);
+      }
+      break;
+    } else if (arg.find("--endpoint=") == 0) {
+      return arg.substr(11);
+    } else if (arg.find("-e=") == 0) {
+      return arg.substr(3);
+    }
+  }
+  return std::string();
 }

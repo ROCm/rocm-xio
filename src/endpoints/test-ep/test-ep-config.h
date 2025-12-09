@@ -22,6 +22,14 @@ struct TestEpConfig {
   bool enableCpuThreads = true; // Default: enabled to match simple-test
                                 // behavior
 
+  // Doorbell mode queue length
+  // When > 0, enables doorbell mode with the specified queue length.
+  // CPU threads do not poll individual SQEs. Instead, a single CPU thread polls
+  // a doorbell address. The GPU writes SQEs to the submission queue and rings
+  // the doorbell after each SQE enqueue. Doorbell location is controlled by
+  // memory mode bit 2 (0=host, 1=device).
+  unsigned doorbell = 0; // Default: 0 (disabled, polling mode)
+
   // Default constructor
   TestEpConfig() = default;
 };
