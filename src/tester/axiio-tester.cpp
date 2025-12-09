@@ -83,8 +83,13 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  // Create endpoint object
-  AxiioEndpoint endpoint(endpointName);
+  // Create endpoint object using factory function
+  auto endpoint = createEndpoint(endpointName);
+  if (!endpoint) {
+    std::cerr << "Error: Failed to create endpoint '" << endpointName << "'"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
 
   // Get GPU device information
   int deviceId = 0;
@@ -117,8 +122,8 @@ int main(int argc, char** argv) {
   std::cout << "CPU Clock: CLOCK_MONOTONIC" << std::endl;
   std::cout << "CPU Clock Resolution: " << std::fixed << std::setprecision(3)
             << cpuClockResolutionNs << " ns" << std::endl;
-  std::cout << "Using endpoint: " << endpoint.getName() << std::endl;
-  std::cout << "Description: " << endpoint.getDescription() << std::endl;
+  std::cout << "Using endpoint: " << endpoint->getName() << std::endl;
+  std::cout << "Description: " << endpoint->getDescription() << std::endl;
   std::cout << "Iterations: " << baseConfig.iterations << std::endl;
   std::cout << "Threads: " << baseConfig.numThreads << std::endl;
   if (baseConfig.delayNs != 0) {
@@ -139,8 +144,8 @@ int main(int argc, char** argv) {
             << std::endl;
 
   // Get queue entry sizes from endpoint
-  size_t sqeSize = endpoint.getSubmissionQueueEntrySize();
-  size_t cqeSize = endpoint.getCompletionQueueEntrySize();
+  size_t sqeSize = endpoint->getSubmissionQueueEntrySize();
+  size_t cqeSize = endpoint->getCompletionQueueEntrySize();
   std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
   std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
 
@@ -177,7 +182,7 @@ int main(int argc, char** argv) {
   baseConfig.completionQueue = hostCqeAddr;
 
   // Run endpoint test
-  hipError_t err = endpoint.run(&baseConfig);
+  hipError_t err = endpoint->run(&baseConfig);
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
               << " (error code: " << err << ")" << std::endl;
