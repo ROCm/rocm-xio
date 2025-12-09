@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "axiio-endpoint-config.h"
 #include "axiio-endpoint-registry.h"
-#include "axiio-endpoint.h"
+#include "axiio.h"
 #include "nvme-ep.h"
 
 // Global debug flag (defined here, declared in nvme-ep.h)

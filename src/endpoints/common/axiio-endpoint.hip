@@ -6,7 +6,7 @@
 #include <memory>
 
 #include "axiio-endpoint-registry.h"
-#include "axiio-endpoint.h"
+#include "axiio.h"
 
 // Include endpoint headers for size information
 #include "nvme-ep.h"

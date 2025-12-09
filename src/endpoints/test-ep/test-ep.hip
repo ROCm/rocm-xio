@@ -8,8 +8,6 @@
 #include <thread>
 #include <vector>
 
-#include "axiio-endpoint-config.h"
-#include "axiio-endpoint.h"
 #include "axiio.h"
 #include "test-ep-config.h"
 #include "test-ep.h"
