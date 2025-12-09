@@ -30,6 +30,10 @@ struct TestEpConfig {
   // memory mode bit 2 (0=host, 1=device).
   unsigned doorbell = 0; // Default: 0 (disabled, polling mode)
 
+  // Emulate mode: run kernel code on CPU instead of GPU
+  // Useful for testing without a GPU or in CI environments
+  bool emulate = false; // Default: false (use GPU)
+
   // Default constructor
   TestEpConfig() = default;
 };

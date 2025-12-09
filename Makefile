@@ -98,8 +98,14 @@ else
 endif
 
 # CXX variables and flags
-override CXXFLAGS += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
-override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
+# Only add GPU-specific flags if using hipcc (not regular g++)
+ifeq ($(findstring hipcc,$(HIPCXX)),hipcc)
+  override CXXFLAGS += -fgpu-rdc -Wall -Wextra -Wno-unused-parameter
+  override CXXFLAGS += $(OFFLOAD_ARCH_FLAG)
+else
+  # For regular C++ compiler (emulate mode), use standard flags
+  override CXXFLAGS += -Wall -Wextra -Wno-unused-parameter -std=c++17
+endif
 # Add include paths for all discovered endpoints
 override CXXFLAGS += $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep))
 
@@ -201,7 +207,11 @@ $(BUILD_DIR)/src/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
 $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(eval ENDPOINT_DEFINE := $(call get_endpoint_define,$<))
-	$(HIPCXX) $(CXXFLAGS) $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -c -o $@ $<
+	if echo "$(HIPCXX)" | grep -q hipcc; then \
+	  $(HIPCXX) $(CXXFLAGS) $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -c -o $@ $<; \
+	else \
+	  $(HIPCXX) $(CXXFLAGS) -D__HIP_PLATFORM_AMD__ $(ENDPOINT_DEFINE) -I$(INCLUDE_DIR) -I$(HIP_INCLUDE_DIR) $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep)) -x c++ -c -o $@ $<; \
+	fi
 
 # Rule for .cpp files (tester) - use regular C++ compiler, not hipcc
 # Need endpoint include paths and HIP platform define, but not GPU flags

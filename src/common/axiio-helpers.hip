@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -395,8 +396,17 @@ hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
     }
     memset(*ptr, 0, size);
   } else {
-    // Allocate host-accessible memory using HIP
-    HIP_CHECK(hipHostMalloc(ptr, size, hipHostMallocDefault));
+    // Allocate host-accessible memory using HIP or regular malloc
+    // Try HIP first, but fall back to malloc if HIP is not available (emulate
+    // mode)
+    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocDefault);
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        return hipErrorMemoryAllocation;
+      }
+    }
     memset(*ptr, 0, size);
   }
 
@@ -424,8 +434,17 @@ hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
     }
     memset(*ptr, 0, size);
   } else {
-    // Allocate host-accessible memory using HIP
-    HIP_CHECK(hipHostMalloc(ptr, size, hipHostMallocDefault));
+    // Allocate host-accessible memory using HIP or regular malloc
+    // Try HIP first, but fall back to malloc if HIP is not available (emulate
+    // mode)
+    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocDefault);
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        return hipErrorMemoryAllocation;
+      }
+    }
     memset(*ptr, 0, size);
   }
 
@@ -442,9 +461,13 @@ void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
       hsa_memory_free(ptr);
     }
   } else {
-    // Free HIP host memory
+    // Free HIP host memory or regular free
     if (ptr != nullptr) {
-      HIP_CHECK(hipHostFree(ptr));
+      hipError_t hipErr = hipHostFree(ptr);
+      if (hipErr != hipSuccess) {
+        // HIP not available (e.g., emulate mode), use regular free
+        free(ptr);
+      }
     }
   }
 }
@@ -459,9 +482,13 @@ void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
       hsa_memory_free(ptr);
     }
   } else {
-    // Free HIP host memory
+    // Free HIP host memory or regular free
     if (ptr != nullptr) {
-      HIP_CHECK(hipHostFree(ptr));
+      hipError_t hipErr = hipHostFree(ptr);
+      if (hipErr != hipSuccess) {
+        // HIP not available (e.g., emulate mode), use regular free
+        free(ptr);
+      }
     }
   }
 }
