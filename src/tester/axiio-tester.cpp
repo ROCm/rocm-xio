@@ -136,34 +136,58 @@ int main(int argc, char** argv) {
   // Initialize endpoint-specific configuration
   baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
 
-  // Get GPU device information
+  // Get test-ep config to check emulate mode (will be used later too)
+  // Note: This is test-ep specific, but needed for GPU initialization check
+  test_ep::TestEpConfig* testEpConfigForEmulate =
+    static_cast<test_ep::TestEpConfig*>(baseConfig.endpointConfig);
+  bool emulateMode = (testEpConfigForEmulate != nullptr)
+                       ? testEpConfigForEmulate->emulate
+                       : false;
+
+  // In emulate mode, memory mode must be 0 (host memory only)
+  if (emulateMode && baseConfig.memoryMode != 0) {
+    std::cerr << "Error: Memory mode must be 0 in emulate mode (device memory "
+                 "not supported)"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  // Get GPU device information (skip in emulate mode)
   int deviceId = 0;
-  HIP_CHECK(hipGetDevice(&deviceId));
-  hipDeviceProp_t deviceProp;
-  HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
+  double gpuClockPeriodNs = 10.0; // Default: 10ns (100MHz) for emulate mode
+  if (!emulateMode) {
+    HIP_CHECK(hipGetDevice(&deviceId));
+    hipDeviceProp_t deviceProp;
+    HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
 
-  // Get GPU wall clock frequency (in KHz)
-  int gpuWallClockRateKHz = 0;
-  HIP_CHECK(hipDeviceGetAttribute(&gpuWallClockRateKHz,
-                                  hipDeviceAttributeWallClockRate, deviceId));
+    // Get GPU wall clock frequency (in KHz)
+    int gpuWallClockRateKHz = 0;
+    HIP_CHECK(hipDeviceGetAttribute(&gpuWallClockRateKHz,
+                                    hipDeviceAttributeWallClockRate, deviceId));
 
-  // Calculate GPU clock period in nanoseconds
-  // Frequency is in KHz, so period = 1e6 / frequency_khz nanoseconds
-  double gpuClockPeriodNs = 1000000.0 /
-                            static_cast<double>(gpuWallClockRateKHz);
+    // Calculate GPU clock period in nanoseconds
+    // Frequency is in KHz, so period = 1e6 / frequency_khz nanoseconds
+    gpuClockPeriodNs = 1000000.0 / static_cast<double>(gpuWallClockRateKHz);
+
+    // Print device and endpoint info
+    std::cout << "GPU Model: " << deviceProp.name << std::endl;
+    std::cout << "GPU Device ID: " << deviceId << std::endl;
+    std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
+              << std::endl;
+  } else {
+    // Emulate mode: use CPU time instead of GPU time
+    std::cout << "GPU Model: [Emulation Mode - CPU]" << std::endl;
+    std::cout << "GPU Device ID: N/A (emulation)" << std::endl;
+    std::cout << "GPU Wall Clock Rate: 100000 KHz (emulated)" << std::endl;
+  }
+
+  std::cout << "GPU Clock Period: " << std::fixed << std::setprecision(3)
+            << gpuClockPeriodNs << " ns" << std::endl;
 
   // Get CPU clock resolution
   struct timespec cpuRes;
   clock_getres(CLOCK_MONOTONIC, &cpuRes);
   double cpuClockResolutionNs = cpuRes.tv_sec * 1000000000.0 + cpuRes.tv_nsec;
-
-  // Print device and endpoint info
-  std::cout << "GPU Model: " << deviceProp.name << std::endl;
-  std::cout << "GPU Device ID: " << deviceId << std::endl;
-  std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
-            << std::endl;
-  std::cout << "GPU Clock Period: " << std::fixed << std::setprecision(3)
-            << gpuClockPeriodNs << " ns" << std::endl;
   std::cout << "CPU Clock: CLOCK_MONOTONIC" << std::endl;
   std::cout << "CPU Clock Resolution: " << std::fixed << std::setprecision(3)
             << cpuClockResolutionNs << " ns" << std::endl;
@@ -242,8 +266,28 @@ int main(int argc, char** argv) {
   }
 
   // Timing buffers are always host-accessible
-  HIP_CHECK(hipHostMalloc((void**)&hostStartTime, totalTimingSize));
-  HIP_CHECK(hipHostMalloc((void**)&hostEndTime, totalTimingSize));
+  // Try HIP first, but fall back to malloc if HIP is not available (emulate
+  // mode)
+  hipError_t hipErr1 = hipHostMalloc((void**)&hostStartTime, totalTimingSize);
+  if (hipErr1 != hipSuccess) {
+    // HIP not available (e.g., emulate mode), use regular malloc
+    void* ptr = malloc(totalTimingSize);
+    if (ptr == nullptr) {
+      std::cerr << "Error: Failed to allocate start time buffer" << std::endl;
+      return EXIT_FAILURE;
+    }
+    hostStartTime = static_cast<unsigned long long int*>(ptr);
+  }
+  hipError_t hipErr2 = hipHostMalloc((void**)&hostEndTime, totalTimingSize);
+  if (hipErr2 != hipSuccess) {
+    // HIP not available (e.g., emulate mode), use regular malloc
+    void* ptr = malloc(totalTimingSize);
+    if (ptr == nullptr) {
+      std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
+      return EXIT_FAILURE;
+    }
+    hostEndTime = static_cast<unsigned long long int*>(ptr);
+  }
 
   // Initialize timing buffers to zero
   memset(hostStartTime, 0, totalTimingSize);
@@ -262,8 +306,15 @@ int main(int argc, char** argv) {
               << " (error code: " << err << ")" << std::endl;
     axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
     axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
-    HIP_CHECK(hipHostFree(hostStartTime));
-    HIP_CHECK(hipHostFree(hostEndTime));
+    // Free host memory using HIP or regular free
+    hipError_t hipErrFree1 = hipHostFree(hostStartTime);
+    if (hipErrFree1 != hipSuccess) {
+      free(hostStartTime);
+    }
+    hipError_t hipErrFree2 = hipHostFree(hostEndTime);
+    if (hipErrFree2 != hipSuccess) {
+      free(hostEndTime);
+    }
     return EXIT_FAILURE;
   }
 
@@ -350,8 +401,15 @@ int main(int argc, char** argv) {
   // Free memory
   axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
   axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
-  HIP_CHECK(hipHostFree(hostStartTime));
-  HIP_CHECK(hipHostFree(hostEndTime));
+  // Free host memory using HIP or regular free
+  hipError_t hipErrFree1 = hipHostFree(hostStartTime);
+  if (hipErrFree1 != hipSuccess) {
+    free(hostStartTime);
+  }
+  hipError_t hipErrFree2 = hipHostFree(hostEndTime);
+  if (hipErrFree2 != hipSuccess) {
+    free(hostEndTime);
+  }
 
   return EXIT_SUCCESS;
 }
