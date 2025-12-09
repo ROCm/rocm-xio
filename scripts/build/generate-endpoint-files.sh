@@ -11,8 +11,8 @@ if [ -z "$ENDPOINTS_DIR" ] || [ -z "$REGISTRY_OUTPUT" ] || \
   exit 1
 fi
 
-# Find all endpoint directories
-ENDPOINTS=$(find "$ENDPOINTS_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+# Find all endpoint directories (exclude common subdirectory)
+ENDPOINTS=$(find "$ENDPOINTS_DIR" -mindepth 1 -maxdepth 1 -type d -not -name "common" -exec basename {} \; | sort)
 
 # Helper function to convert endpoint name to define name
 get_endpoint_define() {
