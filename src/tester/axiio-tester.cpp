@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
 
   // Print GPU info if requested
   if (printInfo) {
-    axxioPrintDeviceInfo();
+    axiioPrintDeviceInfo();
   }
 
   // Validate endpoint
@@ -164,14 +164,29 @@ int main(int argc, char** argv) {
   size_t totalTimingSize = baseConfig.iterations * baseConfig.numThreads *
                            sizeof(unsigned long long int);
 
-  HIP_CHECK(hipHostMalloc(&hostSqeAddr, totalSqeSize));
-  HIP_CHECK(hipHostMalloc(&hostCqeAddr, totalCqeSize));
+  // Allocate queues based on memory mode
+  hipError_t sqeErr = axiioAllocateSubmissionQueue(totalSqeSize,
+                                                   baseConfig.memoryMode,
+                                                   &hostSqeAddr);
+  if (sqeErr != hipSuccess) {
+    std::cerr << "Failed to allocate submission queue" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  hipError_t cqeErr = axiioAllocateCompletionQueue(totalCqeSize,
+                                                   baseConfig.memoryMode,
+                                                   &hostCqeAddr);
+  if (cqeErr != hipSuccess) {
+    std::cerr << "Failed to allocate completion queue" << std::endl;
+    axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+    return EXIT_FAILURE;
+  }
+
+  // Timing buffers are always host-accessible
   HIP_CHECK(hipHostMalloc((void**)&hostStartTime, totalTimingSize));
   HIP_CHECK(hipHostMalloc((void**)&hostEndTime, totalTimingSize));
 
-  // Initialize buffers to zero
-  memset(hostSqeAddr, 0, totalSqeSize);
-  memset(hostCqeAddr, 0, totalCqeSize);
+  // Initialize timing buffers to zero
   memset(hostStartTime, 0, totalTimingSize);
   memset(hostEndTime, 0, totalTimingSize);
 
@@ -186,8 +201,8 @@ int main(int argc, char** argv) {
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
               << " (error code: " << err << ")" << std::endl;
-    HIP_CHECK(hipHostFree(hostSqeAddr));
-    HIP_CHECK(hipHostFree(hostCqeAddr));
+    axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+    axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
     HIP_CHECK(hipHostFree(hostStartTime));
     HIP_CHECK(hipHostFree(hostEndTime));
     return EXIT_FAILURE;
@@ -259,9 +274,9 @@ int main(int argc, char** argv) {
   // Print statistics
   if (durations.size() > 0) {
     if (printHistogram) {
-      axxioPrintHistogram(durations, baseConfig.iterations);
+      axiioPrintHistogram(durations, baseConfig.iterations);
     } else {
-      axxioPrintStatistics(durations, baseConfig.iterations);
+      axiioPrintStatistics(durations, baseConfig.iterations);
     }
   } else {
     std::cout << "Warning: No valid timing data collected" << std::endl;
@@ -271,8 +286,8 @@ int main(int argc, char** argv) {
   std::cout << "\nTest completed successfully!" << std::endl;
 
   // Free memory
-  HIP_CHECK(hipHostFree(hostSqeAddr));
-  HIP_CHECK(hipHostFree(hostCqeAddr));
+  axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+  axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
   HIP_CHECK(hipHostFree(hostStartTime));
   HIP_CHECK(hipHostFree(hostEndTime));
 

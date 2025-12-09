@@ -104,15 +104,25 @@ __host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
   const std::string& endpointName);
 
 // Helper functions
-void axxioPrintDeviceInfo();
-void axxioPrintStatistics(const std::vector<double>& durations,
+void axiioPrintDeviceInfo();
+void axiioPrintStatistics(const std::vector<double>& durations,
                           unsigned totalIterations = 0,
                           unsigned readIterations = 0,
                           unsigned writeIterations = 0,
                           unsigned verifiedReadsCount = 0);
-void axxioPrintHistogram(const std::vector<double>& durations,
+void axiioPrintHistogram(const std::vector<double>& durations,
                          unsigned nIterations, unsigned readIterations = 0,
                          unsigned writeIterations = 0,
                          unsigned verifiedReadsCount = 0);
+
+// Queue memory allocation functions
+// memoryMode bits: Bit 0 (LSB) = GPU write location (0=host, 1=device)
+//                  Bit 1 (MSB) = CPU write location (0=host, 1=device)
+hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
+                                        void** ptr);
+hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
+                                        void** ptr);
+void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
+void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode);
 
 #endif // AXIIO_H
