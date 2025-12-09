@@ -7,6 +7,7 @@
 #define AXIIO_ENDPOINT_H
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include <hip/hip_runtime.h>
@@ -17,36 +18,33 @@
 #include "axiio-endpoint-includes-gen.h"
 
 /*
- * AxiioEndpoint Class
+ * AxiioEndpoint Base Class
  *
+ * Base class for all endpoint implementations. Uses polymorphism to
+ * eliminate switch statements and function pointers.
  */
 class AxiioEndpoint {
 public:
-  // Construction
-  __host__ AxiioEndpoint(EndpointType type);
-  __host__ AxiioEndpoint(const std::string& endpointName);
+  virtual ~AxiioEndpoint() = default;
 
   // Accessors (host-only)
-  __host__ EndpointType getType() const;
-  __host__ const char* getName() const;
-  __host__ const char* getDescription() const;
+  __host__ virtual EndpointType getType() const = 0;
+  __host__ virtual const char* getName() const = 0;
+  __host__ virtual const char* getDescription() const = 0;
 
-  // Get queue entry sizes (host-only)
-  __host__ size_t getSubmissionQueueEntrySize() const;
-  __host__ size_t getCompletionQueueEntrySize() const;
+  // Get queue entry sizes (host-only) - each derived class knows its sizes
+  __host__ virtual size_t getSubmissionQueueEntrySize() const = 0;
+  __host__ virtual size_t getCompletionQueueEntrySize() const = 0;
 
   // Run endpoint test - launches GPU kernel and waits for completion
-  // Calls the endpoint-specific run function directly (no dispatch)
-  __host__ hipError_t run(AxiioEndpointConfig* config);
-
-private:
-  EndpointType type_;
-  // Function pointer to endpoint-specific run() - set in constructor
-  hipError_t (*runFunc_)(AxiioEndpointConfig*);
+  // Each derived class implements this to call its specific run function
+  __host__ virtual hipError_t run(AxiioEndpointConfig* config) = 0;
 };
 
-// Standalone helper functions to get queue entry sizes
-__host__ size_t getSubmissionQueueEntrySize(EndpointType type);
-__host__ size_t getCompletionQueueEntrySize(EndpointType type);
+// Factory function to create endpoint instances
+// Returns unique_ptr for proper ownership management
+__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(EndpointType type);
+__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
+  const std::string& endpointName);
 
 #endif // AXIIO_ENDPOINT_H
