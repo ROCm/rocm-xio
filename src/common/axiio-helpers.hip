@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -14,9 +15,11 @@
 
 #include <hip/hip_runtime.h>
 
+#include <unistd.h>
+
 #include "axiio.h"
 
-void axxioPrintDeviceInfo() {
+void axiioPrintDeviceInfo() {
   int deviceCount;
   HIP_CHECK(hipGetDeviceCount(&deviceCount));
   std::cout << "Number of devices: " << deviceCount << std::endl;
@@ -57,7 +60,7 @@ void axxioPrintDeviceInfo() {
   }
 }
 
-void axxioPrintStatistics(const std::vector<double>& durations,
+void axiioPrintStatistics(const std::vector<double>& durations,
                           unsigned totalIterations, unsigned readIterations,
                           unsigned writeIterations,
                           unsigned verifiedReadsCount) {
@@ -138,7 +141,7 @@ void axxioPrintStatistics(const std::vector<double>& durations,
             << std::setprecision(2) << stddev_display << time_unit << std::endl;
 }
 
-void axxioPrintHistogram(const std::vector<double>& durations,
+void axiioPrintHistogram(const std::vector<double>& durations,
                          unsigned nIterations, unsigned readIterations,
                          unsigned writeIterations,
                          unsigned verifiedReadsCount) {
@@ -248,6 +251,211 @@ void axxioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  axxioPrintStatistics(durations, nIterations, readIterations, writeIterations,
+  axiioPrintStatistics(durations, nIterations, readIterations, writeIterations,
                        verifiedReadsCount);
+}
+
+// Helper function to allocate HSA device memory
+static hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
+                                           const char* direction) {
+  hsa_status_t status;
+
+  // Initialize HSA runtime (safe to call multiple times)
+  status = hsa_init();
+  if (status != HSA_STATUS_SUCCESS) {
+    // If already initialized, that's fine, continue
+    if (status != 0x1001) { // HSA_STATUS_ERROR_ALREADY_INITIALIZED value
+      std::cerr << "Error: hsa_init failed: " << status << std::endl;
+      return status;
+    }
+  }
+
+  // Iterate through agents to find GPU
+  hsa_region_t device_region = {0};
+
+  hsa_iterate_agents(
+    [](hsa_agent_t agent, void* data) -> hsa_status_t {
+      hsa_device_type_t device_type;
+      hsa_status_t status = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE,
+                                               &device_type);
+      if (status != HSA_STATUS_SUCCESS) {
+        return status;
+      }
+
+      if (device_type == HSA_DEVICE_TYPE_GPU) {
+        // Found GPU agent, iterate its regions
+        // Look for fine-grained global region first (better for CPU-GPU
+        // coherence) Then fall back to coarse-grained if fine-grained not
+        // available
+        struct RegionData {
+          hsa_region_t fine;
+          hsa_region_t coarse;
+        };
+        RegionData regions = {{0}, {0}};
+
+        hsa_agent_iterate_regions(
+          agent,
+          [](hsa_region_t region, void* data) -> hsa_status_t {
+            hsa_region_segment_t segment;
+            hsa_status_t status = hsa_region_get_info(region,
+                                                      HSA_REGION_INFO_SEGMENT,
+                                                      &segment);
+            if (status != HSA_STATUS_SUCCESS) {
+              return status;
+            }
+
+            // Look for global (device) memory region
+            if (segment == HSA_REGION_SEGMENT_GLOBAL) {
+              uint32_t alloc_allowed;
+              status = hsa_region_get_info(
+                region, HSA_REGION_INFO_RUNTIME_ALLOC_ALLOWED, &alloc_allowed);
+              if (status == HSA_STATUS_SUCCESS && alloc_allowed) {
+                // Check if fine-grained or coarse-grained
+                uint32_t global_flags;
+                status = hsa_region_get_info(region,
+                                             HSA_REGION_INFO_GLOBAL_FLAGS,
+                                             &global_flags);
+                if (status == HSA_STATUS_SUCCESS) {
+                  RegionData* regions_ptr = (RegionData*)data;
+
+                  if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
+                    regions_ptr->fine = region;
+                  } else if (global_flags &
+                             HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
+                    regions_ptr->coarse = region;
+                  }
+                }
+              }
+            }
+            return HSA_STATUS_SUCCESS;
+          },
+          &regions);
+
+        // Prefer fine-grained, fall back to coarse-grained
+        hsa_region_t* best_region = (hsa_region_t*)data;
+        if (regions.fine.handle != 0) {
+          *best_region = regions.fine;
+        } else if (regions.coarse.handle != 0) {
+          *best_region = regions.coarse;
+        }
+
+        return HSA_STATUS_INFO_BREAK; // Stop agent iteration
+      }
+      return HSA_STATUS_SUCCESS;
+    },
+    &device_region);
+
+  if (device_region.handle == 0) {
+    std::cerr << "Error: Could not find allocatable device memory region"
+              << std::endl;
+    return HSA_STATUS_ERROR_INVALID_REGION;
+  }
+
+  // Check what type of region we found
+  uint32_t global_flags = 0;
+  hsa_region_get_info(device_region, HSA_REGION_INFO_GLOBAL_FLAGS,
+                      &global_flags);
+  if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
+    std::cerr << "  Info: (" << direction << "):  Using HSA fine-grained "
+              << "global memory region" << std::endl;
+  } else if (global_flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
+    std::cerr << "  Info: (" << direction << "):  Using HSA coarse-grained "
+              << "global memory region" << std::endl;
+  }
+
+  // Allocate memory from device region
+  status = hsa_memory_allocate(device_region, size, ptr);
+  return status;
+}
+
+// Allocate submission queue memory based on memory mode
+// Returns hipSuccess on success, hipErrorMemoryAllocation on failure
+hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
+                                        void** ptr) {
+  bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
+
+  if (gpuWriteToDevice) {
+    // Allocate device memory using HSA
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
+                         host_page_size;
+
+    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
+                                                     "GPU->CPU (SQE)");
+    if (hsa_status != HSA_STATUS_SUCCESS) {
+      std::cerr << "Error: HSA memory allocation failed for submission queue: "
+                << hsa_status << std::endl;
+      return hipErrorMemoryAllocation;
+    }
+    memset(*ptr, 0, size);
+  } else {
+    // Allocate host-accessible memory using HIP
+    HIP_CHECK(hipHostMalloc(ptr, size, hipHostMallocDefault));
+    memset(*ptr, 0, size);
+  }
+
+  return hipSuccess;
+}
+
+// Allocate completion queue memory based on memory mode
+// Returns hipSuccess on success, hipErrorMemoryAllocation on failure
+hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
+                                        void** ptr) {
+  bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
+
+  if (cpuWriteToDevice) {
+    // Allocate device memory using HSA
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
+                         host_page_size;
+
+    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
+                                                     "CPU->GPU (CQE)");
+    if (hsa_status != HSA_STATUS_SUCCESS) {
+      std::cerr << "Error: HSA memory allocation failed for completion queue: "
+                << hsa_status << std::endl;
+      return hipErrorMemoryAllocation;
+    }
+    memset(*ptr, 0, size);
+  } else {
+    // Allocate host-accessible memory using HIP
+    HIP_CHECK(hipHostMalloc(ptr, size, hipHostMallocDefault));
+    memset(*ptr, 0, size);
+  }
+
+  return hipSuccess;
+}
+
+// Free submission queue memory based on memory mode
+void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
+  bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
+
+  if (gpuWriteToDevice) {
+    // Free HSA device memory
+    if (ptr != nullptr) {
+      hsa_memory_free(ptr);
+    }
+  } else {
+    // Free HIP host memory
+    if (ptr != nullptr) {
+      HIP_CHECK(hipHostFree(ptr));
+    }
+  }
+}
+
+// Free completion queue memory based on memory mode
+void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
+  bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
+
+  if (cpuWriteToDevice) {
+    // Free HSA device memory
+    if (ptr != nullptr) {
+      hsa_memory_free(ptr);
+    }
+  } else {
+    // Free HIP host memory
+    if (ptr != nullptr) {
+      HIP_CHECK(hipHostFree(ptr));
+    }
+  }
 }
