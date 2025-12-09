@@ -33,11 +33,13 @@ CLANG_FORMAT ?= clang-format
 
 # Project directories
 ENDPOINTS_DIR := src/endpoints
+ENDPOINTS_COMMON_DIR := src/endpoints/common
 COMMON_DIR := src/common
 TESTER_DIR := src/tester
 
 # Automatically discover all available endpoints from subdirectories
-VALID_ENDPOINTS := $(notdir $(wildcard $(ENDPOINTS_DIR)/*))
+# Exclude common directory from endpoint list
+VALID_ENDPOINTS := $(filter-out common,$(notdir $(wildcard $(ENDPOINTS_DIR)/*)))
 
 # Generated files
 ENDPOINT_REGISTRY_GEN := $(INCLUDE_DIR)/axiio-endpoint-registry-gen.h
@@ -62,8 +64,10 @@ RDMA_VENDOR_HEADERS := $(ENDPOINTS_DIR)/rdma-ep/mlx/mlx5-rdma.h \
 # Find all source files with .hip extension
 LIB_HEADERS := $(call rwildcard,$(INCLUDE_DIR) $(ENDPOINTS_DIR),*.h)
 # Build all endpoints (automatically find all .hip files)
+# Exclude common directory from ENDPOINTS_DIR to avoid duplicates
 LIB_SOURCES := $(call rwildcard,$(COMMON_DIR),*.hip) \
-               $(call rwildcard,$(ENDPOINTS_DIR),*.hip)
+               $(call rwildcard,$(ENDPOINTS_COMMON_DIR),*.hip) \
+               $(filter-out $(ENDPOINTS_COMMON_DIR)/%,$(call rwildcard,$(ENDPOINTS_DIR),*.hip))
 LIB_OBJECTS := $(patsubst %.hip,$(BUILD_DIR)/%.o,$(LIB_SOURCES))
 
 # Tester source file
@@ -119,7 +123,7 @@ ENDPOINT_GEN_SENTINEL := $(BUILD_DIR)/.endpoint-files-generated
 $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN): \
 	$(ENDPOINT_GEN_SENTINEL)
 
-$(ENDPOINT_GEN_SENTINEL): scripts/build/generate-endpoint-files.sh | $(INCLUDE_DIR) $(COMMON_DIR) $(BUILD_DIR)
+$(ENDPOINT_GEN_SENTINEL): scripts/build/generate-endpoint-files.sh | $(INCLUDE_DIR) $(ENDPOINTS_COMMON_DIR) $(BUILD_DIR)
 	@echo "Generating endpoint files from: $(VALID_ENDPOINTS)"
 	@./scripts/build/generate-endpoint-files.sh $(ENDPOINTS_DIR) \
 		$(ENDPOINT_REGISTRY_GEN) \
