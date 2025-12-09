@@ -38,11 +38,6 @@
 // Namespace all rdma-ep implementation to avoid conflicts
 namespace rdma_ep {
 
-// Helper function to create AxiioEndpoint object for this endpoint
-__host__ AxiioEndpoint createEndpoint() {
-  return AxiioEndpoint(EndpointType::RDMA_EP);
-}
-
 // Use types from rdma-ep.h
 typedef struct rdma_wqe sqeType;
 typedef struct rdma_cqe cqeType;
@@ -199,7 +194,7 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
 
 } // namespace rdma_ep
 
-// Export rdma-ep functions for runtime dispatch
+// Export rdma-ep functions
 __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
                                                  void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
@@ -346,4 +341,9 @@ __device__ void rdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
   wqe->opcode = 0xFF;
   wqe->wqe_id = 0xFFFF;
   rdma_ep::sqeWrite(sqeLocal, sqePtr);
+}
+
+// Dummy run() function for rdma-ep (not implemented yet)
+hipError_t rdma_ep_run(AxiioEndpointConfig* config) {
+  return hipErrorNotSupported;
 }

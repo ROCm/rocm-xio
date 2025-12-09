@@ -15,11 +15,6 @@
 // Namespace all sdma-ep implementation to avoid conflicts
 namespace sdma_ep {
 
-// Helper function to create AxiioEndpoint object for this endpoint
-__host__ AxiioEndpoint createEndpoint() {
-  return AxiioEndpoint(EndpointType::SDMA_EP);
-}
-
 // Use types from sdma-ep.h
 typedef struct sdma_sqe sqeType;
 typedef struct sdma_cqe cqeType;
@@ -142,7 +137,7 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
 
 } // namespace sdma_ep
 
-// Export sdma-ep functions for runtime dispatch
+// Export sdma-ep functions
 __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
                                                  void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
@@ -257,4 +252,9 @@ __device__ void sdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
   sqe->opcode = 0xFF;
   sqe->command_id = 0xFFFF;
   sdma_ep::sqeWrite(sqeLocal, sqePtr);
+}
+
+// Dummy run() function for sdma-ep (not implemented yet)
+hipError_t sdma_ep_run(AxiioEndpointConfig* config) {
+  return hipErrorNotSupported;
 }

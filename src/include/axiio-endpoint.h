@@ -35,16 +35,14 @@ public:
   __host__ size_t getSubmissionQueueEntrySize() const;
   __host__ size_t getCompletionQueueEntrySize() const;
 
-  // GPU operations - config-based signature
-  __device__ void drive(const AxiioEndpointConfig& config,
-                        void* submissionQueue, // User-provided
-                                               // endpoint-specific buffer
-                        void* completionQueue // User-provided endpoint-specific
-                                              // buffer
-  );
+  // Run endpoint test - launches GPU kernel and waits for completion
+  // Calls the endpoint-specific run function directly (no dispatch)
+  __host__ hipError_t run(AxiioEndpointConfig* config);
 
 private:
   EndpointType type_;
+  // Function pointer to endpoint-specific run() - set in constructor
+  hipError_t (*runFunc_)(AxiioEndpointConfig*);
 };
 
 // Standalone helper functions to get queue entry sizes

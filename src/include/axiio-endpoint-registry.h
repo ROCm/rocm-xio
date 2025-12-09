@@ -9,7 +9,10 @@
 #include <string>
 #include <vector>
 
+#include <hip/hip_runtime.h>
+
 // Include auto-generated EndpointType enum
+#include "axiio-endpoint-config.h"
 #include "axiio-endpoint-registry-gen.h"
 
 // Endpoint information structure

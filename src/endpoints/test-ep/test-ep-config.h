@@ -14,11 +14,13 @@ namespace test_ep {
  * Test endpoint configuration structure
  *
  * Contains test-ep-specific configuration parameters.
- * Currently minimal, but can be extended as needed.
  */
 struct TestEpConfig {
-  // Test-ep specific parameters can be added here
-  // For now, we rely on the base AxiioEndpointConfig
+  // Enable CPU threads to poll SQEs and generate CQEs
+  // When enabled, CPU threads will poll host memory for SQEs written by GPU
+  // and generate CQEs with delay support
+  bool enableCpuThreads = true; // Default: enabled to match simple-test
+                                // behavior
 
   // Default constructor
   TestEpConfig() = default;

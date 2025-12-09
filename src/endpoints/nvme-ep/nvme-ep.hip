@@ -4,6 +4,7 @@
  */
 
 #include "axiio-endpoint-config.h"
+#include "axiio-endpoint-registry.h"
 #include "axiio-endpoint.h"
 #include "nvme-ep.h"
 
@@ -13,11 +14,6 @@ __device__ bool g_nvme_ep_debug = false;
 
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
-
-// Helper function to create AxiioEndpoint object for this endpoint
-__host__ AxiioEndpoint createEndpoint() {
-  return AxiioEndpoint(EndpointType::NVME_EP);
-}
 
 // Use types from nvme-ep.h
 typedef struct nvme_sqe sqeType;
@@ -157,7 +153,7 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
 
 } // namespace nvme_ep
 
-// Export nvme-ep functions for runtime dispatch
+// Export nvme-ep functions
 //
 // Emulate Endpoint - Acts as NVMe controller
 // Polls for SQEs from the GPU, generates CQEs in response
@@ -503,4 +499,9 @@ __global__ void nvme_ep_verify_reads_gpu(
       cqeIdx = 0;
     }
   }
+}
+
+// Dummy run() function for nvme-ep (not implemented yet)
+hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
+  return hipErrorNotSupported;
 }
