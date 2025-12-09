@@ -3,11 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <thread>
-#include <vector>
+#include <memory>
 
 #include "axiio-endpoint-registry.h"
-#include "axiio-endpoint.h"
+#include "axiio.h"
 
 // Include endpoint headers for size information
 #include "nvme-ep.h"
@@ -21,96 +20,140 @@ extern hipError_t nvme_ep_run(AxiioEndpointConfig* config);
 extern hipError_t rdma_ep_run(AxiioEndpointConfig* config);
 extern hipError_t sdma_ep_run(AxiioEndpointConfig* config);
 
-// Constructor implementations
-__host__ AxiioEndpoint::AxiioEndpoint(EndpointType type) : type_(type) {
-  // Set run function pointer based on endpoint type - no switch in run()
+// ============================================================================
+// Derived Endpoint Classes
+// ============================================================================
+
+class TestEndpoint : public AxiioEndpoint {
+public:
+  __host__ EndpointType getType() const override {
+    return EndpointType::TEST_EP;
+  }
+
+  __host__ const char* getName() const override {
+    return "test-ep";
+  }
+
+  __host__ const char* getDescription() const override {
+    return "Test endpoint for development/testing";
+  }
+
+  __host__ size_t getSubmissionQueueEntrySize() const override {
+    return TEST_EP_SQE_SIZE;
+  }
+
+  __host__ size_t getCompletionQueueEntrySize() const override {
+    return TEST_EP_CQE_SIZE;
+  }
+
+  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+    return test_ep_run(config);
+  }
+};
+
+class NvmeEndpoint : public AxiioEndpoint {
+public:
+  __host__ EndpointType getType() const override {
+    return EndpointType::NVME_EP;
+  }
+
+  __host__ const char* getName() const override {
+    return "nvme-ep";
+  }
+
+  __host__ const char* getDescription() const override {
+    return "nvme endpoint";
+  }
+
+  __host__ size_t getSubmissionQueueEntrySize() const override {
+    return NVME_EP_SQE_SIZE;
+  }
+
+  __host__ size_t getCompletionQueueEntrySize() const override {
+    return NVME_EP_CQE_SIZE;
+  }
+
+  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+    return nvme_ep_run(config);
+  }
+};
+
+class RdmaEndpoint : public AxiioEndpoint {
+public:
+  __host__ EndpointType getType() const override {
+    return EndpointType::RDMA_EP;
+  }
+
+  __host__ const char* getName() const override {
+    return "rdma-ep";
+  }
+
+  __host__ const char* getDescription() const override {
+    return "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, "
+           "PVRDMA)";
+  }
+
+  __host__ size_t getSubmissionQueueEntrySize() const override {
+    return RDMA_EP_SQE_SIZE;
+  }
+
+  __host__ size_t getCompletionQueueEntrySize() const override {
+    return RDMA_EP_CQE_SIZE;
+  }
+
+  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+    return rdma_ep_run(config);
+  }
+};
+
+class SdmaEndpoint : public AxiioEndpoint {
+public:
+  __host__ EndpointType getType() const override {
+    return EndpointType::SDMA_EP;
+  }
+
+  __host__ const char* getName() const override {
+    return "sdma-ep";
+  }
+
+  __host__ const char* getDescription() const override {
+    return "AMD SDMA Engine endpoint";
+  }
+
+  __host__ size_t getSubmissionQueueEntrySize() const override {
+    return SDMA_EP_SQE_SIZE;
+  }
+
+  __host__ size_t getCompletionQueueEntrySize() const override {
+    return SDMA_EP_CQE_SIZE;
+  }
+
+  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+    return sdma_ep_run(config);
+  }
+};
+
+// ============================================================================
+// Factory Function Implementation
+// ============================================================================
+
+__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(EndpointType type) {
   switch (type) {
     case EndpointType::TEST_EP:
-      runFunc_ = test_ep_run;
-      break;
+      return std::make_unique<TestEndpoint>();
     case EndpointType::NVME_EP:
-      runFunc_ = nvme_ep_run;
-      break;
+      return std::make_unique<NvmeEndpoint>();
     case EndpointType::RDMA_EP:
-      runFunc_ = rdma_ep_run;
-      break;
+      return std::make_unique<RdmaEndpoint>();
     case EndpointType::SDMA_EP:
-      runFunc_ = sdma_ep_run;
-      break;
+      return std::make_unique<SdmaEndpoint>();
     default:
-      runFunc_ = nullptr;
-      break;
+      return nullptr;
   }
 }
 
-__host__ AxiioEndpoint::AxiioEndpoint(const std::string& endpointName)
-  : type_(getEndpointType(endpointName)) {
-}
-
-// Accessor implementations
-__host__ EndpointType AxiioEndpoint::getType() const {
-  return type_;
-}
-
-__host__ const char* AxiioEndpoint::getName() const {
-  return getEndpointName(type_);
-}
-
-__host__ const char* AxiioEndpoint::getDescription() const {
-  const auto& registry = getEndpointRegistry();
-  for (const auto& ep : registry) {
-    if (ep.type == type_) {
-      return ep.description.c_str();
-    }
-  }
-  return "Unknown endpoint";
-}
-
-// Size helper methods
-__host__ size_t AxiioEndpoint::getSubmissionQueueEntrySize() const {
-  return ::getSubmissionQueueEntrySize(type_);
-}
-
-__host__ size_t AxiioEndpoint::getCompletionQueueEntrySize() const {
-  return ::getCompletionQueueEntrySize(type_);
-}
-
-// Standalone helper functions
-__host__ size_t getSubmissionQueueEntrySize(EndpointType type) {
-  switch (type) {
-    case EndpointType::TEST_EP:
-      return TEST_EP_SQE_SIZE;
-    case EndpointType::NVME_EP:
-      return NVME_EP_SQE_SIZE;
-    case EndpointType::RDMA_EP:
-      return RDMA_EP_SQE_SIZE;
-    case EndpointType::SDMA_EP:
-      return SDMA_EP_SQE_SIZE;
-    default:
-      return 0;
-  }
-}
-
-__host__ size_t getCompletionQueueEntrySize(EndpointType type) {
-  switch (type) {
-    case EndpointType::TEST_EP:
-      return TEST_EP_CQE_SIZE;
-    case EndpointType::NVME_EP:
-      return NVME_EP_CQE_SIZE;
-    case EndpointType::RDMA_EP:
-      return RDMA_EP_CQE_SIZE;
-    case EndpointType::SDMA_EP:
-      return SDMA_EP_CQE_SIZE;
-    default:
-      return 0;
-  }
-}
-
-// Run method implementation
-__host__ hipError_t AxiioEndpoint::run(AxiioEndpointConfig* config) {
-  return test_ep_run(config);
-  /*if (runFunc_ == nullptr) {
-    return hipErrorNotSupported;
-  }
-  return runFunc_(config);*/
+__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
+  const std::string& endpointName) {
+  EndpointType type = getEndpointType(endpointName);
+  return createEndpoint(type);
 }
