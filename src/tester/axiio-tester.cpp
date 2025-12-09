@@ -9,87 +9,132 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <CLI/CLI.hpp>
 
 #include "axiio.h"
+#include "test-ep-config.h"
 
 int main(int argc, char** argv) {
   CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
-  // Base configuration
-  AxiioEndpointConfig baseConfig;
+  app.fallthrough(true);
 
-  // CLI options - common testing parameters
-  app
-    .add_option("-n,--iterations", baseConfig.iterations,
-                "Number of I/O operations")
-    ->default_val(128);
-
-  app
-    .add_option("-t,--threads", baseConfig.numThreads,
-                "Number of GPU threads (default: 1, max: 32)")
-    ->default_val(1)
-    ->check(CLI::Range(1, 32));
-
-  app
-    .add_option("--delay", baseConfig.delayNs,
-                "Delay in nanoseconds for CPU response (default: 0). "
-                "Negative: fixed delay of |delay| ns. "
-                "Positive: random delay 0 to delay ns.")
-    ->default_val(0);
-
-  app
-    .add_option("-m,--memory-mode", baseConfig.memoryMode, "Memory mode (0-3)")
-    ->default_val(0)
-    ->check(CLI::Range(0, 3));
-
-  baseConfig.verbose = false;
-  app.add_flag("-v,--verbose", baseConfig.verbose, "Enable detailed output");
-
+  // Global flags (not endpoint-specific)
   bool printInfo = false;
   app.add_flag("-i,--info", printInfo, "Print GPU information");
-
-  bool printHistogram = false;
-  app.add_flag("--histogram", printHistogram, "Generate performance histogram");
-
-  std::string endpointName = "test-ep";
-  app.add_option("-e,--endpoint", endpointName, "Endpoint to use")
-    ->default_val("test-ep");
 
   bool listEndpoints = false;
   app.add_flag("-l,--list-endpoints", listEndpoints,
                "List all available endpoints");
 
+  // Common options (will be inherited by subcommands via fallthrough)
+  // We'll use a single config that gets copied to the selected endpoint
+  AxiioEndpointConfig commonConfig;
+  app
+    .add_option("-n,--iterations", commonConfig.iterations,
+                "Number of I/O operations")
+    ->default_val(128)
+    ->group("Common Options");
+
+  app
+    .add_option("-t,--threads", commonConfig.numThreads,
+                "Number of GPU threads (default: 1, max: 32)")
+    ->default_val(1)
+    ->check(CLI::Range(1, 32))
+    ->group("Common Options");
+
+  app
+    .add_option("--delay", commonConfig.delayNs,
+                "Delay in nanoseconds for CPU response (default: 0). "
+                "Negative: fixed delay of |delay| ns. "
+                "Positive: random delay 0 to delay ns.")
+    ->default_val(0)
+    ->group("Common Options");
+
+  app
+    .add_option("-m,--memory-mode", commonConfig.memoryMode,
+                "Memory mode (0-7)")
+    ->default_val(0)
+    ->check(CLI::Range(0, 7))
+    ->group("Common Options");
+
+  commonConfig.verbose = false;
+  app.add_flag("-v,--verbose", commonConfig.verbose, "Enable detailed output")
+    ->group("Common Options");
+
+  bool printHistogram = false;
+  app.add_flag("--histogram", printHistogram, "Generate performance histogram")
+    ->group("Common Options");
+
+  // Get all available endpoints
+  const auto& registry = getEndpointRegistry();
+
+  // Create subcommands for each endpoint
+  std::map<std::string, CLI::App*> endpointSubcommands;
+  std::map<std::string, std::unique_ptr<AxiioEndpoint>> endpoints;
+
+  for (const auto& endpointInfo : registry) {
+    // Create endpoint object
+    auto endpoint = createEndpoint(endpointInfo.name);
+    if (!endpoint) {
+      continue;
+    }
+
+    // Create subcommand for this endpoint
+    std::string description = endpointInfo.description;
+    CLI::App* subcmd = app.add_subcommand(endpointInfo.name, description);
+
+    // Enable fallthrough for the subcommand itself
+    // This allows options defined on the main app to be parsed
+    subcmd->fallthrough(true);
+
+    // Store endpoint and subcommand
+    endpoints[endpointInfo.name] = std::move(endpoint);
+    endpointSubcommands[endpointInfo.name] = subcmd;
+
+    // Let endpoint configure its own CLI options
+    endpoints[endpointInfo.name]->configureCliOptions(*subcmd);
+  }
+
+  // Parse command line
   CLI11_PARSE(app, argc, argv);
 
-  // List endpoints if requested
+  // Handle global flags
   if (listEndpoints) {
     listAvailableEndpoints();
     return EXIT_SUCCESS;
   }
 
-  // Print GPU info if requested
   if (printInfo) {
     axiioPrintDeviceInfo();
+    return EXIT_SUCCESS;
   }
 
-  // Validate endpoint
-  if (!isValidEndpoint(endpointName)) {
-    std::cerr << "Error: Unknown endpoint '" << endpointName << "'"
-              << std::endl;
-    std::cerr << "Use --list-endpoints to see available endpoints" << std::endl;
-    return EXIT_FAILURE;
+  // Find which subcommand was called
+  std::string selectedEndpoint;
+  for (const auto& [name, subcmd] : endpointSubcommands) {
+    if (subcmd->parsed()) {
+      selectedEndpoint = name;
+      break;
+    }
   }
 
-  // Create endpoint object using factory function
-  auto endpoint = createEndpoint(endpointName);
-  if (!endpoint) {
-    std::cerr << "Error: Failed to create endpoint '" << endpointName << "'"
-              << std::endl;
-    return EXIT_FAILURE;
+  // If no subcommand was called, show help
+  if (selectedEndpoint.empty()) {
+    std::cout << app.help() << std::endl;
+    return EXIT_SUCCESS;
   }
+
+  // Get the selected endpoint and copy common config
+  auto& endpoint = endpoints[selectedEndpoint];
+  AxiioEndpointConfig baseConfig = commonConfig;
+
+  // Initialize endpoint-specific configuration
+  baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
 
   // Get GPU device information
   int deviceId = 0;
@@ -137,17 +182,35 @@ int main(int argc, char** argv) {
 
   // Extract memory mode bits and explain them
   bool gpuWriteToDevice = (baseConfig.memoryMode & 0x1) != 0; // LSB
-  bool cpuWriteToDevice = (baseConfig.memoryMode & 0x2) != 0; // MSB
+  bool cpuWriteToDevice = (baseConfig.memoryMode & 0x2) != 0; // Bit 1
+  bool doorbellOnDevice = (baseConfig.memoryMode & 0x4) != 0; // Bit 2
   std::cout << "Memory Mode: " << baseConfig.memoryMode
             << " (GPU write: " << (gpuWriteToDevice ? "device" : "host")
-            << ", CPU write: " << (cpuWriteToDevice ? "device" : "host") << ")"
+            << ", CPU write: " << (cpuWriteToDevice ? "device" : "host")
+            << ", Doorbell: " << (doorbellOnDevice ? "device" : "host") << ")"
             << std::endl;
 
-  // Get queue entry sizes from endpoint
+  // Get queue entry sizes and lengths from endpoint
   size_t sqeSize = endpoint->getSubmissionQueueEntrySize();
   size_t cqeSize = endpoint->getCompletionQueueEntrySize();
+  size_t sqeLength = endpoint->getSubmissionQueueLength(&baseConfig);
+  size_t cqeLength = endpoint->getCompletionQueueLength(&baseConfig);
+
+  // Validate doorbell mode: numThreads must not exceed doorbell queue length
+  test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
+    baseConfig.endpointConfig);
+  unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
+  if (doorbell > 0 && baseConfig.numThreads > doorbell) {
+    std::cerr << "Error: Number of threads (" << baseConfig.numThreads
+              << ") exceeds doorbell queue length (" << doorbell << ")"
+              << std::endl;
+    return EXIT_FAILURE;
+  }
+
   std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
   std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
+  std::cout << "SQE length: " << sqeLength << " entries" << std::endl;
+  std::cout << "CQE length: " << cqeLength << " entries" << std::endl;
 
   // Allocate queue memory
   void* hostSqeAddr = nullptr;
@@ -155,12 +218,8 @@ int main(int argc, char** argv) {
   unsigned long long int* hostStartTime = nullptr;
   unsigned long long int* hostEndTime = nullptr;
 
-  size_t totalSqeSize = (baseConfig.numThreads > 1)
-                          ? sqeSize * baseConfig.numThreads
-                          : sqeSize;
-  size_t totalCqeSize = (baseConfig.numThreads > 1)
-                          ? cqeSize * baseConfig.numThreads
-                          : cqeSize;
+  size_t totalSqeSize = sqeSize * sqeLength;
+  size_t totalCqeSize = cqeSize * cqeLength;
   size_t totalTimingSize = baseConfig.iterations * baseConfig.numThreads *
                            sizeof(unsigned long long int);
 
@@ -271,12 +330,15 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Print statistics
+  // Print statistics (printHistogram is already set from common options)
+
   if (durations.size() > 0) {
     if (printHistogram) {
-      axiioPrintHistogram(durations, baseConfig.iterations);
+      axiioPrintHistogram(durations, baseConfig.iterations,
+                          baseConfig.numThreads);
     } else {
-      axiioPrintStatistics(durations, baseConfig.iterations);
+      axiioPrintStatistics(durations, baseConfig.iterations,
+                           baseConfig.numThreads);
     }
   } else {
     std::cout << "Warning: No valid timing data collected" << std::endl;

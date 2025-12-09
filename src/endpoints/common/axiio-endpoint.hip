@@ -5,8 +5,12 @@
 
 #include <memory>
 
+#include <CLI/CLI.hpp>
+
 #include "axiio-endpoint-registry.h"
 #include "axiio.h"
+#include "test-ep-config.h"
+#include "test-ep.h"
 
 // Include endpoint headers for size information
 #include "nvme-ep.h"
@@ -25,6 +29,10 @@ extern hipError_t sdma_ep_run(AxiioEndpointConfig* config);
 // ============================================================================
 
 class TestEndpoint : public AxiioEndpoint {
+private:
+  // Store doorbell queue length from CLI
+  unsigned doorbell_ = 0;
+
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::TEST_EP;
@@ -46,8 +54,57 @@ public:
     return TEST_EP_CQE_SIZE;
   }
 
+  __host__ size_t
+  getSubmissionQueueLength(const AxiioEndpointConfig* config) const override {
+    if (config == nullptr) {
+      return 1;
+    }
+    // Get test-ep specific config to check doorbell value
+    test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
+      config->endpointConfig);
+    unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
+    if (doorbell > 0) {
+      // Doorbell mode: use doorbell value as queue length
+      return doorbell;
+    }
+    // Normal mode: one entry per thread, or 1 for single-threaded
+    return (config->numThreads > 1) ? config->numThreads : 1;
+  }
+
+  __host__ size_t
+  getCompletionQueueLength(const AxiioEndpointConfig* config) const override {
+    if (config == nullptr) {
+      return 1;
+    }
+    // Get test-ep specific config to check doorbell value
+    test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
+      config->endpointConfig);
+    unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
+    if (doorbell > 0) {
+      // Doorbell mode: use doorbell value as queue length (circular buffer)
+      return doorbell;
+    }
+    // Normal mode: one entry per thread, or 1 for single-threaded
+    return (config->numThreads > 1) ? config->numThreads : 1;
+  }
+
   __host__ hipError_t run(AxiioEndpointConfig* config) override {
     return test_ep_run(config);
+  }
+
+  __host__ void configureCliOptions(CLI::App& app) override {
+    app
+      .add_option(
+        "--doorbell", doorbell_,
+        "Enable doorbell mode with specified queue length (0=disabled)")
+      ->default_val(0)
+      ->group("Endpoint Options");
+  }
+
+  __host__ void* initializeEndpointConfig() override {
+    static test_ep::TestEpConfig testEpConfig;
+    testEpConfig.doorbell = doorbell_;
+    return &testEpConfig;
   }
 };
 
@@ -104,6 +161,16 @@ public:
   __host__ hipError_t run(AxiioEndpointConfig* config) override {
     return rdma_ep_run(config);
   }
+
+  __host__ void configureCliOptions(CLI::App& app) override {
+    // RDMA endpoint can add its own CLI options here in the future
+    (void)app;
+  }
+
+  __host__ void* initializeEndpointConfig() override {
+    // RDMA endpoint can return its config here in the future
+    return nullptr;
+  }
 };
 
 class SdmaEndpoint : public AxiioEndpoint {
@@ -131,7 +198,43 @@ public:
   __host__ hipError_t run(AxiioEndpointConfig* config) override {
     return sdma_ep_run(config);
   }
+
+  __host__ void configureCliOptions(CLI::App& app) override {
+    // SDMA endpoint can add its own CLI options here in the future
+    (void)app;
+  }
+
+  __host__ void* initializeEndpointConfig() override {
+    // SDMA endpoint can return its config here in the future
+    return nullptr;
+  }
 };
+
+// ============================================================================
+// Default Implementation of Virtual Methods
+// ============================================================================
+
+void AxiioEndpoint::configureCliOptions(CLI::App& app) {
+  // Default: no endpoint-specific options
+  (void)app;
+}
+
+void* AxiioEndpoint::initializeEndpointConfig() {
+  // Default: no endpoint-specific config
+  return nullptr;
+}
+
+size_t AxiioEndpoint::getSubmissionQueueLength(
+  const AxiioEndpointConfig* config) const {
+  // Default: one entry per thread, or 1 for single-threaded
+  return (config != nullptr && config->numThreads > 1) ? config->numThreads : 1;
+}
+
+size_t AxiioEndpoint::getCompletionQueueLength(
+  const AxiioEndpointConfig* config) const {
+  // Default: one entry per thread, or 1 for single-threaded
+  return (config != nullptr && config->numThreads > 1) ? config->numThreads : 1;
+}
 
 // ============================================================================
 // Factory Function Implementation

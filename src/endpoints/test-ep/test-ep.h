@@ -52,11 +52,14 @@ static_assert(sizeof(struct test_cqe) == TEST_EP_CQE_SIZE,
 //   numThreads: Number of CPU threads to launch (one per GPU thread)
 //   iterations: Number of iterations per thread
 //   delayNs: Delay configuration (from AxiioEndpointConfig)
+//   doorbellMode: If true, use doorbell mode (single CPU thread polling
+//   doorbell) doorbell: Doorbell address (nullptr if not in doorbell mode)
+//   queueSize: Size of submission queue in doorbell mode
 // Returns: Vector of thread handles (caller must join)
-std::vector<std::thread> launchCpuThreads(void* hostSqeAddr, void* hostCqeAddr,
-                                          unsigned numThreads,
-                                          unsigned iterations,
-                                          long long delayNs);
+std::vector<std::thread> launchCpuThreads(
+  void* hostSqeAddr, void* hostCqeAddr, unsigned numThreads,
+  unsigned iterations, long long delayNs, bool doorbellMode = false,
+  void* doorbell = nullptr, unsigned queueSize = 0);
 
 // Run endpoint test - launches GPU kernel and waits for completion
 // Parameters:
