@@ -364,11 +364,11 @@ hipcc --offload-arch=native -xhip -c endpoints/test-ep/test-ep.hip \
   -DAXIIO_ENDPOINT_NAME=\"test-ep\" -DAXIIO_ENDPOINT_TEST
 
 # Compile helper
-hipcc --offload-arch=native -xhip -c common/helper.hip \
-  -o helper.o -fgpu-rdc -I include/ -I endpoints/test-ep
+hipcc --offload-arch=native -xhip -c common/axiio-helpers.hip \
+  -o axiio-helpers.o -fgpu-rdc -I include/ -I endpoints/test-ep
 
 # Create library
-ar rcsD lib/librocm-axiio.a test-ep.o helper.o
+ar rcsD lib/librocm-axiio.a test-ep.o axiio-helpers.o
 
 # Compile tester
 hipcc -c tester/axiio-tester.hip -fgpu-rdc -I include/ \

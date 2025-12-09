@@ -12,6 +12,9 @@
 
 #include <hip/hip_runtime.h>
 
+// Forward declaration - full definition in axiio.h
+struct AxiioEndpointConfig;
+
 // Magic ID for test-ep queue entries (matches simple-test)
 #define TEST_EP_MAGIC_ID 0xDEADBEEFCAFEBABEULL
 #define TEST_EP_CQE_MAGIC_ID 0xBABECAFEBEEFDEADULL

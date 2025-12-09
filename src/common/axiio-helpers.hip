@@ -14,7 +14,7 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio-helpers.h"
+#include "axiio.h"
 
 void axxioPrintDeviceInfo() {
   int deviceCount;
