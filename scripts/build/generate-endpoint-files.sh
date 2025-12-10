@@ -40,6 +40,30 @@ get_endpoint_define() {
   esac
 }
 
+# Helper function to get endpoint description (matches hardcoded values
+# in src/endpoints/common/axiio-endpoint.hip)
+get_endpoint_description() {
+  local ep="$1"
+  case "$ep" in
+    test-ep)
+      echo "Test endpoint for development/testing"
+      ;;
+    nvme-ep)
+      echo "nvme endpoint"
+      ;;
+    rdma-ep)
+      echo "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, PVRDMA)"
+      ;;
+    sdma-ep)
+      echo "AMD SDMA Engine endpoint"
+      ;;
+    *)
+      # Default fallback: convert endpoint name to description
+      echo "$ep" | sed 's/-ep$/ endpoint/' | sed 's/-/ /g'
+      ;;
+  esac
+}
+
 # ============================================================================
 # Generate endpoint registry (with enum)
 # ============================================================================
@@ -92,12 +116,7 @@ echo "#define ENDPOINT_REGISTRY_ENTRIES { \\" >> "$REGISTRY_OUTPUT"
 
 FIRST=1
 for ep in $ENDPOINTS; do
-  DESC_FILE="$ENDPOINTS_DIR/$ep/DESCRIPTION"
-  if [ -f "$DESC_FILE" ]; then
-    DESC=$(cat "$DESC_FILE")
-  else
-    DESC=$(echo "$ep" | sed 's/-ep$/ endpoint/' | sed 's/-/ /g')
-  fi
+  DESC=$(get_endpoint_description "$ep")
   
   if [ $FIRST -eq 0 ]; then
     echo ", \\" >> "$REGISTRY_OUTPUT"
