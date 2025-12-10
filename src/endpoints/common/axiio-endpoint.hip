@@ -9,7 +9,6 @@
 
 #include "axiio-endpoint-registry.h"
 #include "axiio.h"
-#include "test-ep-config.h"
 #include "test-ep.h"
 
 // Include endpoint headers for size information
@@ -113,9 +112,21 @@ public:
     testEpConfig.emulate = emulate_;
     return &testEpConfig;
   }
+
+  __host__ bool isEmulateMode() const override {
+    return emulate_;
+  }
+
+  __host__ unsigned getDoorbellQueueLength() const override {
+    return doorbell_;
+  }
 };
 
 class NvmeEndpoint : public AxiioEndpoint {
+private:
+  // Store NVMe config
+  nvme_ep::NvmeEpConfig nvmeConfig_;
+
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::NVME_EP;
@@ -139,6 +150,14 @@ public:
 
   __host__ hipError_t run(AxiioEndpointConfig* config) override {
     return nvme_ep_run(config);
+  }
+
+  __host__ void configureCliOptions(CLI::App& app) override {
+    nvme_ep::registerCliOptions(app, &nvmeConfig_);
+  }
+
+  __host__ void* initializeEndpointConfig() override {
+    return &nvmeConfig_;
   }
 };
 
@@ -229,6 +248,16 @@ void AxiioEndpoint::configureCliOptions(CLI::App& app) {
 void* AxiioEndpoint::initializeEndpointConfig() {
   // Default: no endpoint-specific config
   return nullptr;
+}
+
+bool AxiioEndpoint::isEmulateMode() const {
+  // Default: not in emulate mode
+  return false;
+}
+
+unsigned AxiioEndpoint::getDoorbellQueueLength() const {
+  // Default: doorbell mode not enabled
+  return 0;
 }
 
 size_t AxiioEndpoint::getSubmissionQueueLength(
