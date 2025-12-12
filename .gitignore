@@ -5,6 +5,18 @@ lib/
 *.o
 *.a
 
+# Kernel module build artifacts
+kernel/*/*.ko
+kernel/*/*.mod
+kernel/*/*.mod.c
+kernel/*/*.mod.o
+kernel/*/Module.symvers
+kernel/*/modules.order
+kernel/*/.tmp_versions/
+kernel/*/.*.cmd
+kernel/*/.module-common.o
+kernel/*/..module-common.o.cmd
+
 # Generated files
 src/include/axiio-endpoint-registry-gen.h
 src/include/axiio-endpoint-includes-gen.h
