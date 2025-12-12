@@ -447,6 +447,7 @@ GPAs
 HVA
 LBAs
 LFSR
+lfsr
 MemoryRegion
 MemoryRegions
 NvmeP

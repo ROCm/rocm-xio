@@ -25,9 +25,12 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
+          curl \
           expect \
           hipcc \
           libcli11-dev \
+          libdrm-dev \
+          libhsa-runtime-dev \
           libstdc++-14-dev \
           pahole
     - name: List supported GPUs.
@@ -52,6 +55,9 @@ jobs:
       env:
         HIPCXX: /usr/bin/hipcc
         HIP_INCLUDE_DIR: /usr/include
+        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     - name: Run tester application.
       run: |
         ./bin/axiio-tester -h
+      env:
+        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH

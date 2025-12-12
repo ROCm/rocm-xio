@@ -1,5 +1,7 @@
 # Build artifacts
 build/
+# Exception: scripts/build/ contains build scripts that should be tracked
+!scripts/build/
 bin/
 lib/
 *.o
@@ -20,6 +22,7 @@ kernel/*/..module-common.o.cmd
 # Generated files
 src/include/axiio-endpoint-registry-gen.h
 src/include/axiio-endpoint-includes-gen.h
+src/include/nvme-ep-generated.h
 src/common/endpoint-dispatch.hip
 
 # Downloaded external headers (can be regenerated with 'make fetch-external-headers')

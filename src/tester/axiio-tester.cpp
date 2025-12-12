@@ -33,11 +33,8 @@ int main(int argc, char** argv) {
   // Common options (will be inherited by subcommands via fallthrough)
   // We'll use a single config that gets copied to the selected endpoint
   AxiioEndpointConfig commonConfig;
-  app
-    .add_option("-n,--iterations", commonConfig.iterations,
-                "Number of I/O operations")
-    ->default_val(128)
-    ->group("Common Options");
+  // Note: iterations is now endpoint-specific (test-ep has --iterations,
+  // nvme-ep uses --read-io + --write-io)
 
   app
     .add_option("-t,--threads", commonConfig.numThreads,
@@ -56,9 +53,9 @@ int main(int argc, char** argv) {
 
   app
     .add_option("-m,--memory-mode", commonConfig.memoryMode,
-                "Memory mode (0-7)")
+                "Memory mode (0-15)")
     ->default_val(0)
-    ->check(CLI::Range(0, 7))
+    ->check(CLI::Range(0, 15))
     ->group("Common Options");
 
   commonConfig.verbose = false;
@@ -67,6 +64,11 @@ int main(int argc, char** argv) {
 
   bool printHistogram = false;
   app.add_flag("--histogram", printHistogram, "Generate performance histogram")
+    ->group("Common Options");
+
+  app
+    .add_flag("--pci-mmio-bridge", commonConfig.pciMmioBridge,
+              "Use PCI MMIO bridge to route endpoint doorbell rings")
     ->group("Common Options");
 
   // Get all available endpoints
@@ -134,6 +136,22 @@ int main(int argc, char** argv) {
 
   // Initialize endpoint-specific configuration
   baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
+
+  // Apply common configuration to endpoint-specific config
+  if (baseConfig.endpointConfig) {
+    endpoint->applyCommonConfig(baseConfig.endpointConfig, &baseConfig);
+  }
+
+  // Validate endpoint-specific configuration
+  std::string validation_error = endpoint->validateConfig(
+    baseConfig.endpointConfig);
+  if (!validation_error.empty()) {
+    std::cerr << "Error: " << validation_error << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  // Get iterations from endpoint (endpoints can override getIterations)
+  baseConfig.iterations = endpoint->getIterations(baseConfig.endpointConfig);
 
   // Check if endpoint is in emulate mode
   bool emulateMode = endpoint->isEmulateMode();
