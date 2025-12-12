@@ -29,6 +29,7 @@ jobs:
           hipcc \
           libcli11-dev \
           libstdc++-14-dev \
+          pahole \
           bc
     - name: Build (with ROCm for compilation, but will run in emulate mode)
       run: |
