@@ -41,6 +41,9 @@ struct TestEpConfig {
   // Useful for testing without a GPU or in CI environments
   bool emulate = false; // Default: false (use GPU)
 
+  // Number of iterations to run
+  unsigned iterations = 128; // Default: 128
+
   // Default constructor
   TestEpConfig() = default;
 };
