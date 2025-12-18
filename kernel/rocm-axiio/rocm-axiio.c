@@ -83,6 +83,12 @@ struct vram_buffer_entry {
   __u64 phys_addr;
   __u64 size;
   struct list_head list;
+  // For passthrough NVMe - keep attachment alive for P2PDMA
+  struct dma_buf* dmabuf;
+  struct dma_buf_attachment* attach;
+  struct sg_table* sgt;
+  struct pci_dev* nvme_pdev; // Keep reference to NVMe device
+  bool is_passthrough;       // Track if this needs cleanup
 };
 
 static LIST_HEAD(queue_addrs);
@@ -90,6 +96,11 @@ static DEFINE_SPINLOCK(queue_addrs_lock);
 
 static LIST_HEAD(vram_buffers);
 static DEFINE_SPINLOCK(vram_buffers_lock);
+
+/* PCI MMIO bridge shadow buffer mapping */
+static __u64 mmio_bridge_shadow_gpa = 0;
+static __u64 mmio_bridge_shadow_size = 0;
+static DEFINE_MUTEX(mmio_bridge_lock);
 
 /*
  * DMA-BUF attach ops for P2P support.
@@ -348,6 +359,98 @@ cleanup_no_attach:
   return ret;
 }
 
+/* Get physical address from dmabuf using DMA API (for passthrough NVMe)
+ * Attaches dmabuf to NVMe device and returns P2PDMA IOVA
+ * Returns attachment info via output parameters - caller must keep alive
+ */
+static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
+                                __u64* size, struct dma_buf** dmabuf_out,
+                                struct dma_buf_attachment** attach_out,
+                                struct sg_table** sgt_out,
+                                struct pci_dev** pdev_out) {
+  struct dma_buf* dmabuf;
+  struct dma_buf_attachment* attach;
+  struct sg_table* sgt;
+  struct pci_dev* pdev = NULL;
+  struct device* dev;
+  dma_addr_t dma_addr;
+  int ret = 0;
+  unsigned int domain, bus, devfn;
+
+  /* Decode BDF: format is 0x0BDF (bus=B, dev=D, func=F) */
+  bus = (nvme_bdf >> 8) & 0xFF;
+  devfn = nvme_bdf & 0xFF;
+  domain = 0; /* Assume domain 0 for now */
+
+  /* Find the NVMe PCI device */
+  pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
+  if (!pdev) {
+    pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", nvme_bdf);
+    return -ENODEV;
+  }
+  dev = &pdev->dev;
+
+  pr_info("rocm-axiio: Using NVMe device %s (BDF: 0x%04x) for P2PDMA\n",
+          pci_name(pdev), nvme_bdf);
+
+  /* Get dmabuf from fd */
+  dmabuf = dma_buf_get(dmabuf_fd);
+  if (IS_ERR(dmabuf)) {
+    pr_err("rocm-axiio: dma_buf_get failed: %ld\n", PTR_ERR(dmabuf));
+    ret = PTR_ERR(dmabuf);
+    goto err_put_pci;
+  }
+
+  *size = dmabuf->size;
+
+  /* Attach to NVMe device */
+  attach = dma_buf_attach(dmabuf, dev);
+  if (IS_ERR(attach)) {
+    pr_err("rocm-axiio: dma_buf_attach failed: %ld\n", PTR_ERR(attach));
+    ret = PTR_ERR(attach);
+    goto err_put_dmabuf;
+  }
+
+  /* Map for DMA - this is where P2PDMA magic happens */
+  sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
+  if (IS_ERR(sgt)) {
+    pr_err("rocm-axiio: dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
+    ret = PTR_ERR(sgt);
+    goto err_detach;
+  }
+
+  /* Get DMA address from scatter-gather list */
+  if (sgt->nents > 0) {
+    dma_addr = sg_dma_address(sgt->sgl);
+    *phys_addr = (__u64)dma_addr;
+    pr_info("rocm-axiio: ✅ P2PDMA address: 0x%llx (size: %llu)\n", *phys_addr,
+            *size);
+  } else {
+    pr_err("rocm-axiio: No DMA segments\n");
+    ret = -EINVAL;
+    goto err_unmap;
+  }
+
+  /* Return attachment info - caller must keep alive */
+  *dmabuf_out = dmabuf;
+  *attach_out = attach;
+  *sgt_out = sgt;
+  *pdev_out = pdev; // Caller gets reference
+
+  return 0;
+
+err_unmap:
+  dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+err_detach:
+  dma_buf_detach(dmabuf, attach);
+err_put_dmabuf:
+  dma_buf_put(dmabuf);
+err_put_pci:
+  pci_dev_put(pdev);
+
+  return ret;
+}
+
 /* Get NVMe device info */
 static int get_nvme_device_info(__u16 bdf,
                                 struct rocm_axiio_device_info* info) {
@@ -388,6 +491,50 @@ static int get_nvme_device_info(__u16 bdf,
   pr_info("  Max queues: %u\n", info->max_queues);
 
   pci_dev_put(nvme_dev);
+  return 0;
+}
+
+/* Get PCI MMIO bridge shadow buffer GPA from PCI config space */
+static int get_mmio_bridge_shadow_buffer(
+  __u16 bridge_bdf, struct rocm_axiio_mmio_bridge_shadow_req* req) {
+  struct pci_dev* bridge_dev = NULL;
+  unsigned int domain, bus, devfn;
+  __u32 gpa_low = 0, gpa_high = 0;
+  __u64 shadow_gpa = 0;
+
+  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  bus = (bridge_bdf >> 8) & 0xFF;
+  devfn = bridge_bdf & 0xFF;
+  domain = 0; /* Assume domain 0 for now */
+
+  /* Find the PCI MMIO bridge device */
+  bridge_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
+  if (!bridge_dev) {
+    pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%04x)\n",
+           bridge_bdf);
+    return -ENODEV;
+  }
+
+  /* Read shadow buffer GPA from PCI config space (offsets 0x40 and 0x44) */
+  pci_read_config_dword(bridge_dev, 0x40, &gpa_low);
+  pci_read_config_dword(bridge_dev, 0x44, &gpa_high);
+
+  shadow_gpa = ((__u64)gpa_high << 32) | gpa_low;
+
+  if (shadow_gpa == 0) {
+    pr_err("rocm-axiio: PCI MMIO bridge shadow GPA is 0 (not configured)\n");
+    pci_dev_put(bridge_dev);
+    return -EINVAL;
+  }
+
+  req->bridge_bdf = bridge_bdf;
+  req->shadow_gpa = shadow_gpa;
+  req->shadow_size = 8192; /* 8KB shadow buffer (typical size) */
+
+  pr_info("rocm-axiio: PCI MMIO bridge shadow buffer: GPA=0x%llx, size=%llu\n",
+          (unsigned long long)shadow_gpa, (unsigned long long)req->shadow_size);
+
+  pci_dev_put(bridge_dev);
   return 0;
 }
 
@@ -666,24 +813,75 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_axiio_register_buffer_req req;
       struct vram_buffer_entry* entry;
       __u64 phys_addr;
+      bool is_emulated = false;
+      struct dma_buf* dmabuf = NULL;
+      struct dma_buf_attachment* attach = NULL;
+      struct sg_table* sgt = NULL;
+      struct pci_dev* nvme_pdev = NULL;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
 
-      /* Get physical address from dmabuf */
-      ret = get_dmabuf_bar_gpa(req.dmabuf_fd, &phys_addr, &req.size);
-      if (ret < 0)
-        return ret;
+      /* Determine if this is emulated NVMe based on flags field */
+      if (req.flags & ROCM_AXIIO_FLAG_EMULATED) {
+        is_emulated = true;
+      } else if (req.flags & ROCM_AXIIO_FLAG_PASSTHROUGH) {
+        is_emulated = false;
+      }
+      /* Default to passthrough if no flags set */
+
+      /* Get physical address from dmabuf - choose method based on NVMe type */
+      if (is_emulated) {
+        /* Emulated NVMe: Return GPU BAR GPA */
+        pr_info("rocm-axiio: Emulated NVMe (BDF 0x%04x) - using GPU BAR GPA\n",
+                req.nvme_bdf);
+        ret = get_dmabuf_bar_gpa(req.dmabuf_fd, &phys_addr, &req.size);
+        if (ret < 0)
+          return ret;
+      } else {
+        /* Passthrough NVMe: Return P2PDMA IOVA - keep attachment alive */
+        pr_info(
+          "rocm-axiio: Passthrough NVMe (BDF 0x%04x) - using P2PDMA IOVA\n",
+          req.nvme_bdf);
+        ret = get_dmabuf_phys_addr(req.dmabuf_fd, req.nvme_bdf, &phys_addr,
+                                   &req.size, &dmabuf, &attach, &sgt,
+                                   &nvme_pdev);
+        if (ret < 0)
+          return ret;
+      }
 
       /* Allocate and register buffer entry */
       entry = kmalloc(sizeof(*entry), GFP_KERNEL);
-      if (!entry)
+      if (!entry) {
+        /* Cleanup passthrough attachment if allocated */
+        if (!is_emulated && sgt && attach && dmabuf) {
+          dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+          dma_buf_detach(dmabuf, attach);
+          dma_buf_put(dmabuf);
+          if (nvme_pdev)
+            pci_dev_put(nvme_pdev);
+        }
         return -ENOMEM;
+      }
 
       /* Store userspace virtual address */
       entry->virt_addr = (__u64)req.virt_addr;
       entry->phys_addr = phys_addr;
       entry->size = req.size;
+      entry->is_passthrough = !is_emulated;
+
+      /* Store attachment info for passthrough (keep alive) */
+      if (!is_emulated) {
+        entry->dmabuf = dmabuf;
+        entry->attach = attach;
+        entry->sgt = sgt;
+        entry->nvme_pdev = nvme_pdev;
+      } else {
+        entry->dmabuf = NULL;
+        entry->attach = NULL;
+        entry->sgt = NULL;
+        entry->nvme_pdev = NULL;
+      }
 
       spin_lock(&vram_buffers_lock);
       list_add(&entry->list, &vram_buffers);
@@ -692,15 +890,26 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       req.phys_addr = phys_addr;
 
       pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
-              "phys=0x%016llx size=0x%llx\n",
+              "phys=0x%016llx size=0x%llx%s\n",
               (unsigned long long)entry->virt_addr,
-              (unsigned long long)phys_addr, (unsigned long long)req.size);
+              (unsigned long long)phys_addr, (unsigned long long)req.size,
+              entry->is_passthrough ? " (P2PDMA attachment kept alive)" : "");
 
       if (copy_to_user((void __user*)arg, &req, sizeof(req))) {
         /* Unregister on copy failure */
         spin_lock(&vram_buffers_lock);
         list_del(&entry->list);
         spin_unlock(&vram_buffers_lock);
+        /* Cleanup passthrough attachment */
+        if (entry->is_passthrough && entry->sgt && entry->attach &&
+            entry->dmabuf) {
+          dma_buf_unmap_attachment(entry->attach, entry->sgt,
+                                   DMA_BIDIRECTIONAL);
+          dma_buf_detach(entry->dmabuf, entry->attach);
+          dma_buf_put(entry->dmabuf);
+          if (entry->nvme_pdev)
+            pci_dev_put(entry->nvme_pdev);
+        }
         kfree(entry);
         return -EFAULT;
       }
@@ -720,7 +929,6 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
         if (entry->virt_addr == req.virt_addr) {
           list_del(&entry->list);
-          kfree(entry);
           found = true;
           break;
         }
@@ -733,8 +941,44 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
         return -ENOENT;
       }
 
+      /* Cleanup passthrough attachment if needed */
+      if (entry->is_passthrough && entry->sgt && entry->attach &&
+          entry->dmabuf) {
+        pr_info(
+          "rocm-axiio: Cleaning up P2PDMA attachment for buffer 0x%016llx\n",
+          (unsigned long long)entry->virt_addr);
+        dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+        dma_buf_detach(entry->dmabuf, entry->attach);
+        dma_buf_put(entry->dmabuf);
+        if (entry->nvme_pdev)
+          pci_dev_put(entry->nvme_pdev);
+      }
+
       pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx\n",
               (unsigned long long)req.virt_addr);
+      kfree(entry);
+      return 0;
+    }
+
+    case ROCM_AXIIO_GET_MMIO_BRIDGE_SHADOW_BUFFER: {
+      struct rocm_axiio_mmio_bridge_shadow_req req;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      ret = get_mmio_bridge_shadow_buffer(req.bridge_bdf, &req);
+      if (ret < 0)
+        return ret;
+
+      /* Store shadow buffer info for mmap */
+      mutex_lock(&mmio_bridge_lock);
+      mmio_bridge_shadow_gpa = req.shadow_gpa;
+      mmio_bridge_shadow_size = req.shadow_size;
+      mutex_unlock(&mmio_bridge_lock);
+
+      if (copy_to_user((void __user*)arg, &req, sizeof(req)))
+        return -EFAULT;
+
       return 0;
     }
 
@@ -745,13 +989,37 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
 
 /* MMAP implementation for high-performance address translation */
 static int rocm_axiio_mmap(struct file* file, struct vm_area_struct* vma) {
-  /* For now, mmap is not directly supported - userspace should use
-   * REGISTER_BUFFER IOCTL for address translation.
-   * In the future, we could map a lookup table here for fast translation.
-   */
-  pr_info("rocm-axiio: mmap not yet implemented, use REGISTER_BUFFER "
-          "IOCTL\n");
-  return -ENOSYS;
+  unsigned long pfn;
+  int ret;
+
+  mutex_lock(&mmio_bridge_lock);
+
+  /* Check if shadow buffer is configured */
+  if (mmio_bridge_shadow_gpa == 0) {
+    mutex_unlock(&mmio_bridge_lock);
+    pr_err("rocm-axiio: PCI MMIO bridge shadow buffer not configured\n");
+    return -EINVAL;
+  }
+
+  /* Map the shadow buffer physical address */
+  pfn = mmio_bridge_shadow_gpa >> PAGE_SHIFT;
+
+  /* Remap the physical pages to userspace */
+  ret = remap_pfn_range(vma, vma->vm_start, pfn, mmio_bridge_shadow_size,
+                        vma->vm_page_prot);
+  if (ret < 0) {
+    mutex_unlock(&mmio_bridge_lock);
+    pr_err("rocm-axiio: Failed to remap shadow buffer: %d\n", ret);
+    return ret;
+  }
+
+  pr_info("rocm-axiio: Mapped PCI MMIO bridge shadow buffer: GPA=0x%llx, "
+          "size=%llu, vaddr=0x%lx\n",
+          (unsigned long long)mmio_bridge_shadow_gpa,
+          (unsigned long long)mmio_bridge_shadow_size, vma->vm_start);
+
+  mutex_unlock(&mmio_bridge_lock);
+  return 0;
 }
 
 /* io_uring_cmd handler for high-performance async operations */
@@ -849,6 +1117,14 @@ static void __exit rocm_axiio_exit(void) {
   spin_lock(&vram_buffers_lock);
   list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
     list_del(&entry->list);
+    /* Cleanup passthrough attachment if needed */
+    if (entry->is_passthrough && entry->sgt && entry->attach && entry->dmabuf) {
+      dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+      dma_buf_detach(entry->dmabuf, entry->attach);
+      dma_buf_put(entry->dmabuf);
+      if (entry->nvme_pdev)
+        pci_dev_put(entry->nvme_pdev);
+    }
     kfree(entry);
   }
   spin_unlock(&vram_buffers_lock);

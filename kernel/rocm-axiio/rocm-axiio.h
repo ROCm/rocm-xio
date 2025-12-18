@@ -37,6 +37,8 @@
   _IOW(ROCM_AXIIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
 #define ROCM_AXIIO_UNREGISTER_BUFFER                                           \
   _IOW(ROCM_AXIIO_IOC_MAGIC, 9, struct rocm_axiio_unregister_buffer_req)
+#define ROCM_AXIIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                               \
+  _IOWR(ROCM_AXIIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
 
 /* Flags for VRAM physical address request */
 #define ROCM_AXIIO_FLAG_EMULATED                                               \
@@ -104,11 +106,20 @@ struct rocm_axiio_register_buffer_req {
   __u64 virt_addr; /* Input: Virtual address (userspace pointer) */
   __u64 phys_addr; /* Output: Physical address (filled by kernel) */
   __u64 size;      /* Input: Buffer size */
+  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD format) */
+  __u32 flags;     /* Input: flags (see ROCM_AXIIO_FLAG_*) */
 };
 
 /* Unregister VRAM buffer */
 struct rocm_axiio_unregister_buffer_req {
   __u64 virt_addr; /* Input: Virtual address to unregister */
+};
+
+/* Get PCI MMIO bridge shadow buffer mapping */
+struct rocm_axiio_mmio_bridge_shadow_req {
+  __u16 bridge_bdf;  /* Input: PCI MMIO bridge BDF (0xBBDD format) */
+  __u64 shadow_gpa;  /* Output: Shadow buffer Guest Physical Address */
+  __u64 shadow_size; /* Output: Shadow buffer size in bytes */
 };
 
 #endif /* ROCM_AXIIO_H */

@@ -33,6 +33,8 @@ private:
   unsigned doorbell_ = 0;
   // Store emulate flag from CLI
   bool emulate_ = false;
+  // Store iterations from CLI
+  unsigned iterations_ = 128;
 
 public:
   __host__ EndpointType getType() const override {
@@ -94,6 +96,9 @@ public:
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
+    app.add_option("-n,--iterations", iterations_, "Number of I/O operations")
+      ->default_val(128)
+      ->group("Endpoint Options");
     app
       .add_option(
         "--doorbell", doorbell_,
@@ -110,7 +115,17 @@ public:
     static test_ep::TestEpConfig testEpConfig;
     testEpConfig.doorbell = doorbell_;
     testEpConfig.emulate = emulate_;
+    testEpConfig.iterations = iterations_;
     return &testEpConfig;
+  }
+
+  __host__ unsigned getIterations(void* endpointConfig) const override {
+    if (endpointConfig) {
+      test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
+        endpointConfig);
+      return testEpConfig->iterations;
+    }
+    return iterations_;
   }
 
   __host__ bool isEmulateMode() const override {
@@ -148,6 +163,21 @@ public:
     return NVME_EP_CQE_SIZE;
   }
 
+  __host__ size_t
+  getSubmissionQueueLength(const AxiioEndpointConfig* config) const override {
+    // Use queue length from CLI configuration (default: 64)
+    (void)config; // Not used - we use member variable instead
+    return nvmeConfig_.queueLength;
+  }
+
+  __host__ size_t
+  getCompletionQueueLength(const AxiioEndpointConfig* config) const override {
+    // NVMe requires minimum queue length of 2 entries (power of 2)
+    // CQ length matches SQ length
+    (void)config; // Not used - we use member variable instead
+    return nvmeConfig_.queueLength;
+  }
+
   __host__ hipError_t run(AxiioEndpointConfig* config) override {
     return nvme_ep_run(config);
   }
@@ -158,6 +188,31 @@ public:
 
   __host__ void* initializeEndpointConfig() override {
     return &nvmeConfig_;
+  }
+
+  __host__ void applyCommonConfig(
+    void* endpointConfig, const AxiioEndpointConfig* baseConfig) override {
+    if (endpointConfig && baseConfig) {
+      nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
+        endpointConfig);
+      nvmeConfig->usePciMmioBridge = baseConfig->pciMmioBridge;
+    }
+  }
+
+  __host__ std::string validateConfig(void* endpointConfig) override {
+    if (endpointConfig) {
+      nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
+        endpointConfig);
+      return nvme_ep::validateConfig(nvmeConfig);
+    }
+    return std::string();
+  }
+
+  __host__ unsigned getIterations(void* endpointConfig) const override {
+    if (endpointConfig) {
+      return nvme_ep::getIterations(endpointConfig);
+    }
+    return 0;
   }
 };
 
@@ -248,6 +303,25 @@ void AxiioEndpoint::configureCliOptions(CLI::App& app) {
 void* AxiioEndpoint::initializeEndpointConfig() {
   // Default: no endpoint-specific config
   return nullptr;
+}
+
+void AxiioEndpoint::applyCommonConfig(void* endpointConfig,
+                                      const AxiioEndpointConfig* baseConfig) {
+  // Default: do nothing
+  (void)endpointConfig;
+  (void)baseConfig;
+}
+
+std::string AxiioEndpoint::validateConfig(void* endpointConfig) {
+  // Default: no validation
+  (void)endpointConfig;
+  return std::string();
+}
+
+unsigned AxiioEndpoint::getIterations(void* endpointConfig) const {
+  // Default: return 128
+  (void)endpointConfig;
+  return 128;
 }
 
 bool AxiioEndpoint::isEmulateMode() const {

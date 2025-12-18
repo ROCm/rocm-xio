@@ -51,6 +51,7 @@ ENDPOINT_INCLUDES_GEN := $(INCLUDE_DIR)/axiio-endpoint-includes-gen.h
 # External headers
 EXTERNAL_HEADERS_DIR := $(INCLUDE_DIR)/external
 NVME_KERNEL_HEADERS := $(EXTERNAL_HEADERS_DIR)/linux-nvme.h $(EXTERNAL_HEADERS_DIR)/linux-nvme_ioctl.h
+NVME_EP_GENERATED := $(INCLUDE_DIR)/nvme-ep-generated.h
 RDMA_HEADERS_DIR := $(EXTERNAL_HEADERS_DIR)/rdma
 RDMA_HEADERS := $(RDMA_HEADERS_DIR)/ib_user_verbs.h \
                 $(RDMA_HEADERS_DIR)/mlx/mlx5dv.h \
@@ -119,7 +120,8 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 .PHONY: build_info
-build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN)
+build_info: $(ENDPOINT_REGISTRY_GEN) $(ENDPOINT_INCLUDES_GEN) \
+	$(NVME_EP_GENERATED)
 	@echo "Building for GPU architecture: $(OFFLOAD_ARCH_MSG)"
 
 # Generate all endpoint files (registry, includes) from discovered endpoints
@@ -146,12 +148,20 @@ $(NVME_KERNEL_HEADERS): scripts/build/fetch-nvme-headers.sh
 	@./scripts/build/fetch-nvme-headers.sh $(EXTERNAL_HEADERS_DIR)
 	@echo "Generated external headers: $(NVME_KERNEL_HEADERS)"
 
+# Generate NVMe defines from kernel headers
+$(NVME_EP_GENERATED): $(EXTERNAL_HEADERS_DIR)/linux-nvme.h scripts/build/extract-nvme-defines.sh
+	@echo "Extracting NVMe defines from kernel headers..."
+	@./scripts/build/extract-nvme-defines.sh $(EXTERNAL_HEADERS_DIR)/linux-nvme.h $(NVME_EP_GENERATED)
+	@if command -v $(CLANG_FORMAT) >/dev/null 2>&1; then \
+		$(CLANG_FORMAT) -i --style=file $(NVME_EP_GENERATED); \
+	fi
+	@echo "Generated: $(NVME_EP_GENERATED)"
+
 .PHONY: fetch-nvme-headers
-fetch-nvme-headers: $(NVME_KERNEL_HEADERS)
+fetch-nvme-headers: $(NVME_KERNEL_HEADERS) $(NVME_EP_GENERATED)
 	@echo ""
 	@echo "NVMe kernel headers downloaded to $(EXTERNAL_HEADERS_DIR)/"
-	@echo "These are for reference only - the nvme-ep definitions are in"
-	@echo "  src/endpoints/nvme-ep/nvme-ep.h"
+	@echo "NVMe defines generated: $(NVME_EP_GENERATED)"
 
 # Download RDMA headers from rdma-core repository
 $(RDMA_HEADERS): scripts/build/fetch-rdma-headers.sh
@@ -186,11 +196,18 @@ $(LIBTARGET): $(LIB_OBJECTS) $(LIB_HEADERS) | $(LIB_DIR)
 $(TESTER_OBJECT): $(TESTER_HEADERS) $(ENDPOINT_REGISTRY_GEN)
 
 # Note: -lhsa-runtime64 is required for GPU doorbell HSA memory lock
+# Note: -ldrm -ldrm_amdgpu is required for DRM GEM_USERPTR registration (PCI MMIO bridge)
 $(TESTER): $(TESTER_OBJECT) $(LIBTARGET) | $(BIN_DIR)
-	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^ -lhsa-runtime64
+	$(HIPCXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -o $@ $^ -lhsa-runtime64 -ldrm -ldrm_amdgpu
 
 # Make RDMA endpoint depend on vendor headers
 $(BUILD_DIR)/src/endpoints/rdma-ep/rdma-ep.o: $(RDMA_VENDOR_HEADERS)
+
+# Make NVMe endpoint depend on generated defines
+$(BUILD_DIR)/src/endpoints/nvme-ep/nvme-ep.o: $(NVME_EP_GENERATED)
+
+# Make common endpoint depend on NVMe generated defines (includes nvme-ep.h)
+$(BUILD_DIR)/src/endpoints/common/axiio-endpoint.o: $(NVME_EP_GENERATED)
 
 # Make all object files depend on generated registry
 $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
