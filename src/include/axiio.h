@@ -44,20 +44,21 @@ class App;
  */
 struct AxiioEndpointConfig {
   // Common testing parameters
-  unsigned iterations = 128; // Number of iterations
-  unsigned numThreads = 1;   // Number of GPU threads (1-32)
-  long long delayNs = 0;     // Delay in nanoseconds
-                             // Negative: fixed delay of |delayNs|
-                             // Positive: random delay 0 to delayNs
-                             // Zero: no delay
-  unsigned memoryMode = 0;   // Memory mode bits:
-                             // Bit 0 (LSB): GPU write location (SQE)
-                             //   (0=host, 1=device)
-                             // Bit 1: CPU write location (CQE)
-                             //   (0=host, 1=device)
-                             // Bit 2: Doorbell location (doorbell mode only)
-                             //   (0=host, 1=device)
-  bool verbose = false;      // Verbose output flag
+  unsigned iterations = 128;  // Number of iterations
+  unsigned numThreads = 1;    // Number of GPU threads (1-32)
+  long long delayNs = 0;      // Delay in nanoseconds
+                              // Negative: fixed delay of |delayNs|
+                              // Positive: random delay 0 to delayNs
+                              // Zero: no delay
+  unsigned memoryMode = 0;    // Memory mode bits:
+                              // Bit 0 (LSB): GPU write location (SQE)
+                              //   (0=host, 1=device)
+                              // Bit 1: CPU write location (CQE)
+                              //   (0=host, 1=device)
+                              // Bit 2: Doorbell location (doorbell mode only)
+                              //   (0=host, 1=device)
+  bool verbose = false;       // Verbose output flag
+  bool pciMmioBridge = false; // Use PCI MMIO bridge for doorbell routing
 
   // Timing arrays (optional, can be nullptr)
   unsigned long long int* startTimes = nullptr;
@@ -123,6 +124,24 @@ public:
   // Caller is responsible for managing the lifetime of the returned object
   __host__ virtual void* initializeEndpointConfig();
 
+  // Apply common configuration to endpoint-specific config
+  // Called after initializeEndpointConfig to copy common flags/options
+  // Default implementation does nothing
+  __host__ virtual void applyCommonConfig(
+    void* endpointConfig, const AxiioEndpointConfig* baseConfig);
+
+  // Validate endpoint-specific configuration
+  // Called after applyCommonConfig to validate and auto-detect settings
+  // Returns empty string if valid, error message otherwise
+  // Default implementation returns empty string (no validation)
+  __host__ virtual std::string validateConfig(void* endpointConfig);
+
+  // Get iterations count for this endpoint
+  // Called after validateConfig to determine how many iterations to run
+  // Default implementation returns 128
+  // Endpoints can override to return endpoint-specific value
+  __host__ virtual unsigned getIterations(void* endpointConfig) const;
+
   // Check if endpoint is in emulate mode (runs on CPU instead of GPU)
   // Returns true if emulate mode is enabled, false otherwise
   // Default implementation returns false
@@ -155,13 +174,18 @@ void axiioPrintHistogram(const std::vector<double>& durations,
 
 // Queue memory allocation functions
 // memoryMode bits: Bit 0 (LSB) = GPU write location (0=host, 1=device)
-//                  Bit 1 (MSB) = CPU write location (0=host, 1=device)
+//                  Bit 1 = CPU write location (0=host, 1=device)
+//                  Bit 2 = Doorbell location (0=host, 1=device)
+//                  Bit 3 = Data buffer location (0=host, 1=device)
 hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
                                         void** ptr);
 hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
                                         void** ptr);
+hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
+                                   void** ptr);
 void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
 void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode);
+void axiioFreeDataBuffer(void* ptr, unsigned memoryMode);
 
 // HSA device memory allocation (for doorbell and other device memory needs)
 hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
@@ -171,5 +195,26 @@ hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
 // This allows endpoints to add their CLI options before full parsing
 // Returns empty string if endpoint name not found in arguments
 std::string axiioExtractEndpointName(int argc, char** argv);
+
+// Detect PCI MMIO bridge BDF by scanning PCI devices
+// Looks for Vendor ID 0x1b36 (Red Hat, Inc.) and Device ID 0x0015
+// Returns 0 on success with BDF in *bdf_out, negative error code on failure
+// Errors out if 0 or >1 PCI MMIO bridges are found
+int axiioDetectPciMmioBridgeBdf(uint16_t* bdf_out);
+
+// Detect PCI BDF from device file path
+// Takes a device path like /dev/nvme0 or /dev/nvme1
+// Returns 0 on success with BDF in *bdf_out, negative error code on failure
+// Returns -ENODEV if device not found or not a PCI device
+__host__ int axiioDetectBdfFromDevice(const char* device_path,
+                                      uint16_t* bdf_out);
+
+// Detect if NVMe controller is emulated based on Vendor ID and Device ID
+// Takes a device path like /dev/nvme0 or /dev/nvme1
+// Returns 0 on success with is_emulated in *is_emulated_out, negative error
+// code on failure Returns -ENODEV if device not found or not a PCI device
+// Emulated NVMe controllers typically have Vendor ID 0x1b36 (Red Hat/QEMU)
+__host__ int axiioDetectEmulatedNvme(const char* device_path,
+                                     bool* is_emulated_out);
 
 #endif // AXIIO_H

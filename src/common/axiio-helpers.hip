@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
+
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -11,14 +13,24 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <hip/hip_runtime.h>
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "axiio.h"
+
+// Track mmap'd allocations for proper cleanup
+static std::map<void*, size_t> mmap_allocations;
+static std::mutex mmap_mutex;
 
 void axiioPrintDeviceInfo() {
   int deviceCount;
@@ -396,18 +408,19 @@ hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
     }
     memset(*ptr, 0, size);
   } else {
-    // Allocate host-accessible memory using HIP or regular malloc
-    // Try HIP first, but fall back to malloc if HIP is not available (emulate
-    // mode)
-    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocDefault);
-    if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), use regular malloc
-      *ptr = malloc(size);
-      if (*ptr == nullptr) {
-        return hipErrorMemoryAllocation;
-      }
+    // Allocate host-accessible memory using mmap (matching
+    // test-gpu-nvme-write.cpp) Use anonymous shared memory with MAP_LOCKED to
+    // prevent swapping
+    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
+    if (*ptr == MAP_FAILED) {
+      std::cerr << "Error: mmap failed for submission queue: "
+                << strerror(errno) << std::endl;
+      return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
+    std::lock_guard<std::mutex> lock(mmap_mutex);
+    mmap_allocations[*ptr] = size;
   }
 
   return hipSuccess;
@@ -434,18 +447,19 @@ hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
     }
     memset(*ptr, 0, size);
   } else {
-    // Allocate host-accessible memory using HIP or regular malloc
-    // Try HIP first, but fall back to malloc if HIP is not available (emulate
-    // mode)
-    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocDefault);
-    if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), use regular malloc
-      *ptr = malloc(size);
-      if (*ptr == nullptr) {
-        return hipErrorMemoryAllocation;
-      }
+    // Allocate host-accessible memory using mmap (matching
+    // test-gpu-nvme-write.cpp) Use anonymous shared memory with MAP_LOCKED to
+    // prevent swapping
+    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
+    if (*ptr == MAP_FAILED) {
+      std::cerr << "Error: mmap failed for completion queue: "
+                << strerror(errno) << std::endl;
+      return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
+    std::lock_guard<std::mutex> lock(mmap_mutex);
+    mmap_allocations[*ptr] = size;
   }
 
   return hipSuccess;
@@ -461,12 +475,22 @@ void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
       hsa_memory_free(ptr);
     }
   } else {
-    // Free HIP host memory or regular free
     if (ptr != nullptr) {
-      hipError_t hipErr = hipHostFree(ptr);
-      if (hipErr != hipSuccess) {
-        // HIP not available (e.g., emulate mode), use regular free
-        free(ptr);
+      std::lock_guard<std::mutex> lock(mmap_mutex);
+      auto it = mmap_allocations.find(ptr);
+      if (it != mmap_allocations.end()) {
+        // Found in mmap tracking - use munmap
+        munmap(ptr, it->second);
+        mmap_allocations.erase(it);
+      } else {
+        // Not in tracking map - try hipHostFree
+        hipError_t hipErr = hipHostFree(ptr);
+        if (hipErr != hipSuccess) {
+          // Not HIP-allocated either - log warning
+          std::cerr << "Warning: Cannot free memory - not found in mmap "
+                       "tracking and hipHostFree failed"
+                    << std::endl;
+        }
       }
     }
   }
@@ -477,6 +501,77 @@ void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
   bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
 
   if (cpuWriteToDevice) {
+    // Free HSA device memory
+    if (ptr != nullptr) {
+      hsa_memory_free(ptr);
+    }
+  } else {
+    if (ptr != nullptr) {
+      std::lock_guard<std::mutex> lock(mmap_mutex);
+      auto it = mmap_allocations.find(ptr);
+      if (it != mmap_allocations.end()) {
+        // Found in mmap tracking - use munmap
+        munmap(ptr, it->second);
+        mmap_allocations.erase(it);
+      } else {
+        // Not in tracking map - try hipHostFree
+        hipError_t hipErr = hipHostFree(ptr);
+        if (hipErr != hipSuccess) {
+          // Not HIP-allocated either - log warning
+          std::cerr << "Warning: Cannot free memory - not found in mmap "
+                       "tracking and hipHostFree failed"
+                    << std::endl;
+        }
+      }
+    }
+  }
+}
+
+// Allocate data buffer memory based on memory mode
+// Bit 3 (0x8): Data buffer location (0=host, 1=device)
+// Returns hipSuccess on success, hipErrorMemoryAllocation on failure
+hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
+                                   void** ptr) {
+  bool dataBufferOnDevice = (memoryMode & 0x8) != 0; // Bit 3
+
+  if (dataBufferOnDevice) {
+    // Allocate device memory using HSA
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
+                         host_page_size;
+
+    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
+                                                     "Data Buffer");
+    if (hsa_status != HSA_STATUS_SUCCESS) {
+      std::cerr << "Error: HSA memory allocation failed for data buffer: "
+                << hsa_status << std::endl;
+      return hipErrorMemoryAllocation;
+    }
+    memset(*ptr, 0, size);
+  } else {
+    // Allocate host-accessible memory using HIP or regular malloc
+    // Use hipHostMallocMapped to ensure GPU can access it (matches QEMU guest
+    // code) Try HIP first, but fall back to malloc if HIP is not available
+    // (emulate mode)
+    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        return hipErrorMemoryAllocation;
+      }
+    }
+    memset(*ptr, 0, size);
+  }
+
+  return hipSuccess;
+}
+
+// Free data buffer memory based on memory mode
+void axiioFreeDataBuffer(void* ptr, unsigned memoryMode) {
+  bool dataBufferOnDevice = (memoryMode & 0x8) != 0; // Bit 3
+
+  if (dataBufferOnDevice) {
     // Free HSA device memory
     if (ptr != nullptr) {
       hsa_memory_free(ptr);
@@ -511,4 +606,391 @@ std::string axiioExtractEndpointName(int argc, char** argv) {
     }
   }
   return std::string();
+}
+
+// Detect PCI MMIO bridge BDF by scanning PCI devices
+// Looks for Vendor ID 0x1b36 (Red Hat, Inc.) and Device ID 0x0015
+// Returns 0 on success with BDF in *bdf_out, negative error code on failure
+// Errors out if 0 or >1 PCI MMIO bridges are found
+int axiioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
+  if (!bdf_out) {
+    return -1;
+  }
+
+  std::cout << "Detecting PCI MMIO bridge BDF" << std::endl;
+
+  const uint16_t PCI_MMIO_BRIDGE_VENDOR_ID = 0x1b36;
+  const uint16_t PCI_MMIO_BRIDGE_DEVICE_ID = 0x0015;
+  const char* PCI_SYSFS_PATH = "/sys/bus/pci/devices";
+
+  DIR* dir = opendir(PCI_SYSFS_PATH);
+  if (!dir) {
+    std::cerr << "Error: Failed to open " << PCI_SYSFS_PATH << ": "
+              << strerror(errno) << std::endl;
+    return -1;
+  }
+
+  std::vector<uint16_t> found_bdfs;
+  struct dirent* entry;
+  int devices_checked = 0;
+  int devices_skipped = 0;
+
+  while ((entry = readdir(dir)) != nullptr) {
+    // Skip . and ..
+    if (entry->d_name[0] == '.') {
+      continue;
+    }
+
+    // PCI device entries are in format "0000:BB:DD.F"
+    std::string dev_name = entry->d_name;
+    if (dev_name.length() < 12 || dev_name.substr(0, 5) != "0000:") {
+      devices_skipped++;
+      std::cout << "Skipping entry (format check): " << dev_name
+                << " (length=" << dev_name.length() << ")" << std::endl;
+      continue;
+    }
+
+    // Parse BDF from device name (format: 0000:BB:DD.F)
+    unsigned int bus, device, function;
+    int parsed = sscanf(dev_name.c_str(), "0000:%02x:%02x.%x", &bus, &device,
+                        &function);
+    if (parsed != 3) {
+      devices_skipped++;
+      std::cout << "Skipping entry (parse failed): " << dev_name << " (parsed "
+                << parsed << " values)" << std::endl;
+      continue;
+    }
+
+    devices_checked++;
+
+    // Construct config file path
+    std::string config_path = std::string(PCI_SYSFS_PATH) + "/" + dev_name +
+                              "/config";
+    int fd = open(config_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      std::cerr << "Warning: Failed to open config file " << config_path << ": "
+                << strerror(errno) << std::endl;
+      continue; // Skip if can't open config
+    }
+
+    // Read Vendor ID (offset 0x00) and Device ID (offset 0x02)
+    uint16_t vendor_id = 0, device_id = 0;
+    bool read_vendor_ok = false;
+    bool read_device_ok = false;
+
+    if (lseek(fd, 0x00, SEEK_SET) >= 0) {
+      ssize_t bytes_read = read(fd, &vendor_id, sizeof(vendor_id));
+      if (bytes_read == sizeof(vendor_id)) {
+        read_vendor_ok = true;
+      } else {
+        std::cerr << "Warning: Failed to read vendor ID from " << config_path
+                  << ": read " << bytes_read << " bytes (expected "
+                  << sizeof(vendor_id) << ")" << std::endl;
+        vendor_id = 0;
+      }
+    }
+    if (lseek(fd, 0x02, SEEK_SET) >= 0) {
+      ssize_t bytes_read = read(fd, &device_id, sizeof(device_id));
+      if (bytes_read == sizeof(device_id)) {
+        read_device_ok = true;
+      } else {
+        std::cerr << "Warning: Failed to read device ID from " << config_path
+                  << ": read " << bytes_read << " bytes (expected "
+                  << sizeof(device_id) << ")" << std::endl;
+        device_id = 0;
+      }
+    }
+    close(fd);
+
+    // Debug output for devices with Red Hat vendor ID
+    if (read_vendor_ok && vendor_id == PCI_MMIO_BRIDGE_VENDOR_ID) {
+      std::cout << "Found Red Hat device " << dev_name << ": vendor=0x"
+                << std::hex << vendor_id << ", device=0x" << device_id
+                << std::dec;
+      if (read_device_ok && device_id == PCI_MMIO_BRIDGE_DEVICE_ID) {
+        std::cout << " (MATCH - PCI MMIO bridge)" << std::endl;
+      } else if (!read_device_ok) {
+        std::cout << " (device ID read failed)" << std::endl;
+      } else {
+        std::cout << " (expected device=0x" << std::hex
+                  << PCI_MMIO_BRIDGE_DEVICE_ID << std::dec << ")" << std::endl;
+      }
+    }
+
+    // Check if this is the PCI MMIO bridge
+    if (vendor_id == PCI_MMIO_BRIDGE_VENDOR_ID &&
+        device_id == PCI_MMIO_BRIDGE_DEVICE_ID) {
+      // Encode BDF: 0xBBDD where BB=bus (bits 15:8), D=device (bits 7:3),
+      // F=function (bits 2:0)
+      uint16_t bdf = (static_cast<uint16_t>(bus) << 8) |
+                     (static_cast<uint16_t>(device) << 3) |
+                     static_cast<uint16_t>(function);
+      found_bdfs.push_back(bdf);
+    }
+  }
+
+  closedir(dir);
+
+  std::cout << "PCI MMIO bridge detection: checked " << devices_checked
+            << " devices, skipped " << devices_skipped << " entries"
+            << std::endl;
+
+  // Error out if 0 or >1 bridges found
+  if (found_bdfs.empty()) {
+    std::cerr << "Error: PCI MMIO bridge not found (Vendor 0x" << std::hex
+              << PCI_MMIO_BRIDGE_VENDOR_ID << ", Device 0x"
+              << PCI_MMIO_BRIDGE_DEVICE_ID << std::dec << ")" << std::endl;
+    std::cerr << "Note: PCI MMIO bridge is a QEMU device that only exists "
+              << "inside a VM." << std::endl;
+    std::cerr << "Please run this command inside the QEMU VM where the bridge "
+              << "is present." << std::endl;
+    return -1;
+  }
+
+  if (found_bdfs.size() > 1) {
+    std::cerr << "Error: Multiple PCI MMIO bridges found (" << found_bdfs.size()
+              << "):" << std::endl;
+    for (size_t i = 0; i < found_bdfs.size(); ++i) {
+      uint8_t bus = (found_bdfs[i] >> 8) & 0xFF;
+      uint8_t device = (found_bdfs[i] >> 3) & 0x1F;
+      uint8_t function = found_bdfs[i] & 0x7;
+      std::cerr << "  " << i + 1 << ". 0000:" << std::hex << std::setfill('0')
+                << std::setw(2) << static_cast<unsigned>(bus) << ":"
+                << std::setw(2) << static_cast<unsigned>(device) << "."
+                << std::dec << static_cast<unsigned>(function) << std::endl;
+    }
+    return -1;
+  }
+
+  // Exactly one bridge found - return its BDF
+  *bdf_out = found_bdfs[0];
+  uint8_t bus = (found_bdfs[0] >> 8) & 0xFF;
+  uint8_t device = (found_bdfs[0] >> 3) & 0x1F;
+  uint8_t function = found_bdfs[0] & 0x7;
+  std::cout << "Detected PCI MMIO bridge at 0000:" << std::hex
+            << std::setfill('0') << std::setw(2) << static_cast<unsigned>(bus)
+            << ":" << std::setw(2) << static_cast<unsigned>(device) << "."
+            << std::dec << static_cast<unsigned>(function) << " (BDF: 0x"
+            << std::hex << std::setfill('0') << std::setw(4) << found_bdfs[0]
+            << std::dec << ")" << std::endl;
+
+  return 0;
+}
+
+// Detect PCI BDF from device file path
+// Takes a device path like /dev/nvme0 or /dev/nvme1
+// Returns 0 on success with BDF in *bdf_out, negative error code on failure
+// Returns -ENODEV if device not found or not a PCI device
+__host__ int axiioDetectBdfFromDevice(const char* device_path,
+                                      uint16_t* bdf_out) {
+  if (!device_path || !bdf_out) {
+    return -EINVAL;
+  }
+
+  // Extract device name from path (e.g., "nvme0" from "/dev/nvme0")
+  std::string dev_path = device_path;
+  size_t last_slash = dev_path.find_last_of('/');
+  if (last_slash == std::string::npos || last_slash == dev_path.length() - 1) {
+    std::cerr << "Error: Invalid device path: " << device_path << std::endl;
+    return -EINVAL;
+  }
+
+  std::string device_name = dev_path.substr(last_slash + 1);
+
+  // Build sysfs device symlink path: /sys/class/nvme/nvme0/device
+  std::string sysfs_path = "/sys/class/nvme/" + device_name + "/device";
+
+  // Read the symlink to get PCI device path
+  char link_target[256];
+  ssize_t len = readlink(sysfs_path.c_str(), link_target,
+                         sizeof(link_target) - 1);
+  if (len < 0) {
+    std::cerr << "Error: Failed to read symlink " << sysfs_path << ": "
+              << strerror(errno) << std::endl;
+    std::cerr << "Device " << device_path << " may not exist or not be an "
+              << "NVMe device" << std::endl;
+    return -ENODEV;
+  }
+  link_target[len] = '\0';
+
+  // Parse PCI address from symlink target
+  // Format: ../../devices/pci0000:00/0000:00:06.0/nvme/nvme0
+  // We need to extract "0000:00:06.0" from the path
+  std::string link_str = link_target;
+
+  // Find the PCI address pattern (0000:BB:DD.F)
+  size_t pci_start = link_str.find("0000:");
+  if (pci_start == std::string::npos) {
+    std::cerr << "Error: Could not find PCI address in symlink: " << link_target
+              << std::endl;
+    return -ENODEV;
+  }
+
+  // Extract the PCI address substring
+  size_t addr_start = pci_start;
+  size_t addr_end = link_str.find('/', addr_start);
+  if (addr_end == std::string::npos) {
+    addr_end = link_str.length();
+  }
+  std::string pci_addr = link_str.substr(addr_start, addr_end - addr_start);
+
+  // Parse bus, device, function from PCI address (format: 0000:BB:DD.F)
+  unsigned int bus, device, function;
+  if (sscanf(pci_addr.c_str(), "0000:%02x:%02x.%x", &bus, &device, &function) !=
+      3) {
+    std::cerr << "Error: Failed to parse PCI address: " << pci_addr
+              << std::endl;
+    return -EINVAL;
+  }
+
+  // Validate parsed values
+  if (bus > 0xFF || device > 0x1F || function > 0x7) {
+    std::cerr << "Error: Invalid PCI address values: bus=0x" << std::hex << bus
+              << ", device=0x" << device << ", function=0x" << function
+              << std::dec << std::endl;
+    return -EINVAL;
+  }
+
+  // Encode BDF: 0xBBDD where BB=bus (bits 15:8), D=device (bits 7:3),
+  // F=function (bits 2:0)
+  uint16_t bdf = (static_cast<uint16_t>(bus) << 8) |
+                 (static_cast<uint16_t>(device) << 3) |
+                 static_cast<uint16_t>(function);
+
+  *bdf_out = bdf;
+
+  std::cout << "Detected PCI BDF for " << device_path << ": 0000:" << std::hex
+            << std::setfill('0') << std::setw(2) << static_cast<unsigned>(bus)
+            << ":" << std::setw(2) << static_cast<unsigned>(device) << "."
+            << std::dec << static_cast<unsigned>(function) << " (BDF: 0x"
+            << std::hex << std::setfill('0') << std::setw(4) << bdf << std::dec
+            << ")" << std::endl;
+
+  return 0;
+}
+
+// Detect if NVMe controller is emulated based on Vendor ID and Device ID
+// Takes a device path like /dev/nvme0 or /dev/nvme1
+// Returns 0 on success with is_emulated in *is_emulated_out, negative error
+// code on failure Returns -ENODEV if device not found or not a PCI device
+// Emulated NVMe controllers typically have Vendor ID 0x1b36 (Red Hat/QEMU)
+__host__ int axiioDetectEmulatedNvme(const char* device_path,
+                                     bool* is_emulated_out) {
+  if (!device_path || !is_emulated_out) {
+    return -EINVAL;
+  }
+
+  // Extract device name from path (e.g., "nvme0" from "/dev/nvme0")
+  std::string dev_path = device_path;
+  size_t last_slash = dev_path.find_last_of('/');
+  if (last_slash == std::string::npos || last_slash == dev_path.length() - 1) {
+    std::cerr << "Error: Invalid device path: " << device_path << std::endl;
+    return -EINVAL;
+  }
+
+  std::string device_name = dev_path.substr(last_slash + 1);
+
+  // Build sysfs device symlink path: /sys/class/nvme/nvme0/device
+  std::string sysfs_path = "/sys/class/nvme/" + device_name + "/device";
+
+  // Read the symlink to get PCI device path
+  char link_target[256];
+  ssize_t len = readlink(sysfs_path.c_str(), link_target,
+                         sizeof(link_target) - 1);
+  if (len < 0) {
+    std::cerr << "Error: Failed to read symlink " << sysfs_path << ": "
+              << strerror(errno) << std::endl;
+    std::cerr << "Device " << device_path << " may not exist or not be an "
+              << "NVMe device" << std::endl;
+    return -ENODEV;
+  }
+  link_target[len] = '\0';
+
+  // Parse PCI address from symlink target
+  // Format: ../../devices/pci0000:00/0000:00:06.0/nvme/nvme0
+  // We need to extract "0000:00:06.0" from the path
+  std::string link_str = link_target;
+
+  // Find the PCI address pattern (0000:BB:DD.F)
+  size_t pci_start = link_str.find("0000:");
+  if (pci_start == std::string::npos) {
+    std::cerr << "Error: Could not find PCI address in symlink: " << link_target
+              << std::endl;
+    return -ENODEV;
+  }
+
+  // Extract the PCI address substring
+  size_t addr_start = pci_start;
+  size_t addr_end = link_str.find('/', addr_start);
+  if (addr_end == std::string::npos) {
+    addr_end = link_str.length();
+  }
+  std::string pci_addr = link_str.substr(addr_start, addr_end - addr_start);
+
+  // Build paths to vendor and device ID files
+  std::string pci_dev_path = "/sys/bus/pci/devices/" + pci_addr;
+  std::string vendor_path = pci_dev_path + "/vendor";
+  std::string device_path_pci = pci_dev_path + "/device";
+
+  // Read Vendor ID
+  int vendor_fd = open(vendor_path.c_str(), O_RDONLY);
+  if (vendor_fd < 0) {
+    std::cerr << "Error: Failed to open vendor file " << vendor_path << ": "
+              << strerror(errno) << std::endl;
+    return -errno;
+  }
+
+  uint16_t vendor_id = 0;
+  char vendor_buf[16];
+  ssize_t bytes_read = read(vendor_fd, vendor_buf, sizeof(vendor_buf) - 1);
+  close(vendor_fd);
+
+  if (bytes_read > 0) {
+    vendor_buf[bytes_read] = '\0';
+    // Parse hex value (format: "0x1b36\n" or "1b36\n")
+    vendor_id = static_cast<uint16_t>(strtoul(vendor_buf, nullptr, 0));
+  } else {
+    std::cerr << "Error: Failed to read vendor ID from " << vendor_path
+              << std::endl;
+    return -EIO;
+  }
+
+  // Read Device ID
+  int device_fd = open(device_path_pci.c_str(), O_RDONLY);
+  if (device_fd < 0) {
+    std::cerr << "Error: Failed to open device file " << device_path_pci << ": "
+              << strerror(errno) << std::endl;
+    return -errno;
+  }
+
+  uint16_t device_id = 0;
+  char device_buf[16];
+  bytes_read = read(device_fd, device_buf, sizeof(device_buf) - 1);
+  close(device_fd);
+
+  if (bytes_read > 0) {
+    device_buf[bytes_read] = '\0';
+    // Parse hex value (format: "0x0010\n" or "0010\n")
+    device_id = static_cast<uint16_t>(strtoul(device_buf, nullptr, 0));
+  } else {
+    std::cerr << "Error: Failed to read device ID from " << device_path_pci
+              << std::endl;
+    return -EIO;
+  }
+
+  // QEMU emulated NVMe controllers use Vendor ID 0x1b36 (Red Hat, Inc.)
+  // This is the same vendor ID used by QEMU for other emulated PCI devices
+  const uint16_t QEMU_VENDOR_ID = 0x1b36;
+
+  bool is_emulated = (vendor_id == QEMU_VENDOR_ID);
+
+  *is_emulated_out = is_emulated;
+
+  std::cout << "NVMe controller " << device_path << " (PCI " << pci_addr
+            << "): VID=0x" << std::hex << std::setfill('0') << std::setw(4)
+            << vendor_id << ", DID=0x" << std::setw(4) << device_id << std::dec
+            << " -> " << (is_emulated ? "EMULATED" : "PASSTHROUGH")
+            << std::endl;
+
+  return 0;
 }

@@ -85,17 +85,14 @@ echo ""
 $QEMU \
     -machine q35,accel=kvm \
     -cpu EPYC \
-    -m 8G \
-    -smp 4 \
+    -m 32G \
+    -smp 16 \
     -drive file="$IMAGE",if=virtio,format=qcow2 \
     -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
     -device virtio-net-pci,netdev=net0 \
     -virtfs local,path=/home/stebates/Projects,mount_tag=hostfs,security_model=none,id=hostfs \
-    -device pci-mmio-bridge,id=mmio-bridge,\
-shadow-gpa=0x80000000,\
-shadow-size=8192,\
-poll-interval-ns=1000000,\
-addr=4.0 \
+    -device pci-mmio-bridge,id=mmio-bridge,shadow-gpa=0x80000000,\
+shadow-size=8192,poll-interval-ns=1000000,addr=4.0 \
     -device pci-testdev,membar=1M,membar-backed=on,addr=5.0 \
     -drive id=nvme0,file="$NVME_IMG",if=none,format=raw \
     -device nvme,serial=nvme0,drive=nvme0,ioeventfd=off,dbcs=off \
@@ -104,22 +101,7 @@ addr=4.0 \
     -serial mon:stdio \
     -display none \
     -trace pci_mmio_* \
-    -trace pci_nvme_admin_* \
-    -trace pci_nvme_read_* \
-    -trace pci_nvme_write_* \
-    -trace pci_nvme_mmio_* \
-    -trace pci_nvme_io_cmd \
-    -trace pci_nvme_rw \
-    -trace pci_nvme_enqueue_req \
-    -trace pci_nvme_dma_read \
-    -trace pci_nvme_dma_write \
-    -trace pci_nvme_map_addr \
-    -trace pci_nvme_map_prp \
-    -trace pci_nvme_vram_p2p_read \
-    -trace pci_nvme_vram_p2p_mr_found \
-    -trace pci_nvme_vram_p2p_direct_ptr \
-    -trace pci_nvme_vram_p2p_bounce \
-    -trace pci_nvme_vram_p2p_data
+    -trace pci_nvme_*
     
 # Cleanup
 echo ""
