@@ -14,7 +14,6 @@
 #include <iostream>
 #include <limits>
 #include <map>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -27,10 +26,6 @@
 #include <unistd.h>
 
 #include "axiio.h"
-
-// Track mmap'd allocations for proper cleanup
-static std::map<void*, size_t> mmap_allocations;
-static std::mutex mmap_mutex;
 
 void axiioPrintDeviceInfo() {
   int deviceCount;
@@ -394,33 +389,36 @@ hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
   bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
 
   if (gpuWriteToDevice) {
-    // Allocate device memory using HSA
-    const size_t host_page_size = sysconf(_SC_PAGESIZE);
-    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
-                         host_page_size;
-
-    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
-                                                     "GPU->CPU (SQE)");
-    if (hsa_status != HSA_STATUS_SUCCESS) {
-      std::cerr << "Error: HSA memory allocation failed for submission queue: "
-                << hsa_status << std::endl;
+    // Allocate device memory using hipMalloc (exportable as DMA-BUF)
+    // This matches VRAM buffer allocation and allows DMA-BUF export for
+    // physical address resolution in nvme-ep
+    hipError_t hipErr = hipMalloc(ptr, size);
+    if (hipErr != hipSuccess) {
+      std::cerr << "Error: hipMalloc failed for submission queue: "
+                << hipGetErrorString(hipErr) << std::endl;
       return hipErrorMemoryAllocation;
     }
-    memset(*ptr, 0, size);
+    // Zero-initialize using hipMemset
+    hipError_t memsetErr = hipMemset(*ptr, 0, size);
+    if (memsetErr != hipSuccess) {
+      std::cerr << "Warning: hipMemset failed for submission queue: "
+                << hipGetErrorString(memsetErr) << std::endl;
+      // Continue anyway - memory might already be zeroed
+    }
   } else {
-    // Allocate host-accessible memory using mmap (matching
-    // test-gpu-nvme-write.cpp) Use anonymous shared memory with MAP_LOCKED to
-    // prevent swapping
-    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
-    if (*ptr == MAP_FAILED) {
-      std::cerr << "Error: mmap failed for submission queue: "
-                << strerror(errno) << std::endl;
-      return hipErrorMemoryAllocation;
+    // Allocate host-accessible memory using HIP (GPU-accessible)
+    // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
+    // nvme-ep will reallocate with hipHostMallocCoherent if needed
+    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), fall back to malloc
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        std::cerr << "Error: malloc failed for submission queue" << std::endl;
+        return hipErrorMemoryAllocation;
+      }
     }
     memset(*ptr, 0, size);
-    std::lock_guard<std::mutex> lock(mmap_mutex);
-    mmap_allocations[*ptr] = size;
   }
 
   return hipSuccess;
@@ -433,33 +431,36 @@ hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
   bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
 
   if (cpuWriteToDevice) {
-    // Allocate device memory using HSA
-    const size_t host_page_size = sysconf(_SC_PAGESIZE);
-    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
-                         host_page_size;
-
-    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
-                                                     "CPU->GPU (CQE)");
-    if (hsa_status != HSA_STATUS_SUCCESS) {
-      std::cerr << "Error: HSA memory allocation failed for completion queue: "
-                << hsa_status << std::endl;
+    // Allocate device memory using hipMalloc (exportable as DMA-BUF)
+    // This matches VRAM buffer allocation and allows DMA-BUF export for
+    // physical address resolution in nvme-ep
+    hipError_t hipErr = hipMalloc(ptr, size);
+    if (hipErr != hipSuccess) {
+      std::cerr << "Error: hipMalloc failed for completion queue: "
+                << hipGetErrorString(hipErr) << std::endl;
       return hipErrorMemoryAllocation;
     }
-    memset(*ptr, 0, size);
+    // Zero-initialize using hipMemset
+    hipError_t memsetErr = hipMemset(*ptr, 0, size);
+    if (memsetErr != hipSuccess) {
+      std::cerr << "Warning: hipMemset failed for completion queue: "
+                << hipGetErrorString(memsetErr) << std::endl;
+      // Continue anyway - memory might already be zeroed
+    }
   } else {
-    // Allocate host-accessible memory using mmap (matching
-    // test-gpu-nvme-write.cpp) Use anonymous shared memory with MAP_LOCKED to
-    // prevent swapping
-    *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
-    if (*ptr == MAP_FAILED) {
-      std::cerr << "Error: mmap failed for completion queue: "
-                << strerror(errno) << std::endl;
-      return hipErrorMemoryAllocation;
+    // Allocate host-accessible memory using HIP (GPU-accessible)
+    // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
+    // nvme-ep will reallocate with hipHostMallocCoherent if needed
+    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), fall back to malloc
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        std::cerr << "Error: malloc failed for completion queue" << std::endl;
+        return hipErrorMemoryAllocation;
+      }
     }
     memset(*ptr, 0, size);
-    std::lock_guard<std::mutex> lock(mmap_mutex);
-    mmap_allocations[*ptr] = size;
   }
 
   return hipSuccess;
@@ -470,27 +471,21 @@ void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
   bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
 
   if (gpuWriteToDevice) {
-    // Free HSA device memory
+    // Free HIP device memory
     if (ptr != nullptr) {
-      hsa_memory_free(ptr);
+      hipError_t hipErr = hipFree(ptr);
+      if (hipErr != hipSuccess) {
+        std::cerr << "Warning: hipFree failed for submission queue: "
+                  << hipGetErrorString(hipErr) << std::endl;
+      }
     }
   } else {
+    // Free HIP host memory or malloc-allocated memory
     if (ptr != nullptr) {
-      std::lock_guard<std::mutex> lock(mmap_mutex);
-      auto it = mmap_allocations.find(ptr);
-      if (it != mmap_allocations.end()) {
-        // Found in mmap tracking - use munmap
-        munmap(ptr, it->second);
-        mmap_allocations.erase(it);
-      } else {
-        // Not in tracking map - try hipHostFree
-        hipError_t hipErr = hipHostFree(ptr);
-        if (hipErr != hipSuccess) {
-          // Not HIP-allocated either - log warning
-          std::cerr << "Warning: Cannot free memory - not found in mmap "
-                       "tracking and hipHostFree failed"
-                    << std::endl;
-        }
+      hipError_t hipErr = hipHostFree(ptr);
+      if (hipErr != hipSuccess) {
+        // Not HIP-allocated, use regular free
+        free(ptr);
       }
     }
   }
@@ -501,27 +496,21 @@ void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
   bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
 
   if (cpuWriteToDevice) {
-    // Free HSA device memory
+    // Free HIP device memory
     if (ptr != nullptr) {
-      hsa_memory_free(ptr);
+      hipError_t hipErr = hipFree(ptr);
+      if (hipErr != hipSuccess) {
+        std::cerr << "Warning: hipFree failed for completion queue: "
+                  << hipGetErrorString(hipErr) << std::endl;
+      }
     }
   } else {
+    // Free HIP host memory or malloc-allocated memory
     if (ptr != nullptr) {
-      std::lock_guard<std::mutex> lock(mmap_mutex);
-      auto it = mmap_allocations.find(ptr);
-      if (it != mmap_allocations.end()) {
-        // Found in mmap tracking - use munmap
-        munmap(ptr, it->second);
-        mmap_allocations.erase(it);
-      } else {
-        // Not in tracking map - try hipHostFree
-        hipError_t hipErr = hipHostFree(ptr);
-        if (hipErr != hipSuccess) {
-          // Not HIP-allocated either - log warning
-          std::cerr << "Warning: Cannot free memory - not found in mmap "
-                       "tracking and hipHostFree failed"
-                    << std::endl;
-        }
+      hipError_t hipErr = hipHostFree(ptr);
+      if (hipErr != hipSuccess) {
+        // Not HIP-allocated, use regular free
+        free(ptr);
       }
     }
   }
