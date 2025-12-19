@@ -73,11 +73,23 @@ else
     FAILED_TESTS+=("nvme0_device_mem")
 fi
 
-# Test passthrough NVMe with host memory
+# Test emulated NVMe with device memory and queues
 seed3=$(openssl rand -hex 2)
+if run_test "nvme0_device_mem_queues" \
+    "nvme0 device-mem-queues write=2 seed=0x${seed3} base_lba=1024 pci-mmio" \
+    bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed3} BASE_LBA=1024 \
+      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme0"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+    FAILED_TESTS+=("nvme0_device_mem_queues")
+fi
+
+# Test passthrough NVMe with host memory
+seed4=$(openssl rand -hex 2)
 if run_test "nvme1_host_mem" \
-    "nvme1 host-mem write=1 seed=0x${seed3} base_lba=4096 pci-mmio" \
-    bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed3} BASE_LBA=4096 \
+    "nvme1 host-mem write=1 seed=0x${seed4} base_lba=4096 pci-mmio" \
+    bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed4} BASE_LBA=4096 \
       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
     ((TESTS_PASSED++))
 else
@@ -86,10 +98,10 @@ else
 fi
 
 # Test passthrough NVMe with device memory
-seed4=$(openssl rand -hex 2)
+seed5=$(openssl rand -hex 2)
 if run_test "nvme1_device_mem" \
-    "nvme1 device-mem write=2 seed=0x${seed4} pci-mmio" \
-    bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed4} \
+    "nvme1 device-mem write=2 seed=0x${seed5} pci-mmio" \
+    bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed5} \
       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
     ((TESTS_PASSED++))
 else
@@ -97,12 +109,24 @@ else
     FAILED_TESTS+=("nvme1_device_mem")
 fi
 
+# Test passthrough NVMe with device memory and queues
+seed6=$(openssl rand -hex 2)
+if run_test "nvme1_device_mem_queues" \
+    "nvme1 device-mem-queues write=2 seed=0x${seed6} pci-mmio" \
+    bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed6} \
+      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+    FAILED_TESTS+=("nvme1_device_mem_queues")
+fi 
+
 # Test passthrough NVMe with host memory (direct doorbell)
-seed5=$(openssl rand -hex 2)
+seed7=$(openssl rand -hex 2)
 if run_test "nvme1_host_mem_direct" \
-    "nvme1 host-mem write=1 seed=0x${seed5} direct" \
+    "nvme1 host-mem write=1 seed=0x${seed7} direct" \
     bash -c "WRITE_IO=1 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=0 \
-      LFSR_SEED=0x${seed5} \
+      LFSR_SEED=0x${seed7} \
       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
     ((TESTS_PASSED++))
 else
@@ -111,10 +135,10 @@ else
 fi
 
 # Test passthrough NVMe with device memory (direct doorbell)
-seed6=$(openssl rand -hex 2)
+seed8=$(openssl rand -hex 2)
 if run_test "nvme1_device_mem_direct" \
-    "nvme1 device-mem write=2 seed=0x${seed6} direct" \
-    bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=8 LFSR_SEED=0x${seed6} \
+    "nvme1 device-mem write=2 seed=0x${seed8} direct" \
+    bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=8 LFSR_SEED=0x${seed8} \
       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
     ((TESTS_PASSED++))
 else
@@ -122,6 +146,17 @@ else
     FAILED_TESTS+=("nvme1_device_mem_direct")
 fi
 
+# Test passthrough NVMe with device memory and queues (direct doorbell)
+seed9=$(openssl rand -hex 2)
+if run_test "nvme1_device_mem_direct_queues" \
+    "nvme1 device-mem-queues write=2 seed=0x${seed9} direct" \
+    bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=11 LFSR_SEED=0x${seed9} \
+      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
+    ((TESTS_PASSED++))
+else
+    ((TESTS_FAILED++))
+    FAILED_TESTS+=("nvme1_device_mem_direct_queues")
+fi
 # Print summary
 echo ""
 echo "========================================"

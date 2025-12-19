@@ -166,10 +166,13 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
 }
 
 // Write SQE - copies entire NVMe command structure with memory fence
-__host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress) {
-  // Copy entire structure
+__host__ __device__ void sqeWrite(sqeType sqeData,
+                                  volatile sqeType* sqeAddress) {
+  // Copy entire structure byte-by-byte to handle volatile correctly
+  // Uses volatile pointer to ensure writes are not optimized away and are
+  // visible to PCIe devices (critical for GPU-PCIe coherency)
   const uint8_t* src = reinterpret_cast<const uint8_t*>(&sqeData);
-  uint8_t* dst = reinterpret_cast<uint8_t*>(sqeAddress);
+  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(sqeAddress);
   for (size_t i = 0; i < sizeof(sqeType); i++) {
     dst[i] = src[i];
   }
@@ -179,10 +182,12 @@ __host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress) {
 }
 
 // Write CQE - copies entire NVMe completion structure with memory fence
-__host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress) {
-  // Copy entire structure
+// Uses volatile pointer to ensure writes are not optimized away
+__host__ __device__ void cqeWrite(cqeType cqeData,
+                                  volatile cqeType* cqeAddress) {
+  // Copy entire structure byte-by-byte to handle volatile correctly
   const uint8_t* src = reinterpret_cast<const uint8_t*>(&cqeData);
-  uint8_t* dst = reinterpret_cast<uint8_t*>(cqeAddress);
+  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(cqeAddress);
   for (size_t i = 0; i < sizeof(cqeType); i++) {
     dst[i] = src[i];
   }
@@ -2086,6 +2091,10 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   void* cq_virt = nullptr;
   void* sq_gpu = nullptr;
   void* cq_gpu = nullptr;
+  bool sq_uses_coherent = false; // Track if SQ was reallocated with coherent
+  bool cq_uses_coherent = false; // Track if CQ was reallocated with coherent
+  bool sq_is_device = (memory_mode & 0x1) != 0; // Bit 0: GPU write location
+  bool cq_is_device = (memory_mode & 0x2) != 0; // Bit 1: CPU write location
   int sq_dmabuf_fd = -1; // Not currently used, but kept for struct
                          // compatibility
   int cq_dmabuf_fd = -1; // Not currently used, but kept for struct
@@ -2132,6 +2141,18 @@ __host__ int nvme_ep_create_queue_via_ioctl(
             kernel_module_device, strerror(errno));
     return -errno;
   }
+
+  // Detect if NVMe device is emulated (QEMU) or passthrough
+  bool is_emulated = false;
+  int detect_ret = axiioDetectEmulatedNvme(nvme_device, &is_emulated);
+  if (detect_ret != 0) {
+    fprintf(stderr, "Warning: Failed to detect NVMe type for %s: %s\n",
+            nvme_device, strerror(-detect_ret));
+    fprintf(stderr, "Defaulting to passthrough mode\n");
+    is_emulated = false;
+  }
+  fprintf(stderr, "NVMe device %s detected as: %s\n", nvme_device,
+          is_emulated ? "EMULATED" : "PASSTHROUGH");
 
   // Open NVMe device (requires root permissions)
   nvme_fd = open(nvme_device, O_RDWR);
@@ -2183,7 +2204,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     memset(sq_virt, 0,
            sq_size_bytes); // HSA fine-grained memory is host-accessible
   } else {
-    // Host memory (mmap) - use memset
+    // Host memory (malloc) - use memset
     memset(sq_virt, 0, sq_size_bytes);
   }
 
@@ -2192,96 +2213,211 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     memset(cq_virt, 0,
            cq_size_bytes); // HSA fine-grained memory is host-accessible
   } else {
-    // Host memory (mmap) - use memset
+    // Host memory (malloc) - use memset
     memset(cq_virt, 0, cq_size_bytes);
   }
 
+  // Reallocate host memory queues with hipHostMallocCoherent for GPU-PCIe
+  // coherency This is critical for gfx900 (MI250) where GPU writes must be
+  // immediately visible to PCIe devices like NVMe controllers
+  if (!gpuWriteToDevice) {
+    void* sq_virt_coherent = nullptr;
+    hipError_t sq_coherent_err = hipHostMalloc(&sq_virt_coherent, sq_size_bytes,
+                                               hipHostMallocMapped |
+                                                 hipHostMallocCoherent);
+    if (sq_coherent_err != hipSuccess) {
+      fprintf(stderr, "Warning: hipHostMallocCoherent failed for SQ: %s\n",
+              hipGetErrorString(sq_coherent_err));
+      fprintf(stderr, "Falling back to regular allocation (may not work on "
+                      "gfx900)\n");
+    } else {
+      // Copy zeroed data to coherent memory
+      memcpy(sq_virt_coherent, sq_virt, sq_size_bytes);
+      // Free original allocation (may be hipHostMalloc or malloc)
+      hipError_t freeErr = hipHostFree(sq_virt);
+      if (freeErr != hipSuccess) {
+        // Not HIP-allocated, use regular free
+        free(sq_virt);
+      }
+      sq_virt = sq_virt_coherent;
+      sq_uses_coherent = true; // Mark that SQ uses coherent allocation
+    }
+  }
+
+  if (!cpuWriteToDevice) {
+    void* cq_virt_coherent = nullptr;
+    hipError_t cq_coherent_err = hipHostMalloc(&cq_virt_coherent, cq_size_bytes,
+                                               hipHostMallocMapped |
+                                                 hipHostMallocCoherent);
+    if (cq_coherent_err != hipSuccess) {
+      fprintf(stderr, "Warning: hipHostMallocCoherent failed for CQ: %s\n",
+              hipGetErrorString(cq_coherent_err));
+      fprintf(stderr, "Falling back to regular allocation (may not work on "
+                      "gfx900)\n");
+    } else {
+      // Copy zeroed data to coherent memory
+      memcpy(cq_virt_coherent, cq_virt, cq_size_bytes);
+      // Free original allocation (may be hipHostMalloc or malloc)
+      hipError_t freeErr = hipHostFree(cq_virt);
+      if (freeErr != hipSuccess) {
+        // Not HIP-allocated, use regular free
+        free(cq_virt);
+      }
+      cq_virt = cq_virt_coherent;
+      cq_uses_coherent = true; // Mark that CQ uses coherent allocation
+    }
+  }
+
   // Register queues with GPU (matching test-gpu-nvme-write.cpp pattern)
-  // Step 1: DRM GEM_USERPTR registration (required for GPU access)
-  // Note: GEM_USERPTR requires page-aligned sizes (already calculated above)
+  // Step 1: DRM GEM_USERPTR registration (required for GPU access to host
+  // memory)
+  // Note: For device memory (hipMalloc), queues are already GPU-accessible,
+  // so GEM_USERPTR is optional but we do it anyway for consistency
+  // GEM_USERPTR requires page-aligned sizes (already calculated above)
 
   drm_fd = open("/dev/dri/renderD128", O_RDWR);
   if (drm_fd < 0) {
     fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
             strerror(errno));
     fprintf(stderr, "Cannot register queues with GPU via GEM_USERPTR.\n");
-    ret = -errno;
-    goto cleanup;
+    // For device memory, this is not fatal - queues are already GPU-accessible
+    if (sq_is_device && cq_is_device) {
+      fprintf(stderr, "Note: Device memory queues are already GPU-accessible, "
+                      "continuing without GEM_USERPTR\n");
+      drm_fd = -1; // Mark as not opened
+    } else {
+      ret = -errno;
+      goto cleanup;
+    }
+  } else {
+    // Register SQ with DRM GEM_USERPTR (if DRM fd opened successfully)
+    sq_userptr.addr = (uint64_t)sq_virt;
+    sq_userptr.size = sq_size_aligned; // Use page-aligned size
+    sq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+    if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &sq_userptr) < 0) {
+      fprintf(stderr,
+              "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for SQ: %s\n",
+              strerror(errno));
+      // For device memory, this is not fatal
+      if (sq_is_device) {
+        fprintf(stderr, "Note: SQ is device memory (already GPU-accessible), "
+                        "continuing without GEM_USERPTR\n");
+      } else {
+        fprintf(stderr, "Cannot register SQ with GPU.\n");
+        close(drm_fd);
+        ret = -errno;
+        goto cleanup;
+      }
+    } else {
+      fprintf(stderr, "SQ registered with DRM GEM_USERPTR (handle: %u)\n",
+              sq_userptr.handle);
+    }
+
+    // Register CQ with DRM GEM_USERPTR
+    cq_userptr.addr = (uint64_t)cq_virt;
+    cq_userptr.size = cq_size_aligned; // Use page-aligned size
+    cq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+    if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &cq_userptr) < 0) {
+      fprintf(stderr,
+              "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for CQ: %s\n",
+              strerror(errno));
+      // For device memory, this is not fatal
+      if (cq_is_device) {
+        fprintf(stderr, "Note: CQ is device memory (already GPU-accessible), "
+                        "continuing without GEM_USERPTR\n");
+      } else {
+        fprintf(stderr, "Cannot register CQ with GPU.\n");
+        if (sq_userptr.handle != 0) {
+          // Try to unregister SQ if it was registered
+          // (Note: There's no unregister call, but closing drm_fd should handle
+          // it)
+        }
+        close(drm_fd);
+        ret = -errno;
+        goto cleanup;
+      }
+    } else {
+      fprintf(stderr, "CQ registered with DRM GEM_USERPTR (handle: %u)\n",
+              cq_userptr.handle);
+    }
   }
-
-  // Register SQ with DRM GEM_USERPTR
-  sq_userptr.addr = (uint64_t)sq_virt;
-  sq_userptr.size = sq_size_aligned; // Use page-aligned size
-  sq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &sq_userptr) < 0) {
-    fprintf(stderr, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for SQ: %s\n",
-            strerror(errno));
-    fprintf(stderr, "Cannot register SQ with GPU.\n");
-    close(drm_fd);
-    ret = -errno;
-    goto cleanup;
-  }
-  fprintf(stderr, "SQ registered with DRM GEM_USERPTR (handle: %u)\n",
-          sq_userptr.handle);
-
-  // Register CQ with DRM GEM_USERPTR
-  cq_userptr.addr = (uint64_t)cq_virt;
-  cq_userptr.size = cq_size_aligned; // Use page-aligned size
-  cq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &cq_userptr) < 0) {
-    fprintf(stderr, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for CQ: %s\n",
-            strerror(errno));
-    fprintf(stderr, "Cannot register CQ with GPU.\n");
-    close(drm_fd);
-    ret = -errno;
-    goto cleanup;
-  }
-  fprintf(stderr, "CQ registered with DRM GEM_USERPTR (handle: %u)\n",
-          cq_userptr.handle);
 
   // Step 2: Register with HIP (matching test-gpu-nvme-write.cpp pattern)
-  sq_hip_err = hipHostRegister(sq_virt, sq_size_bytes, hipHostRegisterMapped);
-  if (sq_hip_err != hipSuccess) {
-    fprintf(stderr, "Warning: Failed to register SQ with HIP: %s\n",
-            hipGetErrorString(sq_hip_err));
-    close(drm_fd);
-    ret = -EIO;
-    goto cleanup;
+  // Skip hipHostRegister if:
+  // 1. Memory was allocated with hipHostMallocCoherent (already registered)
+  // 2. Memory is device memory (allocated via HSA, already GPU-accessible)
+  if (!sq_uses_coherent && !sq_is_device) {
+    sq_hip_err = hipHostRegister(sq_virt, sq_size_bytes, hipHostRegisterMapped);
+    if (sq_hip_err != hipSuccess) {
+      fprintf(stderr, "Warning: Failed to register SQ with HIP: %s\n",
+              hipGetErrorString(sq_hip_err));
+      close(drm_fd);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
-  cq_hip_err = hipHostRegister(cq_virt, cq_size_bytes, hipHostRegisterMapped);
-  if (cq_hip_err != hipSuccess) {
-    fprintf(stderr, "Warning: Failed to register CQ with HIP: %s\n",
-            hipGetErrorString(cq_hip_err));
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-    close(drm_fd);
-    ret = -EIO;
-    goto cleanup;
+  if (!cq_uses_coherent && !cq_is_device) {
+    cq_hip_err = hipHostRegister(cq_virt, cq_size_bytes, hipHostRegisterMapped);
+    if (cq_hip_err != hipSuccess) {
+      fprintf(stderr, "Warning: Failed to register CQ with HIP: %s\n",
+              hipGetErrorString(cq_hip_err));
+      if (!sq_uses_coherent && !sq_is_device) {
+        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
+      }
+      close(drm_fd);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
   // Step 3: Get GPU pointers (matching test-gpu-nvme-write.cpp pattern)
-  sq_gpu_ptr_err = hipHostGetDevicePointer(&sq_gpu, sq_virt, 0);
-  if (sq_gpu_ptr_err != hipSuccess) {
-    fprintf(stderr, "Warning: hipHostGetDevicePointer failed for SQ: %s\n",
-            hipGetErrorString(sq_gpu_ptr_err));
-    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-    close(drm_fd);
-    ret = -EIO;
-    goto cleanup;
+  // For device memory (hipMalloc), GPU pointer is same as host pointer
+  // For host memory (hipHostMalloc), need hipHostGetDevicePointer
+  if (sq_is_device) {
+    // Device memory - GPU pointer is same as host pointer
+    sq_gpu = sq_virt;
+    sq_gpu_ptr_err = hipSuccess;
+  } else {
+    // Host memory - get GPU pointer via hipHostGetDevicePointer
+    sq_gpu_ptr_err = hipHostGetDevicePointer(&sq_gpu, sq_virt, 0);
+    if (sq_gpu_ptr_err != hipSuccess) {
+      fprintf(stderr, "Warning: hipHostGetDevicePointer failed for SQ: %s\n",
+              hipGetErrorString(sq_gpu_ptr_err));
+      if (!sq_uses_coherent) {
+        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
+      }
+      if (!cq_uses_coherent && !cq_is_device) {
+        (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
+      }
+      close(drm_fd);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
-  cq_gpu_ptr_err = hipHostGetDevicePointer(&cq_gpu, cq_virt, 0);
-  if (cq_gpu_ptr_err != hipSuccess) {
-    fprintf(stderr, "Warning: hipHostGetDevicePointer failed for CQ: %s\n",
-            hipGetErrorString(cq_gpu_ptr_err));
-    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-    close(drm_fd);
-    ret = -EIO;
-    goto cleanup;
+  if (cq_is_device) {
+    // Device memory - GPU pointer is same as host pointer
+    cq_gpu = cq_virt;
+    cq_gpu_ptr_err = hipSuccess;
+  } else {
+    // Host memory - get GPU pointer via hipHostGetDevicePointer
+    cq_gpu_ptr_err = hipHostGetDevicePointer(&cq_gpu, cq_virt, 0);
+    if (cq_gpu_ptr_err != hipSuccess) {
+      fprintf(stderr, "Warning: hipHostGetDevicePointer failed for CQ: %s\n",
+              hipGetErrorString(cq_gpu_ptr_err));
+      if (!sq_uses_coherent && !sq_is_device) {
+        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
+      }
+      if (!cq_uses_coherent) {
+        (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
+      }
+      close(drm_fd);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
   fprintf(stderr,
@@ -2310,13 +2446,55 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // IOCTL
 
   if (gpuWriteToDevice) {
-    // Device memory (HSA) - need dmabuf FDs for physical address
-    // TODO: Get dmabuf FDs from HSA-allocated memory
-    // For now, fall back to virtual address (kernel module may handle this)
+    // Device memory (HSA) - export as DMA-BUF and get physical address
+    // Similar to VRAM buffer export - need page alignment
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    void* aligned_sq_ptr = (void*)((uintptr_t)sq_virt & ~(host_page_size - 1));
+    uint64_t sq_dmabuf_offset = (uintptr_t)sq_virt - (uintptr_t)aligned_sq_ptr;
+    size_t aligned_sq_size = (sq_size_bytes + sq_dmabuf_offset +
+                              host_page_size - 1) &
+                             ~(host_page_size - 1);
+
+    int sq_dmabuf_fd = -1;
+    hsa_status_t sq_dmabuf_status = hsa_amd_portable_export_dmabuf(
+      aligned_sq_ptr, aligned_sq_size, &sq_dmabuf_fd, &sq_dmabuf_offset);
+    if (sq_dmabuf_status != HSA_STATUS_SUCCESS) {
+      fprintf(stderr, "ERROR: Failed to export SQ as DMA-BUF (status=%d): %s\n",
+              sq_dmabuf_status,
+              (sq_dmabuf_status == HSA_STATUS_ERROR_INVALID_ARGUMENT)
+                ? "Invalid argument"
+                : "Unknown error");
+      fprintf(stderr, "Device memory queues require DMA-BUF export support.\n");
+      ret = -ENOTSUP;
+      goto cleanup;
+    }
+
+    // Get physical address via kernel module
+    struct rocm_axiio_register_buffer_req buf_req = {};
+    buf_req.dmabuf_fd = sq_dmabuf_fd;
+    buf_req.virt_addr = reinterpret_cast<uint64_t>(sq_virt);
+    buf_req.size = sq_size_bytes;
+    buf_req.nvme_bdf = nvme_bdf;
+    buf_req.flags = is_emulated ? ROCM_AXIIO_FLAG_EMULATED
+                                : ROCM_AXIIO_FLAG_PASSTHROUGH;
+    fprintf(stderr, "SQ registration: is_emulated=%d, flags=0x%x\n",
+            is_emulated, buf_req.flags);
+
+    ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_BUFFER, &buf_req);
+    close(sq_dmabuf_fd); // Close FD after kernel module has it
+    if (ret < 0) {
+      fprintf(stderr,
+              "ERROR: Failed to get SQ physical address via kernel module: "
+              "%s\n",
+              strerror(errno));
+      ret = -errno;
+      goto cleanup;
+    }
+    sq_phys = buf_req.phys_addr + sq_dmabuf_offset;
     fprintf(stderr,
-            "Warning: Device memory mode - dmabuf FDs not yet supported, "
-            "using virtual address for SQ\n");
-    sq_phys = reinterpret_cast<uint64_t>(sq_virt);
+            "SQ device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
+            (unsigned long long)reinterpret_cast<uint64_t>(sq_virt),
+            (unsigned long long)sq_phys);
   } else {
     // Host memory (mmap) - use /proc/self/pagemap to get physical address
     // This matches QEMU guest code pattern (test-gpu-nvme-write.cpp)
@@ -2356,11 +2534,55 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   }
 
   if (cpuWriteToDevice) {
-    // Device memory (HSA) - need dmabuf FDs for physical address
+    // Device memory (HSA) - export as DMA-BUF and get physical address
+    // Similar to VRAM buffer export - need page alignment
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    void* aligned_cq_ptr = (void*)((uintptr_t)cq_virt & ~(host_page_size - 1));
+    uint64_t cq_dmabuf_offset = (uintptr_t)cq_virt - (uintptr_t)aligned_cq_ptr;
+    size_t aligned_cq_size = (cq_size_bytes + cq_dmabuf_offset +
+                              host_page_size - 1) &
+                             ~(host_page_size - 1);
+
+    int cq_dmabuf_fd = -1;
+    hsa_status_t cq_dmabuf_status = hsa_amd_portable_export_dmabuf(
+      aligned_cq_ptr, aligned_cq_size, &cq_dmabuf_fd, &cq_dmabuf_offset);
+    if (cq_dmabuf_status != HSA_STATUS_SUCCESS) {
+      fprintf(stderr, "ERROR: Failed to export CQ as DMA-BUF (status=%d): %s\n",
+              cq_dmabuf_status,
+              (cq_dmabuf_status == HSA_STATUS_ERROR_INVALID_ARGUMENT)
+                ? "Invalid argument"
+                : "Unknown error");
+      fprintf(stderr, "Device memory queues require DMA-BUF export support.\n");
+      ret = -ENOTSUP;
+      goto cleanup;
+    }
+
+    // Get physical address via kernel module
+    struct rocm_axiio_register_buffer_req buf_req = {};
+    buf_req.dmabuf_fd = cq_dmabuf_fd;
+    buf_req.virt_addr = reinterpret_cast<uint64_t>(cq_virt);
+    buf_req.size = cq_size_bytes;
+    buf_req.nvme_bdf = nvme_bdf;
+    buf_req.flags = is_emulated ? ROCM_AXIIO_FLAG_EMULATED
+                                : ROCM_AXIIO_FLAG_PASSTHROUGH;
+    fprintf(stderr, "CQ registration: is_emulated=%d, flags=0x%x\n",
+            is_emulated, buf_req.flags);
+
+    ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_BUFFER, &buf_req);
+    close(cq_dmabuf_fd); // Close FD after kernel module has it
+    if (ret < 0) {
+      fprintf(stderr,
+              "ERROR: Failed to get CQ physical address via kernel module: "
+              "%s\n",
+              strerror(errno));
+      ret = -errno;
+      goto cleanup;
+    }
+    cq_phys = buf_req.phys_addr + cq_dmabuf_offset;
     fprintf(stderr,
-            "Warning: Device memory mode - dmabuf FDs not yet supported, "
-            "using virtual address for CQ\n");
-    cq_phys = reinterpret_cast<uint64_t>(cq_virt);
+            "CQ device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
+            (unsigned long long)reinterpret_cast<uint64_t>(cq_virt),
+            (unsigned long long)cq_phys);
   } else {
     // Host memory (mmap) - use /proc/self/pagemap
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
@@ -2399,6 +2621,9 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   }
 
   // Register queue addresses with kernel module for kprobe injection
+  // Note: For device memory queues, ROCM_AXIIO_REGISTER_BUFFER was already
+  // called above to map the DMA-BUF. This registration is for kprobe tracking
+  // and works for both host and device memory queues.
   struct rocm_axiio_register_queue_addr_req reg_req;
 
   // Register SQ
@@ -2614,25 +2839,40 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   return 0;
 
 cleanup:
-  // Clean up HIP registrations if they were successful
-  if (sq_hip_err == hipSuccess && sq_virt) {
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-  }
-  if (cq_hip_err == hipSuccess && cq_virt) {
-    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-  }
-
   // Close DRM fd if opened
   if (drm_fd >= 0) {
     close(drm_fd);
   }
 
-  // Free queues using the same functions as test-ep (respects memory mode)
+  // Unregister from HIP if we registered (non-coherent, non-device
+  // allocations)
+  if (sq_virt && !sq_uses_coherent && !sq_is_device &&
+      sq_hip_err == hipSuccess) {
+    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
+  }
+  if (cq_virt && !cq_uses_coherent && !cq_is_device &&
+      cq_hip_err == hipSuccess) {
+    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
+  }
+
+  // Free queues - handle coherent allocation separately
   if (sq_virt) {
-    axiioFreeSubmissionQueue(sq_virt, memory_mode);
+    if (sq_uses_coherent) {
+      // Free HIP coherent memory
+      (void)hipHostFree(sq_virt);
+    } else {
+      // Free using standard free function
+      axiioFreeSubmissionQueue(sq_virt, memory_mode);
+    }
   }
   if (cq_virt) {
-    axiioFreeCompletionQueue(cq_virt, memory_mode);
+    if (cq_uses_coherent) {
+      // Free HIP coherent memory
+      (void)hipHostFree(cq_virt);
+    } else {
+      // Free using standard free function
+      axiioFreeCompletionQueue(cq_virt, memory_mode);
+    }
   }
   if (nvme_fd >= 0) {
     close(nvme_fd);
