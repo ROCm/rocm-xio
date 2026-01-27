@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
-# WORKDIR ./
+# WORKDIR ../
 
 # 4. Set environment variables
 ENV PATH="${PATH}:/opt/rocm/bin"
@@ -25,7 +25,4 @@ RUN apt-get update && \
 RUN apt-get update && \
     apt-get install -y libcli11-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# 5. Define the command to run when the container starts
-CMD ["make all"]
 
