@@ -332,10 +332,24 @@ wsl
 WSL
 www
 XNACK
+xnack
 XT
 XTX
 yaml
 yml
+
+# ===== CMake and Build System Terms =====
+DOFFLOAD
+DINSTALL
+DIRS
+DROCM
+Kbuild
+TransferBench
+asm
+dirs
+hipFile
+libdrm
+mknod
 
 # ===== Additional Terms =====
 Subdirectory

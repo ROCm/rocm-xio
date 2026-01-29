@@ -111,19 +111,20 @@ EOF
 
 # Extract NVME_SC_* defines from the enum (only the ones we use)
 # Find the enum block that contains NVME_SC_* values
-awk '/^\tNVME_SC_SUCCESS/,/^\};/ {
+awk '/NVME_SC_SUCCESS/,/^};/ {
     # Only extract the specific status codes we use (exclude others)
-    if (/^\tNVME_SC_SUCCESS\s*=|^\tNVME_SC_INVALID_OPCODE\s*=|^\tNVME_SC_INVALID_FIELD\s*=|^\tNVME_SC_CMDID_CONFLICT\s*=|^\tNVME_SC_DATA_XFER_ERROR\s*=|^\tNVME_SC_POWER_LOSS\s*=|^\tNVME_SC_INTERNAL\s*=|^\tNVME_SC_ABORT_REQ\s*=|^\tNVME_SC_ABORT_QUEUE\s*=|^\tNVME_SC_FUSED_FAIL\s*=|^\tNVME_SC_FUSED_MISSING\s*=|^\tNVME_SC_INVALID_NS\s*=|^\tNVME_SC_CMD_SEQ_ERROR\s*=|^\tNVME_SC_LBA_RANGE\s*=|^\tNVME_SC_CAP_EXCEEDED\s*=|^\tNVME_SC_NS_NOT_READY\s*=|^\tNVME_SC_RESERVATION_CONFLICT\s*=/) {
+    if (/NVME_SC_SUCCESS[ \t]*=|NVME_SC_INVALID_OPCODE[ \t]*=|NVME_SC_INVALID_FIELD[ \t]*=|NVME_SC_CMDID_CONFLICT[ \t]*=|NVME_SC_DATA_XFER_ERROR[ \t]*=|NVME_SC_POWER_LOSS[ \t]*=|NVME_SC_INTERNAL[ \t]*=|NVME_SC_ABORT_REQ[ \t]*=|NVME_SC_ABORT_QUEUE[ \t]*=|NVME_SC_FUSED_FAIL[ \t]*=|NVME_SC_FUSED_MISSING[ \t]*=|NVME_SC_INVALID_NS[ \t]*=|NVME_SC_CMD_SEQ_ERROR[ \t]*=|NVME_SC_LBA_RANGE[ \t]*=|NVME_SC_CAP_EXCEEDED[ \t]*=|NVME_SC_NS_NOT_READY[ \t]*=|NVME_SC_RESERVATION_CONFLICT[ \t]*=/) {
         # Convert enum entry to #define
-        gsub(/^\t/, "")
-        gsub(/,\s*$/, "")
+        gsub(/^[ \t]+/, "")
+        gsub(/,[ \t]*$/, "")
         if ($0 != "" && !/^\/\//) {
             # Convert "NVME_SC_SUCCESS = 0x0," to "#define NVME_SC_SUCCESS 0x0"
-            gsub(/\s*=\s*/, " ")
+            gsub(/[ \t]*=[ \t]*/, " ")
+            gsub(/[ \t]+/, " ")
             print "#define " $0
         }
     }
-    if (/^\};/) exit
+    if (/^};/) exit
 }' "$INPUT_FILE" >> "$OUTPUT_FILE"
 
 cat >> "$OUTPUT_FILE" << 'EOF'

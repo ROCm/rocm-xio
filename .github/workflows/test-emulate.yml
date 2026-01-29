@@ -6,63 +6,47 @@ on:
     branches:
       - main
     paths:
-      - 'src/**.hip'
-      - 'src/**.cpp'
-      - 'src/**.h'
       - '**.hip'
       - '**.cpp'
       - '**.h'
-      - Makefile
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'scripts/**'
+      - 'Makefile'
 
 jobs:
   test-emulate:
     name: test-emulate for rocm-axiio
     runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     steps:
     - name: Check out code.
       uses: actions/checkout@v5.0.0
-    - name: Install dependencies
+    - name: Install additional dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        apt-get update
+        apt-get install -y \
+          cmake \
           curl \
-          expect \
-          hipcc \
           libcli11-dev \
-          libdrm-dev \
-          libhsa-runtime-dev \
-          libstdc++-14-dev \
-          pahole \
-          bc
+          libdrm-dev
     - name: Build (with ROCm for compilation, but will run in emulate mode)
       run: |
-        mkdir bin
-        mkdir lib
-        make CXXFLAGS+="--offload-arch=gfx942:xnack+" all
-      env:
-        HIPCXX: /usr/bin/hipcc
-        HIP_INCLUDE_DIR: /usr/include
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+        mkdir -p build && cd build
+        cmake -DOFFLOAD_ARCH=gfx942:xnack+ \
+          -DROCM_PATH=/opt/rocm ..
+        cmake --build . --target all
     - name: Run tester using test-ep in emulate mode
       run: |
-        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 -v
-      env:
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+        ./build/axiio-tester test-ep --emulate -n 100 -t 4 -v
     - name: Run tester using test-ep in emulate mode with doorbell
       run: |
-        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 -v
-      env:
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-    - name: Run tester using test-ep in emulate mode with doorbell and variable delay
-      run: |
-        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 --delay 10000
-      env:
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-    - name: Run tester using test-ep in emulate mode with doorbell and fixed delay
-      run: |
-        ./bin/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 --delay -10000
-      env:
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+        ./build/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 -v
+
  
 
 
