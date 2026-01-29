@@ -6,6 +6,6 @@ docker build -t axiio-build-image:v1  -f docker/Dockerfile .
 
 docker run -it --rm   --device=/dev/kfd   --device=/dev/dri \
       	axiio-build-image:v1 \
-	CXXFLAGS="-ferror-limit=10" \
+	pwd; \
 	make all
 
