@@ -1764,6 +1764,7 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
 //
 
 // Structure for NVMe Identify Namespace response (4096 bytes)
+#if 0
 struct nvme_id_ns {
   uint64_t nsze;  // Namespace size
   uint64_t ncap;  // Namespace capacity
@@ -1789,6 +1790,7 @@ struct nvme_id_ns {
   uint8_t resv[40];   // Reserved
   uint8_t lbaf[64];   // LBA format support (16 formats * 4 bytes each)
 };
+#endif
 
 __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
                                     unsigned* lba_size) {

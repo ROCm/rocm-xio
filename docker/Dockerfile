@@ -4,25 +4,20 @@ FROM rocm/dev-ubuntu-24.04:latest
 # Install additional development tools
 RUN apt-get update && apt-get install -y \
     build-essential \
+    clang \
+    make \
     git \
-    cmake \
-    python3-pip \
+    linux-libc-dev \
+    vim \
+    bash-completion \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
-# WORKDIR ../
+WORKDIR /home/AMD/$USER/rocm-axiio.git
 
-# 4. Set environment variables
+# Set environment variables
 ENV PATH="${PATH}:/opt/rocm/bin"
 ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/opt/rocm/lib"
 
-# RUN apt-get install -y libcli11-dev
-# Fix for libcli11-dev error
-RUN apt-get update && \
-    apt-get install -y software-properties-common && \
-    add-apt-repository universe 
-
-RUN apt-get update && \
-    apt-get install -y libcli11-dev && \
-    rm -rf /var/lib/apt/lists/*
+CMD ["/bin/bash"]
 

@@ -59,6 +59,8 @@ RDMA_HEADERS := $(RDMA_HEADERS_DIR)/ib_user_verbs.h \
                 $(RDMA_HEADERS_DIR)/ionic/ionic.h \
                 $(RDMA_HEADERS_DIR)/pvrdma/pvrdma.h
 
+CLI11_HEADERS_DIR := $(EXTERNAL_HEADERS_DIR)/CLI11/include
+
 # Auto-generated vendor-specific RDMA headers
 RDMA_VENDOR_HEADERS := $(ENDPOINTS_DIR)/rdma-ep/mlx/mlx5-rdma.h \
                        $(ENDPOINTS_DIR)/rdma-ep/bnxt/bnxt-rdma.h \
@@ -109,6 +111,8 @@ else
 endif
 # Add include paths for all discovered endpoints
 override CXXFLAGS += $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep))
+# Add include path for CLI11 submodule
+override CXXFLAGS += -I$(CLI11_HEADERS_DIR)
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
@@ -227,7 +231,7 @@ $(BUILD_DIR)/%.o: %.hip $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 $(BUILD_DIR)/%.o: %.cpp $(ENDPOINT_REGISTRY_GEN) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	@$(CXX) -std=c++17 -Wall -Wextra -Wno-unused-parameter \
-	  -D__HIP_PLATFORM_AMD__ -I$(INCLUDE_DIR) -I$(HIP_INCLUDE_DIR) \
+	  -D__HIP_PLATFORM_AMD__ -I$(CLI11_HEADERS_DIR) -I$(INCLUDE_DIR) -I$(HIP_INCLUDE_DIR) \
 	  $(foreach ep,$(VALID_ENDPOINTS),-I$(ENDPOINTS_DIR)/$(ep)) -c -o $@ $<
 
 # A simple target to dump the assembly of the library

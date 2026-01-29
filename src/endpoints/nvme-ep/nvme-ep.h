@@ -14,6 +14,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "external/linux-nvme.h"
 #include "axiio.h"
 
 /*
