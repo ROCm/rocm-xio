@@ -14,20 +14,170 @@ list of supported devices we can issue IO to is given in the
 
 ## Quick Reference
 
+### Dependencies
+
+```bash
+# Install required packages
+sudo apt install rocm-hip-sdk rocminfo libcli11-dev cmake \
+  libdrm-dev libhsa-runtime-dev
+```
+
 ### Build and Run
 
 ```bash
-# 1. Install ROCm (if not already installed)
-sudo apt install rocm-hip-sdk rocminfo libcli11-dev
+# 1. Configure CMake build
+mkdir -p build && cd build
+cmake ..
 
-# 2. Build
-make all
+# 2. Build library and tester
+cmake --build . --target all
+
+# Output locations:
+# - Library: build/lib/librocm-axiio.a
+# - Tester:  build/bin/axiio-tester
 
 # 3. Run with GPU + NVMe
 export HSA_FORCE_FINE_GRAIN_PCIE=1
-sudo ./bin/axiio-tester nvme-ep --controller /dev/nvme0 \
+sudo ./build/bin/axiio-tester nvme-ep --controller /dev/nvme0 \
   --read-io 50 --write-io 50 --verbose
 ```
+
+### CMake Configuration Options
+
+```bash
+# Specify GPU architecture (auto-detected if not specified)
+cmake -DOFFLOAD_ARCH=gfx942:xnack+ ..
+
+# Specify ROCm installation path (default: /opt/rocm)
+cmake -DROCM_PATH=/opt/rocm-7.1.0 ..
+
+# Configure and build in one step
+cmake --build . --target all
+```
+
+### CMake Build Targets
+
+**Primary targets:**
+```bash
+cmake --build . --target rocm-axiio    # Build library only
+cmake --build . --target axiio-tester   # Build tester only
+cmake --build . --target all            # Build library + tester (default)
+```
+
+**Code generation targets:**
+```bash
+cmake --build . --target endpoint-registry-generated
+cmake --build . --target nvme-ep-generated
+cmake --build . --target rdma-vendor-headers-generated
+cmake --build . --target fetch-nvme-headers
+cmake --build . --target fetch-rdma-headers
+cmake --build . --target fetch-external-headers
+```
+
+**Utility targets:**
+```bash
+cmake --build . --target list           # List supported GPU architectures
+cmake --build . --target asm            # Dump library assembly code
+cmake --build . --target lint-format    # Check code formatting
+cmake --build . --target format         # Fix code formatting
+cmake --build . --target lint-spell     # Check spelling in docs
+cmake --build . --target lint-all       # Run all linting checks
+cmake --build . --target clean-all      # Remove all build artifacts
+cmake --build . --target clean-external # Remove external headers
+```
+
+### Installation
+
+**Install to default location (typically `/opt/rocm`):**
+```bash
+cd build
+cmake --build . --target install
+```
+
+**Install to custom location for testing:**
+```bash
+cd build
+cmake --install . --prefix /tmp/rocm-axiio-test
+
+# Test the installation
+export CMAKE_PREFIX_PATH=/tmp/rocm-axiio-test:$CMAKE_PREFIX_PATH
+cd /tmp
+cat > test-find-package.cmake << 'EOF'
+cmake_minimum_required(VERSION 3.21)
+project(test)
+find_package(rocm-axiio REQUIRED)
+message(STATUS "Found rocm-axiio version: ${rocm-axiio_VERSION}")
+message(STATUS "Include dirs: ${ROCM_AXIIO_INCLUDE_DIRS}")
+message(STATUS "Libraries: ${ROCM_AXIIO_LIBRARIES}")
+EOF
+cmake -P test-find-package.cmake
+```
+
+**Install with tester executable:**
+```bash
+cd build
+cmake -DINSTALL_TESTER=ON ..
+cmake --build . --target install --prefix /tmp/rocm-axiio-test
+```
+
+### Kernel Module Build
+
+The kernel module (`kernel/rocm-axiio/`) uses the standard Linux kernel
+build system (Kbuild) and must be built separately:
+
+```bash
+# Build kernel module
+cd kernel/rocm-axiio
+make
+
+# Install kernel module
+sudo make install
+
+# Load module
+sudo modprobe rocm-axiio
+
+# Create device node (after loading)
+sudo mknod /dev/rocm-axiio c $(grep rocm-axiio /proc/devices | awk '{print $1}') 0
+sudo chmod 666 /dev/rocm-axiio
+```
+
+**Note:** The kernel module build is independent of the CMake build system
+and uses its own Makefile following Linux kernel conventions.
+
+## Build System
+
+This project uses CMake for building userspace code (library and tester).
+The build system follows ROCm best practices and patterns from hipFile and
+TransferBench.
+
+### Build Output Structure
+
+```
+build/
+├── bin/
+│   └── axiio-tester          # Test application
+├── lib/
+│   └── librocm-axiio.a       # Static library
+└── CMakeFiles/               # CMake internal files
+```
+
+### Key Features
+
+- **HIP compilation**: Uses `hipcc` with `-fgpu-rdc` for relocatable device
+  code
+- **Device code extraction**: Tester executable links with `hipcc` to extract
+  device code from static library
+- **Code generation**: Automatic generation of endpoint registry and external
+  headers
+- **GPU architecture detection**: Auto-detects GPU architecture via `rocminfo`
+  or can be specified via `OFFLOAD_ARCH` option
+
+### CMake Requirements
+
+- CMake 3.21 or later
+- ROCm HIP SDK
+- HSA runtime libraries
+- libdrm and libdrm_amdgpu development packages
 
 ## Endpoints
 
@@ -46,7 +196,7 @@ devices. Each endpoint provides its own queue entry formats and IO semantics.
 
 To see all available endpoints:
 ```bash
-./bin/axiio-tester --list-endpoints
+./build/bin/axiio-tester --list-endpoints
 ```
 
 ### Environment Variables for Radeon GPUs

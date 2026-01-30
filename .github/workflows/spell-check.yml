@@ -8,7 +8,7 @@ on:
     paths:
       - '**.md'
       - '.wordlist.txt'
-      - '.spellcheck.yaml'
+      - '.spellcheck.yml'
 
 jobs:
   spell-check:

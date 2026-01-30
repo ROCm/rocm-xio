@@ -6,38 +6,41 @@ on:
     branches:
       - main
     paths:
-      - 'src/**.hip'
-      - 'src/**.cpp'
-      - 'src/**.h'
       - '**.hip'
       - '**.cpp'
       - '**.h'
-      - Makefile
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'scripts/**'
+      - 'Makefile'
 
 jobs:
   build-check:
     name: build-check for rocm-axiio
     runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     steps:
     - name: Check out code.
       uses: actions/checkout@v5.0.0
-    - name: Install rocm
+    - name: Install additional dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        apt-get update
+        apt-get install -y \
+          cmake \
           curl \
-          expect \
-          hipcc \
           libcli11-dev \
-          libdrm-dev \
-          libhsa-runtime-dev \
-          libstdc++-14-dev \
-          pahole
+          libdrm-dev
     - name: List supported GPUs.
       run: |
-        make list
+        mkdir -p build && cd build
+        cmake -DROCM_PATH=/opt/rocm ..
+        cmake --build . --target list
       env:
-        CLANGXX: /usr/bin/clang++
+        CLANGXX: /opt/rocm/llvm/bin/clang++
     - name: Perform clang linting.
       uses: DoozyX/clang-format-lint-action@v0.18.2
       with:
@@ -47,17 +50,16 @@ jobs:
         clangFormatVersion: 18
         style: file
         inplace: false
-    - name: Compile code.
+    - name: Configure and build with CMake.
       run: |
-        mkdir bin
-        mkdir lib
-        make CXXFLAGS+="--offload-arch=gfx942:xnack+" all
-      env:
-        HIPCXX: /usr/bin/hipcc
-        HIP_INCLUDE_DIR: /usr/include
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+        mkdir -p build && cd build
+        cmake -DOFFLOAD_ARCH=gfx942:xnack+ \
+          -DROCM_PATH=/opt/rocm ..
+        cmake --build . --target all
     - name: Run tester application.
       run: |
-        ./bin/axiio-tester -h
-      env:
-        LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+        ./build/axiio-tester -h
+    - name: Install with CMake.
+      run: |
+        cd build
+        cmake --install . --prefix /tmp/rocm-axiio-test
