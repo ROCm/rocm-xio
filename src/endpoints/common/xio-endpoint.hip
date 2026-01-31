@@ -7,9 +7,9 @@
 
 #include <CLI/CLI.hpp>
 
-#include "axiio-endpoint-registry.h"
-#include "axiio.h"
 #include "test-ep.h"
+#include "xio-endpoint-registry.h"
+#include "xio.h"
 
 // Include endpoint headers for size information
 #include "nvme-ep.h"
@@ -18,16 +18,16 @@
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
-extern hipError_t test_ep_run(AxiioEndpointConfig* config);
-extern hipError_t nvme_ep_run(AxiioEndpointConfig* config);
-extern hipError_t rdma_ep_run(AxiioEndpointConfig* config);
-extern hipError_t sdma_ep_run(AxiioEndpointConfig* config);
+extern hipError_t test_ep_run(XioEndpointConfig* config);
+extern hipError_t nvme_ep_run(XioEndpointConfig* config);
+extern hipError_t rdma_ep_run(XioEndpointConfig* config);
+extern hipError_t sdma_ep_run(XioEndpointConfig* config);
 
 // ============================================================================
 // Derived Endpoint Classes
 // ============================================================================
 
-class TestEndpoint : public AxiioEndpoint {
+class TestEndpoint : public XioEndpoint {
 private:
   // Store doorbell queue length from CLI
   unsigned doorbell_ = 0;
@@ -58,7 +58,7 @@ public:
   }
 
   __host__ size_t
-  getSubmissionQueueLength(const AxiioEndpointConfig* config) const override {
+  getSubmissionQueueLength(const XioEndpointConfig* config) const override {
     if (config == nullptr) {
       return 1;
     }
@@ -75,7 +75,7 @@ public:
   }
 
   __host__ size_t
-  getCompletionQueueLength(const AxiioEndpointConfig* config) const override {
+  getCompletionQueueLength(const XioEndpointConfig* config) const override {
     if (config == nullptr) {
       return 1;
     }
@@ -91,7 +91,7 @@ public:
     return (config->numThreads > 1) ? config->numThreads : 1;
   }
 
-  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+  __host__ hipError_t run(XioEndpointConfig* config) override {
     return test_ep_run(config);
   }
 
@@ -137,7 +137,7 @@ public:
   }
 };
 
-class NvmeEndpoint : public AxiioEndpoint {
+class NvmeEndpoint : public XioEndpoint {
 private:
   // Store NVMe config
   nvme_ep::NvmeEpConfig nvmeConfig_;
@@ -164,21 +164,21 @@ public:
   }
 
   __host__ size_t
-  getSubmissionQueueLength(const AxiioEndpointConfig* config) const override {
+  getSubmissionQueueLength(const XioEndpointConfig* config) const override {
     // Use queue length from CLI configuration (default: 64)
     (void)config; // Not used - we use member variable instead
     return nvmeConfig_.queueLength;
   }
 
   __host__ size_t
-  getCompletionQueueLength(const AxiioEndpointConfig* config) const override {
+  getCompletionQueueLength(const XioEndpointConfig* config) const override {
     // NVMe requires minimum queue length of 2 entries (power of 2)
     // CQ length matches SQ length
     (void)config; // Not used - we use member variable instead
     return nvmeConfig_.queueLength;
   }
 
-  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+  __host__ hipError_t run(XioEndpointConfig* config) override {
     return nvme_ep_run(config);
   }
 
@@ -191,7 +191,7 @@ public:
   }
 
   __host__ void applyCommonConfig(
-    void* endpointConfig, const AxiioEndpointConfig* baseConfig) override {
+    void* endpointConfig, const XioEndpointConfig* baseConfig) override {
     if (endpointConfig && baseConfig) {
       nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
         endpointConfig);
@@ -216,7 +216,7 @@ public:
   }
 };
 
-class RdmaEndpoint : public AxiioEndpoint {
+class RdmaEndpoint : public XioEndpoint {
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::RDMA_EP;
@@ -239,7 +239,7 @@ public:
     return RDMA_EP_CQE_SIZE;
   }
 
-  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+  __host__ hipError_t run(XioEndpointConfig* config) override {
     return rdma_ep_run(config);
   }
 
@@ -254,7 +254,7 @@ public:
   }
 };
 
-class SdmaEndpoint : public AxiioEndpoint {
+class SdmaEndpoint : public XioEndpoint {
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::SDMA_EP;
@@ -276,7 +276,7 @@ public:
     return SDMA_EP_CQE_SIZE;
   }
 
-  __host__ hipError_t run(AxiioEndpointConfig* config) override {
+  __host__ hipError_t run(XioEndpointConfig* config) override {
     return sdma_ep_run(config);
   }
 
@@ -295,53 +295,53 @@ public:
 // Default Implementation of Virtual Methods
 // ============================================================================
 
-void AxiioEndpoint::configureCliOptions(CLI::App& app) {
+void XioEndpoint::configureCliOptions(CLI::App& app) {
   // Default: no endpoint-specific options
   (void)app;
 }
 
-void* AxiioEndpoint::initializeEndpointConfig() {
+void* XioEndpoint::initializeEndpointConfig() {
   // Default: no endpoint-specific config
   return nullptr;
 }
 
-void AxiioEndpoint::applyCommonConfig(void* endpointConfig,
-                                      const AxiioEndpointConfig* baseConfig) {
+void XioEndpoint::applyCommonConfig(void* endpointConfig,
+                                    const XioEndpointConfig* baseConfig) {
   // Default: do nothing
   (void)endpointConfig;
   (void)baseConfig;
 }
 
-std::string AxiioEndpoint::validateConfig(void* endpointConfig) {
+std::string XioEndpoint::validateConfig(void* endpointConfig) {
   // Default: no validation
   (void)endpointConfig;
   return std::string();
 }
 
-unsigned AxiioEndpoint::getIterations(void* endpointConfig) const {
+unsigned XioEndpoint::getIterations(void* endpointConfig) const {
   // Default: return 128
   (void)endpointConfig;
   return 128;
 }
 
-bool AxiioEndpoint::isEmulateMode() const {
+bool XioEndpoint::isEmulateMode() const {
   // Default: not in emulate mode
   return false;
 }
 
-unsigned AxiioEndpoint::getDoorbellQueueLength() const {
+unsigned XioEndpoint::getDoorbellQueueLength() const {
   // Default: doorbell mode not enabled
   return 0;
 }
 
-size_t AxiioEndpoint::getSubmissionQueueLength(
-  const AxiioEndpointConfig* config) const {
+size_t XioEndpoint::getSubmissionQueueLength(
+  const XioEndpointConfig* config) const {
   // Default: one entry per thread, or 1 for single-threaded
   return (config != nullptr && config->numThreads > 1) ? config->numThreads : 1;
 }
 
-size_t AxiioEndpoint::getCompletionQueueLength(
-  const AxiioEndpointConfig* config) const {
+size_t XioEndpoint::getCompletionQueueLength(
+  const XioEndpointConfig* config) const {
   // Default: one entry per thread, or 1 for single-threaded
   return (config != nullptr && config->numThreads > 1) ? config->numThreads : 1;
 }
@@ -350,7 +350,7 @@ size_t AxiioEndpoint::getCompletionQueueLength(
 // Factory Function Implementation
 // ============================================================================
 
-__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(EndpointType type) {
+__host__ std::unique_ptr<XioEndpoint> createEndpoint(EndpointType type) {
   switch (type) {
     case EndpointType::TEST_EP:
       return std::make_unique<TestEndpoint>();
@@ -365,7 +365,7 @@ __host__ std::unique_ptr<AxiioEndpoint> createEndpoint(EndpointType type) {
   }
 }
 
-__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
+__host__ std::unique_ptr<XioEndpoint> createEndpoint(
   const std::string& endpointName) {
   EndpointType type = getEndpointType(endpointName);
   return createEndpoint(type);

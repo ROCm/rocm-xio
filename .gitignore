@@ -20,8 +20,8 @@ kernel/*/.module-common.o
 kernel/*/..module-common.o.cmd
 
 # Generated files
-src/include/axiio-endpoint-registry-gen.h
-src/include/axiio-endpoint-includes-gen.h
+src/include/xio-endpoint-registry-gen.h
+src/include/xio-endpoint-includes-gen.h
 src/include/nvme-ep-generated.h
 src/common/endpoint-dispatch.hip
 

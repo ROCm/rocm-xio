@@ -25,9 +25,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "axiio.h"
+#include "xio.h"
 
-void axiioPrintDeviceInfo() {
+void xioPrintDeviceInfo() {
   int deviceCount;
   HIP_CHECK(hipGetDeviceCount(&deviceCount));
   std::cout << "Number of devices: " << deviceCount << std::endl;
@@ -68,10 +68,10 @@ void axiioPrintDeviceInfo() {
   }
 }
 
-void axiioPrintStatistics(const std::vector<double>& durations,
-                          unsigned totalIterations, unsigned numThreads,
-                          unsigned readIterations, unsigned writeIterations,
-                          unsigned verifiedReadsCount) {
+void xioPrintStatistics(const std::vector<double>& durations,
+                        unsigned totalIterations, unsigned numThreads,
+                        unsigned readIterations, unsigned writeIterations,
+                        unsigned verifiedReadsCount) {
   if (durations.empty()) {
     return;
   }
@@ -155,10 +155,10 @@ void axiioPrintStatistics(const std::vector<double>& durations,
             << std::setprecision(2) << stddev_display << time_unit << std::endl;
 }
 
-void axiioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations, unsigned numThreads,
-                         unsigned readIterations, unsigned writeIterations,
-                         unsigned verifiedReadsCount) {
+void xioPrintHistogram(const std::vector<double>& durations,
+                       unsigned nIterations, unsigned numThreads,
+                       unsigned readIterations, unsigned writeIterations,
+                       unsigned verifiedReadsCount) {
   if (durations.empty() || nIterations == 0) {
     return;
   }
@@ -265,13 +265,13 @@ void axiioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  axiioPrintStatistics(durations, nIterations, numThreads, readIterations,
-                       writeIterations, verifiedReadsCount);
+  xioPrintStatistics(durations, nIterations, numThreads, readIterations,
+                     writeIterations, verifiedReadsCount);
 }
 
 // Helper function to allocate HSA device memory
-hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
-                                    const char* direction) {
+hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
+                                  const char* direction) {
   hsa_status_t status;
 
   // Initialize HSA runtime (safe to call multiple times)
@@ -384,8 +384,8 @@ hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
 
 // Allocate submission queue memory based on memory mode
 // Returns hipSuccess on success, hipErrorMemoryAllocation on failure
-hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
-                                        void** ptr) {
+hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
+                                      void** ptr) {
   bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
 
   if (gpuWriteToDevice) {
@@ -426,8 +426,8 @@ hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
 
 // Allocate completion queue memory based on memory mode
 // Returns hipSuccess on success, hipErrorMemoryAllocation on failure
-hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
-                                        void** ptr) {
+hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
+                                      void** ptr) {
   bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
 
   if (cpuWriteToDevice) {
@@ -467,7 +467,7 @@ hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
 }
 
 // Free submission queue memory based on memory mode
-void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
+void xioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
   bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
 
   if (gpuWriteToDevice) {
@@ -492,7 +492,7 @@ void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
 }
 
 // Free completion queue memory based on memory mode
-void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
+void xioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
   bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
 
   if (cpuWriteToDevice) {
@@ -519,8 +519,7 @@ void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
 // Allocate data buffer memory based on memory mode
 // Bit 3 (0x8): Data buffer location (0=host, 1=device)
 // Returns hipSuccess on success, hipErrorMemoryAllocation on failure
-hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
-                                   void** ptr) {
+hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
   bool dataBufferOnDevice = (memoryMode & 0x8) != 0; // Bit 3
 
   if (dataBufferOnDevice) {
@@ -529,8 +528,8 @@ hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
     size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
                          host_page_size;
 
-    hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize, ptr,
-                                                     "Data Buffer");
+    hsa_status_t hsa_status = xioAllocDeviceMemory(alignedSize, ptr,
+                                                   "Data Buffer");
     if (hsa_status != HSA_STATUS_SUCCESS) {
       std::cerr << "Error: HSA memory allocation failed for data buffer: "
                 << hsa_status << std::endl;
@@ -557,7 +556,7 @@ hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
 }
 
 // Free data buffer memory based on memory mode
-void axiioFreeDataBuffer(void* ptr, unsigned memoryMode) {
+void xioFreeDataBuffer(void* ptr, unsigned memoryMode) {
   bool dataBufferOnDevice = (memoryMode & 0x8) != 0; // Bit 3
 
   if (dataBufferOnDevice) {
@@ -580,7 +579,7 @@ void axiioFreeDataBuffer(void* ptr, unsigned memoryMode) {
 // Extract endpoint name from command line arguments
 // This allows endpoints to add their CLI options before full parsing
 // Returns empty string if endpoint name not found in arguments
-std::string axiioExtractEndpointName(int argc, char** argv) {
+std::string xioExtractEndpointName(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-e" || arg == "--endpoint") {
@@ -601,7 +600,7 @@ std::string axiioExtractEndpointName(int argc, char** argv) {
 // Looks for Vendor ID 0x1b36 (Red Hat, Inc.) and Device ID 0x0015
 // Returns 0 on success with BDF in *bdf_out, negative error code on failure
 // Errors out if 0 or >1 PCI MMIO bridges are found
-int axiioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
+int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
   if (!bdf_out) {
     return -1;
   }
@@ -770,8 +769,8 @@ int axiioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
 // Takes a device path like /dev/nvme0 or /dev/nvme1
 // Returns 0 on success with BDF in *bdf_out, negative error code on failure
 // Returns -ENODEV if device not found or not a PCI device
-__host__ int axiioDetectBdfFromDevice(const char* device_path,
-                                      uint16_t* bdf_out) {
+__host__ int xioDetectBdfFromDevice(const char* device_path,
+                                    uint16_t* bdf_out) {
   if (!device_path || !bdf_out) {
     return -EINVAL;
   }
@@ -863,8 +862,8 @@ __host__ int axiioDetectBdfFromDevice(const char* device_path,
 // Returns 0 on success with is_emulated in *is_emulated_out, negative error
 // code on failure Returns -ENODEV if device not found or not a PCI device
 // Emulated NVMe controllers typically have Vendor ID 0x1b36 (Red Hat/QEMU)
-__host__ int axiioDetectEmulatedNvme(const char* device_path,
-                                     bool* is_emulated_out) {
+__host__ int xioDetectEmulatedNvme(const char* device_path,
+                                   bool* is_emulated_out) {
   if (!device_path || !is_emulated_out) {
     return -EINVAL;
   }

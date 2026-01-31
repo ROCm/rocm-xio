@@ -2,6 +2,11 @@
 # Minimal wordlist - only terms used in current documentation
 # Reduced from 918 to 311 terms (66% reduction) after doc cleanup
 
+# ===== Project Names =====
+xio
+XIO
+rocm
+
 # ===== NVMe and Storage =====
 CQE
 cqe
