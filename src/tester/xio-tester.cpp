@@ -182,13 +182,13 @@ int main(int argc, char** argv) {
     gpuClockPeriodNs = 1000000.0 / static_cast<double>(gpuWallClockRateKHz);
 
     // Print device and endpoint info
-    std::cout << "GPU Model: " << deviceProp.name << std::endl;
+    std::cout << "Model: " << xioGetModelName(deviceId) << std::endl;
     std::cout << "GPU Device ID: " << deviceId << std::endl;
     std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
               << std::endl;
   } else {
     // Emulate mode: use CPU time instead of GPU time
-    std::cout << "GPU Model: [Emulation Mode - CPU]" << std::endl;
+    std::cout << "Model: [Emulation Mode - CPU]" << std::endl;
     std::cout << "GPU Device ID: N/A (emulation)" << std::endl;
     std::cout << "GPU Wall Clock Rate: 100000 KHz (emulated)" << std::endl;
   }
@@ -241,12 +241,14 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
-  std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
-  std::cout << "SQE length: " << sqeLength << " entries" << std::endl;
-  std::cout << "CQE length: " << cqeLength << " entries" << std::endl;
+  if (sqeSize > 0 || cqeSize > 0) {
+    std::cout << "SQE size: " << sqeSize << " bytes" << std::endl;
+    std::cout << "CQE size: " << cqeSize << " bytes" << std::endl;
+    std::cout << "SQE length: " << sqeLength << " entries" << std::endl;
+    std::cout << "CQE length: " << cqeLength << " entries" << std::endl;
+  }
 
-  // Allocate queue memory
+  // Allocate queue memory (use at least 1 byte to avoid allocator edge cases)
   void* hostSqeAddr = nullptr;
   void* hostCqeAddr = nullptr;
   unsigned long long int* hostStartTime = nullptr;
@@ -254,6 +256,10 @@ int main(int argc, char** argv) {
 
   size_t totalSqeSize = sqeSize * sqeLength;
   size_t totalCqeSize = cqeSize * cqeLength;
+  if (totalSqeSize == 0)
+    totalSqeSize = 1;
+  if (totalCqeSize == 0)
+    totalCqeSize = 1;
   size_t totalTimingSize = baseConfig.iterations * baseConfig.numThreads *
                            sizeof(unsigned long long int);
 

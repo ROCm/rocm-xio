@@ -4,6 +4,7 @@
  */
 
 #include <memory>
+#include <string>
 
 #include <CLI/CLI.hpp>
 
@@ -14,7 +15,7 @@
 // Include endpoint headers for size information
 #include "nvme-ep.h"
 #include "rdma-ep.h"
-#include "sdma-ep.h"
+#include "sdma-ep-config.h"
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
@@ -22,6 +23,49 @@ extern hipError_t test_ep_run(XioEndpointConfig* config);
 extern hipError_t nvme_ep_run(XioEndpointConfig* config);
 extern hipError_t rdma_ep_run(XioEndpointConfig* config);
 extern hipError_t sdma_ep_run(XioEndpointConfig* config);
+
+// Transform human-readable size (e.g. "4k", "1M") to bytes for CLI options.
+// Suffixes use power-of-2 (binary): k=1024, M=1024², G=1024³ (KiB/MiB/GiB).
+// Mutates s to the numeric string; returns error message or "".
+static std::string transferSizeTransform(std::string& s) {
+  if (s.empty())
+    return "Transfer size cannot be empty";
+  size_t start = s.find_first_not_of(" \t");
+  if (start == std::string::npos)
+    return "Invalid transfer size";
+  size_t end = s.find_last_not_of(" \t");
+  std::string val = s.substr(start, end - start + 1);
+  if (val.empty())
+    return "Invalid transfer size";
+  unsigned long long mult = 1;
+  char last = val.back();
+  // Binary (power-of-2) units only; not SI (power-of-10)
+  if (last == 'k' || last == 'K') {
+    mult = 1024ULL;
+    val.pop_back();
+  } else if (last == 'm' || last == 'M') {
+    mult = 1024ULL * 1024;
+    val.pop_back();
+  } else if (last == 'g' || last == 'G') {
+    mult = 1024ULL * 1024 * 1024;
+    val.pop_back();
+  }
+  if (val.empty())
+    return "Invalid transfer size (missing number)";
+  unsigned long long num = 0;
+  try {
+    num = std::stoull(val, nullptr, 0);
+  } catch (...) {
+    return "Transfer size must be a number (e.g. 4096 or 1M)";
+  }
+  if (num == 0)
+    return "Transfer size must be > 0";
+  unsigned long long result = num * mult;
+  if (mult != 0 && result / mult != num)
+    return "Transfer size overflow";
+  s = std::to_string(result);
+  return "";
+}
 
 // ============================================================================
 // Derived Endpoint Classes
@@ -255,6 +299,17 @@ public:
 };
 
 class SdmaEndpoint : public XioEndpoint {
+  // SDMA uses raw packets (sizes vary by op); report 0 so tester skips SQE/CQE
+  static constexpr size_t kSqeSize = 0;
+  static constexpr size_t kCqeSize = 0;
+  unsigned iterations_ = 128;
+  bool useHostDst_ = false;
+  bool verifyData_ = false;
+  int srcDeviceId_ = -1;
+  int dstDeviceId_ = -1;
+  size_t transferSize_ = 4096;
+  sdma_ep::SdmaEpConfig sdmaEpConfig_;
+
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::SDMA_EP;
@@ -269,11 +324,11 @@ public:
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
-    return SDMA_EP_SQE_SIZE;
+    return kSqeSize;
   }
 
   __host__ size_t getCompletionQueueEntrySize() const override {
-    return SDMA_EP_CQE_SIZE;
+    return kCqeSize;
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
@@ -281,13 +336,63 @@ public:
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
-    // SDMA endpoint can add its own CLI options here in the future
-    (void)app;
+    app.add_option("-n,--iterations", iterations_, "Number of SDMA transfers")
+      ->default_val(128)
+      ->group("Endpoint Options");
+    app
+      .add_flag("--to-host", useHostDst_,
+                "Use pinned host memory as destination (single GPU only)")
+      ->group("Endpoint Options");
+    app
+      .add_flag("--verify", verifyData_,
+                "Verify destination buffer contains expected pattern after "
+                "transfer (host-dst or P2P)")
+      ->group("Endpoint Options");
+    app
+      .add_option("--src-gpu", srcDeviceId_,
+                  "Source HIP device ID (default: 0)")
+      ->default_val(-1)
+      ->group("Endpoint Options");
+    app
+      .add_option("--dst-gpu", dstDeviceId_,
+                  "Destination HIP device ID for P2P (default: 1)")
+      ->default_val(-1)
+      ->group("Endpoint Options");
+    app
+      .add_option(
+        "-s,--transfer-size", transferSize_,
+        "Transfer size per iteration: number or 4k/1M/2G (binary, power-of-2; "
+        "default 4096)")
+      ->default_val(4096)
+      ->transform(CLI::Validator(transferSizeTransform,
+                                 "4k/1M/2G (binary) or bytes", "SIZE"))
+      ->group("Endpoint Options");
   }
 
   __host__ void* initializeEndpointConfig() override {
-    // SDMA endpoint can return its config here in the future
-    return nullptr;
+    sdmaEpConfig_.useHostDst = useHostDst_;
+    sdmaEpConfig_.verifyData = verifyData_;
+    sdmaEpConfig_.srcDeviceId = srcDeviceId_;
+    sdmaEpConfig_.dstDeviceId = dstDeviceId_;
+    sdmaEpConfig_.transferSize = transferSize_;
+    return &sdmaEpConfig_;
+  }
+
+  __host__ std::string validateConfig(void* endpointConfig) override {
+    if (endpointConfig) {
+      const auto* ep = static_cast<const sdma_ep::SdmaEpConfig*>(
+        endpointConfig);
+      if (ep->transferSize == 0)
+        return "transfer-size must be > 0";
+      if (ep->transferSize % 4 != 0)
+        return "transfer-size must be a multiple of 4 (LFSR uses dwords)";
+    }
+    return std::string();
+  }
+
+  __host__ unsigned getIterations(void* endpointConfig) const override {
+    (void)endpointConfig;
+    return iterations_;
   }
 };
 

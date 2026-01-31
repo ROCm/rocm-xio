@@ -46,6 +46,8 @@ jobs:
     - name: Run tester using test-ep in emulate mode with doorbell
       run: |
         ./build/xio-tester test-ep --emulate -n 100 -t 1 --doorbell 64 -v
+    # Note: sdma-ep is not tested in CI as it requires real AMD GPU hardware
+    # with SDMA support (MI300X or similar) and cannot run in emulation mode.
 
  
 
