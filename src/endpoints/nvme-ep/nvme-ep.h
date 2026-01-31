@@ -14,7 +14,7 @@
 
 #include <CLI/CLI.hpp>
 
-#include "axiio.h"
+#include "xio.h"
 
 /*
  * NVMe Definitions for AxIIO nvme-ep Endpoint
@@ -226,7 +226,7 @@ struct nvme_cqe;
 // Sequential mode: if readIo < 0 or writeIo < 0, issues one SQE at a time
 // waiting for completion
 __device__ void nvme_ep_driveEndpoint(
-  const AxiioEndpointConfig& config, struct nvme_sqe* sqeAddr,
+  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
   uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
@@ -298,7 +298,7 @@ __host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
  *
  * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
  * @param kernel_module_device Path to kernel module device
- *                            (e.g., "/dev/rocm-axiio")
+ *                            (e.g., "/dev/rocm-xio")
  * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
  * @param queue_size Queue size in entries (must be power of 2, max 65536)
  * @param nvme_bdf NVMe device BDF in 0xBBDD format (for kernel module)
@@ -521,7 +521,7 @@ inline std::string validateConfig(NvmeEpConfig* config) {
   // Auto-detect PCI MMIO bridge BDF if --pci-mmio-bridge is set
   if (config->usePciMmioBridge) {
     uint16_t detected_bdf = 0;
-    int bdf_ret = axiioDetectPciMmioBridgeBdf(&detected_bdf);
+    int bdf_ret = xioDetectPciMmioBridgeBdf(&detected_bdf);
     if (bdf_ret != 0) {
       return "Failed to detect PCI MMIO bridge BDF";
     }
@@ -530,8 +530,8 @@ inline std::string validateConfig(NvmeEpConfig* config) {
 
   // Auto-detect NVMe target BDF from controller device path
   uint16_t detected_nvme_bdf = 0;
-  int nvme_bdf_ret = axiioDetectBdfFromDevice(config->device.c_str(),
-                                              &detected_nvme_bdf);
+  int nvme_bdf_ret = xioDetectBdfFromDevice(config->device.c_str(),
+                                            &detected_nvme_bdf);
   if (nvme_bdf_ret != 0) {
     return std::string("Failed to detect NVMe target BDF: ") +
            std::string(strerror(-nvme_bdf_ret));

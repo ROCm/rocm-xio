@@ -12,8 +12,8 @@
 
 #include <hip/hip_runtime.h>
 
-// Forward declaration - full definition in axiio.h
-struct AxiioEndpointConfig;
+// Forward declaration - full definition in xio.h
+struct XioEndpointConfig;
 
 namespace test_ep {
 
@@ -86,7 +86,7 @@ static_assert(sizeof(struct test_cqe) == TEST_EP_CQE_SIZE,
 //   hostEndTimes: Host-accessible end times array (optional, can be nullptr)
 //   numThreads: Number of CPU threads to launch (one per GPU thread)
 //   iterations: Number of iterations per thread
-//   delayNs: Delay configuration (from AxiioEndpointConfig)
+//   delayNs: Delay configuration (from XioEndpointConfig)
 //   doorbellMode: If true, use doorbell mode (single CPU thread polling
 //   doorbell) doorbell: Doorbell address (nullptr if not in doorbell mode)
 //   queueSize: Size of submission queue in doorbell mode
@@ -101,6 +101,6 @@ std::vector<std::thread> launchCpuThreads(
 //   config: Endpoint configuration (includes submissionQueue and
 //   completionQueue)
 // Returns: HIP error code
-hipError_t test_ep_run(AxiioEndpointConfig* config);
+hipError_t test_ep_run(XioEndpointConfig* config);
 
 #endif // TEST_EP_H

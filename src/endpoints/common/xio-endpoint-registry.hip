@@ -10,8 +10,8 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio-endpoint-registry-gen.h"
-#include "axiio-endpoint-registry.h"
+#include "xio-endpoint-registry-gen.h"
+#include "xio-endpoint-registry.h"
 
 // Static registry of all available endpoints
 static std::vector<EndpointInfo> buildEndpointRegistry() {

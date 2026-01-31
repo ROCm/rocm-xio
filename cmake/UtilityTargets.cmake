@@ -116,9 +116,9 @@ find_program(OBJDUMP llvm-objdump PATHS
 if(OBJDUMP)
   add_custom_target(asm
     COMMAND ${OBJDUMP} --demangle --disassemble-all
-      $<TARGET_FILE:rocm-axiio>
+      $<TARGET_FILE:rocm-xio>
     COMMAND ${CMAKE_COMMAND} -E echo "Use 'make asm | less -R' to view"
-    DEPENDS rocm-axiio
+    DEPENDS rocm-xio
     COMMENT "Dumping assembly of library"
   )
 else()
