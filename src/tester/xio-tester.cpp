@@ -16,10 +16,10 @@
 
 #include <CLI/CLI.hpp>
 
-#include "axiio.h"
+#include "xio.h"
 
 int main(int argc, char** argv) {
-  CLI::App app{"axiio-tester: A test harness for rocm-axiio."};
+  CLI::App app{"xio-tester: A test harness for rocm-xio."};
   app.fallthrough(true);
 
   // Global flags (not endpoint-specific)
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
 
   // Common options (will be inherited by subcommands via fallthrough)
   // We'll use a single config that gets copied to the selected endpoint
-  AxiioEndpointConfig commonConfig;
+  XioEndpointConfig commonConfig;
   // Note: iterations is now endpoint-specific (test-ep has --iterations,
   // nvme-ep uses --read-io + --write-io)
 
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
 
   // Create subcommands for each endpoint
   std::map<std::string, CLI::App*> endpointSubcommands;
-  std::map<std::string, std::unique_ptr<AxiioEndpoint>> endpoints;
+  std::map<std::string, std::unique_ptr<XioEndpoint>> endpoints;
 
   for (const auto& endpointInfo : registry) {
     // Create endpoint object
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
   }
 
   if (printInfo) {
-    axiioPrintDeviceInfo();
+    xioPrintDeviceInfo();
     return EXIT_SUCCESS;
   }
 
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
 
   // Get the selected endpoint and copy common config
   auto& endpoint = endpoints[selectedEndpoint];
-  AxiioEndpointConfig baseConfig = commonConfig;
+  XioEndpointConfig baseConfig = commonConfig;
 
   // Initialize endpoint-specific configuration
   baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
@@ -258,20 +258,20 @@ int main(int argc, char** argv) {
                            sizeof(unsigned long long int);
 
   // Allocate queues based on memory mode
-  hipError_t sqeErr = axiioAllocateSubmissionQueue(totalSqeSize,
-                                                   baseConfig.memoryMode,
-                                                   &hostSqeAddr);
+  hipError_t sqeErr = xioAllocateSubmissionQueue(totalSqeSize,
+                                                 baseConfig.memoryMode,
+                                                 &hostSqeAddr);
   if (sqeErr != hipSuccess) {
     std::cerr << "Failed to allocate submission queue" << std::endl;
     return EXIT_FAILURE;
   }
 
-  hipError_t cqeErr = axiioAllocateCompletionQueue(totalCqeSize,
-                                                   baseConfig.memoryMode,
-                                                   &hostCqeAddr);
+  hipError_t cqeErr = xioAllocateCompletionQueue(totalCqeSize,
+                                                 baseConfig.memoryMode,
+                                                 &hostCqeAddr);
   if (cqeErr != hipSuccess) {
     std::cerr << "Failed to allocate completion queue" << std::endl;
-    axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+    xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
     return EXIT_FAILURE;
   }
 
@@ -314,8 +314,8 @@ int main(int argc, char** argv) {
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
               << " (error code: " << err << ")" << std::endl;
-    axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
-    axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
+    xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+    xioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
     // Free host memory using HIP or regular free
     hipError_t hipErrFree1 = hipHostFree(hostStartTime);
     if (hipErrFree1 != hipSuccess) {
@@ -395,11 +395,11 @@ int main(int argc, char** argv) {
 
   if (durations.size() > 0) {
     if (printHistogram) {
-      axiioPrintHistogram(durations, baseConfig.iterations,
-                          baseConfig.numThreads);
+      xioPrintHistogram(durations, baseConfig.iterations,
+                        baseConfig.numThreads);
     } else {
-      axiioPrintStatistics(durations, baseConfig.iterations,
-                           baseConfig.numThreads);
+      xioPrintStatistics(durations, baseConfig.iterations,
+                         baseConfig.numThreads);
     }
   } else {
     std::cout << "Warning: No valid timing data collected" << std::endl;
@@ -409,8 +409,8 @@ int main(int argc, char** argv) {
   std::cout << "\nTest completed successfully!" << std::endl;
 
   // Free memory
-  axiioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
-  axiioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
+  xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+  xioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
   // Free host memory using HIP or regular free
   hipError_t hipErrFree1 = hipHostFree(hostStartTime);
   if (hipErrFree1 != hipSuccess) {

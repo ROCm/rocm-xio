@@ -12,8 +12,8 @@
 
 #include <unistd.h>
 
-#include "axiio.h"
 #include "test-ep.h"
+#include "xio.h"
 
 // Get CPU wall clock time in nanoseconds (host-only)
 static inline uint64_t getCpuTime() {
@@ -765,7 +765,7 @@ static void endpoint_kernel_cpu_emulate(
 
 // Run method implementation for test-ep - launches GPU kernel and waits for
 // completion
-hipError_t test_ep_run(AxiioEndpointConfig* config) {
+hipError_t test_ep_run(XioEndpointConfig* config) {
   std::vector<std::thread> cpuThreadHandles;
 
   // Get test-ep specific config
@@ -790,9 +790,8 @@ hipError_t test_ep_run(AxiioEndpointConfig* config) {
       size_t alignedSize = ((sizeof(uint32_t) + host_page_size - 1) /
                             host_page_size) *
                            host_page_size;
-      hsa_status_t hsa_status = axiioAllocDeviceMemory(alignedSize,
-                                                       &doorbellAddr,
-                                                       "Doorbell");
+      hsa_status_t hsa_status = xioAllocDeviceMemory(alignedSize, &doorbellAddr,
+                                                     "Doorbell");
       if (hsa_status != HSA_STATUS_SUCCESS) {
         std::cerr << "Error: Failed to allocate doorbell in device memory"
                   << std::endl;

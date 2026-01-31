@@ -1,4 +1,4 @@
-obj-m += rocm-axiio.o
+obj-m += rocm-xio.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
@@ -24,10 +24,10 @@ clean:
 install: all
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
 	depmod -a
-	@echo "rocm-axiio module installed"
-	@echo "Load with: sudo modprobe rocm-axiio"
-	@echo "Create device node: sudo mknod /dev/rocm-axiio c $(shell grep rocm-axiio /proc/devices | awk '{print $$1}') 0"
-	@echo "Set permissions: sudo chmod 666 /dev/rocm-axiio"
+	@echo "rocm-xio module installed"
+	@echo "Load with: sudo modprobe rocm-xio"
+	@echo "Create device node: sudo mknod /dev/rocm-xio c $(shell grep rocm-xio /proc/devices | awk '{print $$1}') 0"
+	@echo "Set permissions: sudo chmod 666 /dev/rocm-xio"
 
 .PHONY: all clean install
 

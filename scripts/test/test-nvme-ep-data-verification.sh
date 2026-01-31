@@ -26,7 +26,7 @@ MEMORY_MODE="${MEMORY_MODE:-0}"
 USE_PCI_MMIO_BRIDGE="${USE_PCI_MMIO_BRIDGE:-1}"  # Default: use PCI MMIO bridge
 
 # Paths
-AXIIO_TESTER="${AXIIO_TESTER:-./bin/axiio-tester}"
+XIO_TESTER="${XIO_TESTER:-./bin/xio-tester}"
 TEMP_DIR="${TEMP_DIR:-/tmp/nvme-ep-test}"
 NVME_CMD="${NVME_CMD:-nvme}"
 
@@ -134,9 +134,9 @@ if [ ! -e "$NVME_DEVICE" ]; then
     exit 1
 fi
 
-# Check if axiio-tester exists
-if [ ! -f "$AXIIO_TESTER" ]; then
-    echo -e "${RED}Error: axiio-tester not found at $AXIIO_TESTER${NC}"
+# Check if xio-tester exists
+if [ ! -f "$XIO_TESTER" ]; then
+    echo -e "${RED}Error: xio-tester not found at $XIO_TESTER${NC}"
     echo "Build it first with: make"
     exit 1
 fi
@@ -304,7 +304,7 @@ test_device() {
     echo ""
     echo "Step 1: Writing data with nvme-ep..."
     
-    local write_cmd="$AXIIO_TESTER nvme-ep -v"
+    local write_cmd="$XIO_TESTER nvme-ep -v"
     if [ "$READ_IO" -gt 0 ]; then
         write_cmd="$write_cmd --read-io $READ_IO"
     fi

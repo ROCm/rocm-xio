@@ -16,7 +16,7 @@ on:
 
 jobs:
   build-check:
-    name: build-check for rocm-axiio
+    name: build-check for rocm-xio
     runs-on: ubuntu-latest
     container:
       image: rocm/dev-ubuntu-24.04:7.2
@@ -58,8 +58,8 @@ jobs:
         cmake --build . --target all
     - name: Run tester application.
       run: |
-        ./build/axiio-tester -h
+        ./build/xio-tester -h
     - name: Install with CMake.
       run: |
         cd build
-        cmake --install . --prefix /tmp/rocm-axiio-test
+        cmake --install . --prefix /tmp/rocm-xio-test

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef AXIIO_ENDPOINT_REGISTRY_H
-#define AXIIO_ENDPOINT_REGISTRY_H
+#ifndef XIO_ENDPOINT_REGISTRY_H
+#define XIO_ENDPOINT_REGISTRY_H
 
 #include <string>
 #include <vector>
@@ -12,7 +12,7 @@
 #include <hip/hip_runtime.h>
 
 // Include auto-generated EndpointType enum
-#include "axiio-endpoint-registry-gen.h"
+#include "xio-endpoint-registry-gen.h"
 
 // Endpoint information structure
 struct EndpointInfo {
@@ -39,4 +39,4 @@ bool isValidEndpoint(const std::string& name);
 // Get EndpointInfo from EndpointType
 EndpointInfo getEndpointInfo(EndpointType type);
 
-#endif // AXIIO_ENDPOINT_REGISTRY_H
+#endif // XIO_ENDPOINT_REGISTRY_H

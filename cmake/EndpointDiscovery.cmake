@@ -60,7 +60,7 @@ function(apply_endpoint_defines target sources endpoints_dir)
         endpoint_name_to_define(${ep_name} ep_define)
         # Apply compile definition
         set_source_files_properties(${src} PROPERTIES
-          COMPILE_DEFINITIONS "AXIIO_ENDPOINT_${ep_define}")
+          COMPILE_DEFINITIONS "XIO_ENDPOINT_${ep_define}")
       endif()
     endif()
   endforeach()

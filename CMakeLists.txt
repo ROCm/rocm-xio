@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Top-level CMake file for rocm-axiio
+# Top-level CMake file for rocm-xio
 
 # CMake version according to latest ROCm platform requirements
 cmake_minimum_required(VERSION 3.21)
@@ -16,24 +16,24 @@ endif()
 
 # Set the library version in a variable so we can use
 # it in *.in files and avoid version mismatch.
-set(ROCM_AXIIO_LIBRARY_MAJOR 0)
-set(ROCM_AXIIO_LIBRARY_MINOR 0)
-set(ROCM_AXIIO_LIBRARY_PATCH 1)
-set(ROCM_AXIIO_LIBRARY_VERSION
-  "${ROCM_AXIIO_LIBRARY_MAJOR}.${ROCM_AXIIO_LIBRARY_MINOR}.${ROCM_AXIIO_LIBRARY_PATCH}"
-  CACHE STRING "ROCM-AXIIO library version")
+set(ROCM_XIO_LIBRARY_MAJOR 0)
+set(ROCM_XIO_LIBRARY_MINOR 0)
+set(ROCM_XIO_LIBRARY_PATCH 1)
+set(ROCM_XIO_LIBRARY_VERSION
+  "${ROCM_XIO_LIBRARY_MAJOR}.${ROCM_XIO_LIBRARY_MINOR}.${ROCM_XIO_LIBRARY_PATCH}"
+  CACHE STRING "ROCM-XIO library version")
 
 # Set the SOVERSION to the major library version (this is the default
 # but we set it explicitly to convey intent).
 #
 # Changes to minor and patch releases must NEVER break the ABI. This
 # includes things like reordering struct fields that don't break the API.
-set(ROCM_AXIIO_LIBRARY_SOVERSION
-  "${ROCM_AXIIO_LIBRARY_MAJOR}"
+set(ROCM_XIO_LIBRARY_SOVERSION
+  "${ROCM_XIO_LIBRARY_MAJOR}"
 )
 
-project(rocm-axiio
-  VERSION ${ROCM_AXIIO_LIBRARY_VERSION}
+project(rocm-xio
+  VERSION ${ROCM_XIO_LIBRARY_VERSION}
   DESCRIPTION "ROCm Library for GPU-Initiated IO"
   LANGUAGES CXX HIP
 )
@@ -96,7 +96,7 @@ set(ROCM_PATH "${ROCM_INITIAL_PATH}"
 # Set install prefix to ROCm directory (following ROCm conventions)
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "${ROCM_PATH}" CACHE PATH
-        "The path where rocm-axiio should be installed" FORCE)
+        "The path where rocm-xio should be installed" FORCE)
 endif()
 
 # Fix library install directory to "lib" to be inline with the rest of ROCm
@@ -172,8 +172,8 @@ setup_code_generation(
   INCLUDE_DIR ${INCLUDE_DIR}
   EXTERNAL_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}
   RDMA_HEADERS_DIR ${RDMA_HEADERS_DIR}
-  GENERATED_REGISTRY ${INCLUDE_DIR}/axiio-endpoint-registry-gen.h
-  GENERATED_INCLUDES ${INCLUDE_DIR}/axiio-endpoint-includes-gen.h
+  GENERATED_REGISTRY ${INCLUDE_DIR}/xio-endpoint-registry-gen.h
+  GENERATED_INCLUDES ${INCLUDE_DIR}/xio-endpoint-includes-gen.h
   NVME_EP_GENERATED ${INCLUDE_DIR}/nvme-ep-generated.h
   RDMA_VENDOR_HEADERS
     ${ENDPOINTS_DIR}/rdma-ep/mlx/mlx5-rdma.h
@@ -196,47 +196,47 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Create static library
-add_library(rocm-axiio STATIC ${LIB_SOURCES})
+add_library(rocm-xio STATIC ${LIB_SOURCES})
 
 # Set compile options for HIP files
-target_compile_options(rocm-axiio PRIVATE
+target_compile_options(rocm-xio PRIVATE
   -Wall
   -Wextra
   -Wno-unused-parameter
 )
 
 # HIP-specific compilation flags (relocatable device code)
-target_compile_options(rocm-axiio PRIVATE -fgpu-rdc)
+target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
 
 # Include directories
 # PUBLIC for headers that consumers need, PRIVATE for internal headers
-target_include_directories(rocm-axiio
+target_include_directories(rocm-xio
   PUBLIC
     $<BUILD_INTERFACE:${INCLUDE_DIR}>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/rocm-axiio>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio>
   PRIVATE
     ${INCLUDE_DIR}
 )
 foreach(ep ${VALID_ENDPOINTS})
-  target_include_directories(rocm-axiio PRIVATE
+  target_include_directories(rocm-xio PRIVATE
     ${ENDPOINTS_DIR}/${ep})
 endforeach()
 
 # Link dependencies that consumers will need
 # These are INTERFACE so consumers get them automatically
-target_link_libraries(rocm-axiio
+target_link_libraries(rocm-xio
   INTERFACE
     hip::host
     hip::device
 )
 
 # Apply endpoint defines per source file
-apply_endpoint_defines(rocm-axiio ${LIB_SOURCES} ${ENDPOINTS_DIR})
+apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
 
 # Dependencies on generated files
-add_dependencies(rocm-axiio endpoint-registry-generated)
-add_dependencies(rocm-axiio nvme-ep-generated)
-add_dependencies(rocm-axiio rdma-vendor-headers-generated)
+add_dependencies(rocm-xio endpoint-registry-generated)
+add_dependencies(rocm-xio nvme-ep-generated)
+add_dependencies(rocm-xio rdma-vendor-headers-generated)
 
 # Specific file dependencies
 set(RDMA_VENDOR_HEADER_DEPS
@@ -257,40 +257,40 @@ set_source_files_properties(
 )
 
 set_source_files_properties(
-  ${ENDPOINTS_COMMON_DIR}/axiio-endpoint.hip
+  ${ENDPOINTS_COMMON_DIR}/xio-endpoint.hip
   PROPERTIES OBJECT_DEPENDS
   "${INCLUDE_DIR}/nvme-ep-generated.h"
 )
 
 file(GLOB TESTER_SOURCES ${TESTER_DIR}/*.cpp)
 file(GLOB TESTER_HEADERS ${TESTER_DIR}/*.h)
-add_executable(axiio-tester ${TESTER_SOURCES})
+add_executable(xio-tester ${TESTER_SOURCES})
 
 # Mark C++ sources as HIP language so they compile with hipcc
 set_source_files_properties(${TESTER_SOURCES}
   PROPERTIES LANGUAGE HIP
 )
 
-target_compile_options(axiio-tester PRIVATE
+target_compile_options(xio-tester PRIVATE
   -std=c++17
   -Wall
   -Wextra
   -Wno-unused-parameter
 )
 
-target_include_directories(axiio-tester PRIVATE
+target_include_directories(xio-tester PRIVATE
   ${INCLUDE_DIR}
 )
 
-target_link_libraries(axiio-tester PRIVATE
-  rocm-axiio
+target_link_libraries(xio-tester PRIVATE
+  rocm-xio
   hip::host
   hip::device
   hsa-runtime64::hsa-runtime64
 )
 
 # Required when linking relocatable device code (like TransferBench)
-target_link_options(axiio-tester PRIVATE -fgpu-rdc)
+target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
 #-----------------------------------------------------------------------------
 # Install configuration
@@ -300,27 +300,27 @@ target_link_options(axiio-tester PRIVATE -fgpu-rdc)
 include(GNUInstallDirs)
 
 # Install static library
-install(TARGETS rocm-axiio
-    EXPORT rocm-axiio-targets
+install(TARGETS rocm-xio
+    EXPORT rocm-xio-targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    COMPONENT rocm-axiio
+    COMPONENT rocm-xio
 )
 
 # Install public headers
 install(FILES
-    ${INCLUDE_DIR}/axiio.h
-    ${INCLUDE_DIR}/axiio-endpoint-registry.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-axiio
-    COMPONENT rocm-axiio
+    ${INCLUDE_DIR}/xio.h
+    ${INCLUDE_DIR}/xio-endpoint-registry.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
+    COMPONENT rocm-xio
 )
 
 # Install generated headers (if they exist at install time)
 install(FILES
-    ${INCLUDE_DIR}/axiio-endpoint-registry-gen.h
-    ${INCLUDE_DIR}/axiio-endpoint-includes-gen.h
+    ${INCLUDE_DIR}/xio-endpoint-registry-gen.h
+    ${INCLUDE_DIR}/xio-endpoint-includes-gen.h
     ${INCLUDE_DIR}/nvme-ep-generated.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-axiio
-    COMPONENT rocm-axiio
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
+    COMPONENT rocm-xio
     OPTIONAL
 )
 
@@ -329,54 +329,54 @@ foreach(ep ${VALID_ENDPOINTS})
     file(GLOB EP_HEADERS ${ENDPOINTS_DIR}/${ep}/*.h)
     if(EP_HEADERS)
         install(FILES ${EP_HEADERS}
-            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-axiio/endpoints/${ep}
-            COMPONENT rocm-axiio
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio/endpoints/${ep}
+            COMPONENT rocm-xio
         )
     endif()
 endforeach()
 
 # Optionally install tester executable
-option(INSTALL_TESTER "Install axiio-tester executable" OFF)
+option(INSTALL_TESTER "Install xio-tester executable" OFF)
 if(INSTALL_TESTER)
-    install(TARGETS axiio-tester
+    install(TARGETS xio-tester
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        COMPONENT rocm-axiio-tester
+        COMPONENT rocm-xio-tester
     )
 endif()
 
 # Install CMake config files for find_package support
-set(ROCM_AXIIO_CONFIG_INSTALL_DIR
-    ${CMAKE_INSTALL_LIBDIR}/cmake/rocm-axiio)
+set(ROCM_XIO_CONFIG_INSTALL_DIR
+    ${CMAKE_INSTALL_LIBDIR}/cmake/rocm-xio)
 
-install(EXPORT rocm-axiio-targets
-    FILE rocm-axiio-targets.cmake
-    NAMESPACE rocm-axiio::
-    DESTINATION ${ROCM_AXIIO_CONFIG_INSTALL_DIR}
-    COMPONENT rocm-axiio
+install(EXPORT rocm-xio-targets
+    FILE rocm-xio-targets.cmake
+    NAMESPACE rocm-xio::
+    DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
+    COMPONENT rocm-xio
 )
 
-# Create and install rocm-axiio-config.cmake for find_package
+# Create and install rocm-xio-config.cmake for find_package
 include(CMakePackageConfigHelpers)
 
 # configure_package_config_file will automatically get version from project()
 configure_package_config_file(
-    ${CMAKE_SOURCE_DIR}/cmake/rocm-axiio-config.cmake.in
-    ${CMAKE_BINARY_DIR}/rocm-axiio-config.cmake
-    INSTALL_DESTINATION ${ROCM_AXIIO_CONFIG_INSTALL_DIR}
+    ${CMAKE_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
+    ${CMAKE_BINARY_DIR}/rocm-xio-config.cmake
+    INSTALL_DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
     PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR
 )
 
 write_basic_package_version_file(
-    ${CMAKE_BINARY_DIR}/rocm-axiio-config-version.cmake
-    VERSION ${ROCM_AXIIO_LIBRARY_VERSION}
+    ${CMAKE_BINARY_DIR}/rocm-xio-config-version.cmake
+    VERSION ${ROCM_XIO_LIBRARY_VERSION}
     COMPATIBILITY SameMajorVersion
 )
 
 install(FILES
-    ${CMAKE_BINARY_DIR}/rocm-axiio-config.cmake
-    ${CMAKE_BINARY_DIR}/rocm-axiio-config-version.cmake
-    DESTINATION ${ROCM_AXIIO_CONFIG_INSTALL_DIR}
-    COMPONENT rocm-axiio
+    ${CMAKE_BINARY_DIR}/rocm-xio-config.cmake
+    ${CMAKE_BINARY_DIR}/rocm-xio-config-version.cmake
+    DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
+    COMPONENT rocm-xio
 )
 
 # Utility targets

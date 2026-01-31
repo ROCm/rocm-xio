@@ -8,8 +8,8 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio.h"
 #include "sdma-ep.h"
+#include "xio.h"
 
 // Namespace all sdma-ep implementation to avoid conflicts
 namespace sdma_ep {
@@ -183,7 +183,7 @@ __host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 // Config-based driveEndpoint function
-__device__ void sdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
+__device__ void sdma_ep_driveEndpoint(const XioEndpointConfig& config,
                                       void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   sdma_ep::sqeType* sqePtr = static_cast<sdma_ep::sqeType*>(sqeAddr);
@@ -254,6 +254,6 @@ __device__ void sdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
 }
 
 // Dummy run() function for sdma-ep (not implemented yet)
-hipError_t sdma_ep_run(AxiioEndpointConfig* config) {
+hipError_t sdma_ep_run(XioEndpointConfig* config) {
   return hipErrorNotSupported;
 }
