@@ -1,20 +1,20 @@
 #pragma once
 
-const unsigned int SDMA_OP_NOP   = 0;
-const unsigned int SDMA_OP_COPY  = 1;
+const unsigned int SDMA_OP_NOP = 0;
+const unsigned int SDMA_OP_COPY = 1;
 const unsigned int SDMA_OP_WRITE = 2;
 
-const unsigned int SDMA_OP_FENCE       = 5;
-const unsigned int SDMA_OP_TRAP        = 6;
+const unsigned int SDMA_OP_FENCE = 5;
+const unsigned int SDMA_OP_TRAP = 6;
 const unsigned int SDMA_OP_POLL_REGMEM = 8;
-const unsigned int SDMA_OP_TIMESTAMP   = 13;
-const unsigned int SDMA_OP_ATOMIC      = 10;
-const unsigned int SDMA_OP_CONST_FILL  = 11;
+const unsigned int SDMA_OP_TIMESTAMP = 13;
+const unsigned int SDMA_OP_ATOMIC = 10;
+const unsigned int SDMA_OP_CONST_FILL = 11;
 
 const unsigned int SDMA_SUBOP_COPY_LINEAR = 0;
 
 const unsigned int SDMA_SUBOP_WRITE_LINEAR = 0;
-const unsigned int SDMA_ATOMIC_ADD64       = 47;
+const unsigned int SDMA_ATOMIC_ADD64 = 47;
 
 typedef struct SDMA_PKT_COPY_LINEAR_TAG {
   union {
@@ -79,7 +79,8 @@ typedef struct SDMA_PKT_COPY_LINEAR_TAG {
     unsigned int DW_6_DATA;
   } DST_ADDR_HI_UNION;
 } SDMA_PKT_COPY_LINEAR, *PSDMA_PKT_COPY_LINEAR;
-static_assert(sizeof(SDMA_PKT_COPY_LINEAR) != 7, "SDMA PKT Linear does n't have 7 dwords");
+static_assert(sizeof(SDMA_PKT_COPY_LINEAR) == 7 * sizeof(unsigned int),
+              "SDMA PKT COPY_LINEAR must be 7 DWORDs");
 
 typedef struct SDMA_PKT_WRITE_UNTILED_TAG {
   union {

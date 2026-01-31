@@ -68,6 +68,85 @@ void xioPrintDeviceInfo() {
   }
 }
 
+// Map GCN arch prefix (from hipDeviceProp_t.gcnArchName) to model name.
+// Use when driver reports generic "AMD Radeon Graphics". Returns nullptr if
+// unknown; caller falls back to driver name.
+static const char* xioGcnArchToModelName(const char* gcnArchName) {
+  if (!gcnArchName || gcnArchName[0] == '\0')
+    return nullptr;
+  if (strncmp(gcnArchName, "gfx942", 6) == 0)
+    return "AMD Instinct MI300X";
+  if (strncmp(gcnArchName, "gfx940", 6) == 0)
+    return "AMD Instinct MI300A";
+  if (strncmp(gcnArchName, "gfx90a", 6) == 0)
+    return "AMD Instinct MI250X/MI250";
+  if (strncmp(gcnArchName, "gfx90c", 6) == 0)
+    return "AMD Radeon / Instinct (gfx90c)";
+  if (strncmp(gcnArchName, "gfx906", 6) == 0)
+    return "AMD Instinct MI50 / Radeon VII";
+  return nullptr;
+}
+
+// Return model name for device: from GCN arch if known, else driver name.
+std::string xioGetModelName(int deviceId) {
+  hipDeviceProp_t prop;
+  if (hipGetDeviceProperties(&prop, deviceId) != hipSuccess)
+    return "(unknown)";
+  const char* model = xioGcnArchToModelName(prop.gcnArchName);
+  if (model != nullptr)
+    return std::string(model);
+  char nameBuf[256];
+  if (hipDeviceGetName(nameBuf, sizeof(nameBuf),
+                       static_cast<hipDevice_t>(deviceId)) == hipSuccess &&
+      nameBuf[0] != '\0') {
+    return std::string(nameBuf);
+  }
+  return std::string(prop.name);
+}
+
+// Print GPU arch, UUID, and PCIe bus address for one device (e.g. for SDMA-ep).
+void xioPrintGpuDeviceDetails(int deviceId) {
+  hipDeviceProp_t prop;
+  hipError_t err = hipGetDeviceProperties(&prop, deviceId);
+  if (err != hipSuccess) {
+    std::cout << "  GPU " << deviceId << ": failed to get properties ("
+              << hipGetErrorString(err) << ")" << std::endl;
+    return;
+  }
+  std::cout << "  Device ID: " << deviceId << std::endl;
+  const char* modelName = xioGcnArchToModelName(prop.gcnArchName);
+  if (modelName != nullptr) {
+    std::cout << "  Model: " << modelName << std::endl;
+  } else {
+    // No known model from GCN arch; show driver name
+    char nameBuf[256];
+    err = hipDeviceGetName(nameBuf, sizeof(nameBuf),
+                           static_cast<hipDevice_t>(deviceId));
+    if (err == hipSuccess && nameBuf[0] != '\0') {
+      std::cout << "  Model: " << nameBuf << std::endl;
+    } else {
+      std::cout << "  Model: " << prop.name << std::endl;
+    }
+  }
+  if (prop.gcnArchName[0] != '\0') {
+    std::cout << "  GCN Arch: " << prop.gcnArchName << std::endl;
+  }
+  // UUID as hex string (hipUUID.bytes is 16 bytes)
+  std::cout << "  UUID: ";
+  for (int i = 0; i < 16; i++) {
+    std::cout << std::hex << std::setfill('0') << std::setw(2)
+              << (static_cast<unsigned>(prop.uuid.bytes[i]) & 0xFF);
+  }
+  std::cout << std::dec << std::endl;
+  char pciBusId[32];
+  err = hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), deviceId);
+  if (err == hipSuccess) {
+    std::cout << "  PCIe Bus: " << pciBusId << std::endl;
+  } else {
+    std::cout << "  PCIe Bus: (unavailable)" << std::endl;
+  }
+}
+
 void xioPrintStatistics(const std::vector<double>& durations,
                         unsigned totalIterations, unsigned numThreads,
                         unsigned readIterations, unsigned writeIterations,
@@ -370,10 +449,10 @@ hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
   hsa_region_get_info(device_region, HSA_REGION_INFO_GLOBAL_FLAGS,
                       &global_flags);
   if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
-    std::cerr << "  Info: (" << direction << "):  Using HSA fine-grained "
+    std::cout << "  Info: (" << direction << "):  Using HSA fine-grained "
               << "global memory region" << std::endl;
   } else if (global_flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
-    std::cerr << "  Info: (" << direction << "):  Using HSA coarse-grained "
+    std::cout << "  Info: (" << direction << "):  Using HSA coarse-grained "
               << "global memory region" << std::endl;
   }
 
