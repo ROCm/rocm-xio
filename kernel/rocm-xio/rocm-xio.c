@@ -24,8 +24,6 @@
  *      physical addresses into PRP1/PRP2 fields
  */
 
-#include "rocm-axiio.h"
-
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
@@ -45,7 +43,9 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
-#define DEVICE_NAME ROCM_AXIIO_DEVICE_NAME
+#include "rocm-axiio.h"
+
+#define DEVICE_NAME ROCM_XIO_DEVICE_NAME
 #define CLASS_NAME "rocm_axiio"
 
 MODULE_LICENSE("GPL");
@@ -54,8 +54,8 @@ MODULE_VERSION("1.0");
 MODULE_INFO(import_ns, "DMA_BUF");
 
 static int major_number;
-static struct class* rocm_axiio_class = NULL;
-static struct device* rocm_axiio_device = NULL;
+static struct class* rocm_xio_class = NULL;
+static struct device* rocm_xio_device = NULL;
 
 /* Kprobe for NVMe command injection */
 static struct kprobe nvme_kp = {
@@ -106,14 +106,14 @@ static DEFINE_MUTEX(mmio_bridge_lock);
  * DMA-BUF attach ops for P2P support.
  * We pin the buffer, so move_notify should never be called.
  */
-static void rocm_axiio_move_notify(struct dma_buf_attachment* attach) {
+static void rocm_xio_move_notify(struct dma_buf_attachment* attach) {
   pr_warn_ratelimited("rocm-axiio: move_notify called on pinned buffer "
                       "(should not happen)\n");
 }
 
-static const struct dma_buf_attach_ops rocm_axiio_attach_ops = {
+static const struct dma_buf_attach_ops rocm_xio_attach_ops = {
   .allow_peer2peer = true,
-  .move_notify = rocm_axiio_move_notify,
+  .move_notify = rocm_xio_move_notify,
 };
 
 /*
@@ -283,7 +283,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
    * We pin the buffer immediately after attach, so move_notify
    * should never be called (buffer is pinned and can't move).
    */
-  attach = dma_buf_dynamic_attach(dmabuf, &gpu_dev->dev, &rocm_axiio_attach_ops,
+  attach = dma_buf_dynamic_attach(dmabuf, &gpu_dev->dev, &rocm_xio_attach_ops,
                                   NULL);
   if (IS_ERR(attach)) {
     pr_err("rocm-axiio: dma_buf_dynamic_attach failed: %ld\n", PTR_ERR(attach));
@@ -452,8 +452,7 @@ err_put_pci:
 }
 
 /* Get NVMe device info */
-static int get_nvme_device_info(__u16 bdf,
-                                struct rocm_axiio_device_info* info) {
+static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
   struct pci_dev* nvme_dev = NULL;
   unsigned int domain, bus, devfn;
   resource_size_t bar0_start, bar0_size;
@@ -496,7 +495,7 @@ static int get_nvme_device_info(__u16 bdf,
 
 /* Get PCI MMIO bridge shadow buffer GPA from PCI config space */
 static int get_mmio_bridge_shadow_buffer(
-  __u16 bridge_bdf, struct rocm_axiio_mmio_bridge_shadow_req* req) {
+  __u16 bridge_bdf, struct rocm_xio_mmio_bridge_shadow_req* req) {
   struct pci_dev* bridge_dev = NULL;
   unsigned int domain, bus, devfn;
   __u32 gpa_low = 0, gpa_high = 0;
@@ -682,13 +681,13 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
 }
 
 /* IOCTL handler */
-static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
-                             unsigned long arg) {
+static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
+                           unsigned long arg) {
   int ret = 0;
 
   switch (cmd) {
-    case ROCM_AXIIO_GET_VRAM_PHYS_ADDR: {
-      struct rocm_axiio_vram_req req;
+    case ROCM_XIO_GET_VRAM_PHYS_ADDR: {
+      struct rocm_xio_vram_req req;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -711,8 +710,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_GET_DEVICE_INFO: {
-      struct rocm_axiio_device_info info;
+    case ROCM_XIO_GET_DEVICE_INFO: {
+      struct rocm_xio_device_info info;
 
       if (copy_from_user(&info, (void __user*)arg, sizeof(info)))
         return -EFAULT;
@@ -727,8 +726,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_CREATE_QUEUE:
-    case ROCM_AXIIO_DELETE_QUEUE:
+    case ROCM_XIO_CREATE_QUEUE:
+    case ROCM_XIO_DELETE_QUEUE:
       /*
        * Queue creation/deletion is handled via kprobe injection.
        * Userspace allocates queues in VRAM, gets physical addresses via
@@ -738,8 +737,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       pr_info("rocm-axiio: Queue management handled via kprobe injection\n");
       return -EOPNOTSUPP;
 
-    case ROCM_AXIIO_BIND_DEVICE: {
-      struct rocm_axiio_bind_device_req req;
+    case ROCM_XIO_BIND_DEVICE: {
+      struct rocm_xio_bind_device_req req;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -749,8 +748,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_REGISTER_QUEUE_ADDR: {
-      struct rocm_axiio_register_queue_addr_req req;
+    case ROCM_XIO_REGISTER_QUEUE_ADDR: {
+      struct rocm_xio_register_queue_addr_req req;
       struct queue_addr_entry* entry;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
@@ -779,8 +778,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_UNREGISTER_QUEUE_ADDR: {
-      struct rocm_axiio_unregister_queue_addr_req req;
+    case ROCM_XIO_UNREGISTER_QUEUE_ADDR: {
+      struct rocm_xio_unregister_queue_addr_req req;
       struct queue_addr_entry *entry, *tmp;
       bool found = false;
 
@@ -809,8 +808,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_REGISTER_BUFFER: {
-      struct rocm_axiio_register_buffer_req req;
+    case ROCM_XIO_REGISTER_BUFFER: {
+      struct rocm_xio_register_buffer_req req;
       struct vram_buffer_entry* entry;
       __u64 phys_addr;
       bool is_emulated = false;
@@ -823,9 +822,9 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
         return -EFAULT;
 
       /* Determine if this is emulated NVMe based on flags field */
-      if (req.flags & ROCM_AXIIO_FLAG_EMULATED) {
+      if (req.flags & ROCM_XIO_FLAG_EMULATED) {
         is_emulated = true;
-      } else if (req.flags & ROCM_AXIIO_FLAG_PASSTHROUGH) {
+      } else if (req.flags & ROCM_XIO_FLAG_PASSTHROUGH) {
         is_emulated = false;
       }
       /* Default to passthrough if no flags set */
@@ -917,8 +916,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_UNREGISTER_BUFFER: {
-      struct rocm_axiio_unregister_buffer_req req;
+    case ROCM_XIO_UNREGISTER_BUFFER: {
+      struct rocm_xio_unregister_buffer_req req;
       struct vram_buffer_entry *entry, *tmp;
       bool found = false;
 
@@ -960,8 +959,8 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
-    case ROCM_AXIIO_GET_MMIO_BRIDGE_SHADOW_BUFFER: {
-      struct rocm_axiio_mmio_bridge_shadow_req req;
+    case ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER: {
+      struct rocm_xio_mmio_bridge_shadow_req req;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -988,7 +987,7 @@ static long rocm_axiio_ioctl(struct file* file, unsigned int cmd,
 }
 
 /* MMAP implementation for high-performance address translation */
-static int rocm_axiio_mmap(struct file* file, struct vm_area_struct* vma) {
+static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   unsigned long pfn;
   int ret;
 
@@ -1023,8 +1022,8 @@ static int rocm_axiio_mmap(struct file* file, struct vm_area_struct* vma) {
 }
 
 /* io_uring_cmd handler for high-performance async operations */
-static int rocm_axiio_uring_cmd(struct io_uring_cmd* ioucmd,
-                                unsigned int issue_flags) {
+static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
+                              unsigned int issue_flags) {
   /* io_uring_cmd support for async high-performance buffer address
    * translation. This allows userspace to submit async requests for
    * address translation without blocking.
@@ -1042,12 +1041,12 @@ static int rocm_axiio_uring_cmd(struct io_uring_cmd* ioucmd,
 /* File operations */
 static struct file_operations fops = {
   .owner = THIS_MODULE,
-  .unlocked_ioctl = rocm_axiio_ioctl,
-  .mmap = rocm_axiio_mmap,
-  .uring_cmd = rocm_axiio_uring_cmd, /* For io_uring async operations */
+  .unlocked_ioctl = rocm_xio_ioctl,
+  .mmap = rocm_xio_mmap,
+  .uring_cmd = rocm_xio_uring_cmd, /* For io_uring async operations */
 };
 
-static int __init rocm_axiio_init(void) {
+static int __init rocm_xio_init(void) {
   int ret;
 
   /* Register character device */
@@ -1058,19 +1057,19 @@ static int __init rocm_axiio_init(void) {
   }
 
   /* Create device class */
-  rocm_axiio_class = class_create(CLASS_NAME);
-  if (IS_ERR(rocm_axiio_class)) {
+  rocm_xio_class = class_create(CLASS_NAME);
+  if (IS_ERR(rocm_xio_class)) {
     unregister_chrdev(major_number, DEVICE_NAME);
-    return PTR_ERR(rocm_axiio_class);
+    return PTR_ERR(rocm_xio_class);
   }
 
   /* Create device */
-  rocm_axiio_device = device_create(rocm_axiio_class, NULL,
-                                    MKDEV(major_number, 0), NULL, DEVICE_NAME);
-  if (IS_ERR(rocm_axiio_device)) {
-    class_destroy(rocm_axiio_class);
+  rocm_xio_device = device_create(rocm_xio_class, NULL, MKDEV(major_number, 0),
+                                  NULL, DEVICE_NAME);
+  if (IS_ERR(rocm_xio_device)) {
+    class_destroy(rocm_xio_class);
     unregister_chrdev(major_number, DEVICE_NAME);
-    return PTR_ERR(rocm_axiio_device);
+    return PTR_ERR(rocm_xio_device);
   }
 
   /* Register kprobe for NVMe command injection */
@@ -1096,7 +1095,7 @@ static int __init rocm_axiio_init(void) {
   return 0;
 }
 
-static void __exit rocm_axiio_exit(void) {
+static void __exit rocm_xio_exit(void) {
   struct queue_addr_entry *qentry, *qtmp;
   struct vram_buffer_entry *entry, *tmp;
 
@@ -1129,12 +1128,12 @@ static void __exit rocm_axiio_exit(void) {
   }
   spin_unlock(&vram_buffers_lock);
 
-  device_destroy(rocm_axiio_class, MKDEV(major_number, 0));
-  class_destroy(rocm_axiio_class);
+  device_destroy(rocm_xio_class, MKDEV(major_number, 0));
+  class_destroy(rocm_xio_class);
   unregister_chrdev(major_number, DEVICE_NAME);
 
   pr_info("rocm-axiio: Module unloaded\n");
 }
 
-module_init(rocm_axiio_init);
-module_exit(rocm_axiio_exit);
+module_init(rocm_xio_init);
+module_exit(rocm_xio_exit);

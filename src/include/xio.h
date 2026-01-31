@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef AXIIO_H
-#define AXIIO_H
+#ifndef XIO_H
+#define XIO_H
 
 #include <cstdint>
 #include <iostream>
@@ -22,9 +22,9 @@ namespace CLI {
 class App;
 }
 
-#include "axiio-endpoint-registry.h"
+#include "xio-endpoint-registry.h"
 // AUTO-GENERATED - DO NOT EDIT MANUALLY
-#include "axiio-endpoint-includes-gen.h"
+#include "xio-endpoint-includes-gen.h"
 
 #define HIP_CHECK(expression)                                                  \
   {                                                                            \
@@ -42,7 +42,7 @@ class App;
  * Endpoints can extend this with their own configuration structures
  * via the endpointConfig pointer.
  */
-struct AxiioEndpointConfig {
+struct XioEndpointConfig {
   // Common testing parameters
   unsigned iterations = 128;  // Number of iterations
   unsigned numThreads = 1;    // Number of GPU threads (1-32)
@@ -73,23 +73,23 @@ struct AxiioEndpointConfig {
   void* endpointConfig = nullptr;
 
   // Default constructor
-  AxiioEndpointConfig() = default;
+  XioEndpointConfig() = default;
 
   // Convenience constructor for simple cases
-  AxiioEndpointConfig(unsigned iter, unsigned threads = 1)
+  XioEndpointConfig(unsigned iter, unsigned threads = 1)
     : iterations(iter), numThreads(threads) {
   }
 };
 
 /*
- * AxiioEndpoint Base Class
+ * XioEndpoint Base Class
  *
  * Base class for all endpoint implementations. Uses polymorphism to
  * eliminate switch statements and function pointers.
  */
-class AxiioEndpoint {
+class XioEndpoint {
 public:
-  virtual ~AxiioEndpoint() = default;
+  virtual ~XioEndpoint() = default;
 
   // Accessors (host-only)
   __host__ virtual EndpointType getType() const = 0;
@@ -105,13 +105,13 @@ public:
   // single-threaded Derived classes can override for custom queue sizing (e.g.,
   // doorbell mode)
   __host__ virtual size_t getSubmissionQueueLength(
-    const AxiioEndpointConfig* config) const;
+    const XioEndpointConfig* config) const;
   __host__ virtual size_t getCompletionQueueLength(
-    const AxiioEndpointConfig* config) const;
+    const XioEndpointConfig* config) const;
 
   // Run endpoint test - launches GPU kernel and waits for completion
   // Each derived class implements this to call its specific run function
-  __host__ virtual hipError_t run(AxiioEndpointConfig* config) = 0;
+  __host__ virtual hipError_t run(XioEndpointConfig* config) = 0;
 
   // Configure endpoint-specific CLI options
   // Derived classes can override this to add their own CLI flags/options
@@ -127,8 +127,8 @@ public:
   // Apply common configuration to endpoint-specific config
   // Called after initializeEndpointConfig to copy common flags/options
   // Default implementation does nothing
-  __host__ virtual void applyCommonConfig(
-    void* endpointConfig, const AxiioEndpointConfig* baseConfig);
+  __host__ virtual void applyCommonConfig(void* endpointConfig,
+                                          const XioEndpointConfig* baseConfig);
 
   // Validate endpoint-specific configuration
   // Called after applyCommonConfig to validate and auto-detect settings
@@ -155,66 +155,64 @@ public:
 
 // Factory function to create endpoint instances
 // Returns unique_ptr for proper ownership management
-__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(EndpointType type);
-__host__ std::unique_ptr<AxiioEndpoint> createEndpoint(
+__host__ std::unique_ptr<XioEndpoint> createEndpoint(EndpointType type);
+__host__ std::unique_ptr<XioEndpoint> createEndpoint(
   const std::string& endpointName);
 
 // Helper functions
-void axiioPrintDeviceInfo();
-void axiioPrintStatistics(const std::vector<double>& durations,
-                          unsigned totalIterations = 0, unsigned numThreads = 0,
-                          unsigned readIterations = 0,
-                          unsigned writeIterations = 0,
-                          unsigned verifiedReadsCount = 0);
-void axiioPrintHistogram(const std::vector<double>& durations,
-                         unsigned nIterations, unsigned numThreads = 0,
-                         unsigned readIterations = 0,
-                         unsigned writeIterations = 0,
-                         unsigned verifiedReadsCount = 0);
+void xioPrintDeviceInfo();
+void xioPrintStatistics(const std::vector<double>& durations,
+                        unsigned totalIterations = 0, unsigned numThreads = 0,
+                        unsigned readIterations = 0,
+                        unsigned writeIterations = 0,
+                        unsigned verifiedReadsCount = 0);
+void xioPrintHistogram(const std::vector<double>& durations,
+                       unsigned nIterations, unsigned numThreads = 0,
+                       unsigned readIterations = 0,
+                       unsigned writeIterations = 0,
+                       unsigned verifiedReadsCount = 0);
 
 // Queue memory allocation functions
 // memoryMode bits: Bit 0 (LSB) = GPU write location (0=host, 1=device)
 //                  Bit 1 = CPU write location (0=host, 1=device)
 //                  Bit 2 = Doorbell location (0=host, 1=device)
 //                  Bit 3 = Data buffer location (0=host, 1=device)
-hipError_t axiioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
-                                        void** ptr);
-hipError_t axiioAllocateCompletionQueue(size_t size, unsigned memoryMode,
-                                        void** ptr);
-hipError_t axiioAllocateDataBuffer(size_t size, unsigned memoryMode,
-                                   void** ptr);
-void axiioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
-void axiioFreeCompletionQueue(void* ptr, unsigned memoryMode);
-void axiioFreeDataBuffer(void* ptr, unsigned memoryMode);
+hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
+                                      void** ptr);
+hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
+                                      void** ptr);
+hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr);
+void xioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
+void xioFreeCompletionQueue(void* ptr, unsigned memoryMode);
+void xioFreeDataBuffer(void* ptr, unsigned memoryMode);
 
 // HSA device memory allocation (for doorbell and other device memory needs)
-hsa_status_t axiioAllocDeviceMemory(size_t size, void** ptr,
-                                    const char* direction);
+hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
+                                  const char* direction);
 
 // Extract endpoint name from command line arguments
 // This allows endpoints to add their CLI options before full parsing
 // Returns empty string if endpoint name not found in arguments
-std::string axiioExtractEndpointName(int argc, char** argv);
+std::string xioExtractEndpointName(int argc, char** argv);
 
 // Detect PCI MMIO bridge BDF by scanning PCI devices
 // Looks for Vendor ID 0x1b36 (Red Hat, Inc.) and Device ID 0x0015
 // Returns 0 on success with BDF in *bdf_out, negative error code on failure
 // Errors out if 0 or >1 PCI MMIO bridges are found
-int axiioDetectPciMmioBridgeBdf(uint16_t* bdf_out);
+int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out);
 
 // Detect PCI BDF from device file path
 // Takes a device path like /dev/nvme0 or /dev/nvme1
 // Returns 0 on success with BDF in *bdf_out, negative error code on failure
 // Returns -ENODEV if device not found or not a PCI device
-__host__ int axiioDetectBdfFromDevice(const char* device_path,
-                                      uint16_t* bdf_out);
+__host__ int xioDetectBdfFromDevice(const char* device_path, uint16_t* bdf_out);
 
 // Detect if NVMe controller is emulated based on Vendor ID and Device ID
 // Takes a device path like /dev/nvme0 or /dev/nvme1
 // Returns 0 on success with is_emulated in *is_emulated_out, negative error
 // code on failure Returns -ENODEV if device not found or not a PCI device
 // Emulated NVMe controllers typically have Vendor ID 0x1b36 (Red Hat/QEMU)
-__host__ int axiioDetectEmulatedNvme(const char* device_path,
-                                     bool* is_emulated_out);
+__host__ int xioDetectEmulatedNvme(const char* device_path,
+                                   bool* is_emulated_out);
 
-#endif // AXIIO_H
+#endif // XIO_H

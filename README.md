@@ -1,9 +1,9 @@
-# rocm-axiio: A ROCm Library for Accelerator-Initiated IO
+# rocm-xio: A ROCm Library for Accelerator-Initiated IO
 
 ## Introduction
 
 This repository contains the source code for a ROCm library that provides
-an API for Accelerator-Initiated IO (AxIIO) for AMD GPU `__device__` code.
+an API for Accelerator-Initiated IO (XIO) for AMD GPU `__device__` code.
 
 This library enables AMD GPUs to perform direct IO operations to hardware
 devices (NVMe SSDs, RDMA NICs, SDMA engines) without CPU intervention.
@@ -33,12 +33,12 @@ cmake ..
 cmake --build . --target all
 
 # Output locations:
-# - Library: build/lib/librocm-axiio.a
-# - Tester:  build/bin/axiio-tester
+# - Library: build/lib/librocm-xio.a
+# - Tester:  build/bin/xio-tester
 
 # 3. Run with GPU + NVMe
 export HSA_FORCE_FINE_GRAIN_PCIE=1
-sudo ./build/bin/axiio-tester nvme-ep --controller /dev/nvme0 \
+sudo ./build/bin/xio-tester nvme-ep --controller /dev/nvme0 \
   --read-io 50 --write-io 50 --verbose
 ```
 
@@ -59,8 +59,8 @@ cmake --build . --target all
 
 **Primary targets:**
 ```bash
-cmake --build . --target rocm-axiio    # Build library only
-cmake --build . --target axiio-tester   # Build tester only
+cmake --build . --target rocm-xio    # Build library only
+cmake --build . --target xio-tester   # Build tester only
 cmake --build . --target all            # Build library + tester (default)
 ```
 
@@ -97,16 +97,16 @@ cmake --build . --target install
 **Install to custom location for testing:**
 ```bash
 cd build
-cmake --install . --prefix /tmp/rocm-axiio-test
+cmake --install . --prefix /tmp/rocm-xio-test
 
 # Test the installation
-export CMAKE_PREFIX_PATH=/tmp/rocm-axiio-test:$CMAKE_PREFIX_PATH
+export CMAKE_PREFIX_PATH=/tmp/rocm-xio-test:$CMAKE_PREFIX_PATH
 cd /tmp
 cat > test-find-package.cmake << 'EOF'
 cmake_minimum_required(VERSION 3.21)
 project(test)
-find_package(rocm-axiio REQUIRED)
-message(STATUS "Found rocm-axiio version: ${rocm-axiio_VERSION}")
+find_package(rocm-xio REQUIRED)
+message(STATUS "Found rocm-xio version: ${rocm-xio_VERSION}")
 message(STATUS "Include dirs: ${ROCM_AXIIO_INCLUDE_DIRS}")
 message(STATUS "Libraries: ${ROCM_AXIIO_LIBRARIES}")
 EOF
@@ -117,28 +117,28 @@ cmake -P test-find-package.cmake
 ```bash
 cd build
 cmake -DINSTALL_TESTER=ON ..
-cmake --build . --target install --prefix /tmp/rocm-axiio-test
+cmake --build . --target install --prefix /tmp/rocm-xio-test
 ```
 
 ### Kernel Module Build
 
-The kernel module (`kernel/rocm-axiio/`) uses the standard Linux kernel
+The kernel module (`kernel/rocm-xio/`) uses the standard Linux kernel
 build system (Kbuild) and must be built separately:
 
 ```bash
 # Build kernel module
-cd kernel/rocm-axiio
+cd kernel/rocm-xio
 make
 
 # Install kernel module
 sudo make install
 
 # Load module
-sudo modprobe rocm-axiio
+sudo modprobe rocm-xio
 
 # Create device node (after loading)
-sudo mknod /dev/rocm-axiio c $(grep rocm-axiio /proc/devices | awk '{print $1}') 0
-sudo chmod 666 /dev/rocm-axiio
+sudo mknod /dev/rocm-xio c $(grep rocm-xio /proc/devices | awk '{print $1}') 0
+sudo chmod 666 /dev/rocm-xio
 ```
 
 **Note:** The kernel module build is independent of the CMake build system
@@ -155,9 +155,9 @@ TransferBench.
 ```
 build/
 ├── bin/
-│   └── axiio-tester          # Test application
+│   └── xio-tester          # Test application
 ├── lib/
-│   └── librocm-axiio.a       # Static library
+│   └── librocm-xio.a       # Static library
 └── CMakeFiles/               # CMake internal files
 ```
 
@@ -185,7 +185,7 @@ Endpoints define the hardware interfaces and protocols for different IO
 devices. Each endpoint provides its own queue entry formats and IO semantics.
 
 ### **test-ep** - Test endpoint for development and testing
-  - Used for validating the AxIIO framework
+  - Used for validating the XIO framework
 
 ### **nvme-ep** - NVMe endpoint 
   - Implements NVMe command submission (SQE) and completion (CQE) handling
@@ -196,7 +196,7 @@ devices. Each endpoint provides its own queue entry formats and IO semantics.
 
 To see all available endpoints:
 ```bash
-./build/bin/axiio-tester --list-endpoints
+./build/bin/xio-tester --list-endpoints
 ```
 
 ### Environment Variables for Radeon GPUs
@@ -235,7 +235,7 @@ well.
 
 `hipHostMalloc()` comes in two flavors. One is pinned and the other is
 pageable/migratable. The pinned version is almost always what we will want in
-rocm-axiio because we do not want to have the delay that happens if a device
+rocm-xio because we do not want to have the delay that happens if a device
 tries to access an unmapped page-able memory page. Because that results in an
 XNACK and associated PTE updates. That would be more useful for very large VMAs
 which the __device__ code is going to access randomly and sporadically.

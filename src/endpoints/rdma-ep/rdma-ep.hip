@@ -8,8 +8,8 @@
 
 #include <hip/hip_runtime.h>
 
-#include "axiio.h"
 #include "rdma-ep.h"
+#include "xio.h"
 
 // Include vendor-specific headers
 #include "bnxt/bnxt-rdma.h"
@@ -240,7 +240,7 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
 }
 
 // Config-based driveEndpoint function
-__device__ void rdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
+__device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
                                       void* sqeAddr, void* cqeAddr) {
   // Cast void* to endpoint-specific types
   rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
@@ -343,6 +343,6 @@ __device__ void rdma_ep_driveEndpoint(const AxiioEndpointConfig& config,
 }
 
 // Dummy run() function for rdma-ep (not implemented yet)
-hipError_t rdma_ep_run(AxiioEndpointConfig* config) {
+hipError_t rdma_ep_run(XioEndpointConfig* config) {
   return hipErrorNotSupported;
 }

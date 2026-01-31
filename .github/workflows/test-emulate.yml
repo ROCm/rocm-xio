@@ -16,7 +16,7 @@ on:
 
 jobs:
   test-emulate:
-    name: test-emulate for rocm-axiio
+    name: test-emulate for rocm-xio
     runs-on: ubuntu-latest
     container:
       image: rocm/dev-ubuntu-24.04:7.2
@@ -42,10 +42,10 @@ jobs:
         cmake --build . --target all
     - name: Run tester using test-ep in emulate mode
       run: |
-        ./build/axiio-tester test-ep --emulate -n 100 -t 4 -v
+        ./build/xio-tester test-ep --emulate -n 100 -t 1 -v
     - name: Run tester using test-ep in emulate mode with doorbell
       run: |
-        ./build/axiio-tester test-ep --emulate -n 100 -t 4 --doorbell 64 -v
+        ./build/xio-tester test-ep --emulate -n 100 -t 1 --doorbell 64 -v
 
  
 

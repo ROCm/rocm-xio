@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "axiio-endpoint-registry.h"
-#include "axiio.h"
 #include "nvme-ep.h"
+#include "xio-endpoint-registry.h"
+#include "xio.h"
 
 // PCI MMIO Bridge structures (matching QEMU implementation)
 // These must be defined before device code that uses them
@@ -60,20 +60,19 @@ struct pci_mmio_bridge_command {
 #include <unistd.h>
 
 // Device path constant (needed in host code)
-#define ROCM_AXIIO_DEVICE_PATH "/dev/rocm-axiio"
+#define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
 
 // Include kernel module header for IOCTL definitions
 // We need to define userspace-compatible structures since the kernel header
 // uses kernel-specific types
-#define ROCM_AXIIO_IOC_MAGIC 'R'
+#define ROCM_XIO_IOC_MAGIC 'R'
 
 // Flags for VRAM physical address request (matching
-// kernel/rocm-axiio/rocm-axiio.h)
-#define ROCM_AXIIO_FLAG_EMULATED (1 << 0) // Return BAR GPA for emulated NVMe
-#define ROCM_AXIIO_FLAG_PASSTHROUGH                                            \
-  (1 << 1) // Return P2PDMA IOVA for passthrough
+// kernel/rocm-xio/rocm-xio.h)
+#define ROCM_XIO_FLAG_EMULATED (1 << 0)    // Return BAR GPA for emulated NVMe
+#define ROCM_XIO_FLAG_PASSTHROUGH (1 << 1) // Return P2PDMA IOVA for passthrough
 
-// Userspace-compatible structures (matching kernel/rocm-axiio/rocm-axiio.h)
+// Userspace-compatible structures (matching kernel/rocm-xio/rocm-xio.h)
 struct rocm_axiio_vram_req {
   int dmabuf_fd;
   uint16_t nvme_bdf;
@@ -101,17 +100,17 @@ struct rocm_axiio_register_buffer_req {
   uint64_t phys_addr; // Output: Physical address (filled by kernel)
   uint64_t size;      // Input: Buffer size
   uint16_t nvme_bdf;  // Input: NVMe device BDF (0xBBDD format)
-  uint32_t flags;     // Input: flags (see ROCM_AXIIO_FLAG_*)
+  uint32_t flags;     // Input: flags (see ROCM_XIO_FLAG_*)
 };
 
-#define ROCM_AXIIO_GET_VRAM_PHYS_ADDR                                          \
-  _IOWR(ROCM_AXIIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
-#define ROCM_AXIIO_REGISTER_QUEUE_ADDR                                         \
-  _IOW(ROCM_AXIIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
-#define ROCM_AXIIO_REGISTER_BUFFER                                             \
-  _IOW(ROCM_AXIIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
-#define ROCM_AXIIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                               \
-  _IOWR(ROCM_AXIIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
+#define ROCM_XIO_GET_VRAM_PHYS_ADDR                                            \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
+#define ROCM_XIO_REGISTER_QUEUE_ADDR                                           \
+  _IOW(ROCM_XIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
+#define ROCM_XIO_REGISTER_BUFFER                                               \
+  _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
+#define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
 #endif // __HIP_DEVICE_COMPILE__
 
 // Namespace all nvme-ep implementation to avoid conflicts
@@ -268,7 +267,7 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
 // completion
 //
 __device__ void nvme_ep_driveEndpoint(
-  const AxiioEndpointConfig& config, struct nvme_sqe* sqeAddr,
+  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
   uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
@@ -643,8 +642,8 @@ __global__ void nvme_ep_kernel(
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
   int readIo, int writeIo) {
-  // Reconstruct AxiioEndpointConfig from parameters
-  AxiioEndpointConfig config;
+  // Reconstruct XioEndpointConfig from parameters
+  XioEndpointConfig config;
   config.submissionQueue = sqeAddr;
   config.completionQueue = cqeAddr;
   config.startTimes = startTimes;
@@ -736,12 +735,11 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
   req.size = size;
   req.nvme_bdf = nvme_bdf;
-  req.flags = is_emulated ? ROCM_AXIIO_FLAG_EMULATED
-                          : ROCM_AXIIO_FLAG_PASSTHROUGH;
+  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED : ROCM_XIO_FLAG_PASSTHROUGH;
 
-  ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_BUFFER, &req);
+  ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &req);
   if (ret < 0) {
-    fprintf(stderr, "ERROR: ROCM_AXIIO_REGISTER_BUFFER ioctl failed: %s\n",
+    fprintf(stderr, "ERROR: ROCM_XIO_REGISTER_BUFFER ioctl failed: %s\n",
             strerror(errno));
     close(dmabuf_fd);
     close(kmod_fd);
@@ -806,7 +804,7 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf, void** virt_addr);
 static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu);
 
 // Run endpoint test - launches GPU kernel and waits for completion
-__host__ hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
+__host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   if (!config) {
     return hipErrorInvalidValue;
   }
@@ -872,7 +870,7 @@ __host__ hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
 
   struct nvme_queue_info queue_info;
   int ret = nvme_ep_create_queue_via_ioctl(
-    nvmeConfig->device.c_str(), ROCM_AXIIO_DEVICE_PATH, nvmeConfig->queueId,
+    nvmeConfig->device.c_str(), ROCM_XIO_DEVICE_PATH, nvmeConfig->queueId,
     queue_size, nvmeConfig->nvmeTargetBdf,
     config->memoryMode, // Respect memory mode like test-ep
     &queue_info);
@@ -1127,12 +1125,12 @@ __host__ hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
 
         // Detect if NVMe is emulated (needed for buffer registration flags)
         bool is_emulated = false;
-        (void)axiioDetectEmulatedNvme(nvmeConfig->device.c_str(), &is_emulated);
+        (void)xioDetectEmulatedNvme(nvmeConfig->device.c_str(), &is_emulated);
 
         // Export VRAM as dmabuf and register with kernel module
         int ret = export_and_register_vram_buffer(readBuffer, dataBufferSize,
                                                   nvmeConfig->nvmeTargetBdf,
-                                                  ROCM_AXIIO_DEVICE_PATH,
+                                                  ROCM_XIO_DEVICE_PATH,
                                                   &readBufferDma, is_emulated);
         if (ret < 0) {
           fprintf(stderr,
@@ -1261,12 +1259,12 @@ __host__ hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
 
         // Detect if NVMe is emulated (needed for buffer registration flags)
         bool is_emulated = false;
-        (void)axiioDetectEmulatedNvme(nvmeConfig->device.c_str(), &is_emulated);
+        (void)xioDetectEmulatedNvme(nvmeConfig->device.c_str(), &is_emulated);
 
         // Export VRAM as dmabuf and register with kernel module
         int ret = export_and_register_vram_buffer(writeBuffer, dataBufferSize,
                                                   nvmeConfig->nvmeTargetBdf,
-                                                  ROCM_AXIIO_DEVICE_PATH,
+                                                  ROCM_XIO_DEVICE_PATH,
                                                   &writeBufferDma, is_emulated);
         if (ret < 0) {
           fprintf(stderr,
@@ -1469,7 +1467,7 @@ __host__ hipError_t nvme_ep_run(AxiioEndpointConfig* config) {
 
   // All pointers are GPU-accessible:
   // - Queues: allocated with hipHostMalloc (via
-  // axiioAllocateSubmissionQueue/CompletionQueue)
+  // xioAllocateSubmissionQueue/CompletionQueue)
   // - startTimes/endTimes: allocated with hipHostMalloc in tester
   // - shadowBufferVirt: GPU pointer (from shadow buffer registration, if
   // enabled) - verified above
@@ -1600,18 +1598,18 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
   void* mapped = MAP_FAILED;
 
   // Open kernel module device
-  kmod_fd = open(ROCM_AXIIO_DEVICE_PATH, O_RDWR);
+  kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stderr, "Failed to open %s: %s\n", ROCM_AXIIO_DEVICE_PATH,
+    fprintf(stderr, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
             strerror(errno));
-    fprintf(stderr, "Please ensure the rocm-axiio kernel module is loaded\n");
+    fprintf(stderr, "Please ensure the rocm-xio kernel module is loaded\n");
     return -errno;
   }
 
   // Get shadow buffer info from kernel module
   memset(&req, 0, sizeof(req));
   req.bridge_bdf = bridge_bdf;
-  ret = ioctl(kmod_fd, ROCM_AXIIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
+  ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
   if (ret < 0) {
     fprintf(stderr, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
             strerror(errno));
@@ -2144,7 +2142,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   // Detect if NVMe device is emulated (QEMU) or passthrough
   bool is_emulated = false;
-  int detect_ret = axiioDetectEmulatedNvme(nvme_device, &is_emulated);
+  int detect_ret = xioDetectEmulatedNvme(nvme_device, &is_emulated);
   if (detect_ret != 0) {
     fprintf(stderr, "Warning: Failed to detect NVMe type for %s: %s\n",
             nvme_device, strerror(-detect_ret));
@@ -2174,7 +2172,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   // Allocate SQ buffer based on memory mode (like test-ep)
   // Bit 0 (LSB): GPU write location (SQE) - 0=host, 1=device
-  sqe_err = axiioAllocateSubmissionQueue(sq_size_bytes, memory_mode, &sq_virt);
+  sqe_err = xioAllocateSubmissionQueue(sq_size_bytes, memory_mode, &sq_virt);
   if (sqe_err != hipSuccess) {
     fprintf(stderr, "Failed to allocate SQ buffer: %s\n",
             hipGetErrorString(sqe_err));
@@ -2184,12 +2182,12 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   // Allocate CQ buffer based on memory mode (like test-ep)
   // Bit 1: CPU write location (CQE) - 0=host, 1=device
-  cqe_err = axiioAllocateCompletionQueue(cq_size_bytes, memory_mode, &cq_virt);
+  cqe_err = xioAllocateCompletionQueue(cq_size_bytes, memory_mode, &cq_virt);
   if (cqe_err != hipSuccess) {
     fprintf(stderr, "Failed to allocate CQ buffer: %s\n",
             hipGetErrorString(cqe_err));
     // Free SQ on failure
-    axiioFreeSubmissionQueue(sq_virt, memory_mode);
+    xioFreeSubmissionQueue(sq_virt, memory_mode);
     ret = -ENOMEM;
     goto cleanup;
   }
@@ -2475,12 +2473,12 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     buf_req.virt_addr = reinterpret_cast<uint64_t>(sq_virt);
     buf_req.size = sq_size_bytes;
     buf_req.nvme_bdf = nvme_bdf;
-    buf_req.flags = is_emulated ? ROCM_AXIIO_FLAG_EMULATED
-                                : ROCM_AXIIO_FLAG_PASSTHROUGH;
+    buf_req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
+                                : ROCM_XIO_FLAG_PASSTHROUGH;
     fprintf(stderr, "SQ registration: is_emulated=%d, flags=0x%x\n",
             is_emulated, buf_req.flags);
 
-    ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_BUFFER, &buf_req);
+    ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &buf_req);
     close(sq_dmabuf_fd); // Close FD after kernel module has it
     if (ret < 0) {
       fprintf(stderr,
@@ -2563,12 +2561,12 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     buf_req.virt_addr = reinterpret_cast<uint64_t>(cq_virt);
     buf_req.size = cq_size_bytes;
     buf_req.nvme_bdf = nvme_bdf;
-    buf_req.flags = is_emulated ? ROCM_AXIIO_FLAG_EMULATED
-                                : ROCM_AXIIO_FLAG_PASSTHROUGH;
+    buf_req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
+                                : ROCM_XIO_FLAG_PASSTHROUGH;
     fprintf(stderr, "CQ registration: is_emulated=%d, flags=0x%x\n",
             is_emulated, buf_req.flags);
 
-    ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_BUFFER, &buf_req);
+    ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &buf_req);
     close(cq_dmabuf_fd); // Close FD after kernel module has it
     if (ret < 0) {
       fprintf(stderr,
@@ -2621,7 +2619,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   }
 
   // Register queue addresses with kernel module for kprobe injection
-  // Note: For device memory queues, ROCM_AXIIO_REGISTER_BUFFER was already
+  // Note: For device memory queues, ROCM_XIO_REGISTER_BUFFER was already
   // called above to map the DMA-BUF. This registration is for kprobe tracking
   // and works for both host and device memory queues.
   struct rocm_axiio_register_queue_addr_req reg_req;
@@ -2633,7 +2631,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   reg_req.size = sq_size_bytes;
   reg_req.queue_type = 0; // SQ
 
-  ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_QUEUE_ADDR, &reg_req);
+  ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
     fprintf(stderr, "Failed to register SQ address: %s\n", strerror(errno));
     ret = -errno;
@@ -2647,7 +2645,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   reg_req.size = cq_size_bytes;
   reg_req.queue_type = 1; // CQ
 
-  ret = ioctl(kmod_fd, ROCM_AXIIO_REGISTER_QUEUE_ADDR, &reg_req);
+  ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
     fprintf(stderr, "Failed to register CQ address: %s\n", strerror(errno));
     ret = -errno;
@@ -2862,7 +2860,7 @@ cleanup:
       (void)hipHostFree(sq_virt);
     } else {
       // Free using standard free function
-      axiioFreeSubmissionQueue(sq_virt, memory_mode);
+      xioFreeSubmissionQueue(sq_virt, memory_mode);
     }
   }
   if (cq_virt) {
@@ -2871,7 +2869,7 @@ cleanup:
       (void)hipHostFree(cq_virt);
     } else {
       // Free using standard free function
-      axiioFreeCompletionQueue(cq_virt, memory_mode);
+      xioFreeCompletionQueue(cq_virt, memory_mode);
     }
   }
   if (nvme_fd >= 0) {
