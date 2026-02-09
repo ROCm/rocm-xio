@@ -195,6 +195,12 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_COMMON_DIR}/.*")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
+# Compile all *.hip.h headers in doca-compatible (device code headers)
+set(DOCA_COMPATIBLE_DIR ${INCLUDE_DIR}/doca-compatible)
+file(GLOB DOCA_HIP_HEADERS ${DOCA_COMPATIBLE_DIR}/*.hip.h)
+list(APPEND LIB_SOURCES ${DOCA_HIP_HEADERS})
+set_source_files_properties(${DOCA_HIP_HEADERS} PROPERTIES LANGUAGE HIP)
+
 # Create static library
 add_library(rocm-xio STATIC ${LIB_SOURCES})
 
