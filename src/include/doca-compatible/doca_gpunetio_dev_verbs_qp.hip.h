@@ -38,7 +38,7 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_QP_H
 #define DOCA_GPUNETIO_DEV_VERBS_QP_H
 
-#include <cuda/atomic>
+#include <atomic>
 #include "doca_gpunetio_dev_verbs_cq.cuh"
 
 /* *********** WQE UTILS *********** */

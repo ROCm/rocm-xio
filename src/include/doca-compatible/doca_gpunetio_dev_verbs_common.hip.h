@@ -40,7 +40,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <cuda/atomic>
+#include <atomic>
 #include <math.h>
 
 #include "../common/doca_gpunetio_verbs_dev.h"
