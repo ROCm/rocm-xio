@@ -103,7 +103,7 @@ template <enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode =
 __device__ static __forceinline__ int doca_priv_gpu_dev_verbs_poll_one_cq_at(
     struct doca_gpu_dev_verbs_cq *cq, uint64_t cons_index) {
     uint8_t *cqe = (uint8_t *)__ldg((uintptr_t *)&cq->cqe_daddr);
-    const uint32_t cqe_num = __ldg(&cq->cqe_num);
+    const uint32_t cqe_num = cq->cqe_num;
     uint32_t idx = cons_index & (cqe_num - 1);
     struct doca_gpunetio_ib_mlx5_cqe64 *cqe64 =
         (struct doca_gpunetio_ib_mlx5_cqe64 *)(cqe + (idx * DOCA_GPUNETIO_VERBS_CQE_SIZE));
@@ -184,7 +184,7 @@ __device__ static __forceinline__ int doca_priv_gpu_dev_verbs_poll_cq_at(
     struct doca_gpu_dev_verbs_cq *cq, uint64_t cons_index) {
     struct doca_gpunetio_ib_mlx5_cqe64 *cqe =
         (struct doca_gpunetio_ib_mlx5_cqe64 *)__ldg((uintptr_t *)&cq->cqe_daddr);
-    const uint32_t cqe_num = __ldg(&cq->cqe_num);
+    const uint32_t cqe_num = cq->cqe_num;
     uint32_t idx = cons_index & (cqe_num - 1);
     struct doca_gpunetio_ib_mlx5_cqe64 *cqe64 = &cqe[idx];
     uint8_t opown;

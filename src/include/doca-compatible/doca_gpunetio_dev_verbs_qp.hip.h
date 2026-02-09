@@ -56,7 +56,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_store_wqe_seg(uint64_t
  */
 __device__ static __forceinline__ struct doca_gpu_dev_verbs_wqe *doca_gpu_dev_verbs_get_wqe_ptr(
     struct doca_gpu_dev_verbs_qp *qp, uint16_t wqe_idx) {
-    const uint16_t nwqes_mask = __ldg(&qp->sq_wqe_mask);
+    const uint16_t nwqes_mask = qp->sq_wqe_mask;
     const uintptr_t wqe_addr = __ldg((uintptr_t *)&qp->sq_wqe_daddr);
     const uint16_t idx = wqe_idx & nwqes_mask;
     return (struct doca_gpu_dev_verbs_wqe *)(wqe_addr +
@@ -77,7 +77,7 @@ template <enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode =
           enum doca_gpu_dev_verbs_qp_type qp_type = DOCA_GPUNETIO_VERBS_QP_SQ>
 __device__ static __forceinline__ void doca_gpu_dev_verbs_wait_until_slot_available(
     struct doca_gpu_dev_verbs_qp *qp, uint64_t wqe_idx) {
-    const uint16_t nwqes = __ldg(&qp->sq_wqe_num);
+    const uint16_t nwqes = qp->sq_wqe_num;
     [[likely]] if (wqe_idx >= nwqes)
         doca_gpu_dev_verbs_poll_cq_at<resource_sharing_mode, qp_type>(&(qp->cq_sq),
                                                                       wqe_idx - nwqes);
@@ -218,7 +218,7 @@ doca_gpu_dev_verbs_prepare_db(struct doca_gpu_dev_verbs_qp *qp, uint64_t prod_in
 
     // The only ctrl segment fields that are inspected while ringing
     // the DB are QP number and WQE index
-    ctrl_seg.qpn_ds = __ldg(&qp->sq_num_shift8_be);
+    ctrl_seg.qpn_ds = qp->sq_num_shift8_be;
     ctrl_seg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32((prod_index << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT));
 
@@ -468,7 +468,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_nop(
     cseg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32(((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) |
                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_NOP);
-    cseg.qpn_ds = __ldg(&qp->sq_num_shift8_be_1ds);
+    cseg.qpn_ds = qp->sq_num_shift8_be_1ds;
     cseg.fm_ce_se = ctrl_flags;
 
     doca_gpu_dev_verbs_store_wqe_seg((uint64_t *)&(wqe_ptr->dseg0), (uint64_t *)&(cseg));
@@ -486,7 +486,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_write(
 
     cseg.opmod_idx_opcode = doca_gpu_dev_verbs_bswap32(
         ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | opcode);
-    cseg.qpn_ds = __ldg(&qp->sq_num_shift8_be_3ds);
+    cseg.qpn_ds = qp->sq_num_shift8_be_3ds;
     cseg.fm_ce_se = ctrl_flags;
     cseg.imm = immediate;
 
@@ -524,7 +524,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_write(
 
     cseg.opmod_idx_opcode = doca_gpu_dev_verbs_bswap32(
         ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | opcode);
-    cseg.qpn_ds = __ldg(&qp->sq_num_shift8_be_4ds);
+    cseg.qpn_ds = qp->sq_num_shift8_be_4ds;
     cseg.fm_ce_se = ctrl_flags;
     cseg.imm = immediate;
 
@@ -587,7 +587,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_prepare_inl_rdma_write
     cseg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32(((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) |
                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_WRITE);
-    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(__ldg(&qp->sq_num_shift8) | ds);
+    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(qp->sq_num_shift8 | ds);
     cseg.fm_ce_se = ctrl_flags;
     // cseg.imm = 0;
 
@@ -670,7 +670,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_read(
     cseg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32(((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) |
                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_READ);
-    cseg.qpn_ds = __ldg(&qp->sq_num_shift8_be_3ds);
+    cseg.qpn_ds = qp->sq_num_shift8_be_3ds;
     cseg.fm_ce_se = ctrl_flags;
 
     rseg.raddr = doca_gpu_dev_verbs_bswap64(raddr);
@@ -706,7 +706,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_read(
     cseg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32(((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) |
                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_RDMA_READ);
-    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(__ldg(&qp->sq_num_shift8) | 4);
+    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(qp->sq_num_shift8 | 4);
     cseg.fm_ce_se = ctrl_flags;
     // cseg.imm = 0;
 
@@ -762,7 +762,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_atomic(
 
     cseg.opmod_idx_opcode = doca_gpu_dev_verbs_bswap32(
         ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | opcode);
-    cseg.qpn_ds = __ldg(&qp->sq_num_shift8_be_4ds);
+    cseg.qpn_ds = qp->sq_num_shift8_be_4ds;
     cseg.fm_ce_se = ctrl_flags;
 
     rseg.raddr = doca_gpu_dev_verbs_bswap64(raddr);
@@ -808,7 +808,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_wqe_prepare_wait(
     cseg.opmod_idx_opcode =
         doca_gpu_dev_verbs_bswap32(((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) |
                                    DOCA_GPUNETIO_IB_MLX5_OPCODE_WAIT);
-    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(__ldg(&qp->sq_num_shift8) |
+    cseg.qpn_ds = doca_gpu_dev_verbs_bswap32(qp->sq_num_shift8 |
                                              DOCA_GPUNETIO_VERBS_WQE_SEG_CNT_WAIT);
     cseg.fm_ce_se = ctrl_flags;
     // cseg.imm = 0;
