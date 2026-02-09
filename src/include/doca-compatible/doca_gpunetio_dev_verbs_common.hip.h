@@ -68,19 +68,19 @@
  *
  * @return The value of the global timer
  */
-__device__ static __forceinline__ uint64_t doca_gpu_dev_verbs_query_globaltimer() {
+__device__ static __forceinline__ uint64_t radaki_dev_query_globaltimer() {
     uint64_t ret;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(ret)::"memory");
     return ret;
 }
 
-__device__ static __forceinline__ unsigned int doca_gpu_dev_verbs_get_lane_id() {
+__device__ static __forceinline__ unsigned int radaki_dev_get_lane_id() {
     unsigned int ret;
     asm volatile("mov.u32 %0, %%laneid;" : "=r"(ret));
     return ret;
 }
 
-__device__ static __forceinline__ uint64_t doca_gpu_dev_verbs_bswap64(uint64_t x) {
+__device__ static __forceinline__ uint64_t radaki_dev_bswap64(uint64_t x) {
     uint64_t ret;
     asm volatile(
         "{\n\t"
@@ -101,7 +101,7 @@ __device__ static __forceinline__ uint64_t doca_gpu_dev_verbs_bswap64(uint64_t x
     return ret;
 }
 
-__device__ static __forceinline__ uint32_t doca_gpu_dev_verbs_bswap32(uint32_t x) {
+__device__ static __forceinline__ uint32_t radaki_dev_bswap32(uint32_t x) {
     uint32_t ret;
     asm volatile(
         "{\n\t"
@@ -115,7 +115,7 @@ __device__ static __forceinline__ uint32_t doca_gpu_dev_verbs_bswap32(uint32_t x
     return ret;
 }
 
-__device__ static __forceinline__ uint16_t doca_gpu_dev_verbs_bswap16(uint16_t x) {
+__device__ static __forceinline__ uint16_t radaki_dev_bswap16(uint16_t x) {
     uint16_t ret;
     asm volatile(
         "{\n\t"
@@ -130,14 +130,14 @@ __device__ static __forceinline__ uint16_t doca_gpu_dev_verbs_bswap16(uint16_t x
 }
 
 #ifdef DOCA_GPUNETIO_VERBS_HAS_STORE_RELAXED_MMIO
-__device__ static __forceinline__ void doca_gpu_dev_verbs_store_relaxed_mmio(uint64_t *ptr,
+__device__ static __forceinline__ void radaki_dev_store_relaxed_mmio(uint64_t *ptr,
                                                                              uint64_t val) {
     asm volatile("st.mmio.relaxed.sys.global.b64 [%0], %1;" : : "l"(ptr), "l"(val));
 }
 #endif
 
-template <enum doca_gpu_dev_verbs_sync_scope sync_scope>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_fence_acquire() {
+template <enum radaki_dev_sync_scope sync_scope>
+__device__ static __forceinline__ void radaki_dev_fence_acquire() {
 #ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
         asm volatile("fence.acquire.cta;");
@@ -158,8 +158,8 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_fence_acquire() {
 #endif
 }
 
-template <enum doca_gpu_dev_verbs_sync_scope sync_scope>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_fence_release() {
+template <enum radaki_dev_sync_scope sync_scope>
+__device__ static __forceinline__ void radaki_dev_fence_release() {
 #ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
         asm volatile("fence.release.cta;");
@@ -181,8 +181,8 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_fence_release() {
 }
 
 #ifdef DOCA_GPUNETIO_VERBS_HAS_ASYNC_STORE_RELEASE
-template <enum doca_gpu_dev_verbs_sync_scope sync_scope>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_async_store_release(uint32_t *ptr,
+template <enum radaki_dev_sync_scope sync_scope>
+__device__ static __forceinline__ void radaki_dev_async_store_release(uint32_t *ptr,
                                                                               uint32_t val) {
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
         asm volatile("st.async.mmio.release.gpu.b32 [%0], %1;" : : "l"(ptr), "r"(val));
@@ -190,8 +190,8 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_async_store_release(ui
         asm volatile("st.async.mmio.release.sys.global.b32 [%0], %1;" : : "l"(ptr), "r"(val));
 }
 
-template <enum doca_gpu_dev_verbs_sync_scope sync_scope>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_async_store_release(uint64_t *ptr,
+template <enum radaki_dev_sync_scope sync_scope>
+__device__ static __forceinline__ void radaki_dev_async_store_release(uint64_t *ptr,
                                                                               uint64_t val) {
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
         asm volatile("st.async.mmio.release.gpu.global.b64 [%0], %1;" : : "l"(ptr), "l"(val));
@@ -200,7 +200,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_async_store_release(ui
 }
 #endif
 
-__device__ static __forceinline__ bool doca_gpu_dev_verbs_isaligned(void *ptr, size_t alignment) {
+__device__ static __forceinline__ bool radaki_dev_isaligned(void *ptr, size_t alignment) {
     bool status;
     status = (((uintptr_t)ptr & (alignment - 1)) == 0);
     return status;
@@ -213,7 +213,7 @@ __device__ static __forceinline__ bool doca_gpu_dev_verbs_isaligned(void *ptr, s
  * @param src - Source pointer
  * @param bytes - Number of bytes to copy
  */
-__device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_aligned_data(void *dst, void *src,
+__device__ static __forceinline__ void radaki_dev_memcpy_aligned_data(void *dst, void *src,
                                                                               size_t bytes) {
     size_t remaining_bytes = bytes;
     size_t copied_size;
@@ -241,23 +241,23 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_aligned_data(vo
  * @param src - Source pointer
  * @param bytes - Number of bytes to copy
  */
-__device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_data(void *dst, void *src,
+__device__ static __forceinline__ void radaki_dev_memcpy_data(void *dst, void *src,
                                                                       size_t bytes) {
     size_t remaining_bytes = bytes;
     size_t copied_size;
     while (remaining_bytes > 0) {
-        if (doca_gpu_dev_verbs_isaligned(dst, sizeof(uint64_t)) &&
-            doca_gpu_dev_verbs_isaligned(src, sizeof(uint64_t)) &&
+        if (radaki_dev_isaligned(dst, sizeof(uint64_t)) &&
+            radaki_dev_isaligned(src, sizeof(uint64_t)) &&
             remaining_bytes >= sizeof(uint64_t)) {
             *(uint64_t *)dst = *(uint64_t *)src;
             copied_size = sizeof(uint64_t);
-        } else if (doca_gpu_dev_verbs_isaligned(dst, sizeof(uint32_t)) &&
-                   doca_gpu_dev_verbs_isaligned(src, sizeof(uint32_t)) &&
+        } else if (radaki_dev_isaligned(dst, sizeof(uint32_t)) &&
+                   radaki_dev_isaligned(src, sizeof(uint32_t)) &&
                    remaining_bytes >= sizeof(uint32_t)) {
             *(uint32_t *)dst = *(uint32_t *)src;
             copied_size = sizeof(uint32_t);
-        } else if (doca_gpu_dev_verbs_isaligned(dst, sizeof(uint16_t)) &&
-                   doca_gpu_dev_verbs_isaligned(src, sizeof(uint16_t)) &&
+        } else if (radaki_dev_isaligned(dst, sizeof(uint16_t)) &&
+                   radaki_dev_isaligned(src, sizeof(uint16_t)) &&
                    remaining_bytes >= sizeof(uint16_t)) {
             *(uint16_t *)dst = *(uint16_t *)src;
             copied_size = sizeof(uint16_t);
@@ -272,7 +272,7 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_data(void *dst,
 }
 
 template <typename T>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_inl_aligned_data(T *dst, T *src,
+__device__ static __forceinline__ void radaki_dev_memcpy_inl_aligned_data(T *dst, T *src,
                                                                                   size_t bytes) {
     size_t remaining_bytes = bytes;
     const size_t copied_size = sizeof(T);
@@ -283,9 +283,9 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_memcpy_inl_aligned_dat
     }
 }
 
-template <typename T, enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode,
+template <typename T, enum radaki_dev_resource_sharing_mode resource_sharing_mode,
           bool need_fence_acquire = false>
-__device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_max(T *ptr, T val) {
+__device__ static __forceinline__ T radaki_dev_atomic_max(T *ptr, T val) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         T old_val = *ptr;
         *ptr = max(old_val, val);
@@ -302,8 +302,8 @@ __device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_max(T *ptr, T val)
     return 0;
 }
 
-template <typename T, enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode>
-__device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_add(T *ptr, T val) {
+template <typename T, enum radaki_dev_resource_sharing_mode resource_sharing_mode>
+__device__ static __forceinline__ T radaki_dev_atomic_add(T *ptr, T val) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         T old_val = *ptr;
         *ptr = old_val + val;
@@ -318,8 +318,8 @@ __device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_add(T *ptr, T val)
     return 0;
 }
 
-template <typename T, enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode>
-__device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_read(T *ptr) {
+template <typename T, enum radaki_dev_resource_sharing_mode resource_sharing_mode>
+__device__ static __forceinline__ T radaki_dev_atomic_read(T *ptr) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE)
         return *ptr;
     else
@@ -331,16 +331,16 @@ __device__ static __forceinline__ T doca_gpu_dev_verbs_atomic_read(T *ptr) {
  *
  * @param lock - Pointer to the lock
  */
-template <enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_lock(int *lock) {
+template <enum radaki_dev_resource_sharing_mode resource_sharing_mode>
+__device__ static __forceinline__ void radaki_dev_lock(int *lock) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         *lock = 1;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
         while (atomicCAS_block(lock, 0, 1) != 0) continue;
-        doca_gpu_dev_verbs_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA>();
+        radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA>();
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
         while (atomicCAS(lock, 0, 1) != 0) continue;
-        doca_gpu_dev_verbs_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
+        radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
     }
 }
 
@@ -349,8 +349,8 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_lock(int *lock) {
  *
  * @param lock - Pointer to the lock
  */
-template <enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode>
-__device__ static __forceinline__ void doca_gpu_dev_verbs_unlock(int *lock) {
+template <enum radaki_dev_resource_sharing_mode resource_sharing_mode>
+__device__ static __forceinline__ void radaki_dev_unlock(int *lock) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         *lock = 0;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
@@ -362,28 +362,28 @@ __device__ static __forceinline__ void doca_gpu_dev_verbs_unlock(int *lock) {
     }
 }
 
-__device__ static __forceinline__ uint8_t doca_gpu_dev_verbs_load_relaxed_sys_global(uint8_t *ptr) {
+__device__ static __forceinline__ uint8_t radaki_dev_load_relaxed_sys_global(uint8_t *ptr) {
     uint16_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b8 %0, [%1];" : "=h"(ret) : "l"(ptr));
     return (uint8_t)ret;
 }
 
 __device__ static __forceinline__ uint32_t
-doca_gpu_dev_verbs_load_relaxed_sys_global(uint32_t *ptr) {
+radaki_dev_load_relaxed_sys_global(uint32_t *ptr) {
     uint32_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b32 %0, [%1];" : "=r"(ret) : "l"(ptr));
     return ret;
 }
 
 __device__ static __forceinline__ uint64_t
-doca_gpu_dev_verbs_load_relaxed_sys_global(uint64_t *ptr) {
+radaki_dev_load_relaxed_sys_global(uint64_t *ptr) {
     uint64_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
     return ret;
 }
 
-template <enum doca_gpu_dev_verbs_resource_sharing_mode resource_sharing_mode>
-__device__ static __forceinline__ uint64_t doca_gpu_dev_verbs_load_relaxed(uint64_t *ptr) {
+template <enum radaki_dev_resource_sharing_mode resource_sharing_mode>
+__device__ static __forceinline__ uint64_t radaki_dev_load_relaxed(uint64_t *ptr) {
     uint64_t ret = 0;
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE)
         ret = *ptr;
@@ -402,7 +402,7 @@ __device__ static __forceinline__ uint64_t doca_gpu_dev_verbs_load_relaxed(uint6
  * @return The ceiling of x / y
  */
 __device__ static __forceinline__ uint64_t
-doca_gpu_dev_verbs_div_ceil_aligned_pow2(uint64_t x, unsigned int denominator_shift) {
+radaki_dev_div_ceil_aligned_pow2(uint64_t x, unsigned int denominator_shift) {
     uint64_t y = 1ULL << denominator_shift;
     return ((x & ~(y - 1)) >> denominator_shift) + (!!(x & (y - 1)));
 }
@@ -416,7 +416,7 @@ doca_gpu_dev_verbs_div_ceil_aligned_pow2(uint64_t x, unsigned int denominator_sh
  * @return The ceiling of x / y
  */
 __device__ static __forceinline__ uint32_t
-doca_gpu_dev_verbs_div_ceil_aligned_pow2_32bits(uint64_t x, int denominator_shift) {
+radaki_dev_div_ceil_aligned_pow2_32bits(uint64_t x, int denominator_shift) {
     return uint32_t(x >> denominator_shift) + !!__funnelshift_r(0, uint32_t(x), denominator_shift);
 }
 

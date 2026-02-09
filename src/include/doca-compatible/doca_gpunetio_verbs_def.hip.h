@@ -178,7 +178,7 @@ enum {
 /**
  * GPUNetIO Verbs flags for WQE control segment
  */
-enum doca_gpu_dev_verbs_wqe_ctrl_flags {
+enum radaki_dev_wqe_ctrl_flags {
     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_UPDATE = DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CE_CQE_ALWAYS << 2,
     DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CQ_ERROR_UPDATE =
         DOCA_GPUNETIO_IB_MLX5_WQE_CTRL_CE_CQE_ON_CQE_ERROR << 2,
@@ -199,10 +199,10 @@ enum {
 };
 
 /**
- * @enum doca_gpu_dev_verbs_mem_type
+ * @enum radaki_dev_mem_type
  * @brief Memory type of the buffer.
  */
-enum doca_gpu_dev_verbs_mem_type {
+enum radaki_dev_mem_type {
     DOCA_GPUNETIO_VERBS_MEM_TYPE_AUTO =
         0,  ///< Automatically select the most performant memory type
     DOCA_GPUNETIO_VERBS_MEM_TYPE_HOST = 1,      ///< Allocate resource on host memory
@@ -211,23 +211,23 @@ enum doca_gpu_dev_verbs_mem_type {
 };
 
 /**
- * @enum doca_gpu_dev_verbs_mem_type
+ * @enum radaki_dev_mem_type
  * @brief Memory type of the buffer.
  */
-enum doca_gpu_dev_verbs_qp_type {
+enum radaki_dev_qp_type {
     DOCA_GPUNETIO_VERBS_QP_SQ = 0,  ///< Use QP SQ
 };
 
-enum doca_gpu_dev_verbs_exec_scope {
+enum radaki_dev_exec_scope {
     DOCA_GPUNETIO_VERBS_EXEC_SCOPE_THREAD = 0,
     DOCA_GPUNETIO_VERBS_EXEC_SCOPE_WARP
 };
 
 /**
- * @enum doca_gpu_dev_verbs_sync_scope
+ * @enum radaki_dev_sync_scope
  * @brief Synchronization scope.
  */
-enum doca_gpu_dev_verbs_sync_scope {
+enum radaki_dev_sync_scope {
     DOCA_GPUNETIO_VERBS_SYNC_SCOPE_SYS = 0,       ///< System synchronization scope
     DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU = 1,       ///< GPU synchronization scope
     DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA = 2,       ///< CTA synchronization scope
@@ -235,10 +235,10 @@ enum doca_gpu_dev_verbs_sync_scope {
 };
 
 /**
- * @enum doca_gpu_dev_verbs_resource_sharing_mode
+ * @enum radaki_dev_resource_sharing_mode
  * @brief Resource sharing mode.
  */
-enum doca_gpu_dev_verbs_resource_sharing_mode {
+enum radaki_dev_resource_sharing_mode {
     DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE =
         0,  ///< The resource is exclusive to one CUDA thread
     DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA = 1,       ///< The resource is shared among CUDA
@@ -249,10 +249,10 @@ enum doca_gpu_dev_verbs_resource_sharing_mode {
 };
 
 /**
- * @enum doca_gpu_dev_verbs_nic_handler
+ * @enum radaki_dev_nic_handler
  * @brief The processor that handles the NIC.
  */
-enum doca_gpu_dev_verbs_nic_handler {
+enum radaki_dev_nic_handler {
     DOCA_GPUNETIO_VERBS_NIC_HANDLER_AUTO = 0,  ///< Automatically select the most performant handler
     DOCA_GPUNETIO_VERBS_NIC_HANDLER_CPU_PROXY = 1,  ///< CPU Proxy
     DOCA_GPUNETIO_VERBS_NIC_HANDLER_GPU_SM_DB = 2,  ///< GPU SM, regular DB
@@ -261,17 +261,17 @@ enum doca_gpu_dev_verbs_nic_handler {
 };
 
 /**
- * @enum doca_gpu_dev_verbs_gpu_code_opt
+ * @enum radaki_dev_gpu_code_opt
  * @brief GPU code optimization for GDA-KI. They can be combined using bitwise or.
  */
-enum doca_gpu_dev_verbs_gpu_code_opt {
+enum radaki_dev_gpu_code_opt {
     DOCA_GPUNETIO_VERBS_GPU_CODE_OPT_DEFAULT = 0,  ///< Use default code optimization
     DOCA_GPUNETIO_VERBS_GPU_CODE_OPT_ASYNC_STORE_RELEASE = (1 << 0),  ///< Use store.async.release
                                                                       ///< code optimization
     DOCA_GPUNETIO_VERBS_GPU_CODE_OPT_MAX = INT_MAX                    ///< Sentinel value
 };
 
-enum doca_gpu_dev_verbs_signal_op {
+enum radaki_dev_signal_op {
     DOCA_GPUNETIO_VERBS_SIGNAL_OP_ADD = 0,  ///< Signal operation - Add
 };
 

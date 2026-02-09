@@ -69,8 +69,8 @@ enum doca_gpu_mem_type {
  * @brief Forward declaration
  *
  */
-struct doca_gpu_dev_verbs_qp;
-struct doca_gpu_dev_verbs_cq;
+struct radaki_dev_qp;
+struct radaki_dev_cq;
 
 /**
  * @brief GPUNetIO QP handler accessible from CPU
@@ -86,9 +86,9 @@ struct doca_gpu_verbs_qp {
     bool cpu_proxy;
     uint32_t sq_num_shift8_be;
     /* CPU handler */
-    struct doca_gpu_dev_verbs_qp *qp_cpu;
+    struct radaki_dev_qp *qp_cpu;
     /* GPU handler */
-    struct doca_gpu_dev_verbs_qp *qp_gpu;
+    struct radaki_dev_qp *qp_gpu;
 };
 
 /**
@@ -208,7 +208,7 @@ doca_error_t doca_gpu_mem_free(struct doca_gpu *gpu, void *memptr_gpu);
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
 doca_error_t doca_gpu_verbs_export_qp(struct doca_gpu *gpu_dev, struct doca_verbs_qp *qp,
-                                      enum doca_gpu_dev_verbs_nic_handler nic_handler,
+                                      enum radaki_dev_nic_handler nic_handler,
                                       void *gpu_qp_umem_dev_ptr, struct doca_verbs_cq *cq_sq,
                                       struct doca_gpu_verbs_qp **qp_out);
 
@@ -241,7 +241,7 @@ doca_error_t doca_gpu_verbs_unexport_qp(struct doca_gpu *gpu_dev, struct doca_gp
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
 doca_error_t doca_gpu_verbs_get_qp_dev(struct doca_gpu_verbs_qp *qp,
-                                       struct doca_gpu_dev_verbs_qp **qp_gpu);
+                                       struct radaki_dev_qp **qp_gpu);
 
 /**
  * Return a DMABuf file descriptor from a GPU memory address if the GPU device and CUDA installation
