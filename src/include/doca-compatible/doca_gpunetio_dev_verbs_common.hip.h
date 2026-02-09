@@ -38,28 +38,38 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_COMMON_H
 #define DOCA_GPUNETIO_DEV_VERBS_COMMON_H
 
+/* Device helpers may be unused in this TU but used from others */
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+
 #include <stdio.h>
 #include <stdint.h>
 #include <atomic>
 #include <math.h>
 
 #include "../common/doca_gpunetio_verbs_dev.h"
+#include "doca_hip_atomic.hip.h"
 
-#if __CUDA_ARCH__ >= 1000
+#if __HIP_ARCH__ >= 1000 || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000)
 #define DOCA_GPUNETIO_VERBS_HAS_ASYNC_STORE_RELEASE 1
 #endif
 
-#if __CUDA_ARCH__ >= 900
+#if __HIP_ARCH__ >= 900 || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900)
 #define DOCA_GPUNETIO_VERBS_HAS_TMA_COPY 1
 #endif
 
-#if CUDA_VERSION >= 12020
+#if (defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR * 100 + HIP_VERSION_MINOR) >= 602) || \
+    (defined(CUDA_VERSION) && CUDA_VERSION >= 12020)
 #define DOCA_GPUNETIO_VERBS_HAS_STORE_RELAXED_MMIO 1
 #else
-#warning "warning: doca_gpunetio should be used with a CUDA version >= 12020."
+#warning "warning: doca_gpunetio should be used with HIP 6.2+ or CUDA >= 12020."
 #endif
 
-#if CUDA_VERSION >= 12080 && __CUDA_ARCH__ >= 900
+#if ((defined(HIP_VERSION_MAJOR) && (HIP_VERSION_MAJOR * 100 + HIP_VERSION_MINOR) >= 608) || \
+     (defined(CUDA_VERSION) && CUDA_VERSION >= 12080)) && \
+    (__HIP_ARCH__ >= 900 || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900))
 #define DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX 1
 #endif
 
@@ -69,18 +79,29 @@
  * @return The value of the global timer
  */
 __device__ static __forceinline__ uint64_t radaki_dev_query_globaltimer() {
+#ifdef __HIP_PLATFORM_AMD__
+    return (uint64_t)wall_clock64();
+#else
     uint64_t ret;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(ret)::"memory");
     return ret;
+#endif
 }
 
 __device__ static __forceinline__ unsigned int radaki_dev_get_lane_id() {
+#ifdef __HIP_PLATFORM_AMD__
+    return __lane_id();
+#else
     unsigned int ret;
     asm volatile("mov.u32 %0, %%laneid;" : "=r"(ret));
     return ret;
+#endif
 }
 
 __device__ static __forceinline__ uint64_t radaki_dev_bswap64(uint64_t x) {
+#ifdef __HIP_PLATFORM_AMD__
+    return __builtin_bswap64(x);
+#else
     uint64_t ret;
     asm volatile(
         "{\n\t"
@@ -99,9 +120,13 @@ __device__ static __forceinline__ uint64_t radaki_dev_bswap64(uint64_t x) {
         : "=l"(ret)
         : "l"(x));
     return ret;
+#endif
 }
 
 __device__ static __forceinline__ uint32_t radaki_dev_bswap32(uint32_t x) {
+#ifdef __HIP_PLATFORM_AMD__
+    return __builtin_bswap32(x);
+#else
     uint32_t ret;
     asm volatile(
         "{\n\t"
@@ -113,9 +138,13 @@ __device__ static __forceinline__ uint32_t radaki_dev_bswap32(uint32_t x) {
         : "=r"(ret)
         : "r"(x));
     return ret;
+#endif
 }
 
 __device__ static __forceinline__ uint16_t radaki_dev_bswap16(uint16_t x) {
+#ifdef __HIP_PLATFORM_AMD__
+    return (uint16_t)((__builtin_bswap32((uint32_t)x) >> 16) & 0xffff);
+#else
     uint16_t ret;
     asm volatile(
         "{\n\t"
@@ -127,18 +156,30 @@ __device__ static __forceinline__ uint16_t radaki_dev_bswap16(uint16_t x) {
         : "=h"(ret)
         : "h"(x));
     return ret;
+#endif
 }
 
 #ifdef DOCA_GPUNETIO_VERBS_HAS_STORE_RELAXED_MMIO
 __device__ static __forceinline__ void radaki_dev_store_relaxed_mmio(uint64_t *ptr,
                                                                              uint64_t val) {
+#ifdef __HIP_PLATFORM_AMD__
+    __atomic_store_n(ptr, val, __ATOMIC_RELAXED);
+#else
     asm volatile("st.mmio.relaxed.sys.global.b64 [%0], %1;" : : "l"(ptr), "l"(val));
+#endif
 }
 #endif
 
 template <enum radaki_dev_sync_scope sync_scope>
 __device__ static __forceinline__ void radaki_dev_fence_acquire() {
-#ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
+#ifdef __HIP_PLATFORM_AMD__
+    if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
+        __threadfence_block();
+    else if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
+        __threadfence();
+    else
+        __threadfence_system();
+#elif defined(DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX)
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
         asm volatile("fence.acquire.cta;");
     else if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
@@ -160,7 +201,14 @@ __device__ static __forceinline__ void radaki_dev_fence_acquire() {
 
 template <enum radaki_dev_sync_scope sync_scope>
 __device__ static __forceinline__ void radaki_dev_fence_release() {
-#ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
+#ifdef __HIP_PLATFORM_AMD__
+    if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
+        __threadfence_block();
+    else if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
+        __threadfence();
+    else
+        __threadfence_system();
+#elif defined(DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX)
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA)
         asm volatile("fence.release.cta;");
     else if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
@@ -184,19 +232,35 @@ __device__ static __forceinline__ void radaki_dev_fence_release() {
 template <enum radaki_dev_sync_scope sync_scope>
 __device__ static __forceinline__ void radaki_dev_async_store_release(uint32_t *ptr,
                                                                               uint32_t val) {
+#ifdef __HIP_PLATFORM_AMD__
+    __atomic_store_n(ptr, val, __ATOMIC_RELEASE);
+    if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
+        __threadfence();
+    else
+        __threadfence_system();
+#else
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
         asm volatile("st.async.mmio.release.gpu.b32 [%0], %1;" : : "l"(ptr), "r"(val));
     else
         asm volatile("st.async.mmio.release.sys.global.b32 [%0], %1;" : : "l"(ptr), "r"(val));
+#endif
 }
 
 template <enum radaki_dev_sync_scope sync_scope>
 __device__ static __forceinline__ void radaki_dev_async_store_release(uint64_t *ptr,
                                                                               uint64_t val) {
+#ifdef __HIP_PLATFORM_AMD__
+    __atomic_store_n(ptr, val, __ATOMIC_RELEASE);
+    if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
+        __threadfence();
+    else
+        __threadfence_system();
+#else
     if (sync_scope == DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU)
         asm volatile("st.async.mmio.release.gpu.global.b64 [%0], %1;" : : "l"(ptr), "l"(val));
     else
         asm volatile("st.async.mmio.release.sys.global.b64 [%0], %1;" : : "l"(ptr), "l"(val));
+#endif
 }
 #endif
 
@@ -291,13 +355,13 @@ __device__ static __forceinline__ T radaki_dev_atomic_max(T *ptr, T val) {
         *ptr = max(old_val, val);
         return old_val;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
-        cuda::atomic_ref<T, cuda::thread_scope_block> ptr_aref(*ptr);
+        doca_hip::atomic_ref<T, doca_hip::thread_scope_block> ptr_aref(*ptr);
         return ptr_aref.fetch_max(
-            val, need_fence_acquire ? cuda::memory_order_acquire : cuda::memory_order_relaxed);
+            val, need_fence_acquire ? doca_hip::memory_order_acquire : doca_hip::memory_order_relaxed);
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
-        cuda::atomic_ref<T, cuda::thread_scope_device> ptr_aref(*ptr);
+        doca_hip::atomic_ref<T, doca_hip::thread_scope_device> ptr_aref(*ptr);
         return ptr_aref.fetch_max(
-            val, need_fence_acquire ? cuda::memory_order_acquire : cuda::memory_order_relaxed);
+            val, need_fence_acquire ? doca_hip::memory_order_acquire : doca_hip::memory_order_relaxed);
     }
     return 0;
 }
@@ -309,11 +373,11 @@ __device__ static __forceinline__ T radaki_dev_atomic_add(T *ptr, T val) {
         *ptr = old_val + val;
         return old_val;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
-        cuda::atomic_ref<T, cuda::thread_scope_block> ptr_aref(*ptr);
-        return ptr_aref.fetch_add(val, cuda::memory_order_relaxed);
+        doca_hip::atomic_ref<T, doca_hip::thread_scope_block> ptr_aref(*ptr);
+        return ptr_aref.fetch_add(val, doca_hip::memory_order_relaxed);
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
-        cuda::atomic_ref<T, cuda::thread_scope_device> ptr_aref(*ptr);
-        return ptr_aref.fetch_add(val, cuda::memory_order_relaxed);
+        doca_hip::atomic_ref<T, doca_hip::thread_scope_device> ptr_aref(*ptr);
+        return ptr_aref.fetch_add(val, doca_hip::memory_order_relaxed);
     }
     return 0;
 }
@@ -336,10 +400,10 @@ __device__ static __forceinline__ void radaki_dev_lock(int *lock) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         *lock = 1;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
-        while (atomicCAS_block(lock, 0, 1) != 0) continue;
+        while (doca_hip_atomic_cas_block(lock, 0, 1) != 0) continue;
         radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA>();
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
-        while (atomicCAS(lock, 0, 1) != 0) continue;
+        while (doca_hip_atomic_cas(lock, 0, 1) != 0) continue;
         radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
     }
 }
@@ -354,43 +418,62 @@ __device__ static __forceinline__ void radaki_dev_unlock(int *lock) {
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
         *lock = 0;
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
-        cuda::atomic_ref<int, cuda::thread_scope_block> lock_aref(*lock);
-        lock_aref.store(0, cuda::memory_order_release);
+        doca_hip::atomic_ref<int, doca_hip::thread_scope_block> lock_aref(*lock);
+        lock_aref.store(0, doca_hip::memory_order_release);
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
-        cuda::atomic_ref<int, cuda::thread_scope_device> lock_aref(*lock);
-        lock_aref.store(0, cuda::memory_order_release);
+        doca_hip::atomic_ref<int, doca_hip::thread_scope_device> lock_aref(*lock);
+        lock_aref.store(0, doca_hip::memory_order_release);
     }
 }
 
 __device__ static __forceinline__ uint8_t radaki_dev_load_relaxed_sys_global(uint8_t *ptr) {
+#ifdef __HIP_PLATFORM_AMD__
+    return (uint8_t)__atomic_load_n(ptr, __ATOMIC_RELAXED);
+#else
     uint16_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b8 %0, [%1];" : "=h"(ret) : "l"(ptr));
     return (uint8_t)ret;
+#endif
 }
 
 __device__ static __forceinline__ uint32_t
 radaki_dev_load_relaxed_sys_global(uint32_t *ptr) {
+#ifdef __HIP_PLATFORM_AMD__
+    return __atomic_load_n(ptr, __ATOMIC_RELAXED);
+#else
     uint32_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b32 %0, [%1];" : "=r"(ret) : "l"(ptr));
     return ret;
+#endif
 }
 
 __device__ static __forceinline__ uint64_t
 radaki_dev_load_relaxed_sys_global(uint64_t *ptr) {
+#ifdef __HIP_PLATFORM_AMD__
+    return __atomic_load_n(ptr, __ATOMIC_RELAXED);
+#else
     uint64_t ret;
     asm volatile("ld.relaxed.sys.global.L1::no_allocate.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
     return ret;
+#endif
 }
 
 template <enum radaki_dev_resource_sharing_mode resource_sharing_mode>
 __device__ static __forceinline__ uint64_t radaki_dev_load_relaxed(uint64_t *ptr) {
     uint64_t ret = 0;
+#ifdef __HIP_PLATFORM_AMD__
+    if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE)
+        ret = *ptr;
+    else
+        ret = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+#else
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE)
         ret = *ptr;
     else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA)
         asm volatile("ld.relaxed.cta.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
     else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU)
         asm volatile("ld.relaxed.gpu.b64 %0, [%1];" : "=l"(ret) : "l"(ptr));
+#endif
     return ret;
 }
 
@@ -419,5 +502,9 @@ __device__ static __forceinline__ uint32_t
 radaki_dev_div_ceil_aligned_pow2_32bits(uint64_t x, int denominator_shift) {
     return uint32_t(x >> denominator_shift) + !!__funnelshift_r(0, uint32_t(x), denominator_shift);
 }
+
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic pop
+#endif
 
 #endif /* DOCA_GPUNETIO_DEV_VERBS_COMMON_H */

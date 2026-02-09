@@ -38,13 +38,27 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_QP_H
 #define DOCA_GPUNETIO_DEV_VERBS_QP_H
 
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wunneeded-internal-declaration"
+#endif
+
 #include <atomic>
-#include "doca_gpunetio_dev_verbs_cq.cuh"
+#include <cassert>
+#include "doca_hip_atomic.hip.h"
+#include "doca_gpunetio_dev_verbs_cq.hip.h"
 
 /* *********** WQE UTILS *********** */
 __device__ static __forceinline__ void radaki_dev_store_wqe_seg(uint64_t *ptr,
                                                                         uint64_t *val) {
+#ifdef __HIP_PLATFORM_AMD__
+    __atomic_store_n(&ptr[0], val[0], __ATOMIC_RELEASE);
+    __atomic_store_n(&ptr[1], val[1], __ATOMIC_RELEASE);
+    __threadfence();
+#else
     asm volatile("st.weak.cs.v2.b64 [%0], {%1, %2};" : : "l"(ptr), "l"(val[0]), "l"(val[1]));
+#endif
 }
 
 /**
@@ -120,16 +134,16 @@ __device__ static __forceinline__ void radaki_dev_mark_wqes_ready(
         qp->sq_ready_index = to_wqe_idx + 1;
     else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_CTA) {
         radaki_dev_fence_release<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA>();
-        cuda::atomic_ref<uint64_t, cuda::thread_scope_block> ready_index_aref(qp->sq_ready_index);
-        while (ready_index_aref.load(cuda::memory_order_relaxed) != from_wqe_idx) continue;
+        doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_block> ready_index_aref(qp->sq_ready_index);
+        while (ready_index_aref.load(doca_hip::memory_order_relaxed) != from_wqe_idx) continue;
         radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_CTA>();
-        ready_index_aref.store(to_wqe_idx + 1, cuda::memory_order_relaxed);
+        ready_index_aref.store(to_wqe_idx + 1, doca_hip::memory_order_relaxed);
     } else if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_GPU) {
         radaki_dev_fence_release<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
-        cuda::atomic_ref<uint64_t, cuda::thread_scope_device> ready_index_aref(qp->sq_ready_index);
-        while (ready_index_aref.load(cuda::memory_order_relaxed) != from_wqe_idx) continue;
+        doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_device> ready_index_aref(qp->sq_ready_index);
+        while (ready_index_aref.load(doca_hip::memory_order_relaxed) != from_wqe_idx) continue;
         radaki_dev_fence_acquire<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
-        ready_index_aref.store(to_wqe_idx + 1, cuda::memory_order_relaxed);
+        ready_index_aref.store(to_wqe_idx + 1, doca_hip::memory_order_relaxed);
     }
 }
 
@@ -176,8 +190,8 @@ __device__ static __forceinline__ void doca_priv_gpu_dev_verbs_update_dbr(
     __be32 dbrec_val = radaki_dev_prepare_dbr(prod_index);
     __be32 *dbrec_ptr = (__be32 *)__ldg((uintptr_t *)&qp->sq_dbrec);
 
-    cuda::atomic_ref<__be32, cuda::thread_scope_system> dbrec_ptr_aref(*dbrec_ptr);
-    dbrec_ptr_aref.store(dbrec_val, cuda::memory_order_relaxed);
+    doca_hip::atomic_ref<__be32, doca_hip::thread_scope_system> dbrec_ptr_aref(*dbrec_ptr);
+    dbrec_ptr_aref.store(dbrec_val, doca_hip::memory_order_relaxed);
 }
 
 /**
@@ -200,6 +214,8 @@ __device__ static __forceinline__ void radaki_dev_update_dbr(
     } else
 #endif
     {
+        (void)dbrec_val;
+        (void)dbrec_ptr;
         radaki_dev_fence_release<sync_scope>();
         doca_priv_gpu_dev_verbs_update_dbr<qp_type>(qp, prod_index);
     }
@@ -214,7 +230,7 @@ __device__ static __forceinline__ void radaki_dev_update_dbr(
  */
 __device__ static __forceinline__ __be64
 radaki_dev_prepare_db(struct radaki_dev_qp *qp, uint64_t prod_index) {
-    struct radaki_dev_wqe_ctrl_seg ctrl_seg = {0};
+    struct radaki_dev_wqe_ctrl_seg ctrl_seg = {};
 
     // The only ctrl segment fields that are inspected while ringing
     // the DB are QP number and WQE index
@@ -252,9 +268,9 @@ __device__ static __forceinline__ void radaki_dev_ring_db(struct radaki_dev_qp *
     }
 #else
     {
-        cuda::atomic_ref<uint64_t, cuda::thread_scope_system> db_ptr_aref(*((uint64_t *)db_ptr));
+        doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_system> db_ptr_aref(*((uint64_t *)db_ptr));
         radaki_dev_fence_release<sync_scope>();
-        db_ptr_aref.store(db_val, cuda::memory_order_relaxed);
+        db_ptr_aref.store(db_val, doca_hip::memory_order_relaxed);
     }
 #endif
 }
@@ -310,13 +326,13 @@ template <enum radaki_dev_resource_sharing_mode resource_sharing_mode>
 __device__ static __forceinline__ void radaki_dev_ring_proxy(
     struct radaki_dev_qp *qp, uint64_t prod_idx) {
     uint64_t *proxy_ptr = (uint64_t *)__ldg((uintptr_t *)&qp->sq_db);
-    cuda::atomic_ref<uint64_t, cuda::thread_scope_system> proxy_ptr_aref(*proxy_ptr);
+    doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_system> proxy_ptr_aref(*proxy_ptr);
 
     if (resource_sharing_mode == DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_EXCLUSIVE) {
-        proxy_ptr_aref.store(prod_idx, cuda::memory_order_relaxed);
-        WRITE_ONCE(*proxy_ptr, prod_idx);
+        proxy_ptr_aref.store(prod_idx, doca_hip::memory_order_relaxed);
+        *proxy_ptr = prod_idx;
     } else {
-        proxy_ptr_aref.fetch_max(prod_idx, cuda::memory_order_relaxed);
+        proxy_ptr_aref.fetch_max(prod_idx, doca_hip::memory_order_relaxed);
     }
 }
 
@@ -819,6 +835,10 @@ __device__ static __forceinline__ void radaki_dev_wqe_prepare_wait(
     radaki_dev_store_wqe_seg((uint64_t *)&(wqe_ptr->dseg0), (uint64_t *)&(cseg));
     radaki_dev_store_wqe_seg((uint64_t *)&(wqe_ptr->dseg1), (uint64_t *)&(wseg));
 }
+
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic pop
+#endif
 
 #endif /* DOCA_GPUNETIO_DEV_VERBS_QP_H */
 

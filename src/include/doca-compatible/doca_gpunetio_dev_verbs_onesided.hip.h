@@ -38,8 +38,9 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_ONESIDED_CUH
 #define DOCA_GPUNETIO_DEV_VERBS_ONESIDED_CUH
 
-#include "doca_gpunetio_dev_verbs_qp.cuh"
-#include "doca_gpunetio_dev_verbs_cq.cuh"
+#include "doca_gpunetio_dev_verbs_structs.hip.h"
+#include "doca_gpunetio_dev_verbs_qp.hip.h"
+#include "doca_gpunetio_dev_verbs_cq.hip.h"
 
 /* **************************************** PUT **************************************** */
 template <enum radaki_dev_resource_sharing_mode resource_sharing_mode =

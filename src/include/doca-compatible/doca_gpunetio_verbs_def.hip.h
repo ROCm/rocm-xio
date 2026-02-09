@@ -49,7 +49,11 @@ extern "C" {
 /**
  * Macro to temporarily cast a variable to volatile.
  */
-#define DOCA_GPUNETIO_VOLATILE(x) (*(volatile typeof(x) *)&(x))
+#if defined(__cplusplus) && __cplusplus >= 201103L
+#define DOCA_GPUNETIO_VOLATILE(x) (*(volatile decltype(x) *)&(x))
+#else
+#define DOCA_GPUNETIO_VOLATILE(x) (*(volatile __typeof__(x) *)&(x))
+#endif
 
 /**
  * Default warp size value of 32 threads
@@ -123,7 +127,12 @@ extern "C" {
     (1ULL << DOCA_GPUNETIO_VERBS_MAX_TRANSFER_SIZE_SHIFT)  // 1GiB
 
 #ifndef ACCESS_ONCE
-#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+#if defined(__cplusplus) && __cplusplus >= 201103L
+#include <type_traits>
+#define ACCESS_ONCE(x) (*(volatile typename std::remove_reference<decltype(x)>::type *)&(x))
+#else
+#define ACCESS_ONCE(x) (*(volatile __typeof__(x) *)&(x))
+#endif
 #endif
 
 #ifndef READ_ONCE

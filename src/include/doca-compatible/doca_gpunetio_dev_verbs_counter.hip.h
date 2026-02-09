@@ -39,8 +39,10 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_COUNTER_CUH
 #define DOCA_GPUNETIO_DEV_VERBS_COUNTER_CUH
 
-#include "doca_gpunetio_dev_verbs_qp.cuh"
-#include "doca_gpunetio_dev_verbs_cq.cuh"
+#include "doca_hip_atomic.hip.h"
+#include "doca_gpunetio_dev_verbs_structs.hip.h"
+#include "doca_gpunetio_dev_verbs_qp.hip.h"
+#include "doca_gpunetio_dev_verbs_cq.hip.h"
 
 /**
  * @brief Submit work requests to the NIC using the DB protocol.
@@ -82,9 +84,9 @@ __device__ static __forceinline__ void radaki_dev_submit_db_multi_qps(
                 { radaki_dev_store_relaxed_mmio((uint64_t *)db_ptr, (uint64_t)db_vals[i]); }
 #else
                 {
-                    cuda::atomic_ref<uint64_t, cuda::thread_scope_system> db_ptr_aref(
+                    doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_system> db_ptr_aref(
                         *((uint64_t *)db_ptr));
-                    db_ptr_aref.store(db_vals[i], cuda::memory_order_relaxed);
+                    db_ptr_aref.store(db_vals[i], doca_hip::memory_order_relaxed);
                 }
 #endif
             }
@@ -110,9 +112,9 @@ __device__ static __forceinline__ void radaki_dev_submit_db_multi_qps(
                 { radaki_dev_store_relaxed_mmio((uint64_t *)db_ptr, (uint64_t)db_vals[i]); }
 #else
                 {
-                    cuda::atomic_ref<uint64_t, cuda::thread_scope_system> db_ptr_aref(
+                    doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_system> db_ptr_aref(
                         *((uint64_t *)db_ptr));
-                    db_ptr_aref.store(db_vals[i], cuda::memory_order_relaxed);
+                    db_ptr_aref.store(db_vals[i], doca_hip::memory_order_relaxed);
                 }
 #endif
             }

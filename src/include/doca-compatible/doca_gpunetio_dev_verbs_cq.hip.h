@@ -38,9 +38,15 @@
 #ifndef DOCA_GPUNETIO_DEV_VERBS_CQ_H
 #define DOCA_GPUNETIO_DEV_VERBS_CQ_H
 
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+
 #include <errno.h>
 
-#include "doca_gpunetio_dev_verbs_common.cuh"
+#include "doca_gpunetio_dev_verbs_common.hip.h"
+#include "doca_gpunetio_dev_verbs_structs.hip.h"
 
 /**
  * @brief Return device CQ SQ pointer from a device QP
@@ -281,15 +287,24 @@ radaki_dev_cq_update_dbrec(struct radaki_dev_cq *cq, uint32_t cqe_num) {
 
     cqe_ci = (cqe_ci + cqe_num) & DOCA_GPUNETIO_VERBS_CQE_CI_MASK;
     if (is_overrun == false) {
+#ifdef __HIP_PLATFORM_AMD__
+        __atomic_store_n((uint32_t *)cq->dbrec, radaki_dev_bswap32(cqe_ci), __ATOMIC_RELEASE);
+        __threadfence();
+#else
         asm volatile("st.release.gpu.global.L1::no_allocate.b32 [%0], %1;"
                      :
                      : "l"(cq->dbrec), "r"(radaki_dev_bswap32(cqe_ci)));
+#endif
     }
 
     DOCA_GPUNETIO_VOLATILE(cq->cqe_ci) = cqe_ci;
 
     return cqe_ci;
 }
+
+#if defined(__clang__) || defined(__HIPCC__)
+#pragma clang diagnostic pop
+#endif
 
 #endif /* DOCA_GPUNETIO_DEV_VERBS_CQ_H */
 
