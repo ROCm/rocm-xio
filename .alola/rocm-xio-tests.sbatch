@@ -7,7 +7,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
-#SBATCH --container-workdir=/home/AMD/stebates/Projects/rocm-xio
 #SBATCH --constraint=MARKHAM
 #SBATCH --gpus-per-node=1
 
@@ -17,6 +16,8 @@ ITERATIONS=100
 THREADS=4
 DOORBELL=64
 DELAY=1000
+
+cd ${HOME}/Projects/rocm-xio
 
 ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
   sed -e 's/ *Name: *\(gfx[0-9,a-f]*\) *$/\1/')
