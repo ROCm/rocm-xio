@@ -68,3 +68,7 @@ gda-experiments/rocSHMEM/
 __pycache__/
 *.pyc
 *.pyo
+
+# Alola slurm-based output files.
+.alola/*.err
+.alola/*.out
