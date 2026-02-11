@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: sbatch rocm-xio-tests.sbatch
+# usage: sbatch rocm-xio-tests.single-gpu.sbatch
 #
 #SBATCH --array=1-4
 #SBATCH --output=%x.%A.%a.out
@@ -11,33 +11,20 @@
 #SBATCH --gpus-per-node=1
 
 set -e
+if [ -n "${SLURM_SUBMIT_DIR}" ]; then
+  . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
+else
+  . "$(dirname "${BASH_SOURCE[0]}")/rocm-xio-tests.common"
+fi
 
 ITERATIONS=100
 THREADS=4
 DOORBELL=64
 DELAY=1000
 
-cd ${HOME}/Projects/rocm-xio
-
-ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
-  sed -e 's/ *Name: *\(gfx[0-9,a-f]*\) *$/\1/')
-echo "Detected GPU architecture: ${ROCM_GPU_ARCH}"
-
-# Whitelist: 300A (gfx941), 300X/325X (gfx942), 355X (gfx950)
-SDMA_EP_GFX_WHITELIST="${SDMA_EP_GFX_WHITELIST:-gfx941 gfx942 gfx950}"
-sdma_ep_allowed=false
-for g in $SDMA_EP_GFX_WHITELIST; do
-  if [ "${ROCM_GPU_ARCH}" = "$g" ]; then sdma_ep_allowed=true; break; fi
-done
-
-WORKING_DIR="/tmp/rocm-xio-tests-$RANDOM"
-mkdir -p ${WORKING_DIR}
-#git clone git@github.com:ROCm/rocm-xio.git ${WORKING_DIR}
-rsync -a --exclude='.git' . ${WORKING_DIR}
-cd ${WORKING_DIR}
-rm -rf build
-cmake -S . -B build
-cmake --build build --target all --parallel
+cd "${PROJECT_DIR}"
+detect_gpu_arch
+setup_and_build_workdir "single-gpu"
 ./build/xio-tester test-ep --emulate -n ${ITERATIONS}
 ./build/xio-tester test-ep -n ${ITERATIONS}
 ./build/xio-tester test-ep -n ${ITERATIONS} --threads ${THREADS} \
@@ -54,5 +41,5 @@ if $sdma_ep_allowed; then
 else
   echo "INFO: Skipping sdma-ep tests (${ROCM_GPU_ARCH} not in SDMA whitelist)."
 fi
-cd $HOME
-rm -rf ${WORKING_DIR}
+cd "$HOME"
+rm -rf "${WORKING_DIR}"
