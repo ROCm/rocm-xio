@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+ * All rights reserved. SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
+ * 1. Redistributions of source code must retain the above copyright notice,
+ * this list of conditions and the following disclaimer.
  *
  * 2. Redistributions in binary form must reproduce the above copyright notice,
  * this list of conditions and the following disclaimer in the documentation
@@ -18,14 +18,15 @@
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 /**
@@ -36,9 +37,9 @@
 #ifndef DOCA_GPUNETIO_H
 #define DOCA_GPUNETIO_H
 
-#include "host/doca_error.h"
-#include "doca_gpunetio_config.h"
 #include "common/doca_gpunetio_verbs_def.h"
+#include "doca_gpunetio_config.h"
+#include "host/doca_error.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,12 +58,12 @@ struct doca_gpu;
  *
  */
 enum doca_gpu_mem_type {
-    /* GPU memory not accessible from CPU. */
-    DOCA_GPU_MEM_TYPE_GPU = 0,
-    /* GPU memory with direct access from CPU. */
-    DOCA_GPU_MEM_TYPE_GPU_CPU = 1,
-    /* CPU memory with direct access from GPU. */
-    DOCA_GPU_MEM_TYPE_CPU_GPU = 2,
+  /* GPU memory not accessible from CPU. */
+  DOCA_GPU_MEM_TYPE_GPU = 0,
+  /* GPU memory with direct access from CPU. */
+  DOCA_GPU_MEM_TYPE_GPU_CPU = 1,
+  /* CPU memory with direct access from GPU. */
+  DOCA_GPU_MEM_TYPE_CPU_GPU = 2,
 };
 
 /**
@@ -77,33 +78,33 @@ struct radaki_dev_cq;
  *
  */
 struct doca_gpu_verbs_qp {
-    struct doca_gpu *gpu_dev;
-    struct doca_verbs_qp *qp;
-    uint64_t *cpu_db;
-    uint64_t sq_wqe_pi_last;
-    uint64_t *sq_db;
-    __be32 *sq_dbrec;
-    bool cpu_proxy;
-    uint32_t sq_num_shift8_be;
-    /* CPU handler */
-    struct radaki_dev_qp *qp_cpu;
-    /* GPU handler */
-    struct radaki_dev_qp *qp_gpu;
+  struct doca_gpu* gpu_dev;
+  struct doca_verbs_qp* qp;
+  uint64_t* cpu_db;
+  uint64_t sq_wqe_pi_last;
+  uint64_t* sq_db;
+  __be32* sq_dbrec;
+  bool cpu_proxy;
+  uint32_t sq_num_shift8_be;
+  /* CPU handler */
+  struct radaki_dev_qp* qp_cpu;
+  /* GPU handler */
+  struct radaki_dev_qp* qp_gpu;
 };
 
 /**
  * @brief GPUNetIO QP Error info.
  */
 struct doca_gpu_verbs_qp_error_info {
-    bool has_error;
-    int syndrome;
-    int vendor_err_synd;
-    int hw_err_synd;
-    int hw_synd_type;
-    int wqe_counter;
+  bool has_error;
+  int syndrome;
+  int vendor_err_synd;
+  int hw_err_synd;
+  int hw_synd_type;
+  int wqe_counter;
 };
 
-typedef void *doca_gpu_verbs_service_t;
+typedef void* doca_gpu_verbs_service_t;
 
 /**
  * @brief Create a DOCA GPUNETIO handler.
@@ -121,7 +122,7 @@ typedef void *doca_gpu_verbs_service_t;
  * - DOCA_ERROR_NO_MEMORY - failed to alloc doca_gpu.
  *
  */
-doca_error_t doca_gpu_create(const char *gpu_bus_id, struct doca_gpu **gpu_dev);
+doca_error_t doca_gpu_create(const char* gpu_bus_id, struct doca_gpu** gpu_dev);
 
 /**
  * @brief Destroy a DOCA GPUNETIO handler.
@@ -133,11 +134,12 @@ doca_error_t doca_gpu_create(const char *gpu_bus_id, struct doca_gpu **gpu_dev);
  * DOCA_SUCCESS - in case of success.
  * doca_error code - in case of failure:
  */
-doca_error_t doca_gpu_destroy(struct doca_gpu *gpu_dev);
+doca_error_t doca_gpu_destroy(struct doca_gpu* gpu_dev);
 
 /**
- * Allocate a GPU accessible memory buffer. Assumes DPDK has been already attached with
- * doca_gpu_to_dpdk(). According to the memory type specified, the buffer can be allocated in:
+ * Allocate a GPU accessible memory buffer. Assumes DPDK has been already
+ * attached with doca_gpu_to_dpdk(). According to the memory type specified, the
+ * buffer can be allocated in:
  * - DOCA_GPU_MEM_TYPE_GPU memptr_gpu is not NULL while memptr_cpu is NULL.
  * - DOCA_GPU_MEM_TYPE_GPU_CPU both memptr_gpu and memptr_cpu are not NULL.
  * - DOCA_GPU_MEM_TYPE_CPU_GPU both memptr_gpu and memptr_cpu are not NULL.
@@ -161,18 +163,20 @@ doca_error_t doca_gpu_destroy(struct doca_gpu *gpu_dev);
  *
  * @return
  * Non NULL memptr_gpu pointer on success, NULL otherwise.
- * Non NULL memptr_cpu pointer on success in case of DOCA_GPU_MEM_TYPE_CPU_GPU and
- * DOCA_GPU_MEM_TYPE_GPU_CPU, NULL otherwise. DOCA_SUCCESS - in case of success. doca_error code -
- * in case of failure:
+ * Non NULL memptr_cpu pointer on success in case of DOCA_GPU_MEM_TYPE_CPU_GPU
+ * and DOCA_GPU_MEM_TYPE_GPU_CPU, NULL otherwise. DOCA_SUCCESS - in case of
+ * success. doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  * - DOCA_ERROR_NO_MEMORY - if an error occurred dealing with GPU memory.
  */
-doca_error_t doca_gpu_mem_alloc(struct doca_gpu *gpu_dev, size_t size, size_t alignment,
-                                enum doca_gpu_mem_type mtype, void **memptr_gpu, void **memptr_cpu);
+doca_error_t doca_gpu_mem_alloc(struct doca_gpu* gpu_dev, size_t size,
+                                size_t alignment, enum doca_gpu_mem_type mtype,
+                                void** memptr_gpu, void** memptr_cpu);
 
 /**
  * Free a GPU memory buffer.
- * Only memory allocated with doca_gpu_mem_alloc() can be freed with this function.
+ * Only memory allocated with doca_gpu_mem_alloc() can be freed with this
+ * function.
  *
  * @param [in] gpu
  * DOCA GPUNetIO handler.
@@ -184,7 +188,7 @@ doca_error_t doca_gpu_mem_alloc(struct doca_gpu *gpu_dev, size_t size, size_t al
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_mem_free(struct doca_gpu *gpu, void *memptr_gpu);
+doca_error_t doca_gpu_mem_free(struct doca_gpu* gpu, void* memptr_gpu);
 
 /**
  * Create a GPU handler for a Verbs QP object
@@ -207,10 +211,12 @@ doca_error_t doca_gpu_mem_free(struct doca_gpu *gpu, void *memptr_gpu);
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_export_qp(struct doca_gpu *gpu_dev, struct doca_verbs_qp *qp,
+doca_error_t doca_gpu_verbs_export_qp(struct doca_gpu* gpu_dev,
+                                      struct doca_verbs_qp* qp,
                                       enum radaki_dev_nic_handler nic_handler,
-                                      void *gpu_qp_umem_dev_ptr, struct doca_verbs_cq *cq_sq,
-                                      struct doca_gpu_verbs_qp **qp_out);
+                                      void* gpu_qp_umem_dev_ptr,
+                                      struct doca_verbs_cq* cq_sq,
+                                      struct doca_gpu_verbs_qp** qp_out);
 
 /**
  * Destroy a GPU handler for a Verbs QP object
@@ -225,7 +231,8 @@ doca_error_t doca_gpu_verbs_export_qp(struct doca_gpu *gpu_dev, struct doca_verb
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_unexport_qp(struct doca_gpu *gpu_dev, struct doca_gpu_verbs_qp *qp);
+doca_error_t doca_gpu_verbs_unexport_qp(struct doca_gpu* gpu_dev,
+                                        struct doca_gpu_verbs_qp* qp);
 
 /**
  * Get a GPUNetIO GPU device handler handler from a GPUNetIO Verbs QP object.
@@ -240,12 +247,12 @@ doca_error_t doca_gpu_verbs_unexport_qp(struct doca_gpu *gpu_dev, struct doca_gp
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_get_qp_dev(struct doca_gpu_verbs_qp *qp,
-                                       struct radaki_dev_qp **qp_gpu);
+doca_error_t doca_gpu_verbs_get_qp_dev(struct doca_gpu_verbs_qp* qp,
+                                       struct radaki_dev_qp** qp_gpu);
 
 /**
- * Return a DMABuf file descriptor from a GPU memory address if the GPU device and CUDA installation
- * supports DMABuf.
+ * Return a DMABuf file descriptor from a GPU memory address if the GPU device
+ * and CUDA installation supports DMABuf.
  *
  * @param [in] gpu_dev
  * DOCA GPUNetIO handler.
@@ -262,8 +269,8 @@ doca_error_t doca_gpu_verbs_get_qp_dev(struct doca_gpu_verbs_qp *qp,
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  * - DOCA_ERROR_NOT_SUPPORTED - DMABuf not supported
  */
-doca_error_t doca_gpu_dmabuf_fd(struct doca_gpu *gpu_dev, void *memptr_gpu, size_t size,
-                                int *dmabuf_fd);
+doca_error_t doca_gpu_dmabuf_fd(struct doca_gpu* gpu_dev, void* memptr_gpu,
+                                size_t size, int* dmabuf_fd);
 
 /**
  * Check if UAR can be registered on GPU
@@ -278,7 +285,8 @@ doca_error_t doca_gpu_dmabuf_fd(struct doca_gpu *gpu_dev, void *memptr_gpu, size
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_can_gpu_register_uar(void *db, bool *out_can_register);
+doca_error_t doca_gpu_verbs_can_gpu_register_uar(void* db,
+                                                 bool* out_can_register);
 
 /**
  * Export UAR to GPU
@@ -294,7 +302,8 @@ doca_error_t doca_gpu_verbs_can_gpu_register_uar(void *db, bool *out_can_registe
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  * - DOCA_ERROR_DRIVER - if UAR mapping failed
  */
-doca_error_t doca_gpu_verbs_export_uar(uint64_t *sq_db, uint64_t **uar_addr_gpu);
+doca_error_t doca_gpu_verbs_export_uar(uint64_t* sq_db,
+                                       uint64_t** uar_addr_gpu);
 
 /**
  * Unexport UAR from GPU
@@ -307,7 +316,7 @@ doca_error_t doca_gpu_verbs_export_uar(uint64_t *sq_db, uint64_t **uar_addr_gpu)
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_unexport_uar(uint64_t *uar_addr_gpu);
+doca_error_t doca_gpu_verbs_unexport_uar(uint64_t* uar_addr_gpu);
 
 /**
  * Progress QP (ring db) in case of CPU proxy mode
@@ -320,7 +329,8 @@ doca_error_t doca_gpu_verbs_unexport_uar(uint64_t *uar_addr_gpu);
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_cpu_proxy_progress(struct doca_gpu_verbs_qp *qp_cpu);
+doca_error_t doca_gpu_verbs_cpu_proxy_progress(
+  struct doca_gpu_verbs_qp* qp_cpu);
 
 /**
  * Create a service object.
@@ -333,7 +343,8 @@ doca_error_t doca_gpu_verbs_cpu_proxy_progress(struct doca_gpu_verbs_qp *qp_cpu)
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_create_service(doca_gpu_verbs_service_t *out_service);
+doca_error_t doca_gpu_verbs_create_service(
+  doca_gpu_verbs_service_t* out_service);
 
 /**
  * Monitor a QP and make forward progress.
@@ -349,7 +360,7 @@ doca_error_t doca_gpu_verbs_create_service(doca_gpu_verbs_service_t *out_service
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
 doca_error_t doca_gpu_verbs_service_monitor_qp(doca_gpu_verbs_service_t service,
-                                               struct doca_gpu_verbs_qp *qp);
+                                               struct doca_gpu_verbs_qp* qp);
 
 /**
  * Destroy a service object.
@@ -377,8 +388,9 @@ doca_error_t doca_gpu_verbs_destroy_service(doca_gpu_verbs_service_t service);
  * doca_error code - in case of failure:
  * - DOCA_ERROR_INVALID_VALUE - if an invalid input had been received.
  */
-doca_error_t doca_gpu_verbs_query_last_error(struct doca_gpu_verbs_qp *qp,
-                                             struct doca_gpu_verbs_qp_error_info *error_info);
+doca_error_t doca_gpu_verbs_query_last_error(
+  struct doca_gpu_verbs_qp* qp,
+  struct doca_gpu_verbs_qp_error_info* error_info);
 
 #ifdef __cplusplus
 }

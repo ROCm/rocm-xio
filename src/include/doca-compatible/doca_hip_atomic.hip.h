@@ -7,9 +7,10 @@
 #ifndef DOCA_HIP_ATOMIC_HIP_H
 #define DOCA_HIP_ATOMIC_HIP_H
 
-#include "hip/hip_runtime.h"
 #include <atomic>
 #include <cstdint>
+
+#include "hip/hip_runtime.h"
 
 namespace doca_hip {
 
@@ -23,39 +24,40 @@ constexpr std::memory_order memory_order_relaxed = std::memory_order_relaxed;
 constexpr std::memory_order memory_order_acquire = std::memory_order_acquire;
 constexpr std::memory_order memory_order_release = std::memory_order_release;
 
-/* Map scope to HIP fence (release semantics before store, acquire after load) */
+/* Map scope to HIP fence (release semantics before store, acquire after load)
+ */
 template <typename Scope>
 __device__ __forceinline__ void fence_release(Scope) {
-    __threadfence(); /* default device scope */
+  __threadfence(); /* default device scope */
 }
 template <>
 __device__ __forceinline__ void fence_release(thread_scope_block) {
-    __threadfence_block();
+  __threadfence_block();
 }
 template <>
 __device__ __forceinline__ void fence_release(thread_scope_device) {
-    __threadfence();
+  __threadfence();
 }
 template <>
 __device__ __forceinline__ void fence_release(thread_scope_system) {
-    __threadfence_system();
+  __threadfence_system();
 }
 
 template <typename Scope>
 __device__ __forceinline__ void fence_acquire(Scope) {
-    __threadfence();
+  __threadfence();
 }
 template <>
 __device__ __forceinline__ void fence_acquire(thread_scope_block) {
-    __threadfence_block();
+  __threadfence_block();
 }
 template <>
 __device__ __forceinline__ void fence_acquire(thread_scope_device) {
-    __threadfence();
+  __threadfence();
 }
 template <>
 __device__ __forceinline__ void fence_acquire(thread_scope_system) {
-    __threadfence_system();
+  __threadfence_system();
 }
 
 /**
@@ -64,50 +66,60 @@ __device__ __forceinline__ void fence_acquire(thread_scope_system) {
  */
 template <typename T, typename Scope>
 class atomic_ref {
-    T* ptr_;
+  T* ptr_;
 
 public:
-    __device__ explicit atomic_ref(T& ref) : ptr_(&ref) {}
+  __device__ explicit atomic_ref(T& ref) : ptr_(&ref) {
+  }
 
-    __device__ void store(T val, std::memory_order order = std::memory_order_seq_cst) {
-        __atomic_store_n(ptr_, val, order);
-    }
+  __device__ void store(T val,
+                        std::memory_order order = std::memory_order_seq_cst) {
+    __atomic_store_n(ptr_, val, order);
+  }
 
-    __device__ T load(std::memory_order order = std::memory_order_seq_cst) const {
-        return __atomic_load_n(ptr_, order);
-    }
+  __device__ T load(std::memory_order order = std::memory_order_seq_cst) const {
+    return __atomic_load_n(ptr_, order);
+  }
 
-    __device__ T fetch_add(T val, std::memory_order order = std::memory_order_relaxed) {
-        return __atomic_fetch_add(ptr_, val, order);
-    }
+  __device__ T fetch_add(T val,
+                         std::memory_order order = std::memory_order_relaxed) {
+    return __atomic_fetch_add(ptr_, val, order);
+  }
 
-    __device__ T fetch_max(T val, std::memory_order order = std::memory_order_relaxed) {
-        T old = __atomic_load_n(ptr_, order);
-        for (;;) {
-            if (val <= old) return old;
-            T new_val = val;
-            if (__atomic_compare_exchange_weak(ptr_, &old, new_val, order,
-                                               std::memory_order_relaxed))
-                return old;
-        }
+  __device__ T fetch_max(T val,
+                         std::memory_order order = std::memory_order_relaxed) {
+    T old = __atomic_load_n(ptr_, order);
+    for (;;) {
+      if (val <= old)
+        return old;
+      T new_val = val;
+      if (__atomic_compare_exchange_weak(ptr_, &old, new_val, order,
+                                         std::memory_order_relaxed))
+        return old;
     }
+  }
 };
 
 } /* namespace doca_hip */
 
-/* HIP-compatible compare-and-swap (return value = old value at *address). Global scope. */
-__device__ __forceinline__ int doca_hip_atomic_cas_block(int *address, int compare, int val) {
-    int expected = compare;
-    __atomic_compare_exchange_n(address, &expected, val, /*weak=*/false,
-                                std::memory_order_acq_rel, std::memory_order_relaxed);
-    return expected;
+/* HIP-compatible compare-and-swap (return value = old value at *address).
+ * Global scope. */
+__device__ __forceinline__ int doca_hip_atomic_cas_block(int* address,
+                                                         int compare, int val) {
+  int expected = compare;
+  __atomic_compare_exchange_n(address, &expected, val, /*weak=*/false,
+                              std::memory_order_acq_rel,
+                              std::memory_order_relaxed);
+  return expected;
 }
 
-__device__ __forceinline__ int doca_hip_atomic_cas(int *address, int compare, int val) {
-    int expected = compare;
-    __atomic_compare_exchange_n(address, &expected, val, /*weak=*/false,
-                                std::memory_order_acq_rel, std::memory_order_relaxed);
-    return expected;
+__device__ __forceinline__ int doca_hip_atomic_cas(int* address, int compare,
+                                                   int val) {
+  int expected = compare;
+  __atomic_compare_exchange_n(address, &expected, val, /*weak=*/false,
+                              std::memory_order_acq_rel,
+                              std::memory_order_relaxed);
+  return expected;
 }
 
 #endif /* DOCA_HIP_ATOMIC_HIP_H */
