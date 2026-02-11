@@ -1,5 +1,11 @@
 # rocm-xio: A ROCm Library for Accelerator-Initiated IO
 
+```
+srun --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh \
+  --container-mount-home --constraint "MARKHAM&(GFX942|GFX950)" \
+  --gres=gpu:2 --pty bash -i
+```
+
 ## Introduction
 
 This repository contains the source code for a ROCm library that provides
