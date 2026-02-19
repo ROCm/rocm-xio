@@ -1,9 +1,12 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-FileCopyrightText: Modifications
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Minimal device struct definitions for DOCA-compatible verbs.
  * Full definitions are in the DOCA SDK; this allows the hipified headers to
  * compile when only the device API is used.
- *
- * SPDX-License-Identifier: BSD-3-Clause
  */
 #ifndef DOCA_GPUNETIO_DEV_VERBS_STRUCTS_HIP_H
 #define DOCA_GPUNETIO_DEV_VERBS_STRUCTS_HIP_H

@@ -1,8 +1,11 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-FileCopyrightText: Modifications
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * HIP-compatible atomic wrapper for DOCA-compatible headers.
  * Replaces CUDA cuda::atomic_ref and maps memory scopes to HIP fences.
- *
- * SPDX-License-Identifier: BSD-3-Clause
  */
 #ifndef DOCA_HIP_ATOMIC_HIP_H
 #define DOCA_HIP_ATOMIC_HIP_H

@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-FileCopyrightText: Modifications
+ * Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
  * Compile test and basic sanity check for doca_hip_atomic.hip.h.
  * Run as: hipcc -x hip --offload-arch=<arch> -I src/include
  * test_doca_hip_atomic.hip -o test_atomic && ./test_atomic Or build with
