@@ -1,4 +1,3 @@
-#include "hip/hip_runtime.h"
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &
  * AFFILIATES. All rights reserved. SPDX-FileCopyrightText: Modifications
@@ -31,6 +30,11 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#if defined(__HIPCC__) || defined(__HIP_PLATFORM_AMD__) ||                     \
+  defined(__HIP_PLATFORM_NVIDIA__)
+#include "hip/hip_runtime.h"
+#endif
 
 /**
  * @file doca_gpunetio_dev_verbs_qp.cuh
