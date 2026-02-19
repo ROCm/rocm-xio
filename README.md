@@ -62,6 +62,10 @@ cmake --build . --target all
 cmake --build . --target rocm-xio    # Build library only
 cmake --build . --target xio-tester   # Build tester only
 cmake --build . --target all            # Build library + tester (default)
+
+# Build low-level hipified GIN tests
+cmake --build . --target xio-doca-gin-wqe-test
+cmake --build . --target xio-doca-gin-doorbell-test
 ```
 
 **Code generation targets:**
@@ -212,6 +216,45 @@ when accessing host memory.
 
 **Note**: On MI-series accelerators (MI300X, etc.), this is typically not
 required as fine-grained memory is available by default.
+
+## Low-level hipified GIN tests
+
+The repository includes low-level tests for the hipified GIN code path:
+
+- `xio-doca-gin-wqe-test`
+  - Verifies WQE helper behavior in hipified device code:
+    - segment store helper
+    - ring slot addressing helper
+    - WQE write encoding for control/addr/key/size fields
+- `xio-doca-gin-doorbell-test`
+  - Verifies system-scope doorbell write behavior to mapped external memory:
+    - device-side doorbell preparation and ring
+    - host-side observation of written value
+- `xio-doca-gin-doorbell-proxy-nic-test` *(optional; built only when `ibverbs` is found)*
+  - Verifies a proxy-style GPU->CPU handoff against a real RDMA NIC path:
+    - GPU writes payload + proxy doorbell signal in mapped host memory
+    - CPU observes proxy signal and posts a real `ibv_post_send`
+    - NIC completion path is validated with CQ polling + payload check
+
+Run via CTest:
+
+```bash
+ctest --test-dir build -R "xio-doca-gin-(wqe|doorbell)-test" --output-on-failure
+```
+
+To include the optional real-NIC proxy doorbell smoke test in the CTest run:
+```bash
+ctest --test-dir build -R "xio-doca-gin-(wqe|doorbell|doorbell-proxy-nic)-test" --output-on-failure
+```
+
+Notes:
+- These tests focus on the hipified device-side helper path (`radaki_dev_*`).
+- Host-side DOCA-compatible allocation APIs declared in
+  `src/include/doca-compatible/doca_gpunetio_host.hip.h`
+  (for example `doca_gpu_mem_alloc`) are not exercised by these tests yet.
+- `xio-doca-gin-doorbell-proxy-nic-test` uses `libibverbs` directly and validates
+  real NIC send/recv execution via a CPU proxy path. It does **not** require
+  full DOCA host-API parity.
 
 ## Additional Useful Information
 

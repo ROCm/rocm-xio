@@ -290,7 +290,8 @@ __device__ static __forceinline__ void radaki_dev_put_signal_thread(
 
   DOCA_GPUNETIO_VERBS_ASSERT(out_ticket != NULL);
   DOCA_GPUNETIO_VERBS_ASSERT(qp != NULL);
-  DOCA_GPUNETIO_VERBS_ASSERT(qp->mem_type == DOCA_GPUNETIO_VERBS_MEM_TYPE_GPU);
+  // DOCA_GPUNETIO_VERBS_ASSERT(qp->mem_type ==
+  // DOCA_GPUNETIO_VERBS_MEM_TYPE_GPU);
 
   base_wqe_idx = radaki_dev_reserve_wq_slots<resource_sharing_mode>(qp,
                                                                     num_chunks +

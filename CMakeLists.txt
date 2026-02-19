@@ -301,6 +301,76 @@ target_link_libraries(xio-tester PRIVATE
 # Required when linking relocatable device code (like TransferBench)
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
+function(add_doca_gin_test target_name source_path)
+  add_executable(${target_name} ${source_path})
+  target_compile_options(${target_name} PRIVATE
+    -std=c++17
+    -Wall
+    -Wextra
+    -Wno-unused-parameter
+  )
+  target_include_directories(${target_name} PRIVATE
+    ${INCLUDE_DIR}
+  )
+  target_link_libraries(${target_name} PRIVATE
+    hip::host
+    hip::device
+    hsa-runtime64::hsa-runtime64
+  )
+  target_link_options(${target_name} PRIVATE -fgpu-rdc)
+endfunction()
+
+add_doca_gin_test(
+  xio-doca-gin-wqe-test
+  ${TESTER_DIR}/doca-gin-wqe-test.hip
+)
+add_doca_gin_test(
+  xio-doca-gin-doorbell-test
+  ${TESTER_DIR}/doca-gin-doorbell-test.hip
+)
+
+option(ROCM_XIO_ENABLE_IBVERBS_TESTS
+  "Build optional ibverbs-backed real NIC smoke tests" ON)
+if(ROCM_XIO_ENABLE_IBVERBS_TESTS)
+  find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+  find_library(IBVERBS_LIBRARY ibverbs)
+  if(IBVERBS_INCLUDE_DIR AND IBVERBS_LIBRARY)
+    add_doca_gin_test(
+      xio-doca-gin-doorbell-proxy-nic-test
+      ${TESTER_DIR}/doca-gin-doorbell-proxy-nic-test.hip
+    )
+    target_include_directories(xio-doca-gin-doorbell-proxy-nic-test PRIVATE
+      ${IBVERBS_INCLUDE_DIR}
+    )
+    target_link_libraries(xio-doca-gin-doorbell-proxy-nic-test PRIVATE
+      ${IBVERBS_LIBRARY}
+    )
+  else()
+    message(STATUS
+      "ibverbs not found, skipping xio-doca-gin-doorbell-proxy-nic-test")
+  endif()
+endif()
+
+if(BUILD_TESTING)
+  add_test(NAME xio-doca-gin-wqe-test COMMAND xio-doca-gin-wqe-test)
+  add_test(NAME xio-doca-gin-doorbell-test COMMAND xio-doca-gin-doorbell-test)
+  if(TARGET xio-doca-gin-doorbell-proxy-nic-test)
+    add_test(NAME xio-doca-gin-doorbell-proxy-nic-test
+      COMMAND xio-doca-gin-doorbell-proxy-nic-test)
+  endif()
+  set_tests_properties(
+    xio-doca-gin-wqe-test
+    xio-doca-gin-doorbell-test
+    PROPERTIES LABELS "gpu;low-level;gin"
+  )
+  if(TARGET xio-doca-gin-doorbell-proxy-nic-test)
+    set_tests_properties(
+      xio-doca-gin-doorbell-proxy-nic-test
+      PROPERTIES LABELS "gpu;low-level;gin;nic;ibverbs"
+    )
+  endif()
+endif()
+
 #-----------------------------------------------------------------------------
 # Install configuration
 #-----------------------------------------------------------------------------

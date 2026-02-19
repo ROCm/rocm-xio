@@ -177,6 +177,10 @@ __device__ static __forceinline__ void radaki_dev_mark_wqes_ready(
  */
 __device__ static __forceinline__ __be32
 radaki_dev_prepare_dbr(uint32_t prod_index) {
+#ifdef __HIP_PLATFORM_AMD__
+  /* Equivalent to HTOBE32(prod_index & 0xffff). */
+  return radaki_dev_bswap32(prod_index & 0xffff);
+#else
   __be32 dbrec_val;
 
   // This is equivalent to
@@ -195,6 +199,7 @@ radaki_dev_prepare_dbr(uint32_t prod_index) {
                : "r"(prod_index));
 
   return dbrec_val;
+#endif
 }
 
 /**

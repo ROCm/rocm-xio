@@ -1,6 +1,6 @@
 # DOCA Top-Level Functions (GIN / GDAKI)
 
-These are the **top-level** DOCA/GPUNetIO functions that are **called directly from NCCL GIN code** (not from other DOCA code). They form the public API boundary between NCCL’s GIN GDAKI path and the DOCA GPUNetIO stack.
+These are the **top-level** DOCA/GPUNetIO functions that are **called directly from NCCL GIN code** (not from other DOCA code). They form the public API boundary between the NCCL GIN GDAKI path and the DOCA GPUNetIO stack.
 
 **References:** NCCL GIN uses DOCA GPUNetIO for GPU-Initiated Networking (GIN). Call sites are in:
 - **Host:** `nccl/src/transport/net_ib/gdaki/gin_host_gdaki.cc`
@@ -90,7 +90,7 @@ All 10 device top-level functions exist in rocm-xio under the **`radaki_dev_*`**
 
 ## Summary
 
-- **Host:** 6 names are **same** in rocm-xio; 4 (**create/destroy_qp_group_hl**, **create/destroy_qp_hl**) are **disappeared** in rocm-xio (not declared in `doca_gpunetio_host.hip.h`; they exist only in NCCL’s high-level API).
+- **Host:** 6 names are **same** in rocm-xio; 4 (**create/destroy_qp_group_hl**, **create/destroy_qp_hl**) are **disappeared** in rocm-xio (not declared in `doca_gpunetio_host.hip.h`; they exist only in the NCCL high-level API).
 - **Device:** All 10 top-level functions are present in rocm-xio with **different** names: `doca_gpu_dev_verbs_*` → `radaki_dev_*`.
 
 All other DOCA/radaki functions in the hipified headers are **nested**; see `DOCA_NESTED_FUNCTIONS.md`.
