@@ -41,7 +41,7 @@ for MEMORY_MODE in 1 2 3 4 5 6 7; do
 done
 # Subcommand must come first; run sdma-ep only when GPU is whitelisted
 if $sdma_ep_allowed; then
-  ./build/xio-tester sdma-ep --to-host --verify -n 100
+  ./build/xio-tester sdma-ep p2p --to-host --verify -n 100
 else
   echo "INFO: Skipping sdma-ep tests (${ROCM_GPU_ARCH} not in SDMA whitelist)."
 fi
