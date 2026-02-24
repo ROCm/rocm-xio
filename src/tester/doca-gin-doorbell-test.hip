@@ -30,7 +30,6 @@ __global__ void doorbell_test_kernel(uint64_t* doorbell_addr,
 
   const uint64_t prod_index = 17;
   radaki_dev_ring_db<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_SYS>(&qp, prod_index);
-  __threadfence_system();
 
   out->db_seen = *doorbell_addr;
   out->db_expected = static_cast<uint64_t>(
