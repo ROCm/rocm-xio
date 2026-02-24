@@ -83,7 +83,12 @@ int main() {
                  static_cast<unsigned long long>(host_result.db_expected));
     rc = 3;
   } else {
-    std::printf("PASS: doorbell system-scope test\n");
+    std::printf(
+      "PASS: doorbell system-scope test db_ptr=%p db_seen=0x%llx "
+      "db_expected=0x%llx\n",
+      static_cast<void*>(host_db_ptr),
+      static_cast<unsigned long long>(host_result.db_seen),
+      static_cast<unsigned long long>(host_result.db_expected));
   }
 
 cleanup:
