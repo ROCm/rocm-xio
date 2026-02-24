@@ -51,7 +51,7 @@ run_p2p_test() {
 
   echo "Running sdma-ep P2P (GPU 0 -> GPU 1)..."
   p2p_rc=0
-  ./build/xio-tester sdma-ep -n "${n}" -s "${size_bytes}" --verify -v || p2p_rc=$?
+  ./build/xio-tester sdma-ep p2p -n "${n}" -s "${size_bytes}" --verify -v || p2p_rc=$?
 
   echo "Capturing XGMI metrics (after)..."
   amd-smi xgmi -m -g all --json > "${xgmi_after}" 2>/dev/null || true

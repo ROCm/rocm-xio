@@ -9,10 +9,15 @@
 namespace sdma_ep {
 
 struct SdmaEpConfig {
-  bool useHostDst = false; // If true, use pinned host memory as destination
-                           // (single GPU, no P2P required)
-  bool verifyData = false; // If true, validate destination contains 0xAB
-                           // after transfer (host-dst or P2P).
+  std::string testType = ""; // Which test subcommand: "p2p", "ping-pong", or
+                             // "buffer-reuse"
+  bool useHostDst = false;   // If true, use pinned host memory as destination
+                             // (single GPU, no P2P required)
+  bool verifyData = false;   // If true, validate destination contains 0xAB
+                             // after transfer (host-dst or P2P).
+  bool useCounter = false;   // For buffer-reuse/ping-pong: use counter-based
+                             // approach
+  bool useFlush = false; // For buffer-reuse/ping-pong: use flush-based approach
   // HIP device IDs. Use -1 for default (src=0, dst=1 for P2P; both 0 for
   // --to-host).
   int srcDeviceId = -1;
