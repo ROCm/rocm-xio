@@ -69,24 +69,33 @@ __device__ __forceinline__ SDMA_PKT_FENCE CreateFencePacket(HSAuint64* address,
   return packet;
 }
 
-// Assumes signal is allocated in device memory
-__device__ __forceinline__ bool waitForSignal(HSAuint64* addr,
+template <int64_t MAX_SPIN_COUNT = -1>
+__device__ __forceinline__ void poll_until_lt(uint64_t* addr,
                                               uint64_t expected) {
-  int retries = 0;
-
-  while (true) {
-    uint64_t value = __hip_atomic_load(addr, __ATOMIC_RELAXED,
-                                       __HIP_MEMORY_SCOPE_AGENT);
-    if (value == expected) {
-      return true;
-    }
-    if constexpr (BREAK_ON_RETRIES) {
-      if (retries++ == MAX_RETRIES) {
-        break;
-      }
-    }
+  [[maybe_unused]] int64_t spin_count = 0;
+  while (__hip_atomic_load(addr, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) <
+         expected) {
+    spin_count++;
+    assert(MAX_SPIN_COUNT < 0 || spin_count != MAX_SPIN_COUNT);
   }
-  return false;
+}
+
+// Assumes signal is allocated in device memory
+__device__ __forceinline__ void waitSignal(uint64_t* addr, uint64_t expected) {
+  if constexpr (BREAK_ON_RETRIES) {
+    poll_until_lt<MAX_RETRIES>(addr, expected);
+  } else {
+    poll_until_lt<-1>(addr, expected);
+  }
+}
+
+// Assumes counter is allocated in device memory
+__device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
+  if constexpr (BREAK_ON_RETRIES) {
+    poll_until_lt<MAX_RETRIES>(addr, expected);
+  } else {
+    poll_until_lt<-1>(addr, expected);
+  }
 }
 
 struct SdmaQueueDeviceHandle {
@@ -219,6 +228,23 @@ struct SdmaQueueDeviceHandle {
     __builtin_amdgcn_s_waitcnt(0);
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __builtin_nontemporal_store(pendingWptr, committedWptr);
+    maxWritePtr = pendingWptr;
+  }
+
+  __device__ __forceinline__ void flush(uint64_t upToIndex) {
+    uint64_t hw_read_index;
+    do {
+      hw_read_index = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_AGENT);
+    } while (hw_read_index < upToIndex);
+  }
+
+  __device__ __forceinline__ void quiet() {
+    uint64_t hw_read_index;
+    do {
+      hw_read_index = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_AGENT);
+    } while (hw_read_index < maxWritePtr);
   }
 
   // Queue resources
@@ -232,6 +258,7 @@ struct SdmaQueueDeviceHandle {
   uint64_t* committedWptr;
   // local variables
   uint64_t cachedHwReadIndex;
+  uint64_t maxWritePtr;
 
 private:
   __device__ __forceinline__ bool nontemporal_compare_exchange(
@@ -312,36 +339,88 @@ struct SdmaQueueSingleProducerDeviceHandle : SdmaQueueDeviceHandle {
 static_assert(sizeof(SdmaQueueSingleProducerDeviceHandle) ==
               sizeof(SdmaQueueDeviceHandle));
 
+template <bool PUT_EN, bool SIGNAL_EN, bool COUNTER_EN>
+__device__ __forceinline__ void put_signal_counter_impl(
+  SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
+  uint64_t* signal, uint64_t* counter, uint64_t* put_index = nullptr) {
+  constexpr size_t space_required =
+    ((PUT_EN) ? sizeof(SDMA_PKT_COPY_LINEAR) : 0) +
+    ((SIGNAL_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0) +
+    ((COUNTER_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0);
+  auto base = handle.ReserveQueueSpace(space_required);
+  uint64_t pendingWptr = base;
+
+  if constexpr (PUT_EN) {
+    auto copy_packet = CreateCopyPacket(src, dst, size);
+    handle.placePacket(copy_packet, pendingWptr);
+    if (put_index != nullptr) {
+      *put_index = pendingWptr;
+    }
+  }
+  if constexpr (SIGNAL_EN) {
+    auto signal_packet = CreateAtomicIncPacket(
+      reinterpret_cast<HSAuint64*>(signal));
+    handle.placePacket(signal_packet, pendingWptr);
+  }
+  if constexpr (COUNTER_EN) {
+    auto counter_packet = CreateAtomicIncPacket(
+      reinterpret_cast<HSAuint64*>(counter));
+    handle.placePacket(counter_packet, pendingWptr);
+  }
+  handle.submitPacket(base, pendingWptr);
+}
+
 __device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
                                     void* src, size_t size) {
-  auto base = handle.ReserveQueueSpace(sizeof(SDMA_PKT_COPY_LINEAR));
-  auto packet = CreateCopyPacket(src, dst, size);
-  uint64_t pendingWptr = base;
-  handle.placePacket(packet, pendingWptr);
-  handle.submitPacket(base, pendingWptr);
+  put_signal_counter_impl<true, false, false>(handle, dst, src, size, nullptr,
+                                              nullptr);
 }
 
+// TODO should increment value be a parameter?
 __device__ __forceinline__ void signal(SdmaQueueDeviceHandle& handle,
-                                       void* signal) {
-  auto base = handle.ReserveQueueSpace(sizeof(SDMA_PKT_ATOMIC));
-  auto packet = CreateAtomicIncPacket(reinterpret_cast<HSAuint64*>(signal));
-  uint64_t pendingWptr = base;
-  handle.placePacket(packet, pendingWptr);
-  handle.submitPacket(base, pendingWptr);
+                                       uint64_t* signal) {
+  put_signal_counter_impl<false, true, false>(handle, nullptr, nullptr, 0,
+                                              signal, nullptr);
 }
 
-__device__ __forceinline__ void putWithSignal(SdmaQueueDeviceHandle& handle,
-                                              void* dst, void* src, size_t size,
-                                              void* signal) {
-  auto base = handle.ReserveQueueSpace(sizeof(SDMA_PKT_COPY_LINEAR) +
-                                       sizeof(SDMA_PKT_ATOMIC));
-  auto copy_packet = CreateCopyPacket(src, dst, size);
-  auto signal_packet = CreateAtomicIncPacket(
-    reinterpret_cast<HSAuint64*>(signal));
-  uint64_t pendingWptr = base;
-  handle.placePacket(copy_packet, pendingWptr);
-  handle.placePacket(signal_packet, pendingWptr);
-  handle.submitPacket(base, pendingWptr);
+__device__ __forceinline__ void put_signal(SdmaQueueDeviceHandle& handle,
+                                           void* dst, void* src, size_t size,
+                                           uint64_t* signal) {
+  put_signal_counter_impl<true, true, false>(handle, dst, src, size, signal,
+                                             nullptr);
+}
+
+__device__ __forceinline__ void put_signal_counter(
+  SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
+  uint64_t* signal, uint64_t* counter) {
+  put_signal_counter_impl<true, true, true>(handle, dst, src, size, signal,
+                                            counter);
+}
+
+__device__ __forceinline__ void put_counter(SdmaQueueDeviceHandle& handle,
+                                            void* dst, void* src, size_t size,
+                                            uint64_t* counter) {
+  put_signal_counter_impl<true, false, true>(handle, dst, src, size, nullptr,
+                                             counter);
+}
+
+__device__ __forceinline__ void signal_counter(SdmaQueueDeviceHandle& handle,
+                                               uint64_t* signal,
+                                               uint64_t* counter) {
+  put_signal_counter_impl<false, true, true>(handle, nullptr, nullptr, 0,
+                                             signal, counter);
+}
+
+// Allows application to track certain operations, usually put operations
+// and only flush up to the most recent put operation,
+// ignoring other operations such as signal
+__device__ __forceinline__ void flush(SdmaQueueDeviceHandle& handle,
+                                      uint64_t up_to_index) {
+  handle.flush(up_to_index);
+}
+
+__device__ __forceinline__ void quiet(SdmaQueueDeviceHandle& handle) {
+  handle.quiet();
 }
 
 } // namespace anvil

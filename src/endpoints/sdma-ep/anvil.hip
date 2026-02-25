@@ -178,8 +178,10 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                                         sizeof(uint64_t),
                                         hipDeviceMallocUncached));
 
-  uint64_t cachedWptr = (uint64_t) * (queue_.Queue_write_ptr_aql);
-  uint64_t committedWptr = (uint64_t) * (queue_.Queue_write_ptr_aql);
+  uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
+    queue_.Queue_write_ptr_aql);
+  uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
+    queue_.Queue_write_ptr_aql);
   SdmaQueueDeviceHandle handle = {
     .queueBuf = static_cast<uint32_t*>(queueBuffer_),
     .rptr = queue_.Queue_read_ptr_aql,
@@ -187,7 +189,9 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
     .doorbell = queue_.Queue_DoorBell_aql,
     .cachedWptr = cachedWptr_,
     .committedWptr = committedWptr_,
-    .cachedHwReadIndex = (uint64_t) * (queue_.Queue_read_ptr_aql),
+    .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
+      queue_.Queue_read_ptr_aql),
+    .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
   };
 
   CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
