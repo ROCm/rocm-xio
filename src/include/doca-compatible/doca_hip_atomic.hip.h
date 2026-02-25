@@ -99,8 +99,8 @@ public:
       if (val <= old)
         return old;
       T new_val = val;
-      if (__atomic_compare_exchange_weak(ptr_, &old, new_val, order,
-                                         std::memory_order_relaxed))
+      if (__atomic_compare_exchange_n(ptr_, &old, new_val, /*weak=*/true, order,
+                                      std::memory_order_relaxed))
         return old;
     }
   }

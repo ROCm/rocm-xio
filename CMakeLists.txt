@@ -311,6 +311,9 @@ target_link_libraries(xio-tester PRIVATE
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
 # DOCA GIN test executables
+add_executable(doca-gin-atomic-test
+  ${TESTER_DIR}/doca-gin-atomic-test.hip
+)
 add_executable(doca-gin-doorbell-test
   ${TESTER_DIR}/doca-gin-doorbell-test.hip
 )
@@ -318,7 +321,7 @@ add_executable(doca-gin-wqe-test
   ${TESTER_DIR}/doca-gin-wqe-test.hip
 )
 
-foreach(tgt doca-gin-doorbell-test doca-gin-wqe-test)
+foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
   target_compile_options(${tgt} PRIVATE
     -std=c++17
     -Wall

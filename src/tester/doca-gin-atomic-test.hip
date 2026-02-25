@@ -12,8 +12,18 @@
 #include <cassert>
 #include <cstdio>
 
-#include "doca_hip_atomic.hip.h"
+#include "doca-compatible/doca_hip_atomic.hip.h"
 #include "hip/hip_runtime.h"
+
+#define HIP_CHECK(cmd)                                                         \
+  do {                                                                         \
+    hipError_t _err = (cmd);                                                   \
+    if (_err != hipSuccess) {                                                  \
+      std::fprintf(stderr, "HIP error %s at %s:%d\n", hipGetErrorString(_err), \
+                   __FILE__, __LINE__);                                        \
+      return 1;                                                                \
+    }                                                                          \
+  } while (0)
 
 __global__ void test_atomic_ref() {
   __shared__ uint64_t sh_max;
@@ -58,13 +68,13 @@ __global__ void test_atomic_ref() {
 
 int main() {
   uint64_t* d_val = nullptr;
-  hipMalloc(&d_val, sizeof(uint64_t));
-  hipMemset(d_val, 0, sizeof(uint64_t));
+  HIP_CHECK(hipMalloc(&d_val, sizeof(uint64_t)));
+  HIP_CHECK(hipMemset(d_val, 0, sizeof(uint64_t)));
 
   hipLaunchKernelGGL(test_atomic_ref, dim3(1), dim3(256), 0, 0);
-  hipDeviceSynchronize();
+  HIP_CHECK(hipDeviceSynchronize());
 
-  hipFree(d_val);
-  printf("PASS: doca_hip atomic operations test\n");
+  HIP_CHECK(hipFree(d_val));
+  std::printf("PASS: doca_hip atomic operations test\n");
   return 0;
 }
