@@ -305,10 +305,13 @@ class SdmaEndpoint : public XioEndpoint {
   unsigned iterations_ = 128;
   bool useHostDst_ = false;
   bool verifyData_ = false;
+  bool useCounter_ = false;
+  bool useFlush_ = false;
   int srcDeviceId_ = -1;
   int dstDeviceId_ = -1;
   size_t transferSize_ = 4096;
   sdma_ep::SdmaEpConfig sdmaEpConfig_;
+  std::map<std::string, CLI::App*> testSubcommands;
 
 public:
   __host__ EndpointType getType() const override {
@@ -339,15 +342,7 @@ public:
     app.add_option("-n,--iterations", iterations_, "Number of SDMA transfers")
       ->default_val(128)
       ->group("Endpoint Options");
-    app
-      .add_flag("--to-host", useHostDst_,
-                "Use pinned host memory as destination (single GPU only)")
-      ->group("Endpoint Options");
-    app
-      .add_flag("--verify", verifyData_,
-                "Verify destination buffer contains expected pattern after "
-                "transfer (host-dst or P2P)")
-      ->group("Endpoint Options");
+
     app
       .add_option("--src-gpu", srcDeviceId_,
                   "Source HIP device ID (default: 0)")
@@ -367,11 +362,61 @@ public:
       ->transform(CLI::Validator(transferSizeTransform,
                                  "4k/1M/2G (binary) or bytes", "SIZE"))
       ->group("Endpoint Options");
+
+    // Register p2p subcommand
+    CLI::App* p2p =
+      app.add_subcommand("p2p", "Simple P2P between GPU -> GPU or GPU -> Host");
+    p2p
+      ->add_flag("--to-host", useHostDst_,
+                 "Use pinned host memory as destination (single GPU only)")
+      ->group("Endpoint Options");
+    p2p
+      ->add_flag("--verify", verifyData_,
+                 "Verify destination buffer contains expected pattern after "
+                 "transfer (host-dst or P2P)")
+      ->group("Endpoint Options");
+    testSubcommands["p2p"] = p2p;
+
+    // Register ping-pong subcommand
+    CLI::App* pingPong = app.add_subcommand(
+      "ping-pong", "Bidirectional ping-pong transfer between two GPUs");
+    pingPong
+      ->add_flag("--use-counter", useCounter_,
+                 "Use counter-based approach for buffer reuse")
+      ->group("Endpoint Options");
+    pingPong
+      ->add_flag("--use-flush", useFlush_,
+                 "Use flush-based approach for buffer reuse")
+      ->group("Endpoint Options");
+    testSubcommands["ping-pong"] = pingPong;
+
+    // Register buffer-reuse subcommand
+    CLI::App* bufferReuse = app.add_subcommand("buffer-reuse",
+                                               "Test buffer reuse patterns");
+    bufferReuse
+      ->add_flag("--use-counter", useCounter_,
+                 "Use counter-based approach for buffer reuse")
+      ->group("Endpoint Options");
+    bufferReuse
+      ->add_flag("--use-flush", useFlush_,
+                 "Use flush-based approach for buffer reuse")
+      ->group("Endpoint Options");
+    testSubcommands["buffer-reuse"] = bufferReuse;
   }
 
   __host__ void* initializeEndpointConfig() override {
+    // Determine which test subcommand was selected
+    for (const auto& [name, subcmd] : testSubcommands) {
+      if (subcmd && subcmd->parsed()) {
+        sdmaEpConfig_.testType = name;
+        break;
+      }
+    }
+
     sdmaEpConfig_.useHostDst = useHostDst_;
     sdmaEpConfig_.verifyData = verifyData_;
+    sdmaEpConfig_.useCounter = useCounter_;
+    sdmaEpConfig_.useFlush = useFlush_;
     sdmaEpConfig_.srcDeviceId = srcDeviceId_;
     sdmaEpConfig_.dstDeviceId = dstDeviceId_;
     sdmaEpConfig_.transferSize = transferSize_;
@@ -382,6 +427,13 @@ public:
     if (endpointConfig) {
       const auto* ep = static_cast<const sdma_ep::SdmaEpConfig*>(
         endpointConfig);
+      if (ep->testType.empty()) {
+        return "Missing test subcommand. Available: p2p, ping-pong, "
+               "buffer-reuse";
+      }
+      if (ep->useCounter && ep->useFlush) {
+        return "Cannot use both --use-counter and --use-flush at the same time";
+      }
       if (ep->transferSize == 0)
         return "transfer-size must be > 0";
       if (ep->transferSize % 4 != 0)
