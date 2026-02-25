@@ -12,7 +12,7 @@
 #include <cassert>
 #include <cstdio>
 
-#include "doca-compatible/doca_hip_atomic.hip.h"
+#include "doca/gin_gdaki.h"
 #include "hip/hip_runtime.h"
 
 #define HIP_CHECK(cmd)                                                         \

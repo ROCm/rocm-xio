@@ -13,12 +13,14 @@
 #include "xio.h"
 
 // Include endpoint headers for size information
+#include "doca-ep.h"
 #include "nvme-ep.h"
 #include "rdma-ep.h"
 #include "sdma-ep.h"
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
+extern hipError_t doca_ep_run(XioEndpointConfig* config);
 extern hipError_t test_ep_run(XioEndpointConfig* config);
 extern hipError_t nvme_ep_run(XioEndpointConfig* config);
 extern hipError_t rdma_ep_run(XioEndpointConfig* config);
@@ -298,6 +300,41 @@ public:
   }
 };
 
+class DocaEndpoint : public XioEndpoint {
+public:
+  __host__ EndpointType getType() const override {
+    return EndpointType::DOCA_EP;
+  }
+
+  __host__ const char* getName() const override {
+    return "doca-ep";
+  }
+
+  __host__ const char* getDescription() const override {
+    return "DOCA GIN endpoint";
+  }
+
+  __host__ size_t getSubmissionQueueEntrySize() const override {
+    return 0;
+  }
+
+  __host__ size_t getCompletionQueueEntrySize() const override {
+    return 0;
+  }
+
+  __host__ hipError_t run(XioEndpointConfig* config) override {
+    return doca_ep_run(config);
+  }
+
+  __host__ void configureCliOptions(CLI::App& app) override {
+    (void)app;
+  }
+
+  __host__ void* initializeEndpointConfig() override {
+    return nullptr;
+  }
+};
+
 class SdmaEndpoint : public XioEndpoint {
   // SDMA uses raw packets (sizes vary by op); report 0 so tester skips SQE/CQE
   static constexpr size_t kSqeSize = 0;
@@ -509,6 +546,8 @@ size_t XioEndpoint::getCompletionQueueLength(
 
 __host__ std::unique_ptr<XioEndpoint> createEndpoint(EndpointType type) {
   switch (type) {
+    case EndpointType::DOCA_EP:
+      return std::make_unique<DocaEndpoint>();
     case EndpointType::TEST_EP:
       return std::make_unique<TestEndpoint>();
     case EndpointType::NVME_EP:

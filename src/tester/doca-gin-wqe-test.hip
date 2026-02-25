@@ -5,7 +5,7 @@
 
 #include <cstdio>
 
-#include "doca-compatible/doca_gpunetio_dev_verbs_qp.hip.h"
+#include "doca/gin_gdaki.h"
 #include "hip/hip_runtime.h"
 
 #define HIP_CHECK(cmd)                                                         \

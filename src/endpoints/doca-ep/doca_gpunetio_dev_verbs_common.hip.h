@@ -57,7 +57,7 @@
 
 #include <atomic>
 
-#include "../common/doca_gpunetio_verbs_dev.h"
+#include "doca_gpunetio_verbs_dev.h"
 #include "doca_hip_atomic.hip.h"
 
 #if __HIP_ARCH__ >= 1000 || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000)

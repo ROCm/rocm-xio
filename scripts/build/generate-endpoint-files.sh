@@ -33,6 +33,9 @@ get_endpoint_define() {
     rdma-ep)
       echo "RDMA"
       ;;
+    doca-ep)
+      echo "DOCA"
+      ;;
     *)
       # Default: convert nvme-simple-ep -> NVME_SIMPLE_EP, then remove _EP
       echo "$ep" | sed 's/-ep$//' | sed 's/-/_/g' | tr '[:lower:]' '[:upper:]'
@@ -56,6 +59,9 @@ get_endpoint_description() {
       ;;
     sdma-ep)
       echo "AMD SDMA Engine endpoint"
+      ;;
+    doca-ep)
+      echo "DOCA GIN endpoint"
       ;;
     *)
       # Default fallback: convert endpoint name to description

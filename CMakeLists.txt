@@ -203,15 +203,6 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_COMMON_DIR}/.*")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
-# Compile all *.hip.h headers in doca-compatible (device code headers)
-# Exclude host API header (depends on DOCA SDK host/doca_error.h) and structs (header-only)
-set(DOCA_COMPATIBLE_DIR ${INCLUDE_DIR}/doca-compatible)
-file(GLOB DOCA_HIP_HEADERS ${DOCA_COMPATIBLE_DIR}/*.hip.h)
-list(FILTER DOCA_HIP_HEADERS EXCLUDE REGEX ".*/doca_gpunetio_host\\.hip\\.h$")
-list(FILTER DOCA_HIP_HEADERS EXCLUDE REGEX ".*/doca_gpunetio_dev_verbs_structs\\.hip\\.h$")
-list(APPEND LIB_SOURCES ${DOCA_HIP_HEADERS})
-set_source_files_properties(${DOCA_HIP_HEADERS} PROPERTIES LANGUAGE HIP)
-
 # Create static library
 add_library(rocm-xio STATIC ${LIB_SOURCES})
 
@@ -328,7 +319,7 @@ foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
     -Wextra
     -Wno-unused-parameter
   )
-  target_include_directories(${tgt} PRIVATE ${INCLUDE_DIR})
+  target_include_directories(${tgt} PRIVATE ${INCLUDE_DIR} ${ENDPOINTS_DIR})
   target_link_libraries(${tgt} PRIVATE
     rocm-xio
     hip::host
@@ -357,6 +348,10 @@ install(FILES
     ${INCLUDE_DIR}/xio.h
     ${INCLUDE_DIR}/xio-endpoint-registry.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
+    COMPONENT rocm-xio
+)
+install(FILES ${INCLUDE_DIR}/doca/gin_gdaki.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio/doca
     COMPONENT rocm-xio
 )
 
