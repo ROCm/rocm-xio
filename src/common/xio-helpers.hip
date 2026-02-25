@@ -68,43 +68,7 @@ void xioPrintDeviceInfo() {
   }
 }
 
-// Map GCN arch prefix (from hipDeviceProp_t.gcnArchName) to model name.
-// Use when driver reports generic "AMD Radeon Graphics". Returns nullptr if
-// unknown; caller falls back to driver name.
-static const char* xioGcnArchToModelName(const char* gcnArchName) {
-  if (!gcnArchName || gcnArchName[0] == '\0')
-    return nullptr;
-  if (strncmp(gcnArchName, "gfx942", 6) == 0)
-    return "AMD Instinct MI300X";
-  if (strncmp(gcnArchName, "gfx940", 6) == 0)
-    return "AMD Instinct MI300A";
-  if (strncmp(gcnArchName, "gfx90a", 6) == 0)
-    return "AMD Instinct MI250X/MI250";
-  if (strncmp(gcnArchName, "gfx90c", 6) == 0)
-    return "AMD Radeon / Instinct (gfx90c)";
-  if (strncmp(gcnArchName, "gfx906", 6) == 0)
-    return "AMD Instinct MI50 / Radeon VII";
-  return nullptr;
-}
-
-// Return model name for device: from GCN arch if known, else driver name.
-std::string xioGetModelName(int deviceId) {
-  hipDeviceProp_t prop;
-  if (hipGetDeviceProperties(&prop, deviceId) != hipSuccess)
-    return "(unknown)";
-  const char* model = xioGcnArchToModelName(prop.gcnArchName);
-  if (model != nullptr)
-    return std::string(model);
-  char nameBuf[256];
-  if (hipDeviceGetName(nameBuf, sizeof(nameBuf),
-                       static_cast<hipDevice_t>(deviceId)) == hipSuccess &&
-      nameBuf[0] != '\0') {
-    return std::string(nameBuf);
-  }
-  return std::string(prop.name);
-}
-
-// Print GPU arch, UUID, and PCIe bus address for one device (e.g. for SDMA-ep).
+// Print GPU arch, UUID, and PCIe bus address.
 void xioPrintGpuDeviceDetails(int deviceId) {
   hipDeviceProp_t prop;
   hipError_t err = hipGetDeviceProperties(&prop, deviceId);
@@ -114,7 +78,7 @@ void xioPrintGpuDeviceDetails(int deviceId) {
     return;
   }
   std::cout << "  Device ID: " << deviceId << std::endl;
-  const char* modelName = xioGcnArchToModelName(prop.gcnArchName);
+  const char* modelName = prop.name;
   if (modelName != nullptr) {
     std::cout << "  Model: " << modelName << std::endl;
   } else {

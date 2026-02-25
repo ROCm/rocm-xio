@@ -1,8 +1,9 @@
 #!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
-# Sbatch scripts source this via SLURM_SUBMIT_DIR when set (job runs from
-# spool copy); else via dirname of BASH_SOURCE for local runs.
-# Expects: callers cd to PROJECT_DIR before calling setup_and_build_workdir.
 
 # Project directory (repo root). When submitted from .alola, use its parent.
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
@@ -14,8 +15,7 @@ else
   PROJECT_DIR="${HOME}/Projects/rocm-xio"
 fi
 
-# Detect GPU arch and set sdma_ep_allowed (true if in SDMA whitelist).
-# Sets: ROCM_GPU_ARCH, SDMA_EP_GFX_WHITELIST, sdma_ep_allowed
+# Detect GPU arch and set sdma_ep_allowed based on a SDMA whitelist.
 detect_gpu_arch() {
   ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
     sed -e 's/ *Name: *\(gfx[0-9,a-f]*\) *$/\1/')
@@ -28,8 +28,6 @@ detect_gpu_arch() {
 }
 
 # Create temp dir, rsync project (from current dir, must be PROJECT_DIR), build.
-# Usage: from PROJECT_DIR, call setup_and_build_workdir "single-gpu" or "two-gpu".
-# Sets: WORKING_DIR. Leaves shell in WORKING_DIR with build complete.
 setup_and_build_workdir() {
   local suffix=$1
   WORKING_DIR="/tmp/rocm-xio-tests.${suffix}.$RANDOM"

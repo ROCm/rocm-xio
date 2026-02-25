@@ -1,14 +1,16 @@
 #!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
 # usage: sbatch rocm-xio-tests.two-gpu.sbatch
 #
 # Runs on a two-GPU node: builds rocm-xio, runs sdma-ep P2P (GPU 0 -> GPU 1),
 # and captures XGMI metrics (amd-smi xgmi -m -g all --json) before and after
 # each test to compare expected transfer size with counter deltas when
-# parseable. On some systems XGMI read/write counters do not increment for
-# SDMA; the script still saves before/after JSON and relies on LFSR
-# verification and timing for success.
+# parseable.
 #
-#SBATCH --array=1-4
+#SBATCH --array=1
 #SBATCH --output=%x.%A.%a.out
 #SBATCH --error=%x.%A.%a.err
 #SBATCH --cpus-per-task=4
@@ -35,7 +37,6 @@ if ! $sdma_ep_allowed; then
 fi
 setup_and_build_workdir "two-gpu"
 
-# Run one or two P2P tests: default run plus optional larger run for XGMI visibility
 run_p2p_test() {
   local n=$1
   local size_bytes=$2

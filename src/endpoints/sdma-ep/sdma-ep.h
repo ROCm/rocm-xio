@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef SDMA_EP_CONFIG_H
-#define SDMA_EP_CONFIG_H
+#ifndef SDMA_EP_H
+#define SDMA_EP_H
 
 namespace sdma_ep {
 
@@ -24,4 +24,4 @@ struct SdmaEpConfig {
 
 } // namespace sdma_ep
 
-#endif // SDMA_EP_CONFIG_H
+#endif // SDMA_EP_H

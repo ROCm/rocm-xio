@@ -98,15 +98,6 @@ void SetUpKFD() {
                        "Failed!");
 }
 
-// void SetUpKFD(uint32_t targetDevice) {
-//     HsaNodeProperties m_node_props;
-//     CHECK_HSAKMT_SUCCESS(hsaKmtGetNodeProperties(targetDevice,
-//     &m_node_props), "Failed!"); std::cout << "Num of PCIe SDMA Queues: " <<
-//     m_node_props.NumSdmaEngines << std::endl; std::cout << "Num of XGMI SDMA
-//     Queues: " << m_node_props.NumSdmaXgmiEngines << std::endl; std::cout <<
-//     "Device Id: " << m_node_props.DeviceId << std::endl;
-// }
-
 // True only after init() has run (SetUpKFD). Avoids CloseKFD/hsa_shut_down at
 // exit when user never ran sdma-ep (e.g. xio-tester -h).
 static bool s_kfd_opened = false;

@@ -1,4 +1,8 @@
 #!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
 # usage: sbatch rocm-xio-tests.single-gpu.sbatch
 #
 #SBATCH --array=1-4
