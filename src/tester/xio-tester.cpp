@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
     gpuClockPeriodNs = 1000000.0 / static_cast<double>(gpuWallClockRateKHz);
 
     // Print device and endpoint info
-    std::cout << "Model: " << xioGetModelName(deviceId) << std::endl;
+    std::cout << "Model: " << deviceProp.name << std::endl;
     std::cout << "GPU Device ID: " << deviceId << std::endl;
     std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
               << std::endl;

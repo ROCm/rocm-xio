@@ -236,11 +236,7 @@ target_link_libraries(rocm-xio
   INTERFACE
     hip::host
     hip::device
-)
-
-# Link dependencies for SDMA endpoint
-target_link_libraries(rocm-xio
-  PRIVATE hsakmt::hsakmt
+    hsakmt::hsakmt
 )
 
 # Apply endpoint defines per source file

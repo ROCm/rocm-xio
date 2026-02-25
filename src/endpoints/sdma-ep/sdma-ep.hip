@@ -13,7 +13,7 @@
 
 #include "anvil.hpp"
 #include "anvil_device.hpp"
-#include "sdma-ep-config.h"
+#include "sdma-ep.h"
 #include "xio.h"
 
 // Discard HIP return values in cleanup paths to satisfy nodiscard
