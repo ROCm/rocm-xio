@@ -310,6 +310,31 @@ target_link_libraries(xio-tester PRIVATE
 # Required when linking relocatable device code (like TransferBench)
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
+# DOCA GIN test executables
+add_executable(doca-gin-doorbell-test
+  ${TESTER_DIR}/doca-gin-doorbell-test.hip
+)
+add_executable(doca-gin-wqe-test
+  ${TESTER_DIR}/doca-gin-wqe-test.hip
+)
+
+foreach(tgt doca-gin-doorbell-test doca-gin-wqe-test)
+  target_compile_options(${tgt} PRIVATE
+    -std=c++17
+    -Wall
+    -Wextra
+    -Wno-unused-parameter
+  )
+  target_include_directories(${tgt} PRIVATE ${INCLUDE_DIR})
+  target_link_libraries(${tgt} PRIVATE
+    rocm-xio
+    hip::host
+    hip::device
+    hsa-runtime64::hsa-runtime64
+  )
+  target_link_options(${tgt} PRIVATE -fgpu-rdc)
+endforeach()
+
 #-----------------------------------------------------------------------------
 # Install configuration
 #-----------------------------------------------------------------------------
@@ -353,10 +378,10 @@ foreach(ep ${VALID_ENDPOINTS})
     endif()
 endforeach()
 
-# Optionally install tester executable
-option(INSTALL_TESTER "Install xio-tester executable" OFF)
+# Optionally install tester executables
+option(INSTALL_TESTER "Install xio-tester and doca-gin test executables" OFF)
 if(INSTALL_TESTER)
-    install(TARGETS xio-tester
+    install(TARGETS xio-tester doca-gin-doorbell-test doca-gin-wqe-test
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT rocm-xio-tester
     )

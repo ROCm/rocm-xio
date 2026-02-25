@@ -45,5 +45,8 @@ if $sdma_ep_allowed; then
 else
   echo "INFO: Skipping sdma-ep tests (${ROCM_GPU_ARCH} not in SDMA whitelist)."
 fi
+# Run the doca-gin tests
+./build/doca-gin-doorbell-test
+./build/doca-gin-wqe-test
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
