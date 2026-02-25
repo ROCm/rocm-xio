@@ -68,6 +68,49 @@ void xioPrintDeviceInfo() {
   }
 }
 
+// Print GPU arch, UUID, and PCIe bus address.
+void xioPrintGpuDeviceDetails(int deviceId) {
+  hipDeviceProp_t prop;
+  hipError_t err = hipGetDeviceProperties(&prop, deviceId);
+  if (err != hipSuccess) {
+    std::cout << "  GPU " << deviceId << ": failed to get properties ("
+              << hipGetErrorString(err) << ")" << std::endl;
+    return;
+  }
+  std::cout << "  Device ID: " << deviceId << std::endl;
+  const char* modelName = prop.name;
+  if (modelName != nullptr) {
+    std::cout << "  Model: " << modelName << std::endl;
+  } else {
+    // No known model from GCN arch; show driver name
+    char nameBuf[256];
+    err = hipDeviceGetName(nameBuf, sizeof(nameBuf),
+                           static_cast<hipDevice_t>(deviceId));
+    if (err == hipSuccess && nameBuf[0] != '\0') {
+      std::cout << "  Model: " << nameBuf << std::endl;
+    } else {
+      std::cout << "  Model: " << prop.name << std::endl;
+    }
+  }
+  if (prop.gcnArchName[0] != '\0') {
+    std::cout << "  GCN Arch: " << prop.gcnArchName << std::endl;
+  }
+  // UUID as hex string (hipUUID.bytes is 16 bytes)
+  std::cout << "  UUID: ";
+  for (int i = 0; i < 16; i++) {
+    std::cout << std::hex << std::setfill('0') << std::setw(2)
+              << (static_cast<unsigned>(prop.uuid.bytes[i]) & 0xFF);
+  }
+  std::cout << std::dec << std::endl;
+  char pciBusId[32];
+  err = hipDeviceGetPCIBusId(pciBusId, sizeof(pciBusId), deviceId);
+  if (err == hipSuccess) {
+    std::cout << "  PCIe Bus: " << pciBusId << std::endl;
+  } else {
+    std::cout << "  PCIe Bus: (unavailable)" << std::endl;
+  }
+}
+
 void xioPrintStatistics(const std::vector<double>& durations,
                         unsigned totalIterations, unsigned numThreads,
                         unsigned readIterations, unsigned writeIterations,
@@ -370,10 +413,10 @@ hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
   hsa_region_get_info(device_region, HSA_REGION_INFO_GLOBAL_FLAGS,
                       &global_flags);
   if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
-    std::cerr << "  Info: (" << direction << "):  Using HSA fine-grained "
+    std::cout << "  Info: (" << direction << "):  Using HSA fine-grained "
               << "global memory region" << std::endl;
   } else if (global_flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
-    std::cerr << "  Info: (" << direction << "):  Using HSA coarse-grained "
+    std::cout << "  Info: (" << direction << "):  Using HSA coarse-grained "
               << "global memory region" << std::endl;
   }
 

@@ -54,6 +54,37 @@ rdma
 RoCE
 SDMA
 sdma
+XGMI
+xgmierr
+
+# ===== SDMA and Anvil =====
+amd-smi
+amdsmi
+AnvilLib
+Const
+CONST
+CreateFencePacket
+dst
+dstDeviceId
+getInstance
+hsakmt
+maxCopySize
+minCopySize
+myKernel
+numChannels
+Perfetto
+putWithSignal
+resettable
+ROCPROFSYS
+rocprof
+rocprof-sys
+rocprofiler
+SdmaQueueDeviceHandle
+shader
+SMI
+smi
+srcDeviceId
+xgmi
 
 # ===== GPU and HIP/HSA =====
 AMDGPU
@@ -64,12 +95,15 @@ fgpu
 gpu
 GPUs
 gpus
+hipDeviceCanAccessPeer
 hipcc
 hipHostMalloc
 hipHostMallocCoherent
 hipImportExternalMemory
 HSA
 hsa
+MiB
+Profiler
 xhip
 
 # ===== AMD and ROCm =====
@@ -146,6 +180,7 @@ VirtFS
 wH
 
 # ===== Commands and Tools =====
+alola
 aspell
 bashrc
 CMake
@@ -156,17 +191,22 @@ DoozyX
 gcc
 github
 github
+gres
 hpp
 makefile
 Makefile
+pty
 pyspelling
 rojopolis
+srun
+sqsh
 sudo
 Werror
 wordlist
 
 # ===== Miscellaneous =====
 api
+datacenter
 ar
 atlassian
 awk
@@ -361,6 +401,8 @@ Subdirectory
 subdirectory
 
 # ===== Common Documentation Terms =====
+OAM
+OCP
 BAR0
 HSA_FORCE_FINE_GRAIN_PCIE
 nvme_axiio

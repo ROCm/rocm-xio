@@ -187,10 +187,15 @@ devices. Each endpoint provides its own queue entry formats and IO semantics.
 ### **test-ep** - Test endpoint for development and testing
   - Used for validating the XIO framework
 
-### **nvme-ep** - NVMe endpoint 
+### **nvme-ep** - NVMe endpoint
   - Implements NVMe command submission (SQE) and completion (CQE) handling
   - Supports Read and Write commands
   - Definitions based on Linux kernel NVMe headers and NVMe specification
+
+### **sdma-ep** - SDMA (System DMA) endpoint
+  - Enables GPU-initiated DMA transfers using AMD SDMA hardware engines
+  - Supports peer-to-peer GPU transfers via XGMI/Infinity Fabric
+  - Requires MI300X or similar datacenter GPUs with SDMA support
 
 ### Listing Available Endpoints
 

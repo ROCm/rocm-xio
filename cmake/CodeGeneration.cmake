@@ -27,6 +27,9 @@ function(setup_code_generation)
     COMMENT "Generating endpoint files from: ${VALID_ENDPOINTS}"
   )
 
+  add_custom_target(endpoint-registry-generated
+    DEPENDS ${GEN_GENERATED_REGISTRY} ${GEN_GENERATED_INCLUDES})
+
   # Format generated files if clang-format is available
   find_program(CLANG_FORMAT clang-format PATHS /usr/bin ENV PATH)
   if(CLANG_FORMAT)
@@ -38,9 +41,6 @@ function(setup_code_generation)
       COMMENT "Formatting generated endpoint registry"
     )
   endif()
-
-  add_custom_target(endpoint-registry-generated
-    DEPENDS ${GEN_GENERATED_REGISTRY} ${GEN_GENERATED_INCLUDES})
 
   # NVMe header fetching
   set(NVME_FETCH_SCRIPT
