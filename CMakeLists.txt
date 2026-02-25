@@ -115,6 +115,14 @@ else()
     message(FATAL_ERROR "find_package did NOT find hip")
 endif()
 
+# Find hsakmt for SDMA endpoint support (required for hardware access)
+find_package(hsakmt REQUIRED)
+if(${hsakmt_FOUND})
+    message(STATUS "hsakmt found @ ${hsakmt_DIR}")
+else()
+    message(FATAL_ERROR "find_package did NOT find hsakmt")
+endif()
+
 # Include helper modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
@@ -228,6 +236,7 @@ target_link_libraries(rocm-xio
   INTERFACE
     hip::host
     hip::device
+    hsakmt::hsakmt
 )
 
 # Apply endpoint defines per source file

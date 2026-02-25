@@ -161,6 +161,8 @@ __host__ std::unique_ptr<XioEndpoint> createEndpoint(
 
 // Helper functions
 void xioPrintDeviceInfo();
+std::string xioGetModelName(int deviceId);
+void xioPrintGpuDeviceDetails(int deviceId);
 void xioPrintStatistics(const std::vector<double>& durations,
                         unsigned totalIterations = 0, unsigned numThreads = 0,
                         unsigned readIterations = 0,
