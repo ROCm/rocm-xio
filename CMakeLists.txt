@@ -164,6 +164,7 @@ set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
 set(ENDPOINTS_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/endpoints/common)
 set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
 set(TESTER_DIR ${CMAKE_SOURCE_DIR}/src/tester)
+set(UNIT_TESTS_DIR ${CMAKE_SOURCE_DIR}/src/unit-tests)
 set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
 
@@ -328,6 +329,24 @@ foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
   )
   target_link_options(${tgt} PRIVATE -fgpu-rdc)
 endforeach()
+
+# DOCA GIN example (unit-tests): single-rank AlltoAll-style test using doca-ep
+add_executable(doca-gin-example ${UNIT_TESTS_DIR}/doca-gin-example.hip)
+target_compile_options(doca-gin-example PRIVATE
+  -std=c++17
+  -Wall
+  -Wextra
+  -Wno-unused-parameter
+)
+target_include_directories(doca-gin-example PRIVATE ${INCLUDE_DIR}
+  ${ENDPOINTS_DIR})
+target_link_libraries(doca-gin-example PRIVATE
+  rocm-xio
+  hip::host
+  hip::device
+  hsa-runtime64::hsa-runtime64
+)
+target_link_options(doca-gin-example PRIVATE -fgpu-rdc)
 
 #-----------------------------------------------------------------------------
 # Install configuration
