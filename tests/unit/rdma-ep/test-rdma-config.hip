@@ -38,7 +38,7 @@ __global__ void test_config_structure_kernel(
   test_passed &= (device_config->vendor == RDMAVendor::MLX5 ||
                   device_config->vendor == RDMAVendor::BNXT_RE ||
                   device_config->vendor == RDMAVendor::IONIC ||
-                  device_config->vendor == RDMAVendor::PVRDMA ||
+                  device_config->vendor == RDMAVendor::ROCM_ERNIC ||
                   device_config->vendor == RDMAVendor::UNKNOWN);
 
   results[0] = test_passed;
@@ -217,11 +217,11 @@ int test_vendor_string_ionic() {
   return 0;
 }
 
-// Test vendor string conversion: "pvrdma" -> PVRDMA
-int test_vendor_string_pvrdma() {
+// Test vendor string conversion: "rocm-ernic" -> ROCM_ERNIC
+int test_vendor_string_rocm_ernic() {
   rdma_ep::RdmaEpConfig config = {};
   config.iterations = 100;
-  config.vendorStr = "pvrdma";
+  config.vendorStr = "rocm-ernic";
   config.emulate = false;
   config.queueLength = 256;
   config.transferSize = 4096;
@@ -229,7 +229,7 @@ int test_vendor_string_pvrdma() {
   std::string result = rdma_ep::validateConfig(&config);
 
   ASSERT_STREQ(result.c_str(), "");
-  ASSERT_EQ(config.vendor, RDMAVendor::PVRDMA);
+  ASSERT_EQ(config.vendor, RDMAVendor::ROCM_ERNIC);
 
   return 0;
 }
@@ -457,7 +457,7 @@ int main() {
   failures += test_vendor_string_bnxt();
   failures += test_vendor_string_bnxt_re();
   failures += test_vendor_string_ionic();
-  failures += test_vendor_string_pvrdma();
+  failures += test_vendor_string_rocm_ernic();
   failures += test_vendor_string_all();
   failures += test_invalid_vendor_string();
   failures += test_vendor_string_case_insensitive();

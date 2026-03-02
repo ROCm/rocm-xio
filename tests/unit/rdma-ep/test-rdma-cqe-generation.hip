@@ -10,10 +10,10 @@
 #include "bnxt/bnxt-rdma.h"
 #include "ionic/ionic-rdma.h"
 #include "mlx/mlx5-rdma.h"
-#include "pvrdma/pvrdma-rdma.h"
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
-#include "xio.h"       // For HIP_CHECK macro
+#include "rocm-ernic/rocm-ernic-rdma.h"
+#include "xio.h" // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -65,17 +65,18 @@ __global__ void test_cqe_generation_kernel(bool* results) {
   test_passed &= (ionic_cqe.byte_len == 16384);
   test_passed &= (ionic_cqe.ionic.qpn == ionic_qp);
 
-  // Test PVRDMA CQE generation
-  struct rdma_wqe pvrdma_wqe = {};
-  rdma_wqe_setup_send(&pvrdma_wqe, 321, RDMAVendor::PVRDMA, 0x6000, 32768,
-                      0x1111);
-  uint32_t pvrdma_qp = 3003;
-  pvrdma_wqe_set_vendor_specific(&pvrdma_wqe, pvrdma_qp, false, true);
-  rdma_ep::cqeType pvrdma_cqe = rdma_ep::cqeGenFromSqe(&pvrdma_wqe,
-                                                       0x1122334455667788ULL);
-  test_passed &= (pvrdma_cqe.wqe_id == 321);
-  test_passed &= (pvrdma_cqe.byte_len == 32768);
-  test_passed &= (pvrdma_cqe.pvrdma.qpn == pvrdma_qp);
+  // Test rocm-ernic CQE generation
+  struct rdma_wqe rocm_ernic_wqe = {};
+  rdma_wqe_setup_send(&rocm_ernic_wqe, 321, RDMAVendor::ROCM_ERNIC, 0x6000,
+                      32768, 0x1111);
+  uint32_t rocm_ernic_qp = 3003;
+  rocm_ernic_wqe_set_vendor_specific(&rocm_ernic_wqe, rocm_ernic_qp, false,
+                                     true);
+  rdma_ep::cqeType rocm_ernic_cqe =
+    rdma_ep::cqeGenFromSqe(&rocm_ernic_wqe, 0x1122334455667788ULL);
+  test_passed &= (rocm_ernic_cqe.wqe_id == 321);
+  test_passed &= (rocm_ernic_cqe.byte_len == 32768);
+  test_passed &= (rocm_ernic_cqe.rocm_ernic.qpn == rocm_ernic_qp);
 
   // Test error handling for invalid opcode
   struct rdma_wqe invalid_wqe = {};
@@ -165,26 +166,26 @@ int test_cqe_generation_ionic() {
   return 0;
 }
 
-// Test CQE generation from PVRDMA WQE
-int test_cqe_generation_pvrdma() {
+// Test CQE generation from rocm-ernic WQE
+int test_cqe_generation_rocm_ernic() {
   struct rdma_wqe wqe = {};
-  rdma_wqe_setup_send(&wqe, 321, RDMAVendor::PVRDMA, 0x6000, 32768, 0x1111);
+  rdma_wqe_setup_send(&wqe, 321, RDMAVendor::ROCM_ERNIC, 0x6000, 32768, 0x1111);
   uint32_t qp_num = 3003;
-  pvrdma_wqe_set_vendor_specific(&wqe, qp_num, false, true);
+  rocm_ernic_wqe_set_vendor_specific(&wqe, qp_num, false, true);
 
   uint64_t timestamp = 0x1122334455667788ULL;
   rdma_ep::cqeType cqe = rdma_ep::cqeGenFromSqe(&wqe, timestamp);
 
   // Verify basic fields
   ASSERT_EQ(cqe.wqe_id, 321);
-  ASSERT_EQ(cqe.vendor, static_cast<uint8_t>(RDMAVendor::PVRDMA));
+  ASSERT_EQ(cqe.vendor, static_cast<uint8_t>(RDMAVendor::ROCM_ERNIC));
   ASSERT_EQ(cqe.status, RDMA_WC_SUCCESS);
   ASSERT_EQ(cqe.byte_len, 32768);
   ASSERT_EQ(cqe.timestamp, timestamp);
 
-  // Verify PVRDMA-specific fields
-  ASSERT_EQ(cqe.pvrdma.qpn, qp_num);
-  ASSERT_EQ(cqe.pvrdma.reserved, 0);
+  // Verify rocm-ernic-specific fields
+  ASSERT_EQ(cqe.rocm_ernic.qpn, qp_num);
+  ASSERT_EQ(cqe.rocm_ernic.reserved, 0);
 
   return 0;
 }
@@ -332,7 +333,7 @@ int main() {
   failures += test_cqe_generation_mlx5();
   failures += test_cqe_generation_bnxt();
   failures += test_cqe_generation_ionic();
-  failures += test_cqe_generation_pvrdma();
+  failures += test_cqe_generation_rocm_ernic();
   failures += test_cqe_generation_invalid_opcode();
   failures += test_cqe_generation_stop_command();
   failures += test_wqe_id_matching();
