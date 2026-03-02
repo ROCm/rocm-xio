@@ -5,7 +5,10 @@
 
 #include <cstring>
 #include <iostream>
+#include <string>
+#include <thread>
 
+#include <CLI/CLI.hpp>
 #include <hip/hip_runtime.h>
 
 #include "rdma-ep.h"
@@ -241,7 +244,8 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
 
 // Config-based driveEndpoint function
 __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
-                                      void* sqeAddr, void* cqeAddr) {
+                                      void* sqeAddr, void* cqeAddr,
+                                      RDMAVendor vendor, uint32_t transferSize) {
   // Cast void* to endpoint-specific types
   rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
   rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
@@ -260,12 +264,12 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
   uint64_t remote_addr = 0x2000000;
   uint32_t lkey = 0x12345678;
   uint32_t rkey = 0x87654321;
-  uint32_t transfer_size = 4096; // 4KB transfers
 
-  // Cycle through different vendors
+  // Vendor selection: if UNKNOWN, cycle through all vendors
   RDMAVendor vendors[] = {RDMAVendor::MLX5, RDMAVendor::BNXT_RE,
                           RDMAVendor::IONIC, RDMAVendor::PVRDMA};
   int num_vendors = sizeof(vendors) / sizeof(vendors[0]);
+  bool use_all_vendors = (vendor == RDMAVendor::UNKNOWN);
 
   // Extract timing arrays from config
   unsigned long long int* startTime = config.startTimes;
@@ -275,29 +279,32 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
     // Start wqe IDs at 1 to avoid conflicts with zero-initialized memory
     uint16_t wqe_id = static_cast<uint16_t>(i + 1);
 
-    // Select vendor in round-robin fashion
-    RDMAVendor vendor = vendors[i % num_vendors];
+    // Select vendor: use specified vendor or cycle through all
+    RDMAVendor selected_vendor =
+      use_all_vendors ? vendors[i % num_vendors] : vendor;
 
     // Alternate between different RDMA operations
     if (i % 3 == 0) {
       // RDMA SEND operation
-      rdma_wqe_setup_send(wqe, wqe_id, vendor, local_addr + (i * transfer_size),
-                          transfer_size, lkey);
+      rdma_wqe_setup_send(wqe, wqe_id, selected_vendor,
+                          local_addr + (i * transferSize), transferSize,
+                          lkey);
     } else if (i % 3 == 1) {
       // RDMA WRITE operation
-      rdma_wqe_setup_write(wqe, wqe_id, vendor,
-                           local_addr + (i * transfer_size),
-                           remote_addr + (i * transfer_size), transfer_size,
+      rdma_wqe_setup_write(wqe, wqe_id, selected_vendor,
+                           local_addr + (i * transferSize),
+                           remote_addr + (i * transferSize), transferSize,
                            lkey, rkey);
     } else {
       // RDMA READ operation
-      rdma_wqe_setup_read(wqe, wqe_id, vendor, local_addr + (i * transfer_size),
-                          remote_addr + (i * transfer_size), transfer_size,
+      rdma_wqe_setup_read(wqe, wqe_id, selected_vendor,
+                          local_addr + (i * transferSize),
+                          remote_addr + (i * transferSize), transferSize,
                           lkey, rkey);
     }
 
     // Set vendor-specific fields
-    switch (vendor) {
+    switch (selected_vendor) {
       case RDMAVendor::MLX5:
         mlx5_wqe_set_vendor_specific(wqe, 1000 + i, false, false);
         break;
@@ -342,7 +349,276 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
   rdma_ep::sqeWrite(sqeLocal, sqePtr);
 }
 
-// Dummy run() function for rdma-ep (not implemented yet)
-hipError_t rdma_ep_run(XioEndpointConfig* config) {
-  return hipErrorNotSupported;
+//
+// RDMA Endpoint Configuration Functions
+//
+
+#ifndef __HIP_DEVICE_COMPILE__
+
+namespace rdma_ep {
+
+/**
+ * Register RDMA endpoint-specific CLI options
+ */
+__host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config) {
+  const std::string rdma_group = "RDMA Endpoint Options";
+
+  app
+    .add_option("-n,--iterations", config->iterations,
+                "Number of RDMA operations to perform")
+    ->default_val(128)
+    ->check(CLI::PositiveNumber)
+    ->group(rdma_group);
+
+  // Vendor selection: support "mlx5", "bnxt", "ionic", "pvrdma", or "all"
+  app
+    .add_option("--vendor", config->vendorStr,
+                "RDMA vendor to use: mlx5, bnxt, ionic, pvrdma, or all "
+                "(round-robin)")
+    ->default_val("mlx5")
+    ->check(CLI::IsMember({"mlx5", "bnxt", "bnxt_re", "ionic", "pvrdma", "all"},
+                          CLI::ignore_case))
+    ->group(rdma_group);
+
+  app
+    .add_flag("--emulate", config->emulate,
+               "Enable emulation mode (no hardware required)")
+    ->group(rdma_group);
+
+  app
+    .add_option("--queue-length", config->queueLength,
+                "Submission/completion queue length (must be power of 2)")
+    ->default_val(64)
+    ->check([](const std::string& str) {
+      unsigned val;
+      try {
+        val = static_cast<unsigned>(std::stoul(str));
+      } catch (...) {
+        return std::string("Invalid number");
+      }
+      if (val == 0 || val > 65536) {
+        return std::string("Queue length must be between 1 and 65536");
+      }
+      if ((val & (val - 1)) != 0) {
+        return std::string("Queue length must be a power of 2");
+      }
+      return std::string();
+    })
+    ->group(rdma_group);
+
+  app
+    .add_option("--transfer-size", config->transferSize,
+                "Transfer size per operation in bytes")
+    ->default_val(4096)
+    ->check(CLI::PositiveNumber)
+    ->group(rdma_group);
 }
+
+/**
+ * Validate RDMA endpoint configuration
+ */
+__host__ std::string validateConfig(RdmaEpConfig* config) {
+  if (!config) {
+    return "Configuration pointer is null";
+  }
+
+  // Convert vendor string to enum
+  if (config->vendorStr == "mlx5") {
+    config->vendor = RDMAVendor::MLX5;
+  } else if (config->vendorStr == "bnxt" || config->vendorStr == "bnxt_re") {
+    config->vendor = RDMAVendor::BNXT_RE;
+  } else if (config->vendorStr == "ionic") {
+    config->vendor = RDMAVendor::IONIC;
+  } else if (config->vendorStr == "pvrdma") {
+    config->vendor = RDMAVendor::PVRDMA;
+  } else if (config->vendorStr == "all") {
+    config->vendor = RDMAVendor::UNKNOWN; // Use UNKNOWN to indicate "all"
+  } else {
+    return "Invalid vendor. Must be: mlx5, bnxt, ionic, pvrdma, or all";
+  }
+
+  // Validate queue length is power of 2
+  if (config->queueLength == 0 || config->queueLength > 65536) {
+    return "Queue length must be between 1 and 65536";
+  }
+  if ((config->queueLength & (config->queueLength - 1)) != 0) {
+    return "Queue length must be a power of 2";
+  }
+
+  // Validate iterations
+  if (config->iterations == 0) {
+    return "Iterations must be greater than 0";
+  }
+
+  // Validate transfer size
+  if (config->transferSize == 0) {
+    return "Transfer size must be greater than 0";
+  }
+
+  return std::string();
+}
+
+/**
+ * Get iterations count for RDMA endpoint
+ */
+__host__ unsigned getIterations(void* endpointConfig) {
+  if (endpointConfig) {
+    RdmaEpConfig* rdmaConfig = static_cast<RdmaEpConfig*>(endpointConfig);
+    return rdmaConfig->iterations;
+  }
+  return 128; // Default
+}
+
+} // namespace rdma_ep
+
+#endif // __HIP_DEVICE_COMPILE__
+
+//
+// RDMA Endpoint Kernel
+//
+
+__global__ void rdma_ep_kernel(
+  struct rdma_wqe* sqeAddr, struct rdma_cqe* cqeAddr,
+  unsigned long long int* startTimes, unsigned long long int* endTimes,
+  unsigned iterations, unsigned numThreads, RDMAVendor vendor,
+  uint32_t transferSize) {
+  // Reconstruct XioEndpointConfig from parameters
+  XioEndpointConfig config;
+  config.submissionQueue = sqeAddr;
+  config.completionQueue = cqeAddr;
+  config.startTimes = startTimes;
+  config.endTimes = endTimes;
+  config.iterations = iterations;
+  config.numThreads = numThreads;
+  config.endpointConfig = nullptr; // Don't use endpointConfig pointer
+
+  // Always use driveEndpoint - it generates SQEs and polls for CQEs
+  // In emulation mode, a separate CPU thread runs rdma_ep_emulateEndpoint
+  // to process SQEs and generate CQEs
+  rdma_ep_driveEndpoint(config, sqeAddr, cqeAddr, vendor, transferSize);
+}
+
+//
+// RDMA Endpoint Run Function
+//
+
+#ifndef __HIP_DEVICE_COMPILE__
+
+hipError_t rdma_ep_run(XioEndpointConfig* config) {
+  if (!config) {
+    return hipErrorInvalidValue;
+  }
+
+  // HIP initialization: Ensure HIP is initialized (similar to nvme-ep)
+  int device_count = 0;
+  hipError_t count_err = hipGetDeviceCount(&device_count);
+  if (count_err != hipSuccess || device_count == 0) {
+    // HIP not initialized or no devices - try to initialize
+    hipError_t hip_init_err = hipInit(0);
+    if (hip_init_err != hipSuccess) {
+      fprintf(stderr,
+              "Warning: hipInit returned: %s (code: %d), continuing anyway\n",
+              hipGetErrorString(hip_init_err), hip_init_err);
+    }
+    // Set device to 0 after initialization
+    hipError_t hip_dev_err = hipSetDevice(0);
+    if (hip_dev_err != hipSuccess) {
+      fprintf(stderr, "Error: Failed to set HIP device 0: %s (code: %d)\n",
+              hipGetErrorString(hip_dev_err), hip_dev_err);
+      return hip_dev_err;
+    }
+  } else {
+    // HIP is already initialized - verify device is set correctly
+    int current_device = -1;
+    hipError_t get_dev_err = hipGetDevice(&current_device);
+    if (get_dev_err == hipSuccess && current_device != 0) {
+      // Device is set but not 0 - set it to 0
+      hipError_t set_dev_err = hipSetDevice(0);
+      if (set_dev_err != hipSuccess) {
+        fprintf(stderr,
+                "Warning: Failed to set HIP device to 0: %s (code: %d)\n",
+                hipGetErrorString(set_dev_err), set_dev_err);
+      }
+    }
+  }
+
+  // Get rdma-ep specific config
+  rdma_ep::RdmaEpConfig* rdmaConfig = nullptr;
+  if (!config->endpointConfig) {
+    fprintf(stderr, "Error: rdma-ep requires endpoint configuration\n");
+    return hipErrorInvalidValue;
+  }
+
+  rdmaConfig = static_cast<rdma_ep::RdmaEpConfig*>(config->endpointConfig);
+
+  // Cast void* to endpoint-specific types
+  struct rdma_wqe* sqePtr =
+    static_cast<struct rdma_wqe*>(config->submissionQueue);
+  struct rdma_cqe* cqePtr =
+    static_cast<struct rdma_cqe*>(config->completionQueue);
+
+  if (rdmaConfig->emulate) {
+    // Emulation mode: launch CPU thread to poll and process commands
+    // rdma_ep_emulateEndpoint polls for commands and processes them
+    std::thread emulationThread(rdma_ep_emulateEndpoint,
+                                config->iterations, sqePtr, cqePtr);
+    
+    // Launch GPU kernel to generate commands (in a separate thread)
+    // For emulation, we still need GPU threads to submit commands
+    dim3 gridDim(1);
+    dim3 blockDim(config->numThreads);
+
+    hipLaunchKernelGGL(rdma_ep_kernel, gridDim, blockDim, 0, 0, sqePtr, cqePtr,
+                        config->startTimes, config->endTimes, config->iterations,
+                        config->numThreads, rdmaConfig->vendor,
+                        rdmaConfig->transferSize);
+
+    hipError_t launchErr = hipGetLastError();
+    if (launchErr != hipSuccess) {
+      fprintf(stderr, "Error: Failed to launch rdma-ep kernel: %s (code: %d)\n",
+              hipGetErrorString(launchErr), launchErr);
+      emulationThread.join();
+      return launchErr;
+    }
+
+    // Wait for kernel completion
+    hipError_t syncErr = hipDeviceSynchronize();
+    if (syncErr != hipSuccess) {
+      fprintf(stderr, "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
+              hipGetErrorString(syncErr), syncErr);
+      emulationThread.join();
+      return syncErr;
+    }
+
+    // Wait for emulation thread to complete
+    emulationThread.join();
+  } else {
+    // Hardware mode: launch GPU kernel
+    dim3 gridDim(1);
+    dim3 blockDim(config->numThreads);
+
+    hipLaunchKernelGGL(rdma_ep_kernel, gridDim, blockDim, 0, 0, sqePtr, cqePtr,
+                        config->startTimes, config->endTimes, config->iterations,
+                        config->numThreads, rdmaConfig->vendor,
+                        rdmaConfig->transferSize);
+
+    hipError_t launchErr = hipGetLastError();
+    if (launchErr != hipSuccess) {
+      fprintf(stderr, "Error: Failed to launch rdma-ep kernel: %s (code: %d)\n",
+              hipGetErrorString(launchErr), launchErr);
+      return launchErr;
+    }
+
+    // Wait for kernel completion
+    hipError_t syncErr = hipDeviceSynchronize();
+    if (syncErr != hipSuccess) {
+      fprintf(stderr, "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
+              hipGetErrorString(syncErr), syncErr);
+      return syncErr;
+    }
+  }
+
+  return hipSuccess;
+}
+
+#endif // __HIP_DEVICE_COMPILE__

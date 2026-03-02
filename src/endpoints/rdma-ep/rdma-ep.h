@@ -7,6 +7,7 @@
 #define RDMA_EP_H
 
 #include <cstdint>
+#include <string>
 
 #include <hip/hip_runtime.h>
 
@@ -245,5 +246,63 @@ __host__ __device__ static inline const char* rdma_vendor_name(
       return "UNKNOWN";
   }
 }
+
+//
+// RDMA Endpoint Configuration Structure
+//
+
+namespace rdma_ep {
+
+/**
+ * RDMA Endpoint Configuration Structure
+ *
+ * Contains all RDMA-specific configuration options for the endpoint.
+ */
+struct RdmaEpConfig {
+  unsigned iterations = 128;              // Number of RDMA operations
+  std::string vendorStr = "mlx5";         // Vendor string (converted to enum)
+  RDMAVendor vendor = RDMAVendor::MLX5;    // Selected vendor (or UNKNOWN for "all")
+  bool emulate = false;                   // Emulation mode (no hardware)
+  unsigned queueLength = 64;              // Queue length (power of 2)
+  uint32_t transferSize = 4096;          // Transfer size per operation (bytes)
+  // Future: Add vendor-specific options (QP number, doorbell address, etc.)
+};
+
+} // namespace rdma_ep
+
+// Forward declaration for CLI::App (only needed in host code)
+#ifndef __HIP_DEVICE_COMPILE__
+namespace CLI {
+  class App;
+}
+#endif // __HIP_DEVICE_COMPILE__
+
+namespace rdma_ep {
+
+/**
+ * Register RDMA endpoint-specific CLI options
+ *
+ * @param app CLI11 App object to add options to
+ * @param config Pointer to RdmaEpConfig structure to populate
+ */
+__host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config);
+
+/**
+ * Validate RDMA endpoint configuration
+ *
+ * @param config Pointer to RdmaEpConfig structure
+ * @return Empty string if valid, error message otherwise
+ */
+__host__ std::string validateConfig(RdmaEpConfig* config);
+
+/**
+ * Get iterations count for RDMA endpoint
+ *
+ * @param endpointConfig Pointer to RdmaEpConfig structure
+ * @return Number of iterations
+ */
+__host__ unsigned getIterations(void* endpointConfig);
+
+} // namespace rdma_ep
 
 #endif // RDMA_EP_H

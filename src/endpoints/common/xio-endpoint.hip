@@ -261,6 +261,10 @@ public:
 };
 
 class RdmaEndpoint : public XioEndpoint {
+private:
+  // Store RDMA config
+  rdma_ep::RdmaEpConfig rdmaConfig_;
+
 public:
   __host__ EndpointType getType() const override {
     return EndpointType::RDMA_EP;
@@ -283,18 +287,58 @@ public:
     return RDMA_EP_CQE_SIZE;
   }
 
+  __host__ size_t
+  getSubmissionQueueLength(const XioEndpointConfig* config) const override {
+    // Use queue length from CLI configuration (default: 64)
+    (void)config; // Not used - we use member variable instead
+    return rdmaConfig_.queueLength;
+  }
+
+  __host__ size_t
+  getCompletionQueueLength(const XioEndpointConfig* config) const override {
+    // CQ length matches SQ length
+    (void)config; // Not used - we use member variable instead
+    return rdmaConfig_.queueLength;
+  }
+
   __host__ hipError_t run(XioEndpointConfig* config) override {
     return rdma_ep_run(config);
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
-    // RDMA endpoint can add its own CLI options here in the future
-    (void)app;
+    rdma_ep::registerCliOptions(app, &rdmaConfig_);
   }
 
   __host__ void* initializeEndpointConfig() override {
-    // RDMA endpoint can return its config here in the future
-    return nullptr;
+    return &rdmaConfig_;
+  }
+
+  __host__ void applyCommonConfig(
+    void* endpointConfig, const XioEndpointConfig* baseConfig) override {
+    // RDMA endpoint doesn't need to apply common config yet
+    // Future: could apply pciMmioBridge or other common options
+    (void)endpointConfig;
+    (void)baseConfig;
+  }
+
+  __host__ std::string validateConfig(void* endpointConfig) override {
+    if (endpointConfig) {
+      rdma_ep::RdmaEpConfig* rdmaConfig = static_cast<rdma_ep::RdmaEpConfig*>(
+        endpointConfig);
+      return rdma_ep::validateConfig(rdmaConfig);
+    }
+    return std::string();
+  }
+
+  __host__ unsigned getIterations(void* endpointConfig) const override {
+    if (endpointConfig) {
+      return rdma_ep::getIterations(endpointConfig);
+    }
+    return rdmaConfig_.iterations;
+  }
+
+  __host__ bool isEmulateMode() const override {
+    return rdmaConfig_.emulate;
   }
 };
 
