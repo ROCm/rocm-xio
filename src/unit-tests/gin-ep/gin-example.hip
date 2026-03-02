@@ -9,15 +9,15 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "doca/gin_gdaki.h"
+#include "gin-ep/gin-ep.h"
 #include "hip/hip_runtime.h"
 
 /*
- * DOCA GIN AlltoAll-style example for AMD GPUs (rocm-xio doca-ep).
+ * DOCA GIN AlltoAll-style example for AMD GPUs (rocm-xio gin-ep).
  *
  * Port of the NCCL Pure GIN AlltoAll example to run on AMD using the
- * doca-ep device API (radaki_dev_*). Single-rank only: one process, one GPU.
- * No NCCL or DOCA host stack; kernel uses doca-ep for fence and, in
+ * gin-ep device API (radaki_dev_*). Single-rank only: one process, one GPU.
+ * No NCCL or DOCA host stack; kernel uses gin-ep for fence and, in
  * single-rank mode, a device copy for data so verification passes without
  * a real NIC backend.
  */
@@ -36,7 +36,7 @@
 #define THREADS_PER_CTA 512
 
 /* Single-rank AlltoAll kernel: copy send -> recv (same shape as multi-rank
- * AlltoAll). Uses doca-ep fence so we exercise the doca-ep code path.
+ * AlltoAll). Uses gin-ep fence so we exercise the gin-ep code path.
  */
 template <typename T>
 __global__ void PureGinAlltoAllKernelSingleRank(const T* __restrict__ sendbuf,
@@ -55,7 +55,7 @@ __global__ void PureGinAlltoAllKernelSingleRank(const T* __restrict__ sendbuf,
   }
   __syncthreads();
 
-  /* Use doca-ep device API so we link and run doca-ep on AMD */
+  /* Use gin-ep device API so we link and run gin-ep on AMD */
   radaki_dev_fence_release<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
 }
 
@@ -73,7 +73,7 @@ int pureGinAlltoAll(int my_rank, int total_ranks, int local_device,
   (void)devices_per_rank;
 
   if (my_rank == 0) {
-    std::printf("Starting Pure GIN AlltoAll (single-rank, doca-ep)\n");
+    std::printf("Starting Pure GIN AlltoAll (single-rank, gin-ep)\n");
   }
 
   HIP_CHECK(hipSetDevice(local_device));

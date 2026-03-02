@@ -5,7 +5,7 @@
 
 #include <cstdio>
 
-#include "doca/gin_gdaki.h"
+#include "gin-ep/gin-ep.h"
 #include "hip/hip_runtime.h"
 
 #define HIP_CHECK(cmd)                                                         \

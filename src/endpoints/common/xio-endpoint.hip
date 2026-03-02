@@ -13,14 +13,14 @@
 #include "xio.h"
 
 // Include endpoint headers for size information
-#include "doca-ep.h"
+#include "gin-ep.h"
 #include "nvme-ep.h"
 #include "rdma-ep.h"
 #include "sdma-ep.h"
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
-extern hipError_t doca_ep_run(XioEndpointConfig* config);
+extern hipError_t gin_ep_run(XioEndpointConfig* config);
 extern hipError_t test_ep_run(XioEndpointConfig* config);
 extern hipError_t nvme_ep_run(XioEndpointConfig* config);
 extern hipError_t rdma_ep_run(XioEndpointConfig* config);
@@ -300,18 +300,18 @@ public:
   }
 };
 
-class DocaEndpoint : public XioEndpoint {
+class GinEndpoint : public XioEndpoint {
 public:
   __host__ EndpointType getType() const override {
-    return EndpointType::DOCA_EP;
+    return EndpointType::GIN_EP;
   }
 
   __host__ const char* getName() const override {
-    return "doca-ep";
+    return "gin-ep";
   }
 
   __host__ const char* getDescription() const override {
-    return "DOCA GIN endpoint";
+    return "GIN endpoint";
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
@@ -323,7 +323,7 @@ public:
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
-    return doca_ep_run(config);
+    return gin_ep_run(config);
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
@@ -546,8 +546,8 @@ size_t XioEndpoint::getCompletionQueueLength(
 
 __host__ std::unique_ptr<XioEndpoint> createEndpoint(EndpointType type) {
   switch (type) {
-    case EndpointType::DOCA_EP:
-      return std::make_unique<DocaEndpoint>();
+    case EndpointType::GIN_EP:
+      return std::make_unique<GinEndpoint>();
     case EndpointType::TEST_EP:
       return std::make_unique<TestEndpoint>();
     case EndpointType::NVME_EP:

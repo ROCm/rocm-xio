@@ -304,13 +304,13 @@ target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
 # DOCA GIN test executables
 add_executable(doca-gin-atomic-test
-  ${TESTER_DIR}/doca-gin-atomic-test.hip
+  ${UNIT_TESTS_DIR}/gin-ep/gin-ep-atomic-test.hip
 )
 add_executable(doca-gin-doorbell-test
-  ${TESTER_DIR}/doca-gin-doorbell-test.hip
+  ${UNIT_TESTS_DIR}/gin-ep/gin-ep-doorbell-test.hip
 )
 add_executable(doca-gin-wqe-test
-  ${TESTER_DIR}/doca-gin-wqe-test.hip
+  ${UNIT_TESTS_DIR}/gin-ep/gin-ep-wqe-test.hip
 )
 
 foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
@@ -330,8 +330,8 @@ foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
   target_link_options(${tgt} PRIVATE -fgpu-rdc)
 endforeach()
 
-# DOCA GIN example (unit-tests): single-rank AlltoAll-style test using doca-ep
-add_executable(doca-gin-example ${UNIT_TESTS_DIR}/doca-gin-example.hip)
+# DOCA GIN example (unit-tests): single-rank AlltoAll-style test using gin-ep
+add_executable(doca-gin-example ${UNIT_TESTS_DIR}/gin-ep/gin-example.hip)
 target_compile_options(doca-gin-example PRIVATE
   -std=c++17
   -Wall
@@ -369,8 +369,8 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
     COMPONENT rocm-xio
 )
-install(FILES ${INCLUDE_DIR}/doca/gin_gdaki.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio/doca
+install(FILES ${INCLUDE_DIR}/gin-ep/gin-ep.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio/gin-ep
     COMPONENT rocm-xio
 )
 

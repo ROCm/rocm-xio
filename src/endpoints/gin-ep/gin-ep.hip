@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "doca-ep.h"
+#include "gin-ep.h"
 #include "xio.h"
 
-hipError_t doca_ep_run(XioEndpointConfig* config) {
+hipError_t gin_ep_run(XioEndpointConfig* config) {
   (void)config;
   return hipSuccess;
 }

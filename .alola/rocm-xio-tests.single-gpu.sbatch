@@ -45,7 +45,7 @@ if $sdma_ep_allowed; then
 else
   echo "INFO: Skipping sdma-ep tests (${ROCM_GPU_ARCH} not in SDMA whitelist)."
 fi
-# Run the doca-gin tests (atomic test broken for now)
+# Run the gin-ep tests (atomic test broken for now)
 #./build/doca-gin-atomic-test
 ./build/doca-gin-doorbell-test
 ./build/doca-gin-wqe-test
