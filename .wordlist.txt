@@ -6,6 +6,7 @@
 xio
 XIO
 rocm
+ernic
 
 # ===== NVMe and Storage =====
 CQE
