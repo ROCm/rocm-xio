@@ -8,8 +8,9 @@
 #include <string>
 #include <thread>
 
-#include <CLI/CLI.hpp>
 #include <hip/hip_runtime.h>
+
+#include <CLI/CLI.hpp>
 
 #include "rdma-ep.h"
 #include "xio.h"
@@ -245,7 +246,8 @@ __host__ __device__ void rdma_ep_emulateEndpoint(unsigned sqeIterations,
 // Config-based driveEndpoint function
 __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
                                       void* sqeAddr, void* cqeAddr,
-                                      RDMAVendor vendor, uint32_t transferSize) {
+                                      RDMAVendor vendor,
+                                      uint32_t transferSize) {
   // Cast void* to endpoint-specific types
   rdma_ep::sqeType* sqePtr = static_cast<rdma_ep::sqeType*>(sqeAddr);
   rdma_ep::cqeType* cqePtr = static_cast<rdma_ep::cqeType*>(cqeAddr);
@@ -280,27 +282,26 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
     uint16_t wqe_id = static_cast<uint16_t>(i + 1);
 
     // Select vendor: use specified vendor or cycle through all
-    RDMAVendor selected_vendor =
-      use_all_vendors ? vendors[i % num_vendors] : vendor;
+    RDMAVendor selected_vendor = use_all_vendors ? vendors[i % num_vendors]
+                                                 : vendor;
 
     // Alternate between different RDMA operations
     if (i % 3 == 0) {
       // RDMA SEND operation
       rdma_wqe_setup_send(wqe, wqe_id, selected_vendor,
-                          local_addr + (i * transferSize), transferSize,
-                          lkey);
+                          local_addr + (i * transferSize), transferSize, lkey);
     } else if (i % 3 == 1) {
       // RDMA WRITE operation
       rdma_wqe_setup_write(wqe, wqe_id, selected_vendor,
                            local_addr + (i * transferSize),
-                           remote_addr + (i * transferSize), transferSize,
-                           lkey, rkey);
+                           remote_addr + (i * transferSize), transferSize, lkey,
+                           rkey);
     } else {
       // RDMA READ operation
       rdma_wqe_setup_read(wqe, wqe_id, selected_vendor,
                           local_addr + (i * transferSize),
-                          remote_addr + (i * transferSize), transferSize,
-                          lkey, rkey);
+                          remote_addr + (i * transferSize), transferSize, lkey,
+                          rkey);
     }
 
     // Set vendor-specific fields
@@ -382,7 +383,7 @@ __host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config) {
 
   app
     .add_flag("--emulate", config->emulate,
-               "Enable emulation mode (no hardware required)")
+              "Enable emulation mode (no hardware required)")
     ->group(rdma_group);
 
   app
@@ -477,11 +478,12 @@ __host__ unsigned getIterations(void* endpointConfig) {
 // RDMA Endpoint Kernel
 //
 
-__global__ void rdma_ep_kernel(
-  struct rdma_wqe* sqeAddr, struct rdma_cqe* cqeAddr,
-  unsigned long long int* startTimes, unsigned long long int* endTimes,
-  unsigned iterations, unsigned numThreads, RDMAVendor vendor,
-  uint32_t transferSize) {
+__global__ void rdma_ep_kernel(struct rdma_wqe* sqeAddr,
+                               struct rdma_cqe* cqeAddr,
+                               unsigned long long int* startTimes,
+                               unsigned long long int* endTimes,
+                               unsigned iterations, unsigned numThreads,
+                               RDMAVendor vendor, uint32_t transferSize) {
   // Reconstruct XioEndpointConfig from parameters
   XioEndpointConfig config;
   config.submissionQueue = sqeAddr;
@@ -552,26 +554,26 @@ hipError_t rdma_ep_run(XioEndpointConfig* config) {
   rdmaConfig = static_cast<rdma_ep::RdmaEpConfig*>(config->endpointConfig);
 
   // Cast void* to endpoint-specific types
-  struct rdma_wqe* sqePtr =
-    static_cast<struct rdma_wqe*>(config->submissionQueue);
-  struct rdma_cqe* cqePtr =
-    static_cast<struct rdma_cqe*>(config->completionQueue);
+  struct rdma_wqe* sqePtr = static_cast<struct rdma_wqe*>(
+    config->submissionQueue);
+  struct rdma_cqe* cqePtr = static_cast<struct rdma_cqe*>(
+    config->completionQueue);
 
   if (rdmaConfig->emulate) {
     // Emulation mode: launch CPU thread to poll and process commands
     // rdma_ep_emulateEndpoint polls for commands and processes them
-    std::thread emulationThread(rdma_ep_emulateEndpoint,
-                                config->iterations, sqePtr, cqePtr);
-    
+    std::thread emulationThread(rdma_ep_emulateEndpoint, config->iterations,
+                                sqePtr, cqePtr);
+
     // Launch GPU kernel to generate commands (in a separate thread)
     // For emulation, we still need GPU threads to submit commands
     dim3 gridDim(1);
     dim3 blockDim(config->numThreads);
 
     hipLaunchKernelGGL(rdma_ep_kernel, gridDim, blockDim, 0, 0, sqePtr, cqePtr,
-                        config->startTimes, config->endTimes, config->iterations,
-                        config->numThreads, rdmaConfig->vendor,
-                        rdmaConfig->transferSize);
+                       config->startTimes, config->endTimes, config->iterations,
+                       config->numThreads, rdmaConfig->vendor,
+                       rdmaConfig->transferSize);
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
@@ -584,7 +586,8 @@ hipError_t rdma_ep_run(XioEndpointConfig* config) {
     // Wait for kernel completion
     hipError_t syncErr = hipDeviceSynchronize();
     if (syncErr != hipSuccess) {
-      fprintf(stderr, "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
+      fprintf(stderr,
+              "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
               hipGetErrorString(syncErr), syncErr);
       emulationThread.join();
       return syncErr;
@@ -598,9 +601,9 @@ hipError_t rdma_ep_run(XioEndpointConfig* config) {
     dim3 blockDim(config->numThreads);
 
     hipLaunchKernelGGL(rdma_ep_kernel, gridDim, blockDim, 0, 0, sqePtr, cqePtr,
-                        config->startTimes, config->endTimes, config->iterations,
-                        config->numThreads, rdmaConfig->vendor,
-                        rdmaConfig->transferSize);
+                       config->startTimes, config->endTimes, config->iterations,
+                       config->numThreads, rdmaConfig->vendor,
+                       rdmaConfig->transferSize);
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
@@ -612,7 +615,8 @@ hipError_t rdma_ep_run(XioEndpointConfig* config) {
     // Wait for kernel completion
     hipError_t syncErr = hipDeviceSynchronize();
     if (syncErr != hipSuccess) {
-      fprintf(stderr, "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
+      fprintf(stderr,
+              "Error: Failed to synchronize rdma-ep kernel: %s (code: %d)\n",
               hipGetErrorString(syncErr), syncErr);
       return syncErr;
     }

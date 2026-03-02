@@ -259,23 +259,22 @@ namespace rdma_ep {
  * Contains all RDMA-specific configuration options for the endpoint.
  */
 struct RdmaEpConfig {
-  unsigned iterations = 128;              // Number of RDMA operations
-  std::string vendorStr = "mlx5";         // Vendor string (converted to enum)
-  RDMAVendor vendor = RDMAVendor::MLX5;    // Selected vendor (or UNKNOWN for "all")
-  bool emulate = false;                   // Emulation mode (no hardware)
-  unsigned queueLength = 64;              // Queue length (power of 2)
-  uint32_t transferSize = 4096;          // Transfer size per operation (bytes)
+  unsigned iterations = 128;            // Number of RDMA operations
+  std::string vendorStr = "mlx5";       // Vendor string (converted to enum)
+  RDMAVendor vendor = RDMAVendor::MLX5; // Selected vendor (or UNKNOWN for
+                                        // "all")
+  bool emulate = false;                 // Emulation mode (no hardware)
+  unsigned queueLength = 64;            // Queue length (power of 2)
+  uint32_t transferSize = 4096;         // Transfer size per operation (bytes)
   // Future: Add vendor-specific options (QP number, doorbell address, etc.)
 };
 
 } // namespace rdma_ep
 
 // Forward declaration for CLI::App (only needed in host code)
-#ifndef __HIP_DEVICE_COMPILE__
 namespace CLI {
-  class App;
+class App;
 }
-#endif // __HIP_DEVICE_COMPILE__
 
 namespace rdma_ep {
 
@@ -302,6 +301,21 @@ __host__ std::string validateConfig(RdmaEpConfig* config);
  * @return Number of iterations
  */
 __host__ unsigned getIterations(void* endpointConfig);
+
+// Type aliases for queue operations (matching rdma-ep.hip)
+typedef struct rdma_wqe sqeType;
+typedef struct rdma_cqe cqeType;
+
+// Forward declarations for queue operations (defined in rdma-ep.hip)
+// These are __host__ __device__ functions available for host code
+__host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b);
+__host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b);
+__host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress);
+__host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress);
+__host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress);
+__host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress);
+__host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
+                                          uint64_t timestamp);
 
 } // namespace rdma_ep
 
