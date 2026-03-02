@@ -388,5 +388,10 @@ install(FILES
     COMPONENT rocm-xio
 )
 
+# Add unit tests subdirectory
+if(BUILD_TESTING)
+  add_subdirectory(tests/unit/rdma-ep)
+endif()
+
 # Utility targets
 include(UtilityTargets)
