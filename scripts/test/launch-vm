@@ -2,7 +2,9 @@
 
 set -e
 
-QEMU="/opt/qemu-pci-mmio-submit/bin/qemu-system-x86_64"
+#QEMU="/opt/qemu-pci-mmio-submit/bin/qemu-system-x86_64"
+QEMU="/home/stebates/Projects/qemu/build-submit/qemu-system-x86_64"
+
 IMAGE="/home/stebates/Projects/qemu-minimal/images/rocm-axiio.qcow2"
 VFIO_PCI="10:00.0"
 SSH_PORT="${SSH_PORT:-2222}"  # SSH forwarding port (default: 2222)
@@ -101,8 +103,11 @@ shadow-size=8192,poll-interval-ns=1000000,addr=4.0 \
     -device vfio-pci,host=85:00.0,id=vfio1 \
     -serial mon:stdio \
     -display none \
-    -trace pci_mmio_* \
-    -trace pci_nvme_*
+    -trace "pci_mmio_*",file=/tmp/qemu-rocm-xio-trace.log \
+    -trace "pci_nvme_*",file=/tmp/qemu-rocm-xio-trace.log \
+    -trace "nvme_*",file=/tmp/qemu-rocm-xio-trace.log \
+    -trace "pci_nvme_dma_read",file=/tmp/qemu-rocm-xio-trace.log \
+    -trace "pci_nvme_enqueue_req_completion",file=/tmp/qemu-rocm-xio-trace.log
     
 # Cleanup
 echo ""

@@ -112,9 +112,11 @@ __host__ static inline uint64_t le128_to_u64(const uint8_t* data) {
 //
 // Helper macros for NVMe CQE status field
 //
+// QEMU NVMe implementation uses bit 0 for phase (not bit 15 as per spec)
+// Status format: (status_code << 1) | phase_bit
 #define NVME_CQE_STATUS_PHASE(status) (((status) >> 0) & 0x1)
 #define NVME_CQE_STATUS_SC(status) (((status) >> 1) & 0xFF)
-#define NVME_CQE_STATUS_SCT(status) (((status) >> 9) & 0x7)
+#define NVME_CQE_STATUS_SCT(status) (((status) >> 9) & 0x7F)
 #define NVME_CQE_STATUS_CRD(status) (((status) >> 12) & 0x3)
 #define NVME_CQE_STATUS_MORE(status) (((status) >> 14) & 0x1)
 #define NVME_CQE_STATUS_DNR(status) (((status) >> 15) & 0x1)
@@ -556,6 +558,22 @@ __host__ __device__ static inline bool nvme_verify_pattern(
  */
 __host__ __device__ void ringDoorbell(
   uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
+  void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu);
+
+/**
+ * Ring NVMe CQ head doorbell to notify controller that CQEs have been
+ * consumed. This is critical - without updating CQ head doorbell, the
+ * controller will run out of CQ slots and stall.
+ *
+ * @param cq_head Completion queue head value (number of CQEs consumed)
+ * @param cq_doorbell_offset Offset within BAR0 for CQ head doorbell register
+ * @param usePciMmioBridge If true, use PCI MMIO bridge mode
+ * @param shadowBufferVirt Shadow buffer pointer (for PCI MMIO bridge mode)
+ * @param nvmeTargetBdf NVMe device BDF (for PCI MMIO bridge mode)
+ * @param nvmeBar0Gpu GPU-accessible BAR0 pointer (for direct BAR0 mode)
+ */
+__host__ __device__ void ringCqHeadDoorbell(
+  uint16_t cq_head, uint32_t cq_doorbell_offset, bool usePciMmioBridge,
   void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu);
 
 /**

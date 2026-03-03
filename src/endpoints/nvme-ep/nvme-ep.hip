@@ -173,8 +173,66 @@ __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
 }
 
 // Read CQE - copies entire NVMe completion structure
+// Uses atomic loads with acquire semantics to ensure CPU/DMA writes are visible
+// to GPU cores. Critical for GPU-PCIe coherency when controller writes via DMA.
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
-  cqeType result;
+  cqeType result = {};
+  
+#ifdef __HIP_DEVICE_COMPILE__
+  // On GPU: Ensure memory visibility before reading. Use system-level memory
+  // fence to ensure CPU/DMA writes are visible to GPU cores.
+  __threadfence_system();
+  
+  // Wait for all memory operations to complete before reading
+  // This ensures we don't read stale cached values
+  __builtin_amdgcn_s_waitcnt(0);
+  
+  // Use atomic loads with acquire semantics for critical fields to ensure
+  // CPU/DMA writes are visible. The status field (which contains phase bit) is
+  // written LAST by the controller, so reading it LAST with acquire semantics
+  // ensures all previous writes to other fields are visible.
+  // Read command_id with acquire semantics
+  volatile uint16_t* cmd_id_ptr = 
+    reinterpret_cast<volatile uint16_t*>(&cqeAddress->command_id);
+  result.command_id = __hip_atomic_load(cmd_id_ptr, __ATOMIC_ACQUIRE,
+                                        __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  // Read sq_head with acquire semantics
+  volatile uint16_t* sq_head_ptr = 
+    reinterpret_cast<volatile uint16_t*>(&cqeAddress->sq_head);
+  result.sq_head = __hip_atomic_load(sq_head_ptr, __ATOMIC_ACQUIRE,
+                                      __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  // Read sq_id with acquire semantics
+  volatile uint16_t* sq_id_ptr = 
+    reinterpret_cast<volatile uint16_t*>(&cqeAddress->sq_id);
+  result.sq_id = __hip_atomic_load(sq_id_ptr, __ATOMIC_ACQUIRE,
+                                    __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  // Read result and rsvd with acquire semantics (use 32-bit atomic loads)
+  volatile uint32_t* result_ptr = 
+    reinterpret_cast<volatile uint32_t*>(&cqeAddress->result);
+  result.result = __hip_atomic_load(result_ptr, __ATOMIC_ACQUIRE,
+                                     __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  volatile uint32_t* rsvd_ptr = 
+    reinterpret_cast<volatile uint32_t*>(&cqeAddress->rsvd);
+  result.rsvd = __hip_atomic_load(rsvd_ptr, __ATOMIC_ACQUIRE,
+                                   __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  // Read status LAST (last field written by controller) with acquire semantics.
+  // This acts as a synchronization point - reading status with acquire ensures
+  // all previous writes by the controller are visible.
+  volatile uint16_t* status_ptr = 
+    reinterpret_cast<volatile uint16_t*>(&cqeAddress->status);
+  result.status = __hip_atomic_load(status_ptr, __ATOMIC_ACQUIRE,
+                                     __HIP_MEMORY_SCOPE_SYSTEM);
+  
+  // Wait for all loads to complete before returning
+  __builtin_amdgcn_s_waitcnt(0);
+#else
+  // On CPU: Use regular memory barrier
+  __sync_synchronize();
   // Copy the entire structure byte-by-byte to handle volatile correctly
   const volatile uint8_t* src = reinterpret_cast<const volatile uint8_t*>(
     cqeAddress);
@@ -182,6 +240,7 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   for (size_t i = 0; i < sizeof(cqeType); i++) {
     dst[i] = src[i];
   }
+#endif
   return result;
 }
 
@@ -698,6 +757,48 @@ __host__ __device__ void ringDoorbell(
   // If neither mode is available, silently skip (matches current behavior)
 }
 
+/**
+ * Ring NVMe CQ head doorbell to notify controller that CQEs have been
+ * consumed. This is critical - without updating CQ head doorbell, the
+ * controller will run out of CQ slots and stall.
+ */
+__host__ __device__ void ringCqHeadDoorbell(
+  uint16_t cq_head, uint32_t cq_doorbell_offset, bool usePciMmioBridge,
+  void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
+  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
+    // PCI MMIO Bridge mode - complex command structure
+    volatile struct pci_mmio_bridge_ring_meta* meta =
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
+    uint32_t slot = meta->producer_idx % meta->queue_depth;
+    volatile struct pci_mmio_bridge_command* cmd =
+      reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
+        static_cast<volatile uint8_t*>(shadowBufferVirt) +
+        sizeof(struct pci_mmio_bridge_ring_meta) +
+        (slot * sizeof(struct pci_mmio_bridge_command)));
+    cmd->target_bdf = nvmeTargetBdf;
+    cmd->target_bar = 0;
+    cmd->reserved1 = 0;
+    cmd->offset = cq_doorbell_offset;
+    cmd->value = cq_head;
+    cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
+    cmd->size = 4;
+    cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
+    cmd->reserved2 = 0;
+    cmd->sequence = slot;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+    meta->producer_idx = meta->producer_idx + 1;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+  } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
+    // Direct BAR0 mode - use generic xio_ep function
+    xio_ep::ringDoorbell(nvmeBar0Gpu, cq_doorbell_offset, cq_head);
+  }
+  // If neither mode is available, silently skip (matches current behavior)
+}
+
 } // namespace nvme_ep
 
 //
@@ -711,12 +812,20 @@ __device__ void nvme_ep_driveEndpoint(
   const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
-  uint16_t /* queueId */, uint32_t doorbell_offset, uint8_t* readBuffer,
+  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
   int verbose,
   int readIo, int writeIo) {
+  // Calculate CQ head doorbell offset
+  // SQ doorbell: doorbell_base + (2 * queueId) * stride_bytes (even)
+  // CQ head doorbell: doorbell_base + (2 * queueId + 1) * stride_bytes (odd)
+  const uint32_t doorbell_stride = 0; // Usually 0 (4 bytes per doorbell)
+  const uint32_t stride_bytes = 4 << doorbell_stride;
+  const uint32_t doorbell_base = 0x1000;
+  const uint32_t cq_doorbell_offset = doorbell_base + 
+    (2 * queueId + 1) * stride_bytes;
   // Check if sequential mode (readIo < 0 or writeIo < 0)
   const bool sequential_mode = (readIo < 0 || writeIo < 0);
   // Determine number of operations and command type for sequential mode
@@ -878,8 +987,10 @@ __device__ void nvme_ep_driveEndpoint(
 
         // Check if we advanced past stale completions
         if (cqe_advanced) {
-          // cq_head was advanced by cqePoll() - update last_sq_head and continue
-          // expected_phase was also updated by cqePoll() if needed
+          // cq_head was advanced by cqePoll() - update CQ head doorbell and
+          // continue. This is needed even when skipping stale entries.
+          nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+            usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
           last_sq_head = new_sq_head;
           poll_count = 0; // Reset poll count when we find progress
           continue;
@@ -922,6 +1033,10 @@ __device__ void nvme_ep_driveEndpoint(
           }
           // Now advance cq_head for the next iteration
           cq_head = (cq_head + 1) % queue_size;
+          // Update CQ head doorbell to notify controller that CQE has been consumed
+          // This is critical - without this, controller will run out of CQ slots
+          nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+            usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
           last_sq_head = new_sq_head;
           break;
         }
@@ -1009,6 +1124,9 @@ __device__ void nvme_ep_driveEndpoint(
                     expected_phase = expected_phase ^ 1;
                   }
                 }
+                // Update CQ head doorbell after processing completions
+                nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+                  usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
                 completed_count += new_completions;
                 last_sq_head = sq_head;
                 current_sq_head = sq_head;
@@ -1039,7 +1157,35 @@ __device__ void nvme_ep_driveEndpoint(
         // Full condition: (sq_tail + 1) % queue_size == sq_head
         // Like Linux driver, we don't batch a full queue length to avoid
         // wrap-around ambiguity when head == tail
-        uint16_t used_slots = (sq_tail - current_sq_head + queue_size) % queue_size;
+        // Handle wrap-around: if sq_head wrapped (sq_head < last_sq_head when last_sq_head > 0),
+        // OR if sq_head==0 and all submitted commands completed, then controller wrapped
+        // and queue is empty
+        // Also detect wrap when sq_head is at the end (queue_size-1) and we've completed commands
+        bool controller_wrapped_sq = (completed_count > 0) && 
+                                     ((current_sq_head < last_sq_head && last_sq_head > 0) ||
+                                      (current_sq_head == 0 && completed_count == submitted_count && sq_tail > 0) ||
+                                      (current_sq_head == (queue_size - 1) && last_sq_head < (queue_size - 1)));
+        uint16_t used_slots;
+        if (controller_wrapped_sq || current_sq_head == sq_tail) {
+          // Controller wrapped or queue is empty - all commands processed
+          used_slots = 0;
+        } else if (current_sq_head < sq_tail) {
+          // Normal case: controller hasn't wrapped
+          used_slots = sq_tail - current_sq_head;
+        } else {
+          // Controller has wrapped: sq_head > sq_tail
+          // sq_head indicates how many commands controller has processed
+          // Controller has processed slots [0..sq_head-1] (sq_head commands total)
+          // We've written slots [0..sq_tail-1] (sq_tail commands total)
+          // Outstanding commands are slots [sq_tail..sq_head-1]
+          // Number of outstanding slots = sq_head - sq_tail
+          // Examples:
+          // - sq_head=7, sq_tail=6: outstanding = slot 6 only = 1 slot (7-6=1) ✓
+          // - sq_head=6, sq_tail=5: outstanding = slot 5 only = 1 slot (6-5=1) ✓
+          // - sq_head=5, sq_tail=3: outstanding = slots [3,4] = 2 slots (5-3=2) ✓
+          // - sq_head=7, sq_tail=0: outstanding = slots [0..6] = 7 slots (7-0=7) ✓
+          used_slots = current_sq_head - sq_tail;
+        }
         // Reserve one slot to avoid wrap-around (can't use all queue_size entries)
         uint16_t available_slots = queue_size - used_slots - 1;
         
@@ -1173,172 +1319,337 @@ __device__ void nvme_ep_driveEndpoint(
         uint32_t poll_count = 0;
         const uint32_t max_polls = 10000000; // Safety limit
         nvme_ep::cqeType cqe_last = {}; // Track last seen CQE for change detection
+        uint16_t last_processed_cid = 0; // Track CID from last processed slot
+        uint16_t last_logged_slot = 0xFFFF; // Track last slot we logged to avoid spam
         
         while (completed_count < num_ops && poll_count < max_polls) {
           // Break if all submitted commands have completed and more need to be
           // submitted. This prevents infinite polling when waiting for commands
           // that haven't been submitted yet.
+          // BUT: Don't break if we're in the middle of processing a queue
+          // wrap-around (cq_head at slot 7) - we must process slot 7 before
+          // wrapping to slot 0, otherwise we'll miss completions.
           if (completed_count == submitted_count && submitted_count < num_ops) {
-            break; // Exit polling loop to submit more commands
+            // Check if we're reading stale data at any slot
+            // If so, and all submitted commands are done, break to submit more
+            volatile struct nvme_cqe* cqe_stale_check = &cqeAddr[cq_head];
+            nvme_ep::cqeType cqe_stale_val = nvme_ep::cqeRead(
+              (volatile nvme_ep::cqeType*)cqe_stale_check);
+            uint8_t phase_stale = NVME_CQE_STATUS_PHASE(cqe_stale_val.status);
+            bool phase_ok_stale = (expected_phase == 0xFF) || 
+                                  (phase_stale == expected_phase);
+            uint16_t sq_head_stale = cqe_stale_val.sq_head;
+            
+            // Don't break on stale data - continue polling until we see new data
+            // The controller will write new completions sequentially, and we need to
+            // wait for them rather than breaking prematurely
+            // Only break if we're NOT reading stale data (phase_ok_stale is true)
+            // and we're not at the last slot waiting for a completion
+            if (phase_ok_stale && cq_head != (queue_size - 1)) {
+              break; // Exit polling loop to submit more commands
+            }
+            // If at slot 7, check if there's a valid completion waiting
+            // We need to be careful: if the controller has wrapped (sq_head wrapped),
+            // slot 7 might have stale data from before the wrap. In that case, we
+            // should continue polling to wait for the controller to write a new
+            // completion to slot 7, not break.
+            volatile struct nvme_cqe* cqe_check = &cqeAddr[cq_head];
+            nvme_ep::cqeType cqe_check_val = nvme_ep::cqeRead(
+              (volatile nvme_ep::cqeType*)cqe_check);
+            uint8_t phase_check = NVME_CQE_STATUS_PHASE(cqe_check_val.status);
+            bool phase_ok_check = (expected_phase == 0xFF) || 
+                                  (phase_check == expected_phase);
+            uint16_t sq_head_check = cqe_check_val.sq_head;
+            // Check if controller has wrapped (sq_head wrapped back to smaller value)
+            // If so, slot 7 might have stale data and we should continue polling
+            bool controller_wrapped = (sq_head_check < queue_size) &&
+                                      (sq_head_check < last_sq_head) && 
+                                      (last_sq_head != 0);
+            // Determine if all commands are completed:
+            // - sq_head=0 means controller has processed all commands (queue empty)
+            // - If slot 7 has no completion (cmd_id=0), all commands are done
+            // - If slot 7 has phase mismatch AND (controller hasn't wrapped OR sq_head=0),
+            //   then slot 7 is stale and all commands are done
+            // Break if all commands are done - we can submit more (if remaining) or exit
+            bool all_commands_done = (sq_head_check == 0) || 
+                                     (cqe_check_val.command_id == 0) ||
+                                     (!phase_ok_check && (!controller_wrapped || sq_head_check == 0));
+            
+            if (all_commands_done) {
+              // All submitted commands have been processed - break to submit more
+              // (if submitted_count < num_ops) or exit (if all operations done)
+              break; // Exit polling loop
+            }
+            // Otherwise, continue polling slot 7 - there may be a valid completion
+            // coming (controller wrapped but sq_head != 0 means commands still pending)
           }
           poll_count++;
           
-          // Declare variables for CQE data
-          nvme_ep::cqeType cqe_new = {};
-          uint8_t phase = 0;
-          uint16_t sq_head = 0;
+          // CQ slots are filled consecutively by the controller. cq_head represents
+          // the current slot we're checking. We read from cq_head, and only advance
+          // cq_head after successfully processing a valid completion.
+          // Phase flips every time we go from slot 7 to slot 0 (controller wraps).
+          volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
+          nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
+            (volatile nvme_ep::cqeType*)cqe_entry);
+          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+          uint16_t sq_head = cqe_new.sq_head;
           
-          // When cq_head is at the end of the CQ (queue_size - 1), the controller
-          // may have wrapped and written new CQEs. Check slot 7 first (where the
-          // controller writes when wrapping from slot 6), then slot 0 (where it
-          // writes when wrapping from slot 7). We need to check BEFORE reading from
-          // cq_head, as cq_head might point to a stale CQE.
-          bool checked_wrap = false;
-          if (cq_head == queue_size - 1 && expected_phase != 0xFF) {
-            // Check slot 7 first - controller writes here when wrapping from slot 6
-            // (first completion after wrap, e.g., command 9 completes before command 8)
-            volatile struct nvme_cqe* cqe_slot7 = &cqeAddr[queue_size - 1];
-            nvme_ep::cqeType cqe_slot7_data = nvme_ep::cqeRead(
-              (volatile nvme_ep::cqeType*)cqe_slot7);
-            uint8_t slot7_phase = NVME_CQE_STATUS_PHASE(cqe_slot7_data.status);
-            uint16_t slot7_sq_head = cqe_slot7_data.sq_head;
-            
-            // If slot 7 has the expected phase, use it (controller wrapped and
-            // wrote here). The sq_head check will be done later in completion
-            // processing logic.
-            if (slot7_phase == expected_phase && slot7_sq_head < queue_size) {
-              // Controller wrapped and wrote at slot 7 - use this CQE
-              cqe_new = cqe_slot7_data;
-              phase = slot7_phase;
-              sq_head = slot7_sq_head;
-              checked_wrap = true;
-              
+          // Only log [POLL] message once per slot to avoid spam
+          if (verbose >= 2 && cq_head != last_logged_slot) {
+            printf("[POLL] Reading from slot %u: phase=%u expected=%u "
+                   "sq_head=%u last_sq_head=%u cmd_id=%u\n",
+                   cq_head, phase, expected_phase, sq_head, last_sq_head,
+                   cqe_new.command_id);
+            last_logged_slot = cq_head;
+          }
+          
+          // NEVER skip a CQ slot - the controller MUST update each slot
+          // Check if submission queue wrapped - if sq_head wrapped, the controller
+          // has processed all commands and written completions. When we're at the
+          // last slot, the completion for the last command should be there.
+          // We must wait for it, not skip it.
+          // IMPORTANT: Only detect sq_wrapped if we're at the last slot AND we've
+          // seen a valid completion (cmd_id != 0) - this ensures the controller
+          // has actually written to this slot, not just that sq_head wrapped.
+          bool sq_wrapped = (sq_head < queue_size) &&
+                            (sq_head < last_sq_head) && 
+                            (last_sq_head != 0) && 
+                            (cq_head == (queue_size - 1)) &&
+                            (cqe_new.command_id != 0);
+          
+          // Validate sq_head is within valid range (0 to queue_size-1)
+          // If invalid, continue polling this slot (don't skip)
+          if (sq_head >= queue_size) {
+            cqe_last = cqe_new;
+            continue; // Keep polling this slot
+          }
+          
+          // Check phase FIRST - phase bit flips when controller wraps from slot 7 to 0
+          // Initialize expected_phase from first valid CQE we read
+          bool phase_ok = false;
+          bool phase_flipped = false;
+          
+          if (expected_phase == 0xFF) {
+            // First read - initialize expected_phase from this CQE's phase
+            // Only initialize if this is a real CQE (cmd_id != 0)
+            if (cqe_new.command_id != 0) {
+              expected_phase = phase;
+              phase_ok = true;
               if (verbose >= 2) {
-                printf("[POLL] Reading from slot %u after wrap "
-                       "phase=%u sq_head=%u last_sq_head=%u cmd_id=%u\n",
-                       queue_size - 1, phase, sq_head, last_sq_head,
-                       cqe_new.command_id);
+                printf("[POLL] Initializing expected_phase=%u from slot %u "
+                       "cmd_id=%u sq_head=%u\n",
+                       expected_phase, cq_head, cqe_new.command_id, sq_head);
               }
             } else {
-              if (verbose >= 2) {
-                printf("[POLL] Slot 7 check failed: phase=%u expected=%u "
-                       "sq_head=%u last_sq_head=%u cmd_id=%u\n",
-                       slot7_phase, expected_phase, slot7_sq_head,
-                       last_sq_head, cqe_slot7_data.command_id);
+              // Uninitialized CQE (cmd_id=0) - wait for controller to write it
+              if (verbose >= 2 && cq_head != last_logged_slot) {
+                printf("[POLL] Uninitialized CQE at slot %u (cmd_id=0), "
+                       "waiting for controller to write completion\n", cq_head);
+                last_logged_slot = cq_head;
               }
-              // Slot 7 doesn't have expected phase - check slot 0 (controller
-              // writes here after wrapping from slot 7, e.g., command 8 completes
-              // after command 9)
-              volatile struct nvme_cqe* cqe_wrap = &cqeAddr[0];
-              nvme_ep::cqeType cqe_wrap_data = nvme_ep::cqeRead(
-                (volatile nvme_ep::cqeType*)cqe_wrap);
-              uint8_t wrap_phase = NVME_CQE_STATUS_PHASE(cqe_wrap_data.status);
-              uint16_t wrap_sq_head = cqe_wrap_data.sq_head;
+              cqe_last = cqe_new;
+              continue; // Keep polling this slot
+            }
+          } else {
+            // expected_phase is initialized - check if it matches
+            phase_ok = (phase == expected_phase);
+            
+            if (!phase_ok) {
+              // Phase mismatch - could be stale data or phase flip
+              // If we're reading stale data, only continue polling if there are
+              // outstanding commands. If all commands are done, break to submit more.
               
-              // If slot 0 has the expected phase and valid sq_head, controller wrapped
-              if (wrap_phase == expected_phase && wrap_sq_head < queue_size) {
-                // Controller wrapped - use CQE from slot 0
-                cqe_new = cqe_wrap_data;
-                phase = wrap_phase;
-                sq_head = wrap_sq_head;
-                // Don't update cq_head - keep it at queue_size - 1 so we continue
-                // checking slot 7 on next iteration (in case slot 7 gets written
-                // later, e.g., if command 9 completes before command 8)
-                checked_wrap = true;
+              // Phase mismatch - check if this is a valid phase flip
+              // Phase flips when controller wraps:
+              // - From last slot (e.g., slot 15) to slot 0
+              // - Or when controller wraps CQ and writes to last slot
+              if (cq_head == 0) {
+                // Phase flip at slot 0 - controller wrapped and wrote new CQE
+                phase_flipped = true;
+                expected_phase = phase;
+                phase_ok = true;
                 
-                if (verbose >= 2) {
-                  printf("[POLL] Detected CQ wrap: reading from slot 0 "
-                         "phase=%u sq_head=%u cmd_id=%u\n",
-                         phase, sq_head, cqe_new.command_id);
+                if (verbose >= 2 && cq_head != last_logged_slot) {
+                  printf("[POLL] Phase flip detected at slot 0: %u -> %u "
+                         "(controller wrapped, new CQE written) cmd_id=%u "
+                         "sq_head=%u last_sq_head=%u\n",
+                         expected_phase ^ 1, phase, cqe_new.command_id,
+                         sq_head, last_sq_head);
+                  last_logged_slot = cq_head;
+                }
+              } else if (cq_head == (queue_size - 1)) {
+                // At last slot (slot 7) with phase mismatch
+                // Phase only flips when controller wraps from slot 7 to slot 0,
+                // NOT when we're waiting at slot 7. So slot 7 should have the
+                // SAME phase as slots 0-6. If we see a mismatch, it means we're
+                // reading stale data from slot 7 (old completion from previous
+                // round). Keep expecting the same phase and wait for controller
+                // to write a new completion to slot 7.
+                if (verbose >= 2 && cq_head != last_logged_slot) {
+                  printf("[POLL] Phase mismatch at last slot %u: phase=%u "
+                         "expected=%u (stale data, waiting for controller to "
+                         "write new completion to slot 7)\n",
+                         cq_head, phase, expected_phase);
+                  last_logged_slot = cq_head;
+                }
+                // DON'T flip expected_phase - phase only flips when controller
+                // wraps to slot 0. Keep expecting the same phase and wait.
+                // Re-read CQE to ensure we see the controller's write
+                cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
+                phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+                sq_head = cqe_new.sq_head;
+                phase_ok = (phase == expected_phase);
+                // Wait for controller to write completion (cmd_id != 0)
+                // We must proceed sequentially - slot 7 must be written before
+                // the controller wraps to slot 0. Keep polling slot 7 until
+                // we see valid data (cmd_id != 0 and phase matches).
+                if (cqe_new.command_id == 0) {
+                  // At last slot with phase matching but cmd_id=0.
+                  // The controller MUST write to this slot before wrapping.
+                  // Keep polling slot 7 until we see valid data.
+                  static uint32_t scan_poll_count = 0;
+                  scan_poll_count++;
+                  bool run_scan = (scan_poll_count == 1 || scan_poll_count % 50 == 0);
+                  
+                  if (run_scan) {
+                    printf("[POLL] Waiting for controller to write to slot %u "
+                           "(phase=%u expected=%u cmd_id=0) (poll #%u)\n",
+                           cq_head, phase, expected_phase, scan_poll_count);
+                    cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
+                    phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+                    sq_head = cqe_new.sq_head;
+                    phase_ok = (phase == expected_phase);
+                    // If we now see valid data, process it instead of continuing
+                    if (cqe_new.command_id != 0 && phase_ok) {
+                      // Valid data now visible - fall through to process it
+                      // Don't continue - we have valid data
+                    } else {
+                      // Still stale - continue polling
+                      cqe_last = cqe_new;
+                      continue; // Keep polling slot 7 until valid data appears
+                    }
+                  } else {
+                    cqe_last = cqe_new;
+                    continue; // Keep polling slot 7 until valid data appears
+                  }
+                }
+                // If phase still doesn't match, continue waiting
+                if (!phase_ok) {
+                  cqe_last = cqe_new;
+                  continue;
+                }
+              } else if (sq_wrapped) {
+                // SQ wrapped and we're at last slot - controller has written
+                // completion to this slot, but phase doesn't match yet.
+                // This means the controller wrapped and flipped phase, but we
+                // haven't seen it yet. Flip expected_phase and re-read the CQE
+                // to ensure we see the controller's write with atomic acquire.
+                if (verbose >= 2 && cq_head != last_logged_slot) {
+                  printf("[POLL] SQ wrapped at slot %u, phase mismatch "
+                         "(phase=%u expected=%u), flipping expected_phase and "
+                         "re-reading CQE\n",
+                         cq_head, phase, expected_phase);
+                  last_logged_slot = cq_head;
+                }
+                expected_phase = expected_phase ^ 1;
+                // Re-read CQE after flipping expected_phase to ensure we see
+                // the controller's write with atomic acquire semantics
+                cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
+                phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+                sq_head = cqe_new.sq_head;
+                phase_ok = (phase == expected_phase);
+                // Even if phase matches, don't process if cmd_id=0 (stale data)
+                if (phase_ok && cqe_new.command_id == 0) {
+                  if (verbose >= 2) {
+                    printf("[POLL] SQ wrapped, phase matches but cmd_id=0 at "
+                           "slot %u, waiting for controller to write completion\n",
+                           cq_head);
+                  }
+                  cqe_last = cqe_new;
+                  continue; // Wait for controller to write cmd_id != 0
+                }
+                if (!phase_ok) {
+                  // Phase still doesn't match - wait for controller to update
+                  cqe_last = cqe_new;
+                  continue;
                 }
               } else {
-                if (verbose >= 2) {
-                  printf("[POLL] Slot 0 check failed: phase=%u expected=%u "
-                         "sq_head=%u last_sq_head=%u cmd_id=%u\n",
-                         wrap_phase, expected_phase, wrap_sq_head,
-                         last_sq_head, cqe_wrap_data.command_id);
+                // Phase mismatch at slot != 0 and SQ didn't wrap - stale CQE
+                // from previous pass. Wait for controller to write new completion.
+                // The controller always updates CQE slots sequentially, so we must
+                // wait for slot 7 to be written before it wraps to slot 0.
+                // Only continue polling if there are outstanding commands.
+                // If all commands are done, break to submit more.
+                if (completed_count == submitted_count && submitted_count < num_ops) {
+                  // All submitted commands done, stale data at this slot - break to submit more
+                  if (verbose >= 2) {
+                    printf("[POLL] Stale CQE at slot %u: phase=%u expected=%u, "
+                           "all commands done (completed=%u submitted=%u), "
+                           "breaking to submit more\n",
+                           cq_head, phase, expected_phase, 
+                           completed_count, submitted_count);
+                  }
+                  break;
                 }
-                // Neither slot 7 nor slot 0 had the expected phase - controller
-                // hasn't written new CQEs yet. Continue polling - don't set
-                // checked_wrap so we read from cq_head normally on next iteration
-                // (which will check slot 7 again until controller writes new CQE)
-                if (verbose >= 2) {
-                  printf("[POLL] Neither slot has expected phase, continuing "
-                         "poll (will check slot 7 again)\n");
+                // Outstanding commands exist - continue polling this slot until unstale
+                if (verbose >= 2 && cq_head != last_logged_slot) {
+                  printf("[POLL] Stale CQE at slot %u: phase=%u expected=%u, "
+                         "waiting for controller to write new completion "
+                         "(outstanding: %u)\n",
+                         cq_head, phase, expected_phase,
+                         submitted_count - completed_count);
+                  last_logged_slot = cq_head;
                 }
-                // Don't set checked_wrap - fall through to read from cq_head
-                // This ensures we keep checking slot 7 until controller writes
+                cqe_last = cqe_new;
+                continue; // Keep polling this slot
               }
+            } else if (cqe_new.command_id == 0) {
+              // Phase matches but cmd_id=0 - controller hasn't written completion yet
+              // Wait for it (don't skip this slot)
+              if (verbose >= 2 && cq_head != last_logged_slot) {
+                printf("[POLL] Phase matches but cmd_id=0 at slot %u, waiting "
+                       "for controller to write completion\n", cq_head);
+                // CQ scan disabled - using QEMU traces for debugging
+                // if (cq_head == (queue_size - 1)) {
+                //   nvme_ep::scanCQ(cqeAddr, queue_size, expected_phase, cq_head,
+                //                   last_sq_head);
+                // }
+                last_logged_slot = cq_head;
+              }
+              cqe_last = cqe_new;
+              continue; // Keep polling this slot
             }
           }
           
-          if (!checked_wrap) {
-            // Normal case: read from current cq_head
-            volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-            cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
-            phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-            sq_head = cqe_new.sq_head;
-          }
-          
-          // Validate sq_head is within valid range (0 to queue_size-1)
-          // If invalid, skip this CQE (likely stale/uninitialized data)
-          if (sq_head >= queue_size) {
-            cqe_last = cqe_new; // Update last seen CQE
-            continue; // Skip invalid sq_head
-          }
-          
-          // Check if phase matches expected phase (skip check if first operation)
-          bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
-          
-          // Debug: print phase mismatch if verbose
-          if (verbose >= 2 && !phase_ok && expected_phase != 0xFF) {
-            printf("[POLL] Phase mismatch: expected=%u got=%u cq_head=%u "
-                   "sq_head=%u last_sq_head=%u\n",
-                   expected_phase, phase, cq_head, sq_head, last_sq_head);
-          }
-          
-          // Check for sq_head progression (handles wrap-around)
-          // sq_head is a queue index (0 to queue_size-1), not a command count
+          // Process exactly ONE completion per CQE slot
+          // sq_head in CQE indicates controller's position, not completion count
+          // Each CQE slot contains exactly one completion entry
           bool sq_head_progressed = false;
           uint16_t new_completions = 0;
           
-          if (sq_head > last_sq_head) {
-            // Normal progression without wrap
-            new_completions = sq_head - last_sq_head;
+          if (phase_ok && cqe_new.command_id != 0) {
+            // Phase matches and cmd_id is valid - this is a valid completion
+            // Process exactly 1 completion from this CQE slot
+            new_completions = 1;
             sq_head_progressed = true;
-          } else if (sq_head < last_sq_head) {
-            // Possible wrap-around - verify it's reasonable
-            uint16_t diff = last_sq_head - sq_head;
-            if (diff <= queue_size) {
-              // Wrap-around: from last_sq_head to end, then from 0 to sq_head
-              // Calculate completions: (queue_size - last_sq_head) commands from
-              // last_sq_head to end, plus sq_head commands from 0 to sq_head
-              new_completions = (queue_size - last_sq_head) + sq_head;
-              sq_head_progressed = true;
-            }
-          } else if (sq_head == last_sq_head) {
-            // sq_head == last_sq_head means no new completions detected yet
-            // This is expected when polling - controller hasn't processed more yet
-            // However, if we just detected a CQ wrap and have a valid phase-matched
-            // CQE, we should process at least one completion to advance past the wrap
-            // Check if we're at a wrap boundary (cq_head is 0 or queue_size-1)
-            // and we have a valid phase-matched CQE
-            if (phase_ok && (cq_head == 0 || cq_head == queue_size - 1) &&
-                last_sq_head == queue_size - 1) {
-              // We just wrapped and read a CQE with matching phase
-              // Even if sq_head hasn't advanced yet, we know at least one command
-              // completed (the one that caused the wrap). Process 1 completion.
-              new_completions = 1;
-              sq_head_progressed = true;
-              
-              if (verbose >= 2) {
-                printf("[POLL] Processing wrap completion: cq_head=%u "
-                       "sq_head=%u last_sq_head=%u\n",
-                       cq_head, sq_head, last_sq_head);
+            
+            if (verbose >= 2) {
+              if (sq_head != last_sq_head) {
+                printf("[POLL] Processing completion: cmd_id=%u sq_head=%u "
+                       "last_sq_head=%u (sq_head advanced)\n",
+                       cqe_new.command_id, sq_head, last_sq_head);
+              } else {
+                printf("[POLL] Processing completion: cmd_id=%u sq_head=%u "
+                       "last_sq_head=%u (out-of-order completion)\n",
+                       cqe_new.command_id, sq_head, last_sq_head);
               }
             }
-            // Otherwise, continue polling
           }
+          // If phase doesn't match, continue polling - wait for phase to match or flip
+          
+          // Phase mismatch should have been handled above (phase flip detection)
+          // This should never be reached if phase_flipped logic works correctly
           
           // Cap new_completions to remaining operations to prevent buffer overflow
           uint16_t remaining_ops = num_ops - completed_count;
@@ -1353,10 +1664,13 @@ __device__ void nvme_ep_driveEndpoint(
               if (verbose >= 2) {
                 uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
                 uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
-                printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
-                       "phase=%u cq_head=%u new_completions=%u\n",
-                       cqe_new.command_id, sq_head, cqe_new.status, sct, sc,
-                       phase, cq_head, new_completions);
+                uint16_t slot_before_advance = cq_head;
+                printf("[CQE] slot=%u cmd_id=%u sq_head=%u status=0x%04x "
+                       "(SCT=%u SC=0x%02x) phase=%u cq_head=%u "
+                       "new_completions=%u\n",
+                       slot_before_advance, cqe_new.command_id, sq_head,
+                       cqe_new.status, sct, sc, phase, cq_head,
+                       new_completions);
               }
               // Update end times if needed
               if (config.endTimes != nullptr) {
@@ -1371,38 +1685,53 @@ __device__ void nvme_ep_driveEndpoint(
               // Process each completion: advance cq_head
               // Phase flips only when controller wraps CQ (from entry N-1 to 0),
               // not when our cq_head wraps. We detect phase changes by reading
-              // CQEs and checking their phase bits.
+              // CQEs and checking their phase bits in the polling loop.
+              // Do NOT flip expected_phase here - let the phase flip detection
+              // logic in the polling loop handle it when the controller actually
+              // wraps.
               for (uint16_t i = 0; i < new_completions; i++) {
                 cq_head = (cq_head + 1) % queue_size;
-                // Phase doesn't flip here - it only flips when controller wraps
+                // Reset logged slot when we advance to a new slot
+                last_logged_slot = 0xFFFF;
               }
+              
+              // Update CQ head doorbell after processing all completions
+              // This is critical - without this, controller will run out of CQ
+              // slots and stall. Update once after processing all completions in
+              // this batch.
+              nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+                usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
               
               completed_count += new_completions;
               // Update last_sq_head with actual sq_head from CQE
               // sq_head_progressed is true here, so sq_head is valid
               last_sq_head = sq_head;
               
+              // Track CID from the slot we just processed (next_slot, before
+              // advancing cq_head). This helps detect stale CQEs when wrapping.
+              // When cq_head wraps from 7 to 0, next_slot was 0, so we track that CID.
+              last_processed_cid = cqe_new.command_id;
+              
               poll_count = 0; // Reset poll count on progress
               cqe_last = cqe_new; // Update last seen CQE
               
-              // Extract phase from the completion we just processed
-              // Phase only changes when controller wraps CQ (from slot N-1 to 0),
-              // which we detect by reading CQEs and checking their phase bits
+              // Update expected_phase based on what we just processed
+              // Phase flips every time controller wraps from slot 7 to slot 0
               if (expected_phase == 0xFF) {
                 // First completion - extract phase from CQE
-                // The phase bit indicates the phase for entries in this loop
                 expected_phase = phase;
-              } else if (cq_head == 0) {
-                // We just read from slot 0 - check if controller wrapped
-                // If phase differs from expected, controller wrapped and flipped phase
-                if (phase != expected_phase) {
-                  // Controller wrapped - phase flipped
-                  expected_phase = phase;
+              } else if (phase_flipped) {
+                // Phase already updated when we detected the flip
+                // expected_phase is already set to the new phase
+              } else {
+                // Phase didn't flip - check if we're about to wrap
+                uint16_t next_cq_head = (cq_head + 1) % queue_size;
+                if (next_cq_head == 0) {
+                  // We just processed slot 7, next will be slot 0
+                  // Phase will flip on next read from slot 0
+                  // Keep current expected_phase for now
                 }
-                // If phase matches, we're still in the same loop (controller hasn't
-                // wrapped yet, or we're reading old CQEs)
               }
-              // Otherwise, phase stays the same (controller hasn't wrapped yet)
             } else {
               // No completion detected - update last seen CQE for change detection
               cqe_last = cqe_new;

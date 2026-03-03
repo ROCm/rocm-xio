@@ -555,20 +555,43 @@ static int get_mmio_bridge_shadow_buffer(
  * Returns physical address if found, 0 otherwise.
  */
 static __u64 lookup_queue_phys_addr(__u64 addr) {
-  struct queue_addr_entry* entry;
+  struct vram_buffer_entry* vram_entry;
+  struct queue_addr_entry* queue_entry;
   __u64 phys_addr = 0;
 
+  /* First check vram_buffers - this contains GPU BAR GPA for emulated NVMe
+   * or P2PDMA IOVA for passthrough NVMe */
+  spin_lock(&vram_buffers_lock);
+  list_for_each_entry(vram_entry, &vram_buffers, list) {
+    if (addr >= vram_entry->virt_addr &&
+        addr < (vram_entry->virt_addr + vram_entry->size)) {
+      phys_addr = vram_entry->phys_addr + (addr - vram_entry->virt_addr);
+      break;
+    }
+    /* Also check if addr matches the physical address directly */
+    if (addr >= vram_entry->phys_addr &&
+        addr < (vram_entry->phys_addr + vram_entry->size)) {
+      phys_addr = addr; /* Already physical, return as-is */
+      break;
+    }
+  }
+  spin_unlock(&vram_buffers_lock);
+
+  if (phys_addr)
+    return phys_addr;
+
+  /* Fallback to queue_addrs (host physical addresses) */
   spin_lock(&queue_addrs_lock);
-  list_for_each_entry(entry, &queue_addrs, list) {
+  list_for_each_entry(queue_entry, &queue_addrs, list) {
     /* Try matching by virtual address */
-    if (addr >= entry->virt_addr &&
-        addr < (entry->virt_addr + entry->size)) {
-      phys_addr = entry->phys_addr + (addr - entry->virt_addr);
+    if (addr >= queue_entry->virt_addr &&
+        addr < (queue_entry->virt_addr + queue_entry->size)) {
+      phys_addr = queue_entry->phys_addr + (addr - queue_entry->virt_addr);
       break;
     }
     /* Try matching by physical address (ubuffer may already be physical) */
-    if (addr >= entry->phys_addr &&
-        addr < (entry->phys_addr + entry->size)) {
+    if (addr >= queue_entry->phys_addr &&
+        addr < (queue_entry->phys_addr + queue_entry->size)) {
       phys_addr = addr; /* Already physical, return as-is */
       break;
     }
