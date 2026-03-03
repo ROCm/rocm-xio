@@ -43,7 +43,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
-#include "rocm-axiio.h"
+#include "rocm-xio.h"
 
 #define DEVICE_NAME ROCM_XIO_DEVICE_NAME
 #define CLASS_NAME "rocm_axiio"

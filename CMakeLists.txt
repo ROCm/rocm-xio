@@ -391,6 +391,7 @@ install(FILES
 # Add unit tests subdirectory
 if(BUILD_TESTING)
   add_subdirectory(tests/unit/rdma-ep)
+  add_subdirectory(tests/unit/nvme-ep)
 endif()
 
 # Utility targets
