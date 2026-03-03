@@ -22,6 +22,7 @@ function(setup_nvme_test TEST_NAME SOURCE_FILE)
     -std=c++17
     -Wall
     -Wextra
+    -fgpu-rdc
   )
 
   # Set include directories
@@ -39,6 +40,9 @@ function(setup_nvme_test TEST_NAME SOURCE_FILE)
     hip::device
     hsa-runtime64::hsa-runtime64
   )
+
+  # Required when linking relocatable device code
+  target_link_options(${TEST_NAME} PRIVATE -fgpu-rdc)
 
   # Add to CTest
   # Note: This test requires --controller argument, so CTest registration

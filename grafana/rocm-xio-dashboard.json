@@ -1000,9 +1000,9 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(amd_gpu_pcie_bandwidth_bytes_total{gpu_id=\"$gpu_id\",direction=\"read\"}[5m])",
+          "expr": "rate(amd_gpu_pcie_received_bytes_total{gpu_id=\"$gpu_id\"}[5m])",
           "format": "time_series",
-          "legendFormat": "Read {{device}}",
+          "legendFormat": "Read (Received)",
           "refId": "A"
         },
         {
@@ -1011,9 +1011,9 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(amd_gpu_pcie_bandwidth_bytes_total{gpu_id=\"$gpu_id\",direction=\"write\"}[5m])",
+          "expr": "rate(amd_gpu_pcie_sent_bytes_total{gpu_id=\"$gpu_id\"}[5m])",
           "format": "time_series",
-          "legendFormat": "Write {{device}}",
+          "legendFormat": "Write (Sent)",
           "refId": "B"
         }
       ],
@@ -1105,7 +1105,7 @@
           "editorMode": "code",
           "expr": "rate(nvme_host_read_commands{device=\"/dev/${device}\"}[5m])",
           "format": "time_series",
-          "legendFormat": "Read IOPS {{device}}",
+          "legendFormat": "Write Commands {{device}}",
           "refId": "A"
         },
         {
@@ -1116,11 +1116,11 @@
           "editorMode": "code",
           "expr": "rate(nvme_host_write_commands{device=\"/dev/${device}\"}[5m])",
           "format": "time_series",
-          "legendFormat": "Write IOPS {{device}}",
+          "legendFormat": "Read Commands {{device}}",
           "refId": "B"
         }
       ],
-      "title": "NVMe IOPS",
+      "title": "NVMe Command Counts",
       "type": "timeseries"
     },
     {

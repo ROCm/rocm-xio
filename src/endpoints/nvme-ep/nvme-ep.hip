@@ -59,9 +59,6 @@ struct pci_mmio_bridge_command {
 #include <sys/mman.h>
 #include <unistd.h>
 
-// Device path constant (needed in host code)
-#define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
-
 // Include kernel module header for IOCTL definitions
 // We need to define userspace-compatible structures since the kernel header
 // uses kernel-specific types
@@ -116,9 +113,7 @@ struct rocm_axiio_register_buffer_req {
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
 
-// Use types from nvme-ep.h
-typedef struct nvme_sqe sqeType;
-typedef struct nvme_cqe cqeType;
+// Types (sqeType, cqeType) are defined in nvme-ep.h
 
 // Verify that the queue entry sizes match nvme-ep expectations
 static_assert(sizeof(sqeType) == NVME_EP_SQE_SIZE, "nvme-ep SQE size mismatch");
@@ -209,14 +204,49 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
   }
 }
 
-// Poll for new CQE - waits for command ID to change
+// Poll for new CQE - waits for command ID to change or sq_head progression
 __host__ __device__ cqeType cqePoll(cqeType cqeLast,
-                                    volatile cqeType* cqeAddress) {
+                                    volatile cqeType* cqeAddress,
+                                    uint16_t last_sq_head,
+                                    uint16_t* sq_head_out) {
   cqeType cqeNew;
   while (true) {
     cqeNew = cqeRead(cqeAddress);
-    // Check if we got a new completion (different command ID)
+    uint16_t sq_head = cqeNew.sq_head;
+
+    // Primary check: sq_head progression (definitive indicator of completion)
+    // sq_head is updated by the controller when commands complete, so checking
+    // sq_head progression is more reliable than just command ID change
+    // Handle wrap-around: sq_head is a 16-bit value that can wrap from 65535 to 0
+    // We detect wrap-around by checking if sq_head is much smaller than last_sq_head
+    // (indicating it wrapped around)
+    bool sq_head_increased = false;
+    if (sq_head > last_sq_head) {
+      // Normal case: sq_head increased without wrapping
+      sq_head_increased = true;
+    } else if (sq_head < last_sq_head) {
+      // Possible wrap-around: check if the difference suggests wrap-around
+      // If last_sq_head is high (> 32768) and sq_head is low (< 32768), it wrapped
+      // Or if the difference is large (> 32768), it's likely wrap-around
+      uint16_t diff = last_sq_head - sq_head;
+      if (diff > 32768 || (last_sq_head > 32768 && sq_head < 32768)) {
+        // Wrap-around detected - sq_head wrapped past last_sq_head
+        sq_head_increased = true;
+      }
+    }
+    
+    if (sq_head_increased) {
+      if (sq_head_out != nullptr) {
+        *sq_head_out = sq_head;
+      }
+      return cqeNew;
+    }
+
+    // Secondary check: command ID change (for backward compatibility)
     if (cqeNew.command_id != cqeLast.command_id) {
+      if (sq_head_out != nullptr) {
+        *sq_head_out = sq_head;
+      }
       return cqeNew;
     }
   }
@@ -257,6 +287,45 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
 
 // Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
+// Ring NVMe doorbell with support for both PCI MMIO bridge and direct BAR0
+// modes
+__host__ __device__ void ringDoorbell(
+  uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
+  void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
+  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
+    // PCI MMIO Bridge mode - complex command structure
+    volatile struct pci_mmio_bridge_ring_meta* meta =
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
+    uint32_t slot = meta->producer_idx % meta->queue_depth;
+    volatile struct pci_mmio_bridge_command* cmd =
+      reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
+        static_cast<volatile uint8_t*>(shadowBufferVirt) +
+        sizeof(struct pci_mmio_bridge_ring_meta) +
+        (slot * sizeof(struct pci_mmio_bridge_command)));
+    cmd->target_bdf = nvmeTargetBdf;
+    cmd->target_bar = 0;
+    cmd->reserved1 = 0;
+    cmd->offset = doorbell_offset;
+    cmd->value = sq_tail;
+    cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
+    cmd->size = 4;
+    cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
+    cmd->reserved2 = 0;
+    cmd->sequence = slot;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+    meta->producer_idx = meta->producer_idx + 1;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+  } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
+    // Direct BAR0 mode - use generic xio_ep function
+    xio_ep::ringDoorbell(nvmeBar0Gpu, doorbell_offset, sq_tail);
+  }
+  // If neither mode is available, silently skip (matches current behavior)
+}
+
 } // namespace nvme_ep
 
 //
@@ -270,7 +339,7 @@ __device__ void nvme_ep_driveEndpoint(
   const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
-  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
+  uint16_t /* queueId */, uint32_t doorbell_offset, uint8_t* readBuffer,
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
@@ -306,7 +375,8 @@ __device__ void nvme_ep_driveEndpoint(
 
   // If using write buffer, generate write data upfront
   if (has_write_buffer) {
-    nvme_generate_pattern(writeBuffer, bufferSize, 0, lbaSize, lfsrSeed);
+    nvme_ep::nvme_generate_pattern(writeBuffer, bufferSize, 0, lbaSize,
+                                   lfsrSeed);
   }
 
   // Initialize phase tracking for completion polling
@@ -352,7 +422,7 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = readBufferDma
                                    ? (readBufferDma + buffer_offset)
                                    : (uint64_t)(readBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -363,7 +433,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = writeBufferDma
                                    ? (writeBufferDma + buffer_offset)
                                    : (uint64_t)(writeBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -376,8 +447,8 @@ __device__ void nvme_ep_driveEndpoint(
       // Setup read or write command
       nvme_ep::sqeType sqeLocal = {};
       struct nvme_sqe* sqe = &sqeLocal;
-      nvme_sqe_setup_rw(sqe, !sequential_is_read, cmd_id, nsid, lba, blocks,
-                        prp1, prp2);
+      nvme_ep::nvme_sqe_setup_rw(sqe, !sequential_is_read, cmd_id, nsid, lba,
+                                 blocks, prp1, prp2);
 
       // Record start time
       if (config.startTimes != nullptr) {
@@ -390,36 +461,8 @@ __device__ void nvme_ep_driveEndpoint(
       __threadfence_system();
 
       // Ring doorbell
-      if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-        volatile struct pci_mmio_bridge_ring_meta* meta =
-          static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-            shadowBufferVirt);
-        uint32_t slot = meta->producer_idx % meta->queue_depth;
-        volatile struct pci_mmio_bridge_command* cmd =
-          reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-            static_cast<volatile uint8_t*>(shadowBufferVirt) +
-            sizeof(struct pci_mmio_bridge_ring_meta) +
-            (slot * sizeof(struct pci_mmio_bridge_command)));
-        cmd->target_bdf = nvmeTargetBdf;
-        cmd->target_bar = 0;
-        cmd->reserved1 = 0;
-        cmd->offset = doorbell_offset;
-        cmd->value = sq_tail;
-        cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-        cmd->size = 4;
-        cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-        cmd->reserved2 = 0;
-        cmd->sequence = slot;
-        __threadfence_system();
-        meta->producer_idx = meta->producer_idx + 1;
-        __threadfence_system();
-      } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-        volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
-          static_cast<volatile char*>(nvmeBar0Gpu) + doorbell_offset);
-        __threadfence_system();
-        *doorbell_reg = sq_tail;
-        __threadfence_system();
-      }
+      nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                            shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
       // Wait for this specific completion
       // In sequential mode, we issue one command at a time, so sq_head should
@@ -521,7 +564,7 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = readBufferDma
                                    ? (readBufferDma + buffer_offset)
                                    : (uint64_t)(readBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -533,7 +576,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = writeBufferDma
                                    ? (writeBufferDma + buffer_offset)
                                    : (uint64_t)(writeBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -544,7 +588,8 @@ __device__ void nvme_ep_driveEndpoint(
       }
 
       // Setup command
-      nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks, prp1, prp2);
+      nvme_ep::nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks, prp1,
+                                 prp2);
 
       // Record start time
       if (config.startTimes != nullptr) {
@@ -560,36 +605,8 @@ __device__ void nvme_ep_driveEndpoint(
     __threadfence_system();
 
     // Ring doorbell once for all commands
-    if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-      volatile struct pci_mmio_bridge_ring_meta* meta =
-        static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-          shadowBufferVirt);
-      uint32_t slot = meta->producer_idx % meta->queue_depth;
-      volatile struct pci_mmio_bridge_command* cmd =
-        reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-          static_cast<volatile uint8_t*>(shadowBufferVirt) +
-          sizeof(struct pci_mmio_bridge_ring_meta) +
-          (slot * sizeof(struct pci_mmio_bridge_command)));
-      cmd->target_bdf = nvmeTargetBdf;
-      cmd->target_bar = 0;
-      cmd->reserved1 = 0;
-      cmd->offset = doorbell_offset;
-      cmd->value = sq_tail;
-      cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-      cmd->size = 4;
-      cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-      cmd->reserved2 = 0;
-      cmd->sequence = slot;
-      __threadfence_system();
-      meta->producer_idx = meta->producer_idx + 1;
-      __threadfence_system();
-    } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-      volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
-        static_cast<volatile char*>(nvmeBar0Gpu) + doorbell_offset);
-      __threadfence_system();
-      *doorbell_reg = sq_tail;
-      __threadfence_system();
-    }
+    nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                          shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
     // Poll for all completions
     uint16_t completed_count = 0;
@@ -762,46 +779,12 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   return 0;
 }
 
-// Helper to get physical address from virtual address (matching
-// test-gpu-nvme-write.cpp)
-static uint64_t virt_to_phys(void* virt_addr) {
-  int fd;
-  uint64_t page_offset = (uint64_t)virt_addr % sysconf(_SC_PAGESIZE);
-  uint64_t pfn;
-  off_t offset = ((uint64_t)virt_addr / sysconf(_SC_PAGESIZE)) *
-                 sizeof(uint64_t);
-
-  fd = open("/proc/self/pagemap", O_RDONLY);
-  if (fd < 0) {
-    perror("open /proc/self/pagemap");
-    return 0;
-  }
-
-  if (lseek(fd, offset, SEEK_SET) < 0) {
-    perror("lseek");
-    close(fd);
-    return 0;
-  }
-
-  if (read(fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
-    perror("read pagemap");
-    close(fd);
-    return 0;
-  }
-
-  close(fd);
-
-  if (!(pfn & (1ULL << 63))) {
-    fprintf(stderr, "Page not present\n");
-    return 0;
-  }
-
-  return ((pfn & ((1ULL << 55) - 1)) * sysconf(_SC_PAGESIZE)) + page_offset;
-}
+// Physical address translation is now provided by xioGetPhysAddr() from xio.h
 
 // Forward declarations
 static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf, void** virt_addr);
-static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu);
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu);
 
 // Run endpoint test - launches GPU kernel and waits for completion
 __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
@@ -869,7 +852,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   fprintf(stderr, "Using queue length: %u entries\n", queue_size);
 
   struct nvme_queue_info queue_info;
-  int ret = nvme_ep_create_queue_via_ioctl(
+  int ret = nvme_ep::nvme_create_queue_via_ioctl(
     nvmeConfig->device.c_str(), ROCM_XIO_DEVICE_PATH, nvmeConfig->queueId,
     queue_size, nvmeConfig->nvmeTargetBdf,
     config->memoryMode, // Respect memory mode like test-ep
@@ -1020,8 +1003,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     // PCI MMIO bridge is disabled - set up direct doorbell via BAR0
     void* bar0_cpu = nullptr;
     void* bar0_gpu = nullptr;
-    int ret_bar0 = map_nvme_bar0(nvmeConfig->nvmeTargetBdf, &bar0_cpu,
-                                 &bar0_gpu);
+    int ret_bar0 = nvme_ep_map_bar0(nvmeConfig->nvmeTargetBdf, &bar0_cpu,
+                                    &bar0_gpu);
     if (ret_bar0 < 0) {
       fprintf(stderr,
               "Warning: Failed to map NVMe BAR0 for direct doorbell: %s\n",
@@ -1163,8 +1146,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         }
 
         // Get physical address for host memory using /proc/self/pagemap
-        // (matching test code line 842)
-        readBufferDma = virt_to_phys(readBuffer);
+        readBufferDma = xioGetPhysAddr(readBuffer);
         if (!readBufferDma) {
           fprintf(stderr,
                   "ERROR: Failed to get read buffer physical address\n");
@@ -1185,9 +1167,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       // Read buffer registration:
       // - Device memory: Already registered via
       // export_and_register_vram_buffer()
-      // - Host memory: Physical address obtained from pagemap, kernel module
-      // will
-      //   use virt_to_phys() fallback if needed for PRP injection
+      // - Host memory: Physical address obtained from pagemap via
+      // xioGetPhysAddr(), kernel module will use virt_to_phys() fallback if
+      // needed for PRP injection
 
       // Verify read buffer is GPU-accessible and get GPU pointer if needed
       // (matches QEMU guest code pattern - hipHostMallocMapped should be
@@ -1313,8 +1295,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         }
 
         // Get physical address for host memory using /proc/self/pagemap
-        // (matching test code line 842)
-        writeBufferDma = virt_to_phys(writeBuffer);
+        writeBufferDma = xioGetPhysAddr(writeBuffer);
         if (!writeBufferDma) {
           fprintf(stderr,
                   "ERROR: Failed to get write buffer physical address\n");
@@ -1343,9 +1324,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       // Write buffer registration:
       // - Device memory: Already registered via
       // export_and_register_vram_buffer()
-      // - Host memory: Physical address obtained from pagemap, kernel module
-      // will
-      //   use virt_to_phys() fallback if needed for PRP injection
+      // - Host memory: Physical address obtained from pagemap via
+      // xioGetPhysAddr(), kernel module will use virt_to_phys() fallback if
+      // needed for PRP injection
 
       // Verify write buffer is GPU-accessible and get GPU pointer if needed
       // (matches QEMU guest code pattern - hipHostMallocMapped should be
@@ -1650,7 +1631,8 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
 
 // Map NVMe BAR0 for direct doorbell access
 // Similar to test-gpu-nvme-write.cpp's map_nvme_bar0 function
-static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu) {
   int bar0_fd = -1;
   int drm_fd = -1;
   void* mapped = MAP_FAILED;
@@ -2070,7 +2052,111 @@ cleanup:
   return ret;
 }
 
-__host__ int nvme_ep_create_queue_via_ioctl(
+__host__ int nvme_ep_check_rootfs(const char* nvme_device) {
+  // Extract namespace device (e.g., /dev/nvme0 -> /dev/nvme0n1)
+  char ns_device[256];
+  snprintf(ns_device, sizeof(ns_device), "%sn1", nvme_device);
+
+  // Check /proc/mounts for root mount
+  FILE* f = fopen("/proc/mounts", "r");
+  if (!f) {
+    fprintf(stderr, "Warning: Failed to open /proc/mounts\n");
+    return 0; // Can't check, allow to proceed
+  }
+
+  char line[512];
+  bool is_rootfs = false;
+  while (fgets(line, sizeof(line), f)) {
+    // Format: device mount_point filesystem ...
+    char device[256], mount_point[256];
+    if (sscanf(line, "%255s %255s", device, mount_point) == 2) {
+      if (strcmp(mount_point, "/") == 0) {
+        // Check if this device matches our NVMe device
+        if (strstr(device, ns_device) != nullptr ||
+            strstr(device, nvme_device) != nullptr) {
+          is_rootfs = true;
+          break;
+        }
+      }
+    }
+  }
+  fclose(f);
+
+  if (is_rootfs) {
+    fprintf(stderr,
+            "ERROR: NVMe device %s appears to be the root filesystem!\n",
+            nvme_device);
+    fprintf(stderr, "This operation will NOT proceed on rootfs to prevent data "
+                    "corruption.\n");
+    fprintf(stderr, "Please specify a different NVMe device.\n");
+    return -1;
+  }
+
+  return 0;
+}
+
+__host__ int nvme_ep_read_smart_log(const char* nvme_device,
+                                    struct nvme_smart_log* smart_log) {
+  int nvme_fd = open(nvme_device, O_RDONLY);
+  if (nvme_fd < 0) {
+    fprintf(stderr, "Failed to open NVMe device %s: %s\n", nvme_device,
+            strerror(errno));
+    return -errno;
+  }
+
+  // Allocate buffer on heap to ensure kernel can access it
+  // Stack-allocated buffers might not work with ioctl
+  uint8_t* buffer = static_cast<uint8_t*>(malloc(512));
+  if (!buffer) {
+    fprintf(stderr, "Failed to allocate SMART log buffer\n");
+    close(nvme_fd);
+    return -ENOMEM;
+  }
+  memset(buffer, 0, 512);
+
+  // Use NVME_IOCTL_ADMIN64_CMD with nvme_passthru_cmd64 structure
+  // NVME_IOCTL_ADMIN_CMD expects nvme_admin_cmd which has different layout
+  // The 64-bit version is needed for the 64-bit result field
+  struct nvme_passthru_cmd64 cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.opcode = nvme_admin_get_log_page;
+  cmd.nsid = 0xFFFFFFFF; // Controller-level log
+  // cdw10: NUMD (Number of Dwords) in bits [31:16], LID (Log Identifier) in
+  // bits [15:0] NUMD = 127 (0x7F) for 512 bytes, LID = 0x02 (SMART/Health
+  // Information)
+  cmd.cdw10 = (127 << 16) | 0x02; // (NUMD << 16) | LID
+  cmd.cdw11 = 0x00000000;         // Reserved
+  cmd.cdw12 = 0x0000007F;         // RAE=0, LSP=0, LSI=0x7F (all fields)
+  cmd.addr = reinterpret_cast<uint64_t>(buffer);
+  cmd.data_len = 512;
+  cmd.timeout_ms = 0;
+
+  int ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
+  if (ret < 0) {
+    fprintf(stderr, "Failed to read SMART log: %s\n", strerror(errno));
+    free(buffer);
+    close(nvme_fd);
+    return -errno;
+  }
+
+  // Check completion status
+  if (cmd.result & 0xFFFE) {
+    uint16_t status = (cmd.result >> 1) & 0xFF;
+    fprintf(stderr, "SMART log read failed with status 0x%02x\n", status);
+    free(buffer);
+    close(nvme_fd);
+    return -EIO;
+  }
+
+  // Copy data from buffer to structure
+  memcpy(smart_log, buffer, 512);
+
+  free(buffer);
+  close(nvme_fd);
+  return 0;
+}
+
+__host__ int nvme_ep::nvme_create_queue_via_ioctl(
   const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
   uint16_t queue_size, uint16_t nvme_bdf, unsigned memory_mode,
   struct nvme_queue_info* info) {
@@ -2714,6 +2800,11 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   cmd.addr = reinterpret_cast<uint64_t>(cq_virt);
   cmd.data_len = 0; // No data transfer for CREATE_CQ
 
+  // Debug: Print what we're sending to the controller
+  fprintf(stderr, "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+                  "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
+          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
+
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     if (errno == EACCES || errno == EPERM) {
@@ -2774,6 +2865,13 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // PRP1 will be injected by kprobe - pass virtual address as ubuffer
   cmd.addr = reinterpret_cast<uint64_t>(sq_virt);
   cmd.data_len = 0; // No data transfer for CREATE_SQ
+
+  // Debug: Print what we're sending to the controller
+  fprintf(stderr, "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+                  "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0), "
+                  "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
+          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
+          cmd.cdw11, queue_id);
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {

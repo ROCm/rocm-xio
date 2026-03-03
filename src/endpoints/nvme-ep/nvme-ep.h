@@ -54,6 +54,48 @@
 // of kernel types (__le32/__le64) for HIP device code compatibility
 
 //
+// NVMe SMART Log Structure
+//
+// SMART log page structure (matches Linux kernel struct nvme_smart_log)
+// Note: 128-bit fields are stored as 16-byte arrays in little-endian format
+struct nvme_smart_log {
+  uint8_t critical_warning;
+  uint8_t temperature[2];
+  uint8_t avail_spare;
+  uint8_t spare_thresh;
+  uint8_t percent_used;
+  uint8_t endu_grp_crit_warn_sumry;
+  uint8_t rsvd7[25];
+  uint8_t data_units_read[16];     // Bytes 32-47 (128-bit little-endian)
+  uint8_t data_units_written[16];  // Bytes 48-63 (128-bit little-endian)
+  uint8_t host_reads[16];          // Bytes 64-79 (128-bit little-endian)
+  uint8_t host_writes[16];         // Bytes 80-95 (128-bit little-endian)
+  uint8_t ctrl_busy_time[16];      // Bytes 96-111 (128-bit little-endian)
+  uint8_t power_cycles[16];        // Bytes 112-127 (128-bit little-endian)
+  uint8_t power_on_hours[16];      // Bytes 128-143 (128-bit little-endian)
+  uint8_t unsafe_shutdowns[16];    // Bytes 144-159 (128-bit little-endian)
+  uint8_t media_errors[16];        // Bytes 160-175 (128-bit little-endian)
+  uint8_t num_err_log_entries[16]; // Bytes 176-191 (128-bit little-endian)
+  uint32_t warning_temp_time;      // Bytes 192-195 (little-endian)
+  uint32_t critical_comp_time;     // Bytes 196-199 (little-endian)
+  uint16_t temp_sensor[8];         // Bytes 200-215 (little-endian)
+  uint32_t thm_temp1_trans_count;  // Bytes 216-219
+  uint32_t thm_temp2_trans_count;  // Bytes 220-223
+  uint32_t thm_temp1_total_time;   // Bytes 224-227
+  uint32_t thm_temp2_total_time;   // Bytes 228-231
+  uint8_t rsvd232[280];            // Bytes 232-511
+} __attribute__((packed));
+
+// Helper function to convert 16-byte little-endian array to uint64_t
+// Reads lower 64 bits (first 8 bytes) - sufficient for most practical values
+// On little-endian systems, we can simply memcpy the first 8 bytes
+__host__ static inline uint64_t le128_to_u64(const uint8_t* data) {
+  uint64_t result;
+  memcpy(&result, data, sizeof(uint64_t));
+  return result;
+}
+
+//
 // Helper macros for NVMe CQE status field
 //
 #define NVME_CQE_STATUS_PHASE(status) (((status) >> 0) & 0x1)
@@ -65,6 +107,239 @@
 
 #define NVME_STATUS_MAKE(phase, sc, sct)                                       \
   ((((phase) & 0x1) << 0) | (((sc) & 0xFF) << 1) | (((sct) & 0x7) << 9))
+
+//
+// Forward declarations for NVMe endpoint functions
+//
+
+// Forward declarations for types
+struct nvme_sqe;
+struct nvme_cqe;
+
+// Drive endpoint - merged function that handles both batch and sequential modes
+// Sequential mode: if readIo < 0 or writeIo < 0, issues one SQE at a time
+// waiting for completion
+__device__ void nvme_ep_driveEndpoint(
+  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
+  struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
+  bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
+  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
+  uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
+  uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
+  uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
+  int readIo, int writeIo);
+
+//
+// Host helper function for NVMe queue creation via IOCTL
+//
+
+/**
+ * Structure to hold queue creation results
+ */
+struct nvme_queue_info {
+  void* sq_virt;     // Virtual address of submission queue (host pointer)
+  void* cq_virt;     // Virtual address of completion queue (host pointer)
+  void* sq_gpu;      // GPU-accessible pointer for submission queue
+  void* cq_gpu;      // GPU-accessible pointer for completion queue
+  uint64_t sq_phys;  // Physical address of submission queue
+  uint64_t cq_phys;  // Physical address of completion queue
+  uint64_t sq_size;  // Size of submission queue in bytes
+  uint64_t cq_size;  // Size of completion queue in bytes
+  uint64_t doorbell; // Physical address of doorbell register
+  int sq_dmabuf_fd;  // dmabuf file descriptor for SQ
+  int cq_dmabuf_fd;  // dmabuf file descriptor for CQ
+};
+
+/**
+ * Query LBA size from NVMe controller
+ *
+ * This function queries the NVMe controller to determine the logical block
+ * size (LBA size) of namespace 1 using the Identify Namespace command.
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param nsid Namespace ID (default: 1)
+ * @param lba_size Output parameter for LBA size in bytes
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
+                                    unsigned* lba_size);
+
+/**
+ * Query namespace capacity in LBAs from NVMe controller
+ *
+ * This function queries the NVMe controller to determine the namespace
+ * capacity (NSZE - Namespace Size) of namespace 1 using the Identify
+ * Namespace command.
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param nsid Namespace ID (default: 1)
+ * @param capacity_lbas Output parameter for namespace capacity in LBAs
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
+                                              uint32_t nsid,
+                                              uint64_t* capacity_lbas);
+
+/**
+ * Check if NVMe device is the root filesystem
+ *
+ * This function checks /proc/mounts to determine if the specified NVMe
+ * device is mounted as the root filesystem. This is useful to prevent
+ * accidental data corruption during testing.
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @return 0 if device is not rootfs (safe to use), -1 if device is rootfs
+ *         (unsafe), or 0 if check cannot be performed (allows to proceed)
+ */
+__host__ int nvme_ep_check_rootfs(const char* nvme_device);
+
+/**
+ * Read NVMe SMART/Health Information log page
+ *
+ * This function reads the SMART log page (Log Identifier 0x02) from the
+ * NVMe controller. The SMART log contains various device statistics including
+ * data units read/written, host commands completed, power cycles, etc.
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param smart_log Output structure to hold SMART log data (512 bytes)
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_read_smart_log(const char* nvme_device,
+                                    struct nvme_smart_log* smart_log);
+
+/**
+ * Map NVMe BAR0 for doorbell access
+ *
+ * This function maps the NVMe controller's BAR0 (Base Address Register 0) to
+ * userspace and registers it with DRM and HIP for GPU access. BAR0 contains
+ * the doorbell registers used to notify the controller of new commands.
+ *
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format
+ * @param bar0_cpu Output parameter for CPU-accessible BAR0 pointer
+ * @param bar0_gpu Output parameter for GPU-accessible BAR0 pointer
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu);
+
+/**
+ * Create NVMe IO queue pair via IOCTL interface using kernel module
+ *
+ * This function:
+ * 1. Allocates VRAM buffers for SQ and CQ using HIP
+ * 2. Gets physical addresses via kernel module IOCTL
+ * 3. Registers queue addresses with kernel module for kprobe injection
+ * 4. Creates queues via NVMe IOCTL (CREATE_CQ and CREATE_SQ)
+ * 5. The kprobe automatically injects the correct physical addresses
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param kernel_module_device Path to kernel module device
+ *                            (e.g., "/dev/rocm-xio")
+ * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
+ * @param queue_size Queue size in entries (must be power of 2, max 65536)
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format (for kernel module)
+ * @param info Output structure to hold queue information
+ * @return 0 on success, negative error code on failure
+ */
+//
+// NVMe Endpoint Configuration Structure
+//
+
+namespace nvme_ep {
+
+/**
+ * Create NVMe IO queue pair via IOCTL interface using kernel module
+ *
+ * This function:
+ * 1. Allocates VRAM buffers for SQ and CQ using HIP
+ * 2. Gets physical addresses via kernel module IOCTL
+ * 3. Registers queue addresses with kernel module for kprobe injection
+ * 4. Creates queues via NVMe IOCTL (CREATE_CQ and CREATE_SQ)
+ * 5. The kprobe automatically injects the correct physical addresses
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param kernel_module_device Path to kernel module device
+ *                            (e.g., "/dev/rocm-xio")
+ * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
+ * @param queue_size Queue size in entries (must be power of 2, max 65536)
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format (for kernel module)
+ * @param memory_mode Memory allocation mode (bits: 0=GPU write location, 1=CPU
+ * write location)
+ * @param info Output structure to hold queue information
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_create_queue_via_ioctl(const char* nvme_device,
+                                         const char* kernel_module_device,
+                                         uint16_t queue_id, uint16_t queue_size,
+                                         uint16_t nvme_bdf,
+                                         unsigned memory_mode,
+                                         struct nvme_queue_info* info);
+
+//
+// Type aliases for queue entries
+//
+typedef struct nvme_sqe sqeType;
+typedef struct nvme_cqe cqeType;
+
+//
+// Queue entry read/write functions for safe volatile access
+//
+
+/**
+ * Read SQE - copies entire NVMe command structure
+ * Safe for volatile pointers - handles byte-by-byte copy
+ */
+__host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress);
+
+/**
+ * Read CQE - copies entire NVMe completion structure
+ * Safe for volatile pointers - handles byte-by-byte copy
+ */
+__host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress);
+
+/**
+ * Write SQE - copies entire NVMe command structure with memory fence
+ * Safe for volatile pointers - handles byte-by-byte copy
+ */
+__host__ __device__ void sqeWrite(sqeType sqeData,
+                                  volatile sqeType* sqeAddress);
+
+/**
+ * Write CQE - copies entire NVMe completion structure with memory fence
+ * Safe for volatile pointers - handles byte-by-byte copy
+ */
+__host__ __device__ void cqeWrite(cqeType cqeData,
+                                  volatile cqeType* cqeAddress);
+
+/**
+ * Poll for new SQE - waits for command ID to change
+ * Simple polling function that waits until a new command appears
+ *
+ * @param sqeLast Last known SQE state
+ * @param sqeAddress Pointer to SQE to poll
+ * @return New SQE when command ID or opcode changes
+ */
+__host__ __device__ sqeType sqePoll(sqeType sqeLast,
+                                    volatile sqeType* sqeAddress);
+
+/**
+ * Poll for new CQE - waits for command ID to change or sq_head progression
+ * Enhanced polling function that checks both command ID change and sq_head
+ * progression for more robust completion detection. sq_head progression is
+ * the definitive indicator of completion and works regardless of which CQE
+ * slot the completion appears in.
+ *
+ * @param cqeLast Last known CQE state
+ * @param cqeAddress Pointer to CQE to poll
+ * @param last_sq_head Last known submission queue head value (for sq_head
+ * tracking)
+ * @param sq_head_out Output parameter for new sq_head value (can be nullptr)
+ * @return New CQE when command ID changes or sq_head increases
+ */
+__host__ __device__ cqeType cqePoll(cqeType cqeLast,
+                                    volatile cqeType* cqeAddress,
+                                    uint16_t last_sq_head = 0,
+                                    uint16_t* sq_head_out = nullptr);
 
 //
 // Helper functions to create NVMe commands
@@ -105,7 +380,8 @@ __host__ __device__ static inline void nvme_sqe_setup_write(
 }
 
 // Check if CQE indicates success
-__host__ __device__ static inline bool nvme_cqe_ok(const struct nvme_cqe* cqe) {
+__host__ __device__ static inline bool nvme_cqe_ok(
+  const volatile struct nvme_cqe* cqe) {
   uint16_t status = cqe->status;
   uint8_t sc = NVME_CQE_STATUS_SC(status);
   uint8_t sct = NVME_CQE_STATUS_SCT(status);
@@ -114,13 +390,13 @@ __host__ __device__ static inline bool nvme_cqe_ok(const struct nvme_cqe* cqe) {
 
 // Get status code from CQE
 __host__ __device__ static inline uint8_t nvme_cqe_status_code(
-  const struct nvme_cqe* cqe) {
+  const volatile struct nvme_cqe* cqe) {
   return NVME_CQE_STATUS_SC(cqe->status);
 }
 
 // Get status code type from CQE
 __host__ __device__ static inline uint8_t nvme_cqe_status_type(
-  const struct nvme_cqe* cqe) {
+  const volatile struct nvme_cqe* cqe) {
   return NVME_CQE_STATUS_SCT(cqe->status);
 }
 
@@ -215,106 +491,23 @@ __host__ __device__ static inline bool nvme_verify_pattern(
 }
 
 //
-// Forward declarations for NVMe endpoint functions
-//
-
-// Forward declarations for types
-struct nvme_sqe;
-struct nvme_cqe;
-
-// Drive endpoint - merged function that handles both batch and sequential modes
-// Sequential mode: if readIo < 0 or writeIo < 0, issues one SQE at a time
-// waiting for completion
-__device__ void nvme_ep_driveEndpoint(
-  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
-  struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
-  bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
-  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
-  uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
-  uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
-  uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
-  int readIo, int writeIo);
-
-//
-// Host helper function for NVMe queue creation via IOCTL
+// Doorbell ringing functions
 //
 
 /**
- * Structure to hold queue creation results
+ * Ring NVMe doorbell with support for both PCI MMIO bridge and direct BAR0
+ * modes
+ *
+ * @param sq_tail Submission queue tail value
+ * @param doorbell_offset Offset within BAR0 for doorbell register
+ * @param usePciMmioBridge If true, use PCI MMIO bridge mode
+ * @param shadowBufferVirt Shadow buffer pointer (for PCI MMIO bridge mode)
+ * @param nvmeTargetBdf NVMe device BDF (for PCI MMIO bridge mode)
+ * @param nvmeBar0Gpu GPU-accessible BAR0 pointer (for direct BAR0 mode)
  */
-struct nvme_queue_info {
-  void* sq_virt;     // Virtual address of submission queue (host pointer)
-  void* cq_virt;     // Virtual address of completion queue (host pointer)
-  void* sq_gpu;      // GPU-accessible pointer for submission queue
-  void* cq_gpu;      // GPU-accessible pointer for completion queue
-  uint64_t sq_phys;  // Physical address of submission queue
-  uint64_t cq_phys;  // Physical address of completion queue
-  uint64_t sq_size;  // Size of submission queue in bytes
-  uint64_t cq_size;  // Size of completion queue in bytes
-  uint64_t doorbell; // Physical address of doorbell register
-  int sq_dmabuf_fd;  // dmabuf file descriptor for SQ
-  int cq_dmabuf_fd;  // dmabuf file descriptor for CQ
-};
-
-/**
- * Query LBA size from NVMe controller
- *
- * This function queries the NVMe controller to determine the logical block
- * size (LBA size) of namespace 1 using the Identify Namespace command.
- *
- * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
- * @param nsid Namespace ID (default: 1)
- * @param lba_size Output parameter for LBA size in bytes
- * @return 0 on success, negative error code on failure
- */
-__host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
-                                    unsigned* lba_size);
-
-/**
- * Query namespace capacity in LBAs from NVMe controller
- *
- * This function queries the NVMe controller to determine the namespace
- * capacity (NSZE - Namespace Size) of namespace 1 using the Identify
- * Namespace command.
- *
- * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
- * @param nsid Namespace ID (default: 1)
- * @param capacity_lbas Output parameter for namespace capacity in LBAs
- * @return 0 on success, negative error code on failure
- */
-__host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
-                                              uint32_t nsid,
-                                              uint64_t* capacity_lbas);
-
-/**
- * Create NVMe IO queue pair via IOCTL interface using kernel module
- *
- * This function:
- * 1. Allocates VRAM buffers for SQ and CQ using HIP
- * 2. Gets physical addresses via kernel module IOCTL
- * 3. Registers queue addresses with kernel module for kprobe injection
- * 4. Creates queues via NVMe IOCTL (CREATE_CQ and CREATE_SQ)
- * 5. The kprobe automatically injects the correct physical addresses
- *
- * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
- * @param kernel_module_device Path to kernel module device
- *                            (e.g., "/dev/rocm-xio")
- * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
- * @param queue_size Queue size in entries (must be power of 2, max 65536)
- * @param nvme_bdf NVMe device BDF in 0xBBDD format (for kernel module)
- * @param info Output structure to hold queue information
- * @return 0 on success, negative error code on failure
- */
-__host__ int nvme_ep_create_queue_via_ioctl(
-  const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
-  uint16_t queue_size, uint16_t nvme_bdf, unsigned memory_mode,
-  struct nvme_queue_info* info);
-
-//
-// NVMe Endpoint Configuration Structure
-//
-
-namespace nvme_ep {
+__host__ __device__ void ringDoorbell(
+  uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
+  void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu);
 
 /**
  * NVMe Endpoint Configuration Structure
