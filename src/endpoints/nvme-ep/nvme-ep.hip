@@ -59,9 +59,6 @@ struct pci_mmio_bridge_command {
 #include <sys/mman.h>
 #include <unistd.h>
 
-// Device path constant (needed in host code)
-#define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
-
 // Include kernel module header for IOCTL definitions
 // We need to define userspace-compatible structures since the kernel header
 // uses kernel-specific types
@@ -116,9 +113,7 @@ struct rocm_axiio_register_buffer_req {
 // Namespace all nvme-ep implementation to avoid conflicts
 namespace nvme_ep {
 
-// Use types from nvme-ep.h
-typedef struct nvme_sqe sqeType;
-typedef struct nvme_cqe cqeType;
+// Types (sqeType, cqeType) are defined in nvme-ep.h
 
 // Verify that the queue entry sizes match nvme-ep expectations
 static_assert(sizeof(sqeType) == NVME_EP_SQE_SIZE, "nvme-ep SQE size mismatch");
@@ -209,14 +204,50 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
   }
 }
 
-// Poll for new CQE - waits for command ID to change
+// Poll for new CQE - waits for command ID to change or sq_head progression
 __host__ __device__ cqeType cqePoll(cqeType cqeLast,
-                                    volatile cqeType* cqeAddress) {
+                                    volatile cqeType* cqeAddress,
+                                    uint16_t last_sq_head,
+                                    uint16_t* sq_head_out) {
   cqeType cqeNew;
   while (true) {
     cqeNew = cqeRead(cqeAddress);
-    // Check if we got a new completion (different command ID)
+    uint16_t sq_head = cqeNew.sq_head;
+
+    // Primary check: sq_head progression (definitive indicator of completion)
+    // sq_head is updated by the controller when commands complete, so checking
+    // sq_head progression is more reliable than just command ID change
+    // Handle wrap-around: sq_head is a 16-bit value that can wrap from 65535 to
+    // 0. We detect wrap-around by checking if sq_head is much smaller than
+    // last_sq_head (indicating it wrapped around)
+    bool sq_head_increased = false;
+    if (sq_head > last_sq_head) {
+      // Normal case: sq_head increased without wrapping
+      sq_head_increased = true;
+    } else if (sq_head < last_sq_head) {
+      // Possible wrap-around: check if the difference suggests wrap-around
+      // If last_sq_head is high (> 32768) and sq_head is low (< 32768), it
+      // wrapped. Or if the difference is large (> 32768), it's likely
+      // wrap-around
+      uint16_t diff = last_sq_head - sq_head;
+      if (diff > 32768 || (last_sq_head > 32768 && sq_head < 32768)) {
+        // Wrap-around detected - sq_head wrapped past last_sq_head
+        sq_head_increased = true;
+      }
+    }
+
+    if (sq_head_increased) {
+      if (sq_head_out != nullptr) {
+        *sq_head_out = sq_head;
+      }
+      return cqeNew;
+    }
+
+    // Secondary check: command ID change (for backward compatibility)
     if (cqeNew.command_id != cqeLast.command_id) {
+      if (sq_head_out != nullptr) {
+        *sq_head_out = sq_head;
+      }
       return cqeNew;
     }
   }
@@ -257,6 +288,45 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
 
 // Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
+// Ring NVMe doorbell with support for both PCI MMIO bridge and direct BAR0
+// modes
+__host__ __device__ void ringDoorbell(
+  uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
+  void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
+  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
+    // PCI MMIO Bridge mode - complex command structure
+    volatile struct pci_mmio_bridge_ring_meta* meta =
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
+    uint32_t slot = meta->producer_idx % meta->queue_depth;
+    volatile struct pci_mmio_bridge_command* cmd =
+      reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
+        static_cast<volatile uint8_t*>(shadowBufferVirt) +
+        sizeof(struct pci_mmio_bridge_ring_meta) +
+        (slot * sizeof(struct pci_mmio_bridge_command)));
+    cmd->target_bdf = nvmeTargetBdf;
+    cmd->target_bar = 0;
+    cmd->reserved1 = 0;
+    cmd->offset = doorbell_offset;
+    cmd->value = sq_tail;
+    cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
+    cmd->size = 4;
+    cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
+    cmd->reserved2 = 0;
+    cmd->sequence = slot;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+    meta->producer_idx = meta->producer_idx + 1;
+#ifdef __HIP_DEVICE_COMPILE__
+    __threadfence_system();
+#endif
+  } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
+    // Direct BAR0 mode - use generic xio_ep function
+    xio_ep::ringDoorbell(nvmeBar0Gpu, doorbell_offset, sq_tail);
+  }
+  // If neither mode is available, silently skip (matches current behavior)
+}
+
 } // namespace nvme_ep
 
 //
@@ -270,7 +340,7 @@ __device__ void nvme_ep_driveEndpoint(
   const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
-  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
+  uint16_t /* queueId */, uint32_t doorbell_offset, uint8_t* readBuffer,
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
@@ -306,7 +376,8 @@ __device__ void nvme_ep_driveEndpoint(
 
   // If using write buffer, generate write data upfront
   if (has_write_buffer) {
-    nvme_generate_pattern(writeBuffer, bufferSize, 0, lbaSize, lfsrSeed);
+    nvme_ep::nvme_generate_pattern(writeBuffer, bufferSize, 0, lbaSize,
+                                   lfsrSeed);
   }
 
   // Initialize phase tracking for completion polling
@@ -352,7 +423,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = readBufferDma
                                    ? (readBufferDma + buffer_offset)
                                    : (uint64_t)(readBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -363,7 +435,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = writeBufferDma
                                    ? (writeBufferDma + buffer_offset)
                                    : (uint64_t)(writeBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -376,8 +449,8 @@ __device__ void nvme_ep_driveEndpoint(
       // Setup read or write command
       nvme_ep::sqeType sqeLocal = {};
       struct nvme_sqe* sqe = &sqeLocal;
-      nvme_sqe_setup_rw(sqe, !sequential_is_read, cmd_id, nsid, lba, blocks,
-                        prp1, prp2);
+      nvme_ep::nvme_sqe_setup_rw(sqe, !sequential_is_read, cmd_id, nsid, lba,
+                                 blocks, prp1, prp2);
 
       // Record start time
       if (config.startTimes != nullptr) {
@@ -390,36 +463,8 @@ __device__ void nvme_ep_driveEndpoint(
       __threadfence_system();
 
       // Ring doorbell
-      if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-        volatile struct pci_mmio_bridge_ring_meta* meta =
-          static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-            shadowBufferVirt);
-        uint32_t slot = meta->producer_idx % meta->queue_depth;
-        volatile struct pci_mmio_bridge_command* cmd =
-          reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-            static_cast<volatile uint8_t*>(shadowBufferVirt) +
-            sizeof(struct pci_mmio_bridge_ring_meta) +
-            (slot * sizeof(struct pci_mmio_bridge_command)));
-        cmd->target_bdf = nvmeTargetBdf;
-        cmd->target_bar = 0;
-        cmd->reserved1 = 0;
-        cmd->offset = doorbell_offset;
-        cmd->value = sq_tail;
-        cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-        cmd->size = 4;
-        cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-        cmd->reserved2 = 0;
-        cmd->sequence = slot;
-        __threadfence_system();
-        meta->producer_idx = meta->producer_idx + 1;
-        __threadfence_system();
-      } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-        volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
-          static_cast<volatile char*>(nvmeBar0Gpu) + doorbell_offset);
-        __threadfence_system();
-        *doorbell_reg = sq_tail;
-        __threadfence_system();
-      }
+      nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                            shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
       // Wait for this specific completion
       // In sequential mode, we issue one command at a time, so sq_head should
@@ -521,7 +566,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = readBufferDma
                                    ? (readBufferDma + buffer_offset)
                                    : (uint64_t)(readBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -533,7 +579,8 @@ __device__ void nvme_ep_driveEndpoint(
           uint64_t buffer_addr = writeBufferDma
                                    ? (writeBufferDma + buffer_offset)
                                    : (uint64_t)(writeBuffer + buffer_offset);
-          nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
+          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
+                                       &prp2);
         } else {
           prp1 = 0xDEADBEEF00000000ULL;
           prp2 = 0xCAFEBABE00000000ULL;
@@ -544,7 +591,8 @@ __device__ void nvme_ep_driveEndpoint(
       }
 
       // Setup command
-      nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks, prp1, prp2);
+      nvme_ep::nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks, prp1,
+                                 prp2);
 
       // Record start time
       if (config.startTimes != nullptr) {
@@ -560,36 +608,8 @@ __device__ void nvme_ep_driveEndpoint(
     __threadfence_system();
 
     // Ring doorbell once for all commands
-    if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-      volatile struct pci_mmio_bridge_ring_meta* meta =
-        static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-          shadowBufferVirt);
-      uint32_t slot = meta->producer_idx % meta->queue_depth;
-      volatile struct pci_mmio_bridge_command* cmd =
-        reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-          static_cast<volatile uint8_t*>(shadowBufferVirt) +
-          sizeof(struct pci_mmio_bridge_ring_meta) +
-          (slot * sizeof(struct pci_mmio_bridge_command)));
-      cmd->target_bdf = nvmeTargetBdf;
-      cmd->target_bar = 0;
-      cmd->reserved1 = 0;
-      cmd->offset = doorbell_offset;
-      cmd->value = sq_tail;
-      cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-      cmd->size = 4;
-      cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-      cmd->reserved2 = 0;
-      cmd->sequence = slot;
-      __threadfence_system();
-      meta->producer_idx = meta->producer_idx + 1;
-      __threadfence_system();
-    } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-      volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
-        static_cast<volatile char*>(nvmeBar0Gpu) + doorbell_offset);
-      __threadfence_system();
-      *doorbell_reg = sq_tail;
-      __threadfence_system();
-    }
+    nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                          shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
     // Poll for all completions
     uint16_t completed_count = 0;
@@ -696,7 +716,7 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   aligned_size = (size + dmabuf_offset + host_page_size - 1) &
                  ~(host_page_size - 1);
 
-  fprintf(stderr,
+  fprintf(stdout,
           "  Aligning VRAM buffer: ptr=%p -> aligned=%p, "
           "size=%zu -> %zu, offset=%llu\n",
           vram_ptr, (void*)aligned_ptr, size, aligned_size,
@@ -707,17 +727,17 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   status = hsa_amd_portable_export_dmabuf((void*)aligned_ptr, aligned_size,
                                           &dmabuf_fd, &dmabuf_offset);
   if (status != HSA_STATUS_SUCCESS) {
-    fprintf(stderr,
+    fprintf(stdout,
             "ERROR: hsa_amd_portable_export_dmabuf failed (status=%d)\n",
             status);
-    fprintf(stderr, "  This requires:\n");
-    fprintf(stderr, "  - ROCm 5.3+ with dmabuf support\n");
-    fprintf(stderr, "  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
-    fprintf(stderr, "  - Kernel CONFIG_PCI_P2PDMA=y\n");
+    fprintf(stdout, "  This requires:\n");
+    fprintf(stdout, "  - ROCm 5.3+ with dmabuf support\n");
+    fprintf(stdout, "  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
+    fprintf(stdout, "  - Kernel CONFIG_PCI_P2PDMA=y\n");
     return -ENOTSUP;
   }
 
-  fprintf(stderr, "  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
+  fprintf(stdout, "  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
           (unsigned long long)dmabuf_offset);
 
   // Open kernel module device
@@ -749,7 +769,7 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   // Physical address includes the offset within the dmabuf
   *phys_addr_out = req.phys_addr + dmabuf_offset;
 
-  fprintf(stderr,
+  fprintf(stdout,
           "  ✅ Registered buffer: virt=0x%016llx, phys=0x%016llx, "
           "size=%zu\n",
           (unsigned long long)req.virt_addr, (unsigned long long)*phys_addr_out,
@@ -762,46 +782,12 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   return 0;
 }
 
-// Helper to get physical address from virtual address (matching
-// test-gpu-nvme-write.cpp)
-static uint64_t virt_to_phys(void* virt_addr) {
-  int fd;
-  uint64_t page_offset = (uint64_t)virt_addr % sysconf(_SC_PAGESIZE);
-  uint64_t pfn;
-  off_t offset = ((uint64_t)virt_addr / sysconf(_SC_PAGESIZE)) *
-                 sizeof(uint64_t);
-
-  fd = open("/proc/self/pagemap", O_RDONLY);
-  if (fd < 0) {
-    perror("open /proc/self/pagemap");
-    return 0;
-  }
-
-  if (lseek(fd, offset, SEEK_SET) < 0) {
-    perror("lseek");
-    close(fd);
-    return 0;
-  }
-
-  if (read(fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
-    perror("read pagemap");
-    close(fd);
-    return 0;
-  }
-
-  close(fd);
-
-  if (!(pfn & (1ULL << 63))) {
-    fprintf(stderr, "Page not present\n");
-    return 0;
-  }
-
-  return ((pfn & ((1ULL << 55) - 1)) * sysconf(_SC_PAGESIZE)) + page_offset;
-}
+// Physical address translation is now provided by xioGetPhysAddr() from xio.h
 
 // Forward declarations
 static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf, void** virt_addr);
-static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu);
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu);
 
 // Run endpoint test - launches GPU kernel and waits for completion
 __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
@@ -817,7 +803,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     // HIP not initialized or no devices - try to initialize
     hipError_t hip_init_err = hipInit(0);
     if (hip_init_err != hipSuccess) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: hipInit returned: %s (code: %d), continuing anyway\n",
               hipGetErrorString(hip_init_err), hip_init_err);
     }
@@ -836,7 +822,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       // Device is set but not 0 - set it to 0
       hipError_t set_dev_err = hipSetDevice(0);
       if (set_dev_err != hipSuccess) {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Warning: Failed to set HIP device to 0: %s (code: %d)\n",
                 hipGetErrorString(set_dev_err), set_dev_err);
       }
@@ -866,10 +852,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // overwriting unprocessed ones.
   uint16_t queue_size = nvmeConfig->queueLength;
 
-  fprintf(stderr, "Using queue length: %u entries\n", queue_size);
+  fprintf(stdout, "Using queue length: %u entries\n", queue_size);
 
   struct nvme_queue_info queue_info;
-  int ret = nvme_ep_create_queue_via_ioctl(
+  int ret = nvme_ep::nvme_create_queue_via_ioctl(
     nvmeConfig->device.c_str(), ROCM_XIO_DEVICE_PATH, nvmeConfig->queueId,
     queue_size, nvmeConfig->nvmeTargetBdf,
     config->memoryMode, // Respect memory mode like test-ep
@@ -894,16 +880,16 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   nvmeConfig->sqSize = queue_info.sq_size;
   nvmeConfig->cqSize = queue_info.cq_size;
 
-  fprintf(stderr, "NVMe queues created: SQ=0x%llx, CQ=0x%llx, queue_id=%u\n",
+  fprintf(stdout, "NVMe queues created: SQ=0x%llx, CQ=0x%llx, queue_id=%u\n",
           (unsigned long long)queue_info.sq_phys,
           (unsigned long long)queue_info.cq_phys, nvmeConfig->queueId);
-  fprintf(stderr, "Queue GPU pointers: SQ=%p (host=%p), CQ=%p (host=%p)\n",
+  fprintf(stdout, "Queue GPU pointers: SQ=%p (host=%p), CQ=%p (host=%p)\n",
           queue_info.sq_gpu, queue_info.sq_virt, queue_info.cq_gpu,
           queue_info.cq_virt);
 
   // Verify queues were created successfully
   if (!config->submissionQueue || !config->completionQueue) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Error: Queue creation succeeded but queue pointers are null\n");
     return hipErrorInvalidValue;
   }
@@ -919,10 +905,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     int ret_shadow = map_mmio_bridge_shadow_buffer(nvmeConfig->mmioBridgeBdf,
                                                    &shadow_virt);
     if (ret_shadow < 0) {
-      fprintf(stderr, "Failed to map PCI MMIO bridge shadow buffer\n");
+      fprintf(stdout, "Failed to map PCI MMIO bridge shadow buffer\n");
       return hipErrorInvalidValue;
     }
-    fprintf(stderr, "PCI MMIO bridge shadow buffer mapped at %p\n",
+    fprintf(stdout, "PCI MMIO bridge shadow buffer mapped at %p\n",
             shadow_virt);
 
     // Register shadow buffer for GPU access (matching QEMU guest code pattern)
@@ -935,9 +921,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     // 933-947)
     int drm_fd = open("/dev/dri/renderD128", O_RDWR);
     if (drm_fd < 0) {
-      fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
+      fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
               strerror(errno));
-      fprintf(stderr,
+      fprintf(stdout,
               "Cannot register shadow buffer with GPU via GEM_USERPTR.\n");
       fprintf(
         stderr,
@@ -952,9 +938,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
 
       if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-        fprintf(stderr, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed: %s\n",
+        fprintf(stdout, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed: %s\n",
                 strerror(errno));
-        fprintf(stderr, "Cannot register shadow buffer with GPU.\n");
+        fprintf(stdout, "Cannot register shadow buffer with GPU.\n");
         fprintf(
           stderr,
           "Disabling PCI MMIO bridge mode - GPU kernel will skip doorbell.\n");
@@ -963,7 +949,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         nvmeConfig->shadowBufferVirt = nullptr;
         nvmeConfig->usePciMmioBridge = false;
       } else {
-        fprintf(stderr,
+        fprintf(stdout,
                 "Shadow buffer registered with DRM GEM_USERPTR "
                 "(handle: %u)\n",
                 gem_userptr.handle);
@@ -972,18 +958,18 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         hipError_t hip_err = hipHostRegister(shadow_virt, shadow_size,
                                              hipHostRegisterMapped);
         if (hip_err != hipSuccess) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "Warning: Failed to register shadow buffer with HIP: "
                   "%s\n",
                   hipGetErrorString(hip_err));
-          fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will "
+          fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will "
                           "skip doorbell.\n");
           close(drm_fd);
           munmap(shadow_virt, shadow_size);
           nvmeConfig->shadowBufferVirt = nullptr;
           nvmeConfig->usePciMmioBridge = false;
         } else {
-          fprintf(stderr, "Shadow buffer registered with HIP for GPU access\n");
+          fprintf(stdout, "Shadow buffer registered with HIP for GPU access\n");
 
           // Step 3: Get GPU pointer (matching QEMU guest code pattern)
           // After hipHostRegister, we need hipHostGetDevicePointer to get the
@@ -992,16 +978,16 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           hipError_t gpu_ptr_err = hipHostGetDevicePointer(&shadow_gpu_ptr,
                                                            shadow_virt, 0);
           if (gpu_ptr_err != hipSuccess) {
-            fprintf(stderr, "Warning: hipHostGetDevicePointer failed: %s\n",
+            fprintf(stdout, "Warning: hipHostGetDevicePointer failed: %s\n",
                     hipGetErrorString(gpu_ptr_err));
-            fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will "
+            fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will "
                             "skip doorbell.\n");
             close(drm_fd);
             munmap(shadow_virt, shadow_size);
             nvmeConfig->shadowBufferVirt = nullptr;
             nvmeConfig->usePciMmioBridge = false;
           } else {
-            fprintf(stderr,
+            fprintf(stdout,
                     "Shadow buffer GPU pointer obtained: %p (host: %p)\n",
                     shadow_gpu_ptr, shadow_virt);
             // Store GPU pointer for kernel use
@@ -1020,10 +1006,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     // PCI MMIO bridge is disabled - set up direct doorbell via BAR0
     void* bar0_cpu = nullptr;
     void* bar0_gpu = nullptr;
-    int ret_bar0 = map_nvme_bar0(nvmeConfig->nvmeTargetBdf, &bar0_cpu,
-                                 &bar0_gpu);
+    int ret_bar0 = nvme_ep_map_bar0(nvmeConfig->nvmeTargetBdf, &bar0_cpu,
+                                    &bar0_gpu);
     if (ret_bar0 < 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: Failed to map NVMe BAR0 for direct doorbell: %s\n",
               strerror(-ret_bar0));
       fprintf(
@@ -1031,7 +1017,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         "Direct doorbell mode disabled - GPU kernel will skip doorbell.\n");
       nvmeConfig->nvmeBar0Gpu = nullptr;
     } else {
-      fprintf(stderr, "NVMe BAR0 mapped for direct doorbell access\n");
+      fprintf(stdout, "NVMe BAR0 mapped for direct doorbell access\n");
       nvmeConfig->nvmeBar0Gpu = bar0_gpu;
     }
   }
@@ -1071,10 +1057,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       nvmeConfig->device.c_str(), 1, &namespace_capacity);
     if (capacity_ret == 0 && namespace_capacity > 0) {
       lbaRangeLbas = namespace_capacity;
-      fprintf(stderr, "Using full namespace capacity: %llu LBAs\n",
+      fprintf(stdout, "Using full namespace capacity: %llu LBAs\n",
               (unsigned long long)lbaRangeLbas);
     } else {
-      fprintf(stderr, "Warning: Failed to query namespace capacity, "
+      fprintf(stdout, "Warning: Failed to query namespace capacity, "
                       "LBA range will be unlimited\n");
       lbaRangeLbas = 0; // 0 means no limit
     }
@@ -1120,8 +1106,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           return buf_err;
         }
 
-        fprintf(stderr, "  VRAM buffer virtual: %p\n", readBuffer);
-        fprintf(stderr, "  Exporting as DMA-BUF (HSA runtime)...\n");
+        fprintf(stdout, "  VRAM buffer virtual: %p\n", readBuffer);
+        fprintf(stdout, "  Exporting as DMA-BUF (HSA runtime)...\n");
 
         // Detect if NVMe is emulated (needed for buffer registration flags)
         bool is_emulated = false;
@@ -1143,10 +1129,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           return hipErrorInvalidValue;
         }
 
-        fprintf(stderr, "  Data buffer physical: 0x%016llx (VRAM)\n",
+        fprintf(stdout, "  Data buffer physical: 0x%016llx (VRAM)\n",
                 (unsigned long long)readBufferDma);
-        fprintf(stderr, "  GPU writes directly to VRAM\n");
-        fprintf(stderr, "  NVMe DMAs from VRAM (P2P)\n");
+        fprintf(stdout, "  GPU writes directly to VRAM\n");
+        fprintf(stdout, "  NVMe DMAs from VRAM (P2P)\n");
 
         // Device memory - GPU pointer is same as host pointer
         readBufferGpu = readBuffer;
@@ -1163,21 +1149,20 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         }
 
         // Get physical address for host memory using /proc/self/pagemap
-        // (matching test code line 842)
-        readBufferDma = virt_to_phys(readBuffer);
+        readBufferDma = xioGetPhysAddr(readBuffer);
         if (!readBufferDma) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "ERROR: Failed to get read buffer physical address\n");
           (void)hipHostFree(readBuffer);
           readBuffer = nullptr;
           return hipErrorInvalidValue;
         }
 
-        fprintf(stderr, "  Data buffer virtual:  %p\n", readBuffer);
-        fprintf(stderr, "  Data buffer physical: 0x%016llx\n",
+        fprintf(stdout, "  Data buffer virtual:  %p\n", readBuffer);
+        fprintf(stdout, "  Data buffer physical: 0x%016llx\n",
                 (unsigned long long)readBufferDma);
-        fprintf(stderr, "  GPU can write directly to this buffer\n");
-        fprintf(stderr, "  NVMe can DMA from this buffer\n");
+        fprintf(stdout, "  GPU can write directly to this buffer\n");
+        fprintf(stdout, "  NVMe can DMA from this buffer\n");
         readBufferActuallyOnDevice = false; // Track that we're using host
                                             // memory
       }
@@ -1185,9 +1170,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       // Read buffer registration:
       // - Device memory: Already registered via
       // export_and_register_vram_buffer()
-      // - Host memory: Physical address obtained from pagemap, kernel module
-      // will
-      //   use virt_to_phys() fallback if needed for PRP injection
+      // - Host memory: Physical address obtained from pagemap via
+      // xioGetPhysAddr(), kernel module will use virt_to_phys() fallback if
+      // needed for PRP injection
 
       // Verify read buffer is GPU-accessible and get GPU pointer if needed
       // (matches QEMU guest code pattern - hipHostMallocMapped should be
@@ -1196,7 +1181,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         hipPointerAttribute_t attr;
         hipError_t attr_err = hipPointerGetAttributes(&attr, readBuffer);
         if (attr_err != hipSuccess) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "Warning: Read buffer may not be GPU-accessible: %s\n",
                   hipGetErrorString(attr_err));
           readBufferGpu = readBuffer; // Fallback to host pointer
@@ -1213,7 +1198,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
             // Store GPU pointer for kernel launch (may be same as host pointer)
             readBufferGpu = static_cast<uint8_t*>(gpu_ptr);
-            fprintf(stderr, "Read buffer GPU pointer: %p (host: %p)\n",
+            fprintf(stdout, "Read buffer GPU pointer: %p (host: %p)\n",
                     readBufferGpu, readBuffer);
           } else {
             // Fallback: use host pointer (should work for hipHostMallocMapped)
@@ -1225,7 +1210,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         readBufferGpu = readBuffer;
       }
 
-      fprintf(stderr, "Read buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
+      fprintf(stdout, "Read buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
               readBuffer, (unsigned long long)readBufferDma, dataBufferSize);
     }
 
@@ -1254,8 +1239,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           return buf_err;
         }
 
-        fprintf(stderr, "  VRAM buffer virtual: %p\n", writeBuffer);
-        fprintf(stderr, "  Exporting as DMA-BUF (HSA runtime)...\n");
+        fprintf(stdout, "  VRAM buffer virtual: %p\n", writeBuffer);
+        fprintf(stdout, "  Exporting as DMA-BUF (HSA runtime)...\n");
 
         // Detect if NVMe is emulated (needed for buffer registration flags)
         bool is_emulated = false;
@@ -1267,10 +1252,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
                                                   ROCM_XIO_DEVICE_PATH,
                                                   &writeBufferDma, is_emulated);
         if (ret < 0) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "ERROR: DMA-BUF export failed for device memory: %s\n",
                   strerror(-ret));
-          fprintf(stderr, "  Device memory was requested but dmabuf export is "
+          fprintf(stdout, "  Device memory was requested but dmabuf export is "
                           "not available\n");
           (void)hipFree(writeBuffer);
           writeBuffer = nullptr;
@@ -1285,10 +1270,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           return hipErrorInvalidValue;
         }
 
-        fprintf(stderr, "  Data buffer physical: 0x%016llx (VRAM)\n",
+        fprintf(stdout, "  Data buffer physical: 0x%016llx (VRAM)\n",
                 (unsigned long long)writeBufferDma);
-        fprintf(stderr, "  GPU writes directly to VRAM\n");
-        fprintf(stderr, "  NVMe DMAs from VRAM (P2P)\n");
+        fprintf(stdout, "  GPU writes directly to VRAM\n");
+        fprintf(stdout, "  NVMe DMAs from VRAM (P2P)\n");
 
         // Device memory - GPU pointer is same as host pointer
         writeBufferGpu = writeBuffer;
@@ -1313,10 +1298,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         }
 
         // Get physical address for host memory using /proc/self/pagemap
-        // (matching test code line 842)
-        writeBufferDma = virt_to_phys(writeBuffer);
+        writeBufferDma = xioGetPhysAddr(writeBuffer);
         if (!writeBufferDma) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "ERROR: Failed to get write buffer physical address\n");
           (void)hipHostFree(writeBuffer);
           writeBuffer = nullptr;
@@ -1331,11 +1315,11 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           return hipErrorInvalidValue;
         }
 
-        fprintf(stderr, "  Data buffer virtual:  %p\n", writeBuffer);
-        fprintf(stderr, "  Data buffer physical: 0x%016llx\n",
+        fprintf(stdout, "  Data buffer virtual:  %p\n", writeBuffer);
+        fprintf(stdout, "  Data buffer physical: 0x%016llx\n",
                 (unsigned long long)writeBufferDma);
-        fprintf(stderr, "  GPU can write directly to this buffer\n");
-        fprintf(stderr, "  NVMe can DMA from this buffer\n");
+        fprintf(stdout, "  GPU can write directly to this buffer\n");
+        fprintf(stdout, "  NVMe can DMA from this buffer\n");
         writeBufferActuallyOnDevice = false; // Track that we're using host
                                              // memory
       }
@@ -1343,9 +1327,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       // Write buffer registration:
       // - Device memory: Already registered via
       // export_and_register_vram_buffer()
-      // - Host memory: Physical address obtained from pagemap, kernel module
-      // will
-      //   use virt_to_phys() fallback if needed for PRP injection
+      // - Host memory: Physical address obtained from pagemap via
+      // xioGetPhysAddr(), kernel module will use virt_to_phys() fallback if
+      // needed for PRP injection
 
       // Verify write buffer is GPU-accessible and get GPU pointer if needed
       // (matches QEMU guest code pattern - hipHostMallocMapped should be
@@ -1354,7 +1338,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         hipPointerAttribute_t attr;
         hipError_t attr_err = hipPointerGetAttributes(&attr, writeBuffer);
         if (attr_err != hipSuccess) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "Warning: Write buffer may not be GPU-accessible: %s\n",
                   hipGetErrorString(attr_err));
           writeBufferGpu = writeBuffer; // Fallback to host pointer
@@ -1371,7 +1355,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
             // Store GPU pointer for kernel launch (may be same as host pointer)
             writeBufferGpu = static_cast<uint8_t*>(gpu_ptr);
-            fprintf(stderr, "Write buffer GPU pointer: %p (host: %p)\n",
+            fprintf(stdout, "Write buffer GPU pointer: %p (host: %p)\n",
                     writeBufferGpu, writeBuffer);
           } else {
             // Fallback: use host pointer (should work for hipHostMallocMapped)
@@ -1383,7 +1367,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         writeBufferGpu = writeBuffer;
       }
 
-      fprintf(stderr,
+      fprintf(stdout,
               "Write buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
               writeBuffer, (unsigned long long)writeBufferDma, dataBufferSize);
     }
@@ -1406,22 +1390,22 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
                                                    config->completionQueue);
 
   if (sq_attr_err != hipSuccess) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Warning: Failed to get SQ pointer attributes: %s (code: %d)\n",
             hipGetErrorString(sq_attr_err), sq_attr_err);
-    fprintf(stderr, "SQ pointer may not be GPU-accessible\n");
+    fprintf(stdout, "SQ pointer may not be GPU-accessible\n");
   } else {
-    fprintf(stderr, "SQ GPU accessibility verified: type=%d, device=%d\n",
+    fprintf(stdout, "SQ GPU accessibility verified: type=%d, device=%d\n",
             sq_attr.type, sq_attr.device);
   }
 
   if (cq_attr_err != hipSuccess) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Warning: Failed to get CQ pointer attributes: %s (code: %d)\n",
             hipGetErrorString(cq_attr_err), cq_attr_err);
-    fprintf(stderr, "CQ pointer may not be GPU-accessible\n");
+    fprintf(stdout, "CQ pointer may not be GPU-accessible\n");
   } else {
-    fprintf(stderr, "CQ GPU accessibility verified: type=%d, device=%d\n",
+    fprintf(stdout, "CQ GPU accessibility verified: type=%d, device=%d\n",
             cq_attr.type, cq_attr.device);
   }
 
@@ -1432,16 +1416,16 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     hipError_t shadow_attr_err = hipPointerGetAttributes(&shadow_attr,
                                                          shadowBufferVirt);
     if (shadow_attr_err != hipSuccess) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: Failed to get shadow buffer pointer attributes: %s "
               "(code: %d)\n",
               hipGetErrorString(shadow_attr_err), shadow_attr_err);
-      fprintf(stderr, "Shadow buffer may not be GPU-accessible - disabling PCI "
+      fprintf(stdout, "Shadow buffer may not be GPU-accessible - disabling PCI "
                       "MMIO bridge mode\n");
       shadowBufferVirt = nullptr;
       usePciMmioBridge = false;
     } else {
-      fprintf(stderr,
+      fprintf(stdout,
               "Shadow buffer GPU accessibility verified: type=%d, device=%d\n",
               shadow_attr.type, shadow_attr.device);
     }
@@ -1452,7 +1436,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     hipPointerAttribute_t bar0_attr;
     hipError_t bar0_attr_err = hipPointerGetAttributes(&bar0_attr, nvmeBar0Gpu);
     if (bar0_attr_err != hipSuccess) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: Failed to get BAR0 pointer attributes: %s (code: %d)\n",
               hipGetErrorString(bar0_attr_err), bar0_attr_err);
       fprintf(
@@ -1460,7 +1444,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         "BAR0 may not be GPU-accessible - disabling direct doorbell mode\n");
       nvmeBar0Gpu = nullptr;
     } else {
-      fprintf(stderr, "BAR0 GPU accessibility verified: type=%d, device=%d\n",
+      fprintf(stdout, "BAR0 GPU accessibility verified: type=%d, device=%d\n",
               bar0_attr.type, bar0_attr.device);
     }
   }
@@ -1481,19 +1465,19 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // avoid kernel launch failure. The GPU kernel handles nullptr
   // shadowBufferVirt gracefully.
 
-  fprintf(stderr,
+  fprintf(stdout,
           "Launching kernel: sq=%p, cq=%p, startTimes=%p, endTimes=%p, "
           "shadowBuffer=%p, usePciMmioBridge=%d, nvmeBar0Gpu=%p\n",
           config->submissionQueue, config->completionQueue, config->startTimes,
           config->endTimes, shadowBufferVirt, usePciMmioBridge, nvmeBar0Gpu);
-  fprintf(stderr,
+  fprintf(stdout,
           "Data buffers: readBuffer=%p (dma=0x%llx), writeBuffer=%p "
           "(dma=0x%llx), size=%zu\n",
           readBufferGpu ? readBufferGpu : readBuffer,
           (unsigned long long)readBufferDma,
           writeBufferGpu ? writeBufferGpu : writeBuffer,
           (unsigned long long)writeBufferDma, dataBufferSize);
-  fprintf(stderr,
+  fprintf(stdout,
           "Kernel parameters: lbaSize=%u, blocks=8, expected transfer_size=%u, "
           "writeBufferDma=0x%llx\n",
           lbaSize, 8 * lbaSize, (unsigned long long)writeBufferDma);
@@ -1501,8 +1485,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // Launch kernel - matching test-ep pattern exactly (line 870-873)
   // queue_size is in entries (calculated above, stored in queue_size variable)
 
-  fprintf(stderr, "Calling hipLaunchKernelGGL...\n");
-  fprintf(stderr, "Queue length: %u entries\n", queue_size);
+  fprintf(stdout, "Calling hipLaunchKernelGGL...\n");
+  fprintf(stdout, "Queue length: %u entries\n", queue_size);
 
   // Cast void* to typed pointers like test-ep does (test-ep line 778-779)
   // This helps HIP validate the pointers correctly
@@ -1539,9 +1523,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // Check for kernel launch errors immediately
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr, "Kernel launch error: %s (code: %d)\n",
+    fprintf(stdout, "Kernel launch error: %s (code: %d)\n",
             hipGetErrorString(err), err);
-    fprintf(stderr,
+    fprintf(stdout,
             "Debug: submissionQueue=%p, completionQueue=%p, "
             "startTimes=%p, endTimes=%p, shadowBuffer=%p\n",
             config->submissionQueue, config->completionQueue,
@@ -1550,18 +1534,18 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     // Additional diagnostics
     int diag_device = -1;
     hipError_t diag_err = hipGetDevice(&diag_device);
-    fprintf(stderr, "HIP device after launch error: device=%d, err=%d\n",
+    fprintf(stdout, "HIP device after launch error: device=%d, err=%d\n",
             diag_device, diag_err);
 
     return err;
   }
 
-  fprintf(stderr, "Kernel launched successfully\n");
+  fprintf(stdout, "Kernel launched successfully\n");
 
   // Wait for GPU kernel to complete (kernel rings doorbell internally)
   err = hipDeviceSynchronize();
   if (err != hipSuccess) {
-    fprintf(stderr, "Device synchronization error: %s (code: %d)\n",
+    fprintf(stdout, "Device synchronization error: %s (code: %d)\n",
             hipGetErrorString(err), err);
   }
 
@@ -1600,9 +1584,9 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
   // Open kernel module device
   kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stderr, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
+    fprintf(stdout, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
             strerror(errno));
-    fprintf(stderr, "Please ensure the rocm-xio kernel module is loaded\n");
+    fprintf(stdout, "Please ensure the rocm-xio kernel module is loaded\n");
     return -errno;
   }
 
@@ -1611,14 +1595,14 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
   req.bridge_bdf = bridge_bdf;
   ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
   if (ret < 0) {
-    fprintf(stderr, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
+    fprintf(stdout, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
             strerror(errno));
     close(kmod_fd);
     return -errno;
   }
 
   if (req.shadow_gpa == 0) {
-    fprintf(stderr, "PCI MMIO bridge shadow GPA is 0 (not configured)\n");
+    fprintf(stdout, "PCI MMIO bridge shadow GPA is 0 (not configured)\n");
     close(kmod_fd);
     return -EINVAL;
   }
@@ -1627,7 +1611,7 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
   mapped = mmap(nullptr, req.shadow_size, PROT_READ | PROT_WRITE, MAP_SHARED,
                 kmod_fd, 0);
   if (mapped == MAP_FAILED) {
-    fprintf(stderr, "Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
+    fprintf(stdout, "Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
             strerror(errno));
     close(kmod_fd);
     return -errno;
@@ -1639,7 +1623,7 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
   // The kernel will clean it up when the process exits
 
   *virt_addr = mapped;
-  fprintf(stderr,
+  fprintf(stdout,
           "PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
           "size=%llu, vaddr=%p\n",
           (unsigned long long)req.shadow_gpa,
@@ -1650,7 +1634,8 @@ static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
 
 // Map NVMe BAR0 for direct doorbell access
 // Similar to test-gpu-nvme-write.cpp's map_nvme_bar0 function
-static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu) {
   int bar0_fd = -1;
   int drm_fd = -1;
   void* mapped = MAP_FAILED;
@@ -1670,7 +1655,7 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
   // Open BAR0 resource file
   bar0_fd = open(resource_path, O_RDWR);
   if (bar0_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
+    fprintf(stdout, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
             strerror(errno));
     return -errno;
   }
@@ -1679,19 +1664,19 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
   mapped = mmap(nullptr, bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar0_fd,
                 0);
   if (mapped == MAP_FAILED) {
-    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
+    fprintf(stdout, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
     close(bar0_fd);
     return -errno;
   }
 
-  fprintf(stderr, "NVMe BAR0 mapped at %p (size=%zu)\n", mapped, bar0_size);
+  fprintf(stdout, "NVMe BAR0 mapped at %p (size=%zu)\n", mapped, bar0_size);
 
   // Register with DRM GEM_USERPTR (required for GPU access to PCI MMIO)
   drm_fd = open("/dev/dri/renderD128", O_RDWR);
   if (drm_fd < 0) {
-    fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
+    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
             strerror(errno));
-    fprintf(stderr, "Cannot register BAR0 with GPU via GEM_USERPTR.\n");
+    fprintf(stdout, "Cannot register BAR0 with GPU via GEM_USERPTR.\n");
     munmap(mapped, bar0_size);
     close(bar0_fd);
     return -errno;
@@ -1703,23 +1688,23 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
   gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
 
   if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for BAR0: %s\n",
             strerror(errno));
-    fprintf(stderr, "Cannot register BAR0 with GPU.\n");
+    fprintf(stdout, "Cannot register BAR0 with GPU.\n");
     close(drm_fd);
     munmap(mapped, bar0_size);
     close(bar0_fd);
     return -errno;
   }
 
-  fprintf(stderr, "NVMe BAR0 registered with DRM GEM_USERPTR (handle: %u)\n",
+  fprintf(stdout, "NVMe BAR0 registered with DRM GEM_USERPTR (handle: %u)\n",
           gem_userptr.handle);
 
   // Register with HIP
   hip_err = hipHostRegister(mapped, bar0_size, hipHostRegisterMapped);
   if (hip_err != hipSuccess) {
-    fprintf(stderr, "Warning: Failed to register BAR0 with HIP: %s\n",
+    fprintf(stdout, "Warning: Failed to register BAR0 with HIP: %s\n",
             hipGetErrorString(hip_err));
     close(drm_fd);
     munmap(mapped, bar0_size);
@@ -1727,13 +1712,13 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
     return -EINVAL;
   }
 
-  fprintf(stderr, "NVMe BAR0 registered with HIP for GPU access\n");
+  fprintf(stdout, "NVMe BAR0 registered with HIP for GPU access\n");
 
   // Get GPU pointer
   void* gpu_ptr = nullptr;
   hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
   if (gpu_ptr_err != hipSuccess) {
-    fprintf(stderr, "Warning: hipHostGetDevicePointer failed for BAR0: %s\n",
+    fprintf(stdout, "Warning: hipHostGetDevicePointer failed for BAR0: %s\n",
             hipGetErrorString(gpu_ptr_err));
     (void)hipHostUnregister(mapped);
     close(drm_fd);
@@ -1742,7 +1727,7 @@ static int map_nvme_bar0(uint16_t nvme_bdf, void** bar0_cpu, void** bar0_gpu) {
     return -EINVAL;
   }
 
-  fprintf(stderr, "NVMe BAR0 GPU pointer obtained: %p (host: %p)\n", gpu_ptr,
+  fprintf(stdout, "NVMe BAR0 GPU pointer obtained: %p (host: %p)\n", gpu_ptr,
           mapped);
 
   // Keep bar0_fd and drm_fd open for the mapping to remain valid
@@ -1816,7 +1801,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Open NVMe device
   nvme_fd = open(nvme_device, O_RDONLY);
   if (nvme_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe device %s: %s\n", nvme_device,
+    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
             strerror(errno));
     ret = -errno;
     goto cleanup;
@@ -1833,7 +1818,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
-    fprintf(stderr, "Failed to identify namespace: %s\n", strerror(errno));
+    fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -1841,7 +1826,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Check completion status
   if (cmd.result & 0xFFFE) {
     status = (cmd.result >> 1) & 0xFF;
-    fprintf(stderr, "Identify Namespace failed with status 0x%02x\n", status);
+    fprintf(stdout, "Identify Namespace failed with status 0x%02x\n", status);
     ret = -EIO;
     goto cleanup;
   }
@@ -1856,7 +1841,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Valid format indices are 0 through nlbaf (inclusive)
   // So if nlbaf=7, formats 0-7 are supported (8 formats total)
   if (lba_format_idx > id_ns->nlbaf) {
-    fprintf(stderr, "Invalid LBA format index %u (max supported: %u)\n",
+    fprintf(stdout, "Invalid LBA format index %u (max supported: %u)\n",
             lba_format_idx, id_ns->nlbaf);
     ret = -EINVAL;
     goto cleanup;
@@ -1881,16 +1866,16 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Debug: Print raw bytes for format 0 to diagnose parsing issues
   if (lba_format_idx == 0) {
     uint8_t* lbaf0_raw = response_base + 128;
-    fprintf(stderr,
+    fprintf(stdout,
             "Debug: Format 0 raw bytes at offset 128: "
             "[0]=0x%02x [1]=0x%02x [2]=0x%02x [3]=0x%02x\n",
             lbaf0_raw[0], lbaf0_raw[1], lbaf0_raw[2], lbaf0_raw[3]);
     // Also check as 32-bit little-endian value
     uint32_t lbaf0_u32 = *reinterpret_cast<uint32_t*>(lbaf0_raw);
-    fprintf(stderr, "Debug: Format 0 as uint32 (little-endian): 0x%08x\n",
+    fprintf(stdout, "Debug: Format 0 as uint32 (little-endian): 0x%08x\n",
             lbaf0_u32);
     fprintf(
-      stderr,
+      stdout,
       "Debug: Extracting bits - [0-7]=%u [8-15]=%u [16-23]=%u [24-31]=%u\n",
       (lbaf0_u32 >> 0) & 0xFF, (lbaf0_u32 >> 8) & 0xFF,
       (lbaf0_u32 >> 16) & 0xFF, (lbaf0_u32 >> 24) & 0xFF);
@@ -1904,7 +1889,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Debug: If byte 0 is 0, check if the value is in byte 2 (might indicate
   // alignment issue)
   if (lbads == 0 && lbaf_ptr[2] != 0) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Debug: Byte 0 is 0, but byte 2 has value 0x%02x - "
             "possible structure alignment issue\n",
             lbaf_ptr[2]);
@@ -1915,11 +1900,11 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Debug output - show all supported formats
   // nlbaf indicates number of formats supported, valid indices are 0 through
   // nlbaf
-  fprintf(stderr,
+  fprintf(stdout,
           "LBA size detection: nlbaf=%u (supports formats 0-%u), "
           "flbas=0x%02x, lba_format_idx=%u\n",
           id_ns->nlbaf, id_ns->nlbaf, flbas, lba_format_idx);
-  fprintf(stderr, "Supported LBA formats:\n");
+  fprintf(stdout, "Supported LBA formats:\n");
   for (uint8_t i = 0; i <= id_ns->nlbaf && i < 16; i++) {
     // Access lbaf using byte offset from start of buffer (offset 128)
     // Structure: bytes[0-1]=ms (little-endian), byte[2]=ds (LBADS), byte[3]=rp
@@ -1927,7 +1912,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
     uint16_t ms_i = lbaf_i_ptr[0] | (lbaf_i_ptr[1] << 8); // Little-endian
     uint8_t lbads_i = lbaf_i_ptr[2] & 0xFF;               // LBADS is in byte 2
     uint32_t lba_size_i = (lbads_i > 0) ? (1U << lbads_i) : 0;
-    fprintf(stderr, "  Format %u: lbads=%u, ms=%u, lba_size=%u bytes%s\n", i,
+    fprintf(stdout, "  Format %u: lbads=%u, ms=%u, lba_size=%u bytes%s\n", i,
             lbads_i, ms_i, lba_size_i,
             (i == lba_format_idx) ? " (current)" : "");
   }
@@ -1937,7 +1922,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
   // Standard LBA sizes: lbads=9 (512B), lbads=12 (4KB)
   // Some devices may support lbads=8 (256B) or other values
   if (lbads == 0) {
-    fprintf(stderr,
+    fprintf(stdout,
             "Warning: Invalid LBADS value (0) in format %u, "
             "namespace may be unformatted\n",
             lba_format_idx);
@@ -1953,12 +1938,12 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
       uint8_t lbads_i = lbaf_i_ptr[2] & 0xFF; // LBADS is in byte 2
       if (lbads_i > 0) {
         uint32_t lba_size_i = 1U << lbads_i;
-        fprintf(stderr,
+        fprintf(stdout,
                 "Found format %u with lbads=%u (lba_size=%u bytes), "
                 "using it instead\n",
                 i, lbads_i, lba_size_i);
         if (lbads_i < 9) {
-          fprintf(stderr,
+          fprintf(stdout,
                   "Warning: Unusual LBA size (%u bytes), "
                   "standard sizes are 512B (lbads=9) or 4KB (lbads=12)\n",
                   lba_size_i);
@@ -1970,14 +1955,14 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
     }
 
     if (!found_valid) {
-      fprintf(stderr, "No valid LBA format found, will fall back to default\n");
+      fprintf(stdout, "No valid LBA format found, will fall back to default\n");
       // Return error so caller can use fallback
       ret = -EINVAL;
       goto cleanup;
     }
   } else if (lbads < 9) {
     // Valid but unusual LBA size
-    fprintf(stderr,
+    fprintf(stdout,
             "Warning: Unusual LBA size (%u bytes, lbads=%u), "
             "standard sizes are 512B (lbads=9) or 4KB (lbads=12)\n",
             1U << lbads, lbads);
@@ -1985,7 +1970,7 @@ __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
 
   // LBA size = 2^LBADS bytes
   *lba_size = 1U << lbads;
-  fprintf(stderr, "Selected LBA size: %u bytes (lbads=%u)\n", *lba_size, lbads);
+  fprintf(stdout, "Selected LBA size: %u bytes (lbads=%u)\n", *lba_size, lbads);
 
   ret = 0;
 
@@ -2022,7 +2007,7 @@ __host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
   // Open NVMe device
   nvme_fd = open(nvme_device, O_RDONLY);
   if (nvme_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe device %s: %s\n", nvme_device,
+    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
             strerror(errno));
     ret = -errno;
     goto cleanup;
@@ -2039,7 +2024,7 @@ __host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
-    fprintf(stderr, "Failed to identify namespace: %s\n", strerror(errno));
+    fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -2047,7 +2032,7 @@ __host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
   // Check completion status
   if (cmd.result & 0xFFFE) {
     status = (cmd.result >> 1) & 0xFF;
-    fprintf(stderr, "Identify Namespace failed with status 0x%02x\n", status);
+    fprintf(stdout, "Identify Namespace failed with status 0x%02x\n", status);
     ret = -EIO;
     goto cleanup;
   }
@@ -2055,7 +2040,7 @@ __host__ int nvme_ep_query_namespace_capacity(const char* nvme_device,
   // Extract NSZE (Namespace Size) - capacity in LBAs
   // NSZE is little-endian 64-bit value at offset 0
   *capacity_lbas = id_ns->nsze;
-  fprintf(stderr, "Namespace capacity: %llu LBAs\n",
+  fprintf(stdout, "Namespace capacity: %llu LBAs\n",
           (unsigned long long)*capacity_lbas);
 
   ret = 0;
@@ -2070,7 +2055,111 @@ cleanup:
   return ret;
 }
 
-__host__ int nvme_ep_create_queue_via_ioctl(
+__host__ int nvme_ep_check_rootfs(const char* nvme_device) {
+  // Extract namespace device (e.g., /dev/nvme0 -> /dev/nvme0n1)
+  char ns_device[256];
+  snprintf(ns_device, sizeof(ns_device), "%sn1", nvme_device);
+
+  // Check /proc/mounts for root mount
+  FILE* f = fopen("/proc/mounts", "r");
+  if (!f) {
+    fprintf(stdout, "Warning: Failed to open /proc/mounts\n");
+    return 0; // Can't check, allow to proceed
+  }
+
+  char line[512];
+  bool is_rootfs = false;
+  while (fgets(line, sizeof(line), f)) {
+    // Format: device mount_point filesystem ...
+    char device[256], mount_point[256];
+    if (sscanf(line, "%255s %255s", device, mount_point) == 2) {
+      if (strcmp(mount_point, "/") == 0) {
+        // Check if this device matches our NVMe device
+        if (strstr(device, ns_device) != nullptr ||
+            strstr(device, nvme_device) != nullptr) {
+          is_rootfs = true;
+          break;
+        }
+      }
+    }
+  }
+  fclose(f);
+
+  if (is_rootfs) {
+    fprintf(stdout,
+            "ERROR: NVMe device %s appears to be the root filesystem!\n",
+            nvme_device);
+    fprintf(stdout, "This operation will NOT proceed on rootfs to prevent data "
+                    "corruption.\n");
+    fprintf(stdout, "Please specify a different NVMe device.\n");
+    return -1;
+  }
+
+  return 0;
+}
+
+__host__ int nvme_ep_read_smart_log(const char* nvme_device,
+                                    struct nvme_smart_log* smart_log) {
+  int nvme_fd = open(nvme_device, O_RDONLY);
+  if (nvme_fd < 0) {
+    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
+            strerror(errno));
+    return -errno;
+  }
+
+  // Allocate buffer on heap to ensure kernel can access it
+  // Stack-allocated buffers might not work with ioctl
+  uint8_t* buffer = static_cast<uint8_t*>(malloc(512));
+  if (!buffer) {
+    fprintf(stdout, "Failed to allocate SMART log buffer\n");
+    close(nvme_fd);
+    return -ENOMEM;
+  }
+  memset(buffer, 0, 512);
+
+  // Use NVME_IOCTL_ADMIN64_CMD with nvme_passthru_cmd64 structure
+  // NVME_IOCTL_ADMIN_CMD expects nvme_admin_cmd which has different layout
+  // The 64-bit version is needed for the 64-bit result field
+  struct nvme_passthru_cmd64 cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.opcode = nvme_admin_get_log_page;
+  cmd.nsid = 0xFFFFFFFF; // Controller-level log
+  // cdw10: NUMD (Number of Dwords) in bits [31:16], LID (Log Identifier) in
+  // bits [15:0] NUMD = 127 (0x7F) for 512 bytes, LID = 0x02 (SMART/Health
+  // Information)
+  cmd.cdw10 = (127 << 16) | 0x02; // (NUMD << 16) | LID
+  cmd.cdw11 = 0x00000000;         // Reserved
+  cmd.cdw12 = 0x00000000;         // RAE=0, LSP=0, LSI=0 (standard SMART log)
+  cmd.addr = reinterpret_cast<uint64_t>(buffer);
+  cmd.data_len = 512;
+  cmd.timeout_ms = 0;
+
+  int ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
+  if (ret < 0) {
+    fprintf(stdout, "Failed to read SMART log: %s\n", strerror(errno));
+    free(buffer);
+    close(nvme_fd);
+    return -errno;
+  }
+
+  // Check completion status
+  if (cmd.result & 0xFFFE) {
+    uint16_t status = (cmd.result >> 1) & 0xFF;
+    fprintf(stdout, "SMART log read failed with status 0x%02x\n", status);
+    free(buffer);
+    close(nvme_fd);
+    return -EIO;
+  }
+
+  // Copy data from buffer to structure
+  memcpy(smart_log, buffer, 512);
+
+  free(buffer);
+  close(nvme_fd);
+  return 0;
+}
+
+__host__ int nvme_ep::nvme_create_queue_via_ioctl(
   const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
   uint16_t queue_size, uint16_t nvme_bdf, unsigned memory_mode,
   struct nvme_queue_info* info) {
@@ -2135,7 +2224,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // Open kernel module device
   kmod_fd = open(kernel_module_device, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stderr, "Failed to open kernel module device %s: %s\n",
+    fprintf(stdout, "Failed to open kernel module device %s: %s\n",
             kernel_module_device, strerror(errno));
     return -errno;
   }
@@ -2144,26 +2233,26 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   bool is_emulated = false;
   int detect_ret = xioDetectEmulatedNvme(nvme_device, &is_emulated);
   if (detect_ret != 0) {
-    fprintf(stderr, "Warning: Failed to detect NVMe type for %s: %s\n",
+    fprintf(stdout, "Warning: Failed to detect NVMe type for %s: %s\n",
             nvme_device, strerror(-detect_ret));
-    fprintf(stderr, "Defaulting to passthrough mode\n");
+    fprintf(stdout, "Defaulting to passthrough mode\n");
     is_emulated = false;
   }
-  fprintf(stderr, "NVMe device %s detected as: %s\n", nvme_device,
+  fprintf(stdout, "NVMe device %s detected as: %s\n", nvme_device,
           is_emulated ? "EMULATED" : "PASSTHROUGH");
 
   // Open NVMe device (requires root permissions)
   nvme_fd = open(nvme_device, O_RDWR);
   if (nvme_fd < 0) {
     if (errno == EACCES || errno == EPERM) {
-      fprintf(stderr, "Failed to open NVMe device %s: %s\n", nvme_device,
+      fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
               strerror(errno));
-      fprintf(stderr, "Note: NVMe device access requires root permissions.\n");
-      fprintf(stderr,
+      fprintf(stdout, "Note: NVMe device access requires root permissions.\n");
+      fprintf(stdout,
               "Please run with sudo or ensure your user has access to %s\n",
               nvme_device);
     } else {
-      fprintf(stderr, "Failed to open NVMe device %s: %s\n", nvme_device,
+      fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
               strerror(errno));
     }
     close(kmod_fd);
@@ -2174,7 +2263,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // Bit 0 (LSB): GPU write location (SQE) - 0=host, 1=device
   sqe_err = xioAllocateSubmissionQueue(sq_size_bytes, memory_mode, &sq_virt);
   if (sqe_err != hipSuccess) {
-    fprintf(stderr, "Failed to allocate SQ buffer: %s\n",
+    fprintf(stdout, "Failed to allocate SQ buffer: %s\n",
             hipGetErrorString(sqe_err));
     ret = -ENOMEM;
     goto cleanup;
@@ -2184,7 +2273,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // Bit 1: CPU write location (CQE) - 0=host, 1=device
   cqe_err = xioAllocateCompletionQueue(cq_size_bytes, memory_mode, &cq_virt);
   if (cqe_err != hipSuccess) {
-    fprintf(stderr, "Failed to allocate CQ buffer: %s\n",
+    fprintf(stdout, "Failed to allocate CQ buffer: %s\n",
             hipGetErrorString(cqe_err));
     // Free SQ on failure
     xioFreeSubmissionQueue(sq_virt, memory_mode);
@@ -2224,9 +2313,9 @@ __host__ int nvme_ep_create_queue_via_ioctl(
                                                hipHostMallocMapped |
                                                  hipHostMallocCoherent);
     if (sq_coherent_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostMallocCoherent failed for SQ: %s\n",
+      fprintf(stdout, "Warning: hipHostMallocCoherent failed for SQ: %s\n",
               hipGetErrorString(sq_coherent_err));
-      fprintf(stderr, "Falling back to regular allocation (may not work on "
+      fprintf(stdout, "Falling back to regular allocation (may not work on "
                       "gfx900)\n");
     } else {
       // Copy zeroed data to coherent memory
@@ -2248,9 +2337,9 @@ __host__ int nvme_ep_create_queue_via_ioctl(
                                                hipHostMallocMapped |
                                                  hipHostMallocCoherent);
     if (cq_coherent_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostMallocCoherent failed for CQ: %s\n",
+      fprintf(stdout, "Warning: hipHostMallocCoherent failed for CQ: %s\n",
               hipGetErrorString(cq_coherent_err));
-      fprintf(stderr, "Falling back to regular allocation (may not work on "
+      fprintf(stdout, "Falling back to regular allocation (may not work on "
                       "gfx900)\n");
     } else {
       // Copy zeroed data to coherent memory
@@ -2275,12 +2364,12 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   drm_fd = open("/dev/dri/renderD128", O_RDWR);
   if (drm_fd < 0) {
-    fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
+    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
             strerror(errno));
-    fprintf(stderr, "Cannot register queues with GPU via GEM_USERPTR.\n");
+    fprintf(stdout, "Cannot register queues with GPU via GEM_USERPTR.\n");
     // For device memory, this is not fatal - queues are already GPU-accessible
     if (sq_is_device && cq_is_device) {
-      fprintf(stderr, "Note: Device memory queues are already GPU-accessible, "
+      fprintf(stdout, "Note: Device memory queues are already GPU-accessible, "
                       "continuing without GEM_USERPTR\n");
       drm_fd = -1; // Mark as not opened
     } else {
@@ -2294,21 +2383,21 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     sq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
 
     if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &sq_userptr) < 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for SQ: %s\n",
               strerror(errno));
       // For device memory, this is not fatal
       if (sq_is_device) {
-        fprintf(stderr, "Note: SQ is device memory (already GPU-accessible), "
+        fprintf(stdout, "Note: SQ is device memory (already GPU-accessible), "
                         "continuing without GEM_USERPTR\n");
       } else {
-        fprintf(stderr, "Cannot register SQ with GPU.\n");
+        fprintf(stdout, "Cannot register SQ with GPU.\n");
         close(drm_fd);
         ret = -errno;
         goto cleanup;
       }
     } else {
-      fprintf(stderr, "SQ registered with DRM GEM_USERPTR (handle: %u)\n",
+      fprintf(stdout, "SQ registered with DRM GEM_USERPTR (handle: %u)\n",
               sq_userptr.handle);
     }
 
@@ -2318,15 +2407,15 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     cq_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
 
     if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &cq_userptr) < 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for CQ: %s\n",
               strerror(errno));
       // For device memory, this is not fatal
       if (cq_is_device) {
-        fprintf(stderr, "Note: CQ is device memory (already GPU-accessible), "
+        fprintf(stdout, "Note: CQ is device memory (already GPU-accessible), "
                         "continuing without GEM_USERPTR\n");
       } else {
-        fprintf(stderr, "Cannot register CQ with GPU.\n");
+        fprintf(stdout, "Cannot register CQ with GPU.\n");
         if (sq_userptr.handle != 0) {
           // Try to unregister SQ if it was registered
           // (Note: There's no unregister call, but closing drm_fd should handle
@@ -2337,7 +2426,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
         goto cleanup;
       }
     } else {
-      fprintf(stderr, "CQ registered with DRM GEM_USERPTR (handle: %u)\n",
+      fprintf(stdout, "CQ registered with DRM GEM_USERPTR (handle: %u)\n",
               cq_userptr.handle);
     }
   }
@@ -2349,7 +2438,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   if (!sq_uses_coherent && !sq_is_device) {
     sq_hip_err = hipHostRegister(sq_virt, sq_size_bytes, hipHostRegisterMapped);
     if (sq_hip_err != hipSuccess) {
-      fprintf(stderr, "Warning: Failed to register SQ with HIP: %s\n",
+      fprintf(stdout, "Warning: Failed to register SQ with HIP: %s\n",
               hipGetErrorString(sq_hip_err));
       close(drm_fd);
       ret = -EIO;
@@ -2360,7 +2449,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   if (!cq_uses_coherent && !cq_is_device) {
     cq_hip_err = hipHostRegister(cq_virt, cq_size_bytes, hipHostRegisterMapped);
     if (cq_hip_err != hipSuccess) {
-      fprintf(stderr, "Warning: Failed to register CQ with HIP: %s\n",
+      fprintf(stdout, "Warning: Failed to register CQ with HIP: %s\n",
               hipGetErrorString(cq_hip_err));
       if (!sq_uses_coherent && !sq_is_device) {
         (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
@@ -2382,7 +2471,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     // Host memory - get GPU pointer via hipHostGetDevicePointer
     sq_gpu_ptr_err = hipHostGetDevicePointer(&sq_gpu, sq_virt, 0);
     if (sq_gpu_ptr_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostGetDevicePointer failed for SQ: %s\n",
+      fprintf(stdout, "Warning: hipHostGetDevicePointer failed for SQ: %s\n",
               hipGetErrorString(sq_gpu_ptr_err));
       if (!sq_uses_coherent) {
         (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
@@ -2404,7 +2493,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     // Host memory - get GPU pointer via hipHostGetDevicePointer
     cq_gpu_ptr_err = hipHostGetDevicePointer(&cq_gpu, cq_virt, 0);
     if (cq_gpu_ptr_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostGetDevicePointer failed for CQ: %s\n",
+      fprintf(stdout, "Warning: hipHostGetDevicePointer failed for CQ: %s\n",
               hipGetErrorString(cq_gpu_ptr_err));
       if (!sq_uses_coherent && !sq_is_device) {
         (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
@@ -2418,7 +2507,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     }
   }
 
-  fprintf(stderr,
+  fprintf(stdout,
           "Queues registered with GPU: SQ=%p (host=%p), CQ=%p (host=%p)\n",
           sq_gpu, sq_virt, cq_gpu, cq_virt);
 
@@ -2475,13 +2564,13 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     buf_req.nvme_bdf = nvme_bdf;
     buf_req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
                                 : ROCM_XIO_FLAG_PASSTHROUGH;
-    fprintf(stderr, "SQ registration: is_emulated=%d, flags=0x%x\n",
+    fprintf(stdout, "SQ registration: is_emulated=%d, flags=0x%x\n",
             is_emulated, buf_req.flags);
 
     ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &buf_req);
     close(sq_dmabuf_fd); // Close FD after kernel module has it
     if (ret < 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "ERROR: Failed to get SQ physical address via kernel module: "
               "%s\n",
               strerror(errno));
@@ -2489,7 +2578,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
       goto cleanup;
     }
     sq_phys = buf_req.phys_addr + sq_dmabuf_offset;
-    fprintf(stderr,
+    fprintf(stdout,
             "SQ device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
             (unsigned long long)reinterpret_cast<uint64_t>(sq_virt),
             (unsigned long long)sq_phys);
@@ -2498,9 +2587,9 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     // This matches QEMU guest code pattern (test-gpu-nvme-write.cpp)
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
-      fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
+      fprintf(stdout, "Warning: Failed to open /proc/self/pagemap: %s\n",
               strerror(errno));
-      fprintf(stderr, "Using virtual address as physical address for SQ\n");
+      fprintf(stdout, "Using virtual address as physical address for SQ\n");
       sq_phys = reinterpret_cast<uint64_t>(sq_virt);
     } else {
       uint64_t page_offset = reinterpret_cast<uint64_t>(sq_virt) %
@@ -2563,13 +2652,13 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     buf_req.nvme_bdf = nvme_bdf;
     buf_req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
                                 : ROCM_XIO_FLAG_PASSTHROUGH;
-    fprintf(stderr, "CQ registration: is_emulated=%d, flags=0x%x\n",
+    fprintf(stdout, "CQ registration: is_emulated=%d, flags=0x%x\n",
             is_emulated, buf_req.flags);
 
     ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &buf_req);
     close(cq_dmabuf_fd); // Close FD after kernel module has it
     if (ret < 0) {
-      fprintf(stderr,
+      fprintf(stdout,
               "ERROR: Failed to get CQ physical address via kernel module: "
               "%s\n",
               strerror(errno));
@@ -2577,7 +2666,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
       goto cleanup;
     }
     cq_phys = buf_req.phys_addr + cq_dmabuf_offset;
-    fprintf(stderr,
+    fprintf(stdout,
             "CQ device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
             (unsigned long long)reinterpret_cast<uint64_t>(cq_virt),
             (unsigned long long)cq_phys);
@@ -2585,9 +2674,9 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     // Host memory (mmap) - use /proc/self/pagemap
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
-      fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
+      fprintf(stdout, "Warning: Failed to open /proc/self/pagemap: %s\n",
               strerror(errno));
-      fprintf(stderr, "Using virtual address as physical address for CQ\n");
+      fprintf(stdout, "Using virtual address as physical address for CQ\n");
       cq_phys = reinterpret_cast<uint64_t>(cq_virt);
     } else {
       uint64_t page_offset = reinterpret_cast<uint64_t>(cq_virt) %
@@ -2633,7 +2722,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
-    fprintf(stderr, "Failed to register SQ address: %s\n", strerror(errno));
+    fprintf(stdout, "Failed to register SQ address: %s\n", strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -2647,7 +2736,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
 
   ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
-    fprintf(stderr, "Failed to register CQ address: %s\n", strerror(errno));
+    fprintf(stdout, "Failed to register CQ address: %s\n", strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -2666,7 +2755,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     // Ignore errors - queue may not exist
-    fprintf(stderr, "Note: DELETE_SQ failed (queue may not exist): %s\n",
+    fprintf(stdout, "Note: DELETE_SQ failed (queue may not exist): %s\n",
             strerror(errno));
   } else if (cmd.result & 0xFFFE) {
     // Check status code, but don't fail - queue may not exist
@@ -2689,7 +2778,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     // Ignore errors - queue may not exist
-    fprintf(stderr, "Note: DELETE_CQ failed (queue may not exist): %s\n",
+    fprintf(stdout, "Note: DELETE_CQ failed (queue may not exist): %s\n",
             strerror(errno));
   } else if (cmd.result & 0xFFFE) {
     // Check status code, but don't fail - queue may not exist
@@ -2713,6 +2802,12 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // Note: nvme_passthru_cmd uses __u64 for addr, which is uint64_t in userspace
   cmd.addr = reinterpret_cast<uint64_t>(cq_virt);
   cmd.data_len = 0; // No data transfer for CREATE_CQ
+
+  // Debug: Print what we're sending to the controller
+  fprintf(stdout,
+          "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
+          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
@@ -2760,7 +2855,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     goto cleanup;
   }
 
-  fprintf(stderr,
+  fprintf(stdout,
           "Successfully created completion queue (queue_id=%u, size=%u)\n",
           queue_id, queue_size);
 
@@ -2774,6 +2869,14 @@ __host__ int nvme_ep_create_queue_via_ioctl(
   // PRP1 will be injected by kprobe - pass virtual address as ubuffer
   cmd.addr = reinterpret_cast<uint64_t>(sq_virt);
   cmd.data_len = 0; // No data transfer for CREATE_SQ
+
+  // Debug: Print what we're sending to the controller
+  fprintf(stdout,
+          "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0), "
+          "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
+          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
+          cmd.cdw11, queue_id);
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
@@ -2812,7 +2915,7 @@ __host__ int nvme_ep_create_queue_via_ioctl(
     goto cleanup;
   }
 
-  fprintf(stderr,
+  fprintf(stdout,
           "Successfully created submission queue (queue_id=%u, size=%u)\n",
           queue_id, queue_size);
 

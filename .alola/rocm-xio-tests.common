@@ -38,3 +38,52 @@ setup_and_build_workdir() {
   cmake -S . -B build
   cmake --build build --target all --parallel
 }
+
+build_and_load_kernel_module_on_host() {
+  echo "Building and loading kernel module on host via ssh localhost ..."
+  ssh localhost "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
+  scp -r ${WORKING_DIR}/kernel/rocm-xio/* localhost:${WORKING_DIR}/kernel/rocm-xio
+  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && ls -la"
+  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
+  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
+  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
+  ssh localhost "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
+}
+
+unload_kernel_module_on_host() {
+  echo "Unloading kernel module on host via ssh localhost ..."
+  ssh localhost "sudo modprobe -r rocm-xio"
+}
+
+function find_root_device() {
+  local root_device=$(findmnt -n -o SOURCE / 2>/dev/null || echo "")
+  root_device=$(echo "${root_device}" | sed 's/\[.*\]$//')
+  echo "${root_device}"
+}
+
+find_non_rootfs_nvme_ctrl() {
+  local root_device="$1"
+  shift
+  
+  # If not NVMe or empty, return first controller
+  if [ -z "${root_device}" ] || ! echo "${root_device}" | grep -q '/dev/nvme'; then
+    [ $# -eq 0 ] && { echo "ERROR: No controllers" >&2; return 1; }
+    echo "$1"
+    return 0
+  fi
+  
+  # Extract rootfs controller
+  local clean_root=$(echo "${root_device}" | sed 's/\[.*\]$//')
+  local root_basename=$(basename "${clean_root}")
+  local rootfs_ctrl=""
+  [[ "${root_basename}" =~ ^nvme([0-9]+) ]] && \
+    rootfs_ctrl="/dev/nvme${BASH_REMATCH[1]}"
+  
+  # Find non-rootfs controller
+  for ctrl in "$@"; do
+    [ "${ctrl}" != "${rootfs_ctrl}" ] && echo "${ctrl}" && return 0
+  done
+  
+  echo "ERROR: No non-rootfs controller found" >&2
+  return 1
+}

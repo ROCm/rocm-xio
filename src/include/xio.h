@@ -26,6 +26,9 @@ class App;
 // AUTO-GENERATED - DO NOT EDIT MANUALLY
 #include "xio-endpoint-includes-gen.h"
 
+// ROCm-XIO kernel module device path
+#define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
+
 #define HIP_CHECK(expression)                                                  \
   {                                                                            \
     const hipError_t status = expression;                                      \
@@ -216,5 +219,81 @@ __host__ int xioDetectBdfFromDevice(const char* device_path, uint16_t* bdf_out);
 // Emulated NVMe controllers typically have Vendor ID 0x1b36 (Red Hat/QEMU)
 __host__ int xioDetectEmulatedNvme(const char* device_path,
                                    bool* is_emulated_out);
+
+// Kernel module management functions
+// Check if rocm-xio kernel module is loaded
+// Returns true if module is loaded, false otherwise
+__host__ bool xioCheckKernelModuleLoaded();
+
+// Attempt to load rocm-xio kernel module
+// Returns 0 on success, negative error code on failure
+__host__ int xioLoadKernelModule();
+
+// Ensure rocm-xio device node exists, create if missing
+// Returns 0 on success, negative error code on failure
+// Note: Creating device node requires root permissions
+__host__ int xioEnsureDeviceNode();
+
+// Physical address translation
+// Get physical address from virtual address using /proc/self/pagemap
+//
+// This function reads the kernel's pagemap to translate a virtual address
+// to its corresponding physical address. This is useful for obtaining DMA
+// addresses for host-allocated memory buffers.
+//
+// Note: This method may not work reliably in all environments:
+// - Requires CAP_SYS_ADMIN or root privileges
+// - May not work correctly with IOMMU enabled
+// - For device memory (VRAM), use DMA-BUF export instead
+//
+// @param virt_addr Virtual address to translate
+// @return Physical address on success, 0 on failure
+__host__ uint64_t xioGetPhysAddr(void* virt_addr);
+
+//
+// Common endpoint utilities namespace
+//
+namespace xio_ep {
+
+/**
+ * Generic doorbell ringing function for direct memory-mapped I/O
+ *
+ * This is the base implementation for simple doorbell patterns where
+ * we write a value directly to a memory-mapped register.
+ *
+ * @param doorbell_addr GPU-accessible pointer to doorbell register
+ * @param value Value to write to doorbell (typically queue tail)
+ */
+__host__ __device__ static inline void ringDoorbell(
+  volatile uint32_t* doorbell_addr, uint32_t value) {
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+#endif
+  *doorbell_addr = value;
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+#endif
+}
+
+/**
+ * Generic doorbell ringing with offset calculation
+ *
+ * Convenience wrapper for doorbells that are offset from a base address.
+ *
+ * @param base_addr Base address (e.g., BAR0)
+ * @param offset Offset from base address to doorbell register
+ * @param value Value to write to doorbell
+ */
+__host__ __device__ static inline void ringDoorbell(void* base_addr,
+                                                    uint32_t offset,
+                                                    uint32_t value) {
+  if (base_addr != nullptr) {
+    volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
+      static_cast<volatile char*>(base_addr) + offset);
+    ringDoorbell(doorbell_reg, value);
+  }
+}
+
+} // namespace xio_ep
 
 #endif // XIO_H
