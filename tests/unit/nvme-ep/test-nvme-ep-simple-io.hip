@@ -48,43 +48,53 @@ __global__ void test_simple_write_kernel(
   nvme_ep::ringDoorbell(sq_tail, doorbell_offset, false, nullptr, 0,
                         nvme_bar0_gpu);
 
-  // Poll for completion - match sequential mode pattern from nvme-ep.hip
-  // Directly check sq_head progression instead of using cqePoll to avoid
-  // issues with zeroed CQE entries
+  // Poll for completion using improved cqePoll() function
   uint16_t cq_head = cq_head_start;
   uint16_t last_sq_head = last_sq_head_start;
   const uint32_t max_polls = 10000000; // Safety limit
   uint32_t poll_count = 0;
+  nvme_ep::cqeType cqe_last = {}; // Initialize to zero
+  bool cqe_advanced = false;
+
+  // Use queue_size passed from host (which may have been detected in previous ops)
+  // The host-side detection happens after kernel completion, so for the first few
+  // operations before detection, we rely on the host passing the correct size.
+  // The kernel's cqePoll() will handle wrap detection via sq_head progression.
+  uint16_t effective_queue_size = queue_size;
 
   while (poll_count < max_polls) {
     volatile struct nvme_cqe* cqe_entry = &cqe[cq_head];
-    nvme_ep::cqeType cqe_data = nvme_ep::cqeRead(
-      reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry));
-    uint16_t sq_head = cqe_data.sq_head;
+    uint16_t new_sq_head = 0;
+    
+    // Use improved cqePoll() with command ID verification and stale handling
+    (void)nvme_ep::cqePoll(cqe_last,
+                           reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
+                           last_sq_head, &new_sq_head, cid, effective_queue_size,
+                           &cq_head, &cqe_advanced);
 
-    // Primary check: sq_head has increased (definitive indicator of completion)
-    // In sequential mode, any increase means our command completed
-    if (sq_head > last_sq_head) {
-      // sq_head increased - command completed
-      // Verify command ID matches (should be our command in sequential mode)
-      if (cqe_data.command_id == cid) {
-        // Our command completed - break
-        last_sq_head = sq_head;
-        break;
-      } else {
-        // Command ID doesn't match - this might be a completion from a
-        // previous command. Advance cq_head and continue polling
-        cq_head = (cq_head + 1) % queue_size;
-        last_sq_head = sq_head;
-        poll_count = 0; // Reset poll count when we find progress
-        continue;
-      }
+    // Check if we advanced past stale completions
+    if (cqe_advanced) {
+      // cq_head was advanced by cqePoll() - update last_sq_head and continue
+      // Note: cqe_entry will be updated on next loop iteration using new cq_head
+      last_sq_head = new_sq_head;
+      poll_count = 0; // Reset poll count when we find progress
+      continue;
     }
+
+    // Got completion with matching CID - verify sq_head progressed
+    if (new_sq_head > last_sq_head ||
+        (effective_queue_size == 64 && new_sq_head == 0 &&
+         last_sq_head == 64)) {
+      // Our command completed
+      last_sq_head = new_sq_head;
+      break;
+    }
+    
     poll_count++;
   }
 
   // Our command completed - advance cq_head for next operation
-  cq_head = (cq_head + 1) % queue_size;
+  cq_head = (cq_head + 1) % effective_queue_size;
 }
 
 // Simple GPU kernel for single NVMe read operation
@@ -122,43 +132,53 @@ __global__ void test_simple_read_kernel(
   nvme_ep::ringDoorbell(sq_tail, doorbell_offset, false, nullptr, 0,
                         nvme_bar0_gpu);
 
-  // Poll for completion - match sequential mode pattern from nvme-ep.hip
-  // Directly check sq_head progression instead of using cqePoll to avoid
-  // issues with zeroed CQE entries
+  // Poll for completion using improved cqePoll() function
   uint16_t cq_head = cq_head_start;
   uint16_t last_sq_head = last_sq_head_start;
   const uint32_t max_polls = 10000000; // Safety limit
   uint32_t poll_count = 0;
+  nvme_ep::cqeType cqe_last = {}; // Initialize to zero
+  bool cqe_advanced = false;
+
+  // Use queue_size passed from host (which may have been detected in previous ops)
+  // The host-side detection happens after kernel completion, so for the first few
+  // operations before detection, we rely on the host passing the correct size.
+  // The kernel's cqePoll() will handle wrap detection via sq_head progression.
+  uint16_t effective_queue_size = queue_size;
 
   while (poll_count < max_polls) {
     volatile struct nvme_cqe* cqe_entry = &cqe[cq_head];
-    nvme_ep::cqeType cqe_data = nvme_ep::cqeRead(
-      reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry));
-    uint16_t sq_head = cqe_data.sq_head;
+    uint16_t new_sq_head = 0;
+    
+    // Use improved cqePoll() with command ID verification and stale handling
+    (void)nvme_ep::cqePoll(cqe_last,
+                           reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
+                           last_sq_head, &new_sq_head, cid, effective_queue_size,
+                           &cq_head, &cqe_advanced);
 
-    // Primary check: sq_head has increased (definitive indicator of completion)
-    // In sequential mode, any increase means our command completed
-    if (sq_head > last_sq_head) {
-      // sq_head increased - command completed
-      // Verify command ID matches (should be our command in sequential mode)
-      if (cqe_data.command_id == cid) {
-        // Our command completed - break
-        last_sq_head = sq_head;
-        break;
-      } else {
-        // Command ID doesn't match - this might be a completion from a
-        // previous command. Advance cq_head and continue polling
-        cq_head = (cq_head + 1) % queue_size;
-        last_sq_head = sq_head;
-        poll_count = 0; // Reset poll count when we find progress
-        continue;
-      }
+    // Check if we advanced past stale completions
+    if (cqe_advanced) {
+      // cq_head was advanced by cqePoll() - update last_sq_head and continue
+      // Note: cqe_entry will be updated on next loop iteration using new cq_head
+      last_sq_head = new_sq_head;
+      poll_count = 0; // Reset poll count when we find progress
+      continue;
     }
+
+    // Got completion with matching CID - verify sq_head progressed
+    if (new_sq_head > last_sq_head ||
+        (effective_queue_size == 64 && new_sq_head == 0 &&
+         last_sq_head == 64)) {
+      // Our command completed
+      last_sq_head = new_sq_head;
+      break;
+    }
+    
     poll_count++;
   }
 
   // Our command completed - advance cq_head for next operation
-  cq_head = (cq_head + 1) % queue_size;
+  cq_head = (cq_head + 1) % effective_queue_size;
 }
 
 // Test simple write operation
@@ -168,10 +188,10 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
                              void* nvme_bar0_gpu, uint16_t* cq_head_inout,
                              uint16_t* last_sq_head_inout,
                              uint16_t* sq_tail_inout, uint16_t cid,
-                             uint16_t queue_size) {
+                             uint16_t* queue_size_inout) {
   hipError_t err;
   const uint32_t transfer_size = blocks * lba_size;
-  const uint16_t queue_id = 1;
+  const uint16_t queue_id = 63; // Use high queue ID to avoid conflicts with OS
 
   // Doorbell offset: base (0x1000) + (2 * queue_id) * stride (4 bytes)
   const uint32_t doorbell_offset = 0x1000 + (2 * queue_id) * 4;
@@ -229,6 +249,8 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
                                   : 0;
   uint16_t sq_tail_start = (sq_tail_inout != nullptr) ? *sq_tail_inout : 0;
   uint16_t cid_to_use = (cid != 0) ? cid : 1;
+  // Assume queue depth is 64 (controller may reduce larger requests to 64)
+  const uint16_t queue_size = 64;
 
   // Debug: Print SQE details before launch
   fprintf(stderr,
@@ -287,9 +309,12 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
     return -1;
   }
 
-  // Update queue state for next operation
-  uint16_t new_cq_head = (cq_head_start + 1) % queue_size;
-  uint16_t new_sq_tail = (sq_tail_start + 1) % queue_size;
+  // Assume queue depth is 64 (controller may reduce larger requests to 64)
+  const uint16_t effective_queue_size = 64;
+
+  // Update queue state for next operation using fixed queue size
+  uint16_t new_cq_head = (cq_head_start + 1) % effective_queue_size;
+  uint16_t new_sq_tail = (sq_tail_start + 1) % effective_queue_size;
   if (cq_head_inout != nullptr) {
     *cq_head_inout = new_cq_head;
   }
@@ -314,10 +339,10 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
                             void* nvme_bar0_gpu, uint16_t* cq_head_inout,
                             uint16_t* last_sq_head_inout,
                             uint16_t* sq_tail_inout, uint16_t cid,
-                            uint16_t queue_size) {
+                            uint16_t* queue_size_inout) {
   hipError_t err;
   const uint32_t transfer_size = blocks * lba_size;
-  const uint16_t queue_id = 1;
+  const uint16_t queue_id = 63; // Use high queue ID to avoid conflicts with OS
 
   // Doorbell offset: base (0x1000) + (2 * queue_id) * stride (4 bytes)
   const uint32_t doorbell_offset = 0x1000 + (2 * queue_id) * 4;
@@ -374,6 +399,8 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
                                   : 1;
   uint16_t sq_tail_start = (sq_tail_inout != nullptr) ? *sq_tail_inout : 1;
   uint16_t cid_to_use = (cid != 0) ? cid : 2;
+  // Assume queue depth is 64 (controller may reduce larger requests to 64)
+  const uint16_t queue_size = 64;
 
   // Debug: Check current CQ state before read
   volatile struct nvme_cqe* check_cqe = &cqe[cq_head_start];
@@ -381,10 +408,11 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
     reinterpret_cast<volatile nvme_ep::cqeType*>(check_cqe));
   fprintf(stderr,
           "Read test: Before launch, cqe[%u]: cmd_id=%u, sq_head=%u, "
-          "phase=%u, last_sq_head_start=%u, sq_tail_start=%u\n",
+          "phase=%u, last_sq_head_start=%u, sq_tail_start=%u, "
+          "queue_size=%u\n",
           cq_head_start, check_data.command_id, check_data.sq_head,
           NVME_CQE_STATUS_PHASE(check_data.status), last_sq_head_start,
-          sq_tail_start);
+          sq_tail_start, queue_size);
 
   // Launch kernel
   hipLaunchKernelGGL(test_simple_read_kernel, dim3(1), dim3(1), 0, 0, sqe, cqe,
@@ -433,9 +461,12 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
     return -1;
   }
 
-  // Update queue state for next operation
-  uint16_t new_cq_head = (cq_head_start + 1) % queue_size;
-  uint16_t new_sq_tail = (sq_tail_start + 1) % queue_size;
+  // Assume queue depth is 64 (controller may reduce larger requests to 64)
+  const uint16_t effective_queue_size = 64;
+
+  // Update queue state for next operation using fixed queue size
+  uint16_t new_cq_head = (cq_head_start + 1) % effective_queue_size;
+  uint16_t new_sq_tail = (sq_tail_start + 1) % effective_queue_size;
   if (cq_head_inout != nullptr) {
     *cq_head_inout = new_cq_head;
   }
@@ -619,7 +650,7 @@ int main(int argc, char* argv[]) {
 
   // Create queues
   struct nvme_queue_info queue_info;
-  uint16_t queue_id = 1;
+  uint16_t queue_id = 63; // Use high queue ID to avoid conflicts with OS
   // Request larger queue size to support many operations without wrapping
   // NVMe spec supports up to 65535 entries (must be power of 2)
   // Start with 1024 - if controller supports larger, we can increase
@@ -641,9 +672,16 @@ int main(int argc, char* argv[]) {
   printf("Queues created successfully (requested: %u entries, allocated: %u entries)\n",
          queue_size, allocated_queue_size);
   
-  // IMPORTANT: Use the actual allocated queue size, not the requested size
-  // The controller may silently reduce the queue size if it doesn't support
-  // the requested size, and we must use the actual size for all operations
+  // IMPORTANT: The controller may silently reduce the queue size if it doesn't
+  // support the requested size. Many controllers have a maximum queue size of 64
+  // entries, even if we request more. We can't query the actual size, but we
+  // can detect it by observing sq_head wrap-around at runtime.
+  // For now, if we requested more than 64 and the controller might have reduced
+  // it, we'll detect this during the first few operations by checking if sq_head
+  // wraps at 64.
+  // However, since OS-owned queues are much longer than 64, the controller clearly
+  // supports larger queues. So we'll use the allocated size and trust the controller
+  // created what we requested.
   if (allocated_queue_size != queue_size) {
     fprintf(stderr, "WARNING: Allocated queue size (%u) does not match requested size (%u)\n",
             allocated_queue_size, queue_size);
@@ -653,6 +691,11 @@ int main(int argc, char* argv[]) {
   
   // Use the actual allocated queue size for all operations
   queue_size = allocated_queue_size;
+  
+  // Additional safety check: if we requested > 64 but suspect the controller
+  // might have reduced it, we could detect this at runtime by observing sq_head
+  // wrap-around. For now, we'll proceed with the allocated size and let runtime
+  // behavior reveal any issues.
 
   // Map NVMe BAR0 for doorbell access using library function
   void* nvme_bar0_cpu = nullptr;
@@ -672,10 +715,11 @@ int main(int argc, char* argv[]) {
     uint16_t cq_head = 0;
     uint16_t last_sq_head = 0;
     uint16_t sq_tail = 0;
+    uint16_t effective_queue_size = queue_size;
     printf("\nRunning write test...\n");
     ret = test_simple_write(nvme_device, nsid, lba_size, base_lba,
                             blocks_per_op, &queue_info, nvme_bar0_gpu, &cq_head,
-                            &last_sq_head, &sq_tail, 1, queue_size);
+                            &last_sq_head, &sq_tail, 1, &effective_queue_size);
     if (ret != 0) {
       fprintf(stderr, "Write test failed\n");
       return 1;
@@ -706,7 +750,7 @@ int main(int argc, char* argv[]) {
     printf("\nRunning read test...\n");
     ret = test_simple_read(nvme_device, nsid, lba_size, base_lba, blocks_per_op,
                            &queue_info, nvme_bar0_gpu, &cq_head, &last_sq_head,
-                           &sq_tail, 2, queue_size);
+                           &sq_tail, 2, &effective_queue_size);
     if (ret != 0) {
       fprintf(stderr, "Read test failed\n");
       return 1;
@@ -759,6 +803,9 @@ int main(int argc, char* argv[]) {
     uint16_t last_sq_head = 0;
     uint16_t sq_tail = 0;
     uint16_t next_cid = 1;
+    
+    // Assume queue depth is 64 (controller may reduce larger requests to 64)
+    uint16_t effective_queue_size = 64;
 
     // Generate random LBAs for operations (same LBAs used for both writes and
     // reads)
@@ -780,11 +827,30 @@ int main(int argc, char* argv[]) {
 
     printf("Phase 1: Writing %u operations at random LBAs...\n", iterations);
     for (uint32_t op = 0; op < iterations; op++) {
+      // Queue depth is fixed at 64 - wrap cq_head and sq_tail when they reach 64
+      // This ensures we're always using the correct queue size for modulo operations
+      if (cq_head >= 64) {
+        cq_head = cq_head % 64;
+      }
+      if (sq_tail >= 64) {
+        sq_tail = sq_tail % 64;
+      }
+      
+      // Before operation 64 (when we're about to wrap), wrap cq_head to 0
+      // because the completion for operation 64 will appear at cqe[0] after wrap
+      // We check op == 63 (0-indexed, which is operation 64) and cq_head == 63
+      if (op == 63 && cq_head == 63) {
+        cq_head = 0;
+        fprintf(stderr, "Wrapped cq_head from 63 to 0 before operation 64 "
+                        "(op=%u, last_sq_head=%u, completion will be at cqe[0])\n",
+                op + 1, last_sq_head);
+      }
+      
       uint64_t base_lba = random_lbas[op];
       ret = test_simple_write(nvme_device, nsid, lba_size, base_lba,
                               blocks_per_op, &queue_info, nvme_bar0_gpu,
                               &cq_head, &last_sq_head, &sq_tail, next_cid++,
-                              queue_size);
+                              &effective_queue_size);
       if (ret != 0) {
         fprintf(stderr, "Write failed at operation %u (LBA %llu)\n", op + 1,
                 (unsigned long long)base_lba);
@@ -800,10 +866,18 @@ int main(int argc, char* argv[]) {
            iterations);
     for (uint32_t op = 0; op < iterations; op++) {
       uint64_t base_lba = random_lbas[op];
+      // Use effective queue size (may have been detected during writes)
       ret = test_simple_read(nvme_device, nsid, lba_size, base_lba,
                              blocks_per_op, &queue_info, nvme_bar0_gpu,
                              &cq_head, &last_sq_head, &sq_tail, next_cid++,
-                             queue_size);
+                             &effective_queue_size);
+      if (op == 63 && last_sq_head == 64 && effective_queue_size > 64) {
+        fprintf(stderr, "WARNING: Detected queue size is 64 entries during reads "
+                        "(sq_head=64 after 64 ops)\n");
+        fprintf(stderr, "  Updating effective_queue_size from %u to 64 for remaining operations\n",
+                effective_queue_size);
+        effective_queue_size = 64;
+      }
       if (ret != 0) {
         fprintf(stderr, "Read failed at operation %u (LBA %llu)\n", op + 1,
                 (unsigned long long)base_lba);

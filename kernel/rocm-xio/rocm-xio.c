@@ -629,6 +629,14 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
 
   opcode = cmd->common.opcode;
 
+  /* Log DELETE commands (0x00=DELETE_SQ, 0x04=DELETE_CQ) */
+  if (opcode == 0x00 || opcode == 0x04) {
+    pr_info("rocm-axiio: Intercepted %s command\n",
+            opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
+    pr_info("  Queue ID: %u\n",
+            (unsigned int)le32_to_cpu(cmd->common.cdw10) & 0xFFFF);
+  }
+
   /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
   if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
     pr_info("rocm-axiio: Intercepted %s command\n",

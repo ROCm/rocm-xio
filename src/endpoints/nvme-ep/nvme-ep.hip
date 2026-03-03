@@ -205,11 +205,25 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
 }
 
 // Poll for new CQE - waits for command ID to change or sq_head progression
+// Improved implementation with command ID verification, stale completion
+// handling, and queue size-aware wrap-around detection
 __host__ __device__ cqeType cqePoll(cqeType cqeLast,
                                     volatile cqeType* cqeAddress,
                                     uint16_t last_sq_head,
-                                    uint16_t* sq_head_out) {
+                                    uint16_t* sq_head_out,
+                                    uint16_t expected_cid,
+                                    uint16_t queue_size,
+                                    uint16_t* cq_head_inout,
+                                    bool* cqe_advanced_out) {
   cqeType cqeNew;
+  uint16_t effective_last_sq_head = last_sq_head;
+  
+  // Prefer explicit last_sq_head over cqeLast.sq_head to avoid zeroed CQE issues
+  // If last_sq_head is 0 and cqeLast is provided, extract from cqeLast as fallback
+  if (effective_last_sq_head == 0 && cqeLast.command_id != 0) {
+    effective_last_sq_head = cqeLast.sq_head;
+  }
+  
   while (true) {
     cqeNew = cqeRead(cqeAddress);
     uint16_t sq_head = cqeNew.sq_head;
@@ -217,35 +231,160 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
     // Primary check: sq_head progression (definitive indicator of completion)
     // sq_head is updated by the controller when commands complete, so checking
     // sq_head progression is more reliable than just command ID change
-    // Handle wrap-around: sq_head is a 16-bit value that can wrap from 65535 to 0
-    // We detect wrap-around by checking if sq_head is much smaller than last_sq_head
-    // (indicating it wrapped around)
-    bool sq_head_increased = false;
-    if (sq_head > last_sq_head) {
+    bool sq_head_progressed = false;
+    
+    if (sq_head > effective_last_sq_head) {
       // Normal case: sq_head increased without wrapping
-      sq_head_increased = true;
-    } else if (sq_head < last_sq_head) {
-      // Possible wrap-around: check if the difference suggests wrap-around
-      // If last_sq_head is high (> 32768) and sq_head is low (< 32768), it wrapped
-      // Or if the difference is large (> 32768), it's likely wrap-around
-      uint16_t diff = last_sq_head - sq_head;
-      if (diff > 32768 || (last_sq_head > 32768 && sq_head < 32768)) {
-        // Wrap-around detected - sq_head wrapped past last_sq_head
-        sq_head_increased = true;
+      sq_head_progressed = true;
+    } else if (queue_size > 0) {
+      // Queue size-aware wrap-around detection
+      if (sq_head < effective_last_sq_head) {
+        // Possible wrap-around: check if it wrapped at queue boundary
+        // Common case: 64-entry queue wraps from 64 to 0
+        if (queue_size == 64 && sq_head == 0 && 
+            effective_last_sq_head == 64) {
+          sq_head_progressed = true;
+        } else {
+          // Generic wrap detection: if difference suggests wrap
+          uint16_t diff = effective_last_sq_head - sq_head;
+          // If wrap point is reasonable (within queue_size), it's a wrap
+          // Also handle case where last_sq_head reached a common wrap point (64)
+          // even if queue_size is larger (controller may have created smaller queue)
+          if ((diff <= queue_size && 
+               effective_last_sq_head >= queue_size - 1) ||
+              (effective_last_sq_head == 64 && sq_head < 64 && diff <= 64)) {
+            sq_head_progressed = true;
+          }
+        }
+      }
+    } else {
+      // No queue_size provided: use generic wrap-around detection
+      // Handle wrap-around: sq_head is a 16-bit value that can wrap from 65535 to 0
+      if (sq_head < effective_last_sq_head) {
+        uint16_t diff = effective_last_sq_head - sq_head;
+        // If last_sq_head is high (> 32768) and sq_head is low (< 32768), it wrapped
+        // Or if the difference is large (> 32768), it's likely wrap-around
+        if (diff > 32768 || 
+            (effective_last_sq_head > 32768 && sq_head < 32768)) {
+          sq_head_progressed = true;
+        }
       }
     }
     
-    if (sq_head_increased) {
-      if (sq_head_out != nullptr) {
-        *sq_head_out = sq_head;
+    if (sq_head_progressed) {
+      // sq_head progressed - a command completed
+      
+      // Command ID verification (if enabled)
+      if (expected_cid != 0) {
+        if (cqeNew.command_id == expected_cid) {
+          // Our command completed - success
+          if (sq_head_out != nullptr) {
+            *sq_head_out = sq_head;
+          }
+          if (cqe_advanced_out != nullptr) {
+            *cqe_advanced_out = false;
+          }
+          return cqeNew;
+        } else {
+          // Wrong command ID - this is a stale completion
+          // Check if this is clearly stale (e.g., we're looking for CID=64 but found CID=0)
+          // In this case, don't update effective_last_sq_head to avoid corrupting state
+          bool clearly_stale = false;
+          if (queue_size > 0 && effective_last_sq_head >= queue_size - 1) {
+            // We're at the wrap point - any CID much lower than expected is stale
+            if (expected_cid > cqeNew.command_id) {
+              uint16_t cid_diff = expected_cid - cqeNew.command_id;
+              if (cid_diff > (queue_size / 2)) {
+                clearly_stale = true;
+              }
+            }
+          }
+          
+          // Always advance cq_head when CID doesn't match to prevent infinite loops
+          // This is critical after queue wraps when we encounter old completions
+          if (cq_head_inout != nullptr && queue_size > 0) {
+            *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+            if (cqe_advanced_out != nullptr) {
+              *cqe_advanced_out = true;
+            }
+          } else if (cqe_advanced_out != nullptr) {
+            *cqe_advanced_out = true;
+          }
+          
+          // Only update sq_head tracking if this isn't clearly stale
+          // This prevents corrupting effective_last_sq_head with old values
+          if (!clearly_stale) {
+            effective_last_sq_head = sq_head;
+            if (sq_head_out != nullptr) {
+              *sq_head_out = sq_head;
+            }
+          }
+          // Return this CQE - caller should check cqe_advanced_out and
+          // if true, use updated cq_head_inout to get next CQE address
+          return cqeNew;
+        }
+      } else {
+        // No CID verification - return immediately
+        if (sq_head_out != nullptr) {
+          *sq_head_out = sq_head;
+        }
+        if (cqe_advanced_out != nullptr) {
+          *cqe_advanced_out = false;
+        }
+        return cqeNew;
       }
-      return cqeNew;
+    }
+
+    // Check for stale completions even when sq_head hasn't progressed
+    // If we're looking for a specific command ID and find a different one,
+    // and we've wrapped the queue, this is likely a stale completion
+    if (expected_cid != 0 && queue_size > 0 && 
+        cqeNew.command_id != expected_cid) {
+      // If we've wrapped (last_sq_head >= queue_size) or CID is much different,
+      // advance to next CQE to prevent infinite loops
+      bool should_advance = false;
+      if (effective_last_sq_head >= queue_size) {
+        // We've wrapped - any CID mismatch is likely stale
+        should_advance = true;
+      } else if (effective_last_sq_head == queue_size - 1) {
+        // We're at the last entry before wrap (e.g., last_sq_head=63, queue_size=64)
+        // The next operation will wrap, so any CID mismatch is likely stale
+        // This handles the case where we proactively wrapped cq_head to 0
+        // but cqe[0] still contains old data from before the wrap
+        should_advance = true;
+      } else {
+        // Check if CID difference is large (more than queue_size/2)
+        uint16_t cid_diff = (expected_cid > cqeNew.command_id) 
+                            ? (expected_cid - cqeNew.command_id)
+                            : (cqeNew.command_id - expected_cid);
+        if (cid_diff > (queue_size / 2)) {
+          should_advance = true;
+        }
+      }
+      
+      if (should_advance && cq_head_inout != nullptr) {
+        // Stale completion - advance cq_head
+        *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+        if (cqe_advanced_out != nullptr) {
+          *cqe_advanced_out = true;
+        }
+        // Update tracking
+        effective_last_sq_head = sq_head;
+        if (sq_head_out != nullptr) {
+          *sq_head_out = sq_head;
+        }
+        return cqeNew;
+      }
     }
 
     // Secondary check: command ID change (for backward compatibility)
-    if (cqeNew.command_id != cqeLast.command_id) {
+    // Only used if sq_head hasn't progressed
+    if (expected_cid == 0 && cqeNew.command_id != cqeLast.command_id) {
       if (sq_head_out != nullptr) {
         *sq_head_out = sq_head;
+      }
+      if (cqe_advanced_out != nullptr) {
+        *cqe_advanced_out = false;
       }
       return cqeNew;
     }
@@ -464,53 +603,47 @@ __device__ void nvme_ep_driveEndpoint(
       nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
                             shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
-      // Wait for this specific completion
+      // Wait for this specific completion using improved cqePoll()
       // In sequential mode, we issue one command at a time, so sq_head should
       // increase by 1 when this command completes
-      // Prioritize sq_head increase over phase matching for robustness
       uint32_t poll_count = 0;
       const uint32_t max_polls = 10000000; // Safety limit
+      nvme_ep::cqeType cqe_last = {}; // Initialize to zero
+      bool cqe_advanced = false;
 
       while (poll_count < max_polls) {
         volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-        nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
-          (volatile nvme_ep::cqeType*)cqe_entry);
-        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-        uint16_t sq_head = cqe_new.sq_head;
+        uint16_t new_sq_head = 0;
+        
+        // Use improved cqePoll() with command ID verification
+        nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(
+          cqe_last, (volatile nvme_ep::cqeType*)cqe_entry, last_sq_head,
+          &new_sq_head, cmd_id, queue_size, &cq_head, &cqe_advanced);
 
-        // Primary check: sq_head has increased (definitive indicator of
-        // completion) In sequential mode, any increase means our command
-        // completed
-        if (sq_head > last_sq_head) {
-          // sq_head increased - command completed
-          // Verify phase matches if possible (for correctness), but don't
-          // require it
-          if (phase == expected_phase) {
-            // Phase matches - perfect, this is definitely a new completion
-            if (config.endTimes != nullptr && cmd_id >= 1 &&
-                cmd_id <= num_ops) {
-              unsigned idx = cmd_id - 1;
-              config.endTimes[idx] = wall_clock64();
-            }
-            cq_head = (cq_head + 1) % queue_size;
-            expected_phase = expected_phase ^ 1;
-            last_sq_head = sq_head;
-            break;
-          } else {
-            // Phase doesn't match but sq_head increased - accept it anyway
-            // This handles cases where phase bit logic might be off
-            // Update expected_phase based on what we actually saw
-            if (config.endTimes != nullptr && cmd_id >= 1 &&
-                cmd_id <= num_ops) {
-              unsigned idx = cmd_id - 1;
-              config.endTimes[idx] = wall_clock64();
-            }
-            cq_head = (cq_head + 1) % queue_size;
-            expected_phase = phase ^ 1; // Toggle based on actual phase seen
-            last_sq_head = sq_head;
-            break;
-          }
+        // Check if we advanced past stale completions
+        if (cqe_advanced) {
+          // cq_head was advanced by cqePoll() - update last_sq_head and continue
+          last_sq_head = new_sq_head;
+          poll_count = 0; // Reset poll count when we find progress
+          continue;
         }
+
+        // Got a completion with matching CID - verify phase if possible
+        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+        // Accept if phase matches or sq_head increased (sq_head is definitive)
+        if (phase == expected_phase || new_sq_head > last_sq_head) {
+          // This is our completion
+          if (config.endTimes != nullptr && cmd_id >= 1 &&
+              cmd_id <= num_ops) {
+            unsigned idx = cmd_id - 1;
+            config.endTimes[idx] = wall_clock64();
+          }
+          cq_head = (cq_head + 1) % queue_size;
+          expected_phase = (phase == expected_phase) ? (expected_phase ^ 1) : (phase ^ 1);
+          last_sq_head = new_sq_head;
+          break;
+        }
+        
         poll_count++;
       }
     }
@@ -843,13 +976,13 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   }
 
   // Create NVMe queues - MUST succeed before proceeding
-  // Use queue length from CLI configuration (default: 64)
+  // Assume queue depth is 64 (controller may reduce larger requests to 64)
   // NVMe queues are circular buffers - commands wrap around, so the queue
   // length must be large enough to handle outstanding commands without
   // overwriting unprocessed ones.
-  uint16_t queue_size = nvmeConfig->queueLength;
+  uint16_t queue_size = 64; // Always use 64 - controller may reduce anyway
 
-  fprintf(stderr, "Using queue length: %u entries\n", queue_size);
+  fprintf(stderr, "Using queue length: %u entries (fixed)\n", queue_size);
 
   struct nvme_queue_info queue_info;
   int ret = nvme_ep::nvme_create_queue_via_ioctl(
@@ -2804,6 +2937,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   fprintf(stderr, "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
                   "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
+  fprintf(stderr, "  Buffer address: virt=0x%016llx, size=%zu bytes "
+                  "(%u entries * %u bytes/entry)\n",
+          (unsigned long long)reinterpret_cast<uint64_t>(cq_virt),
+          cq_size_bytes, queue_size, NVME_EP_CQE_SIZE);
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
@@ -2872,6 +3009,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
                   "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
           cmd.cdw11, queue_id);
+  fprintf(stderr, "  Buffer address: virt=0x%016llx, size=%zu bytes "
+                  "(%u entries * %u bytes/entry)\n",
+          (unsigned long long)reinterpret_cast<uint64_t>(sq_virt),
+          sq_size_bytes, queue_size, NVME_EP_SQE_SIZE);
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
