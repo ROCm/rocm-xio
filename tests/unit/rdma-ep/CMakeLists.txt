@@ -35,7 +35,7 @@ function(setup_rdma_test TEST_NAME SOURCE_FILE NEEDS_VENDOR_DIRS)
       ${ENDPOINTS_DIR}/rdma-ep/mlx
       ${ENDPOINTS_DIR}/rdma-ep/bnxt
       ${ENDPOINTS_DIR}/rdma-ep/ionic
-      ${ENDPOINTS_DIR}/rdma-ep/pvrdma
+      ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic
     )
   endif()
 

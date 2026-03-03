@@ -19,7 +19,7 @@
  * - MLX5 (Mellanox/NVIDIA ConnectX-5 and later)
  * - BNXT_RE (Broadcom NetXtreme RDMA)
  * - IONIC (Pensando Ionic RDMA)
- * - PVRDMA (VMware Paravirtualized RDMA)
+ * - rocm-ernic (AMD Emulated RDMA NIC)
  *
  * Reference: Based on linux-rdma/rdma-core repository
  * Downloaded headers in include/external/rdma/ for reference
@@ -38,10 +38,10 @@
 // RDMA Vendor Types
 //
 enum class RDMAVendor : uint8_t {
-  MLX5 = 0,    // Mellanox/NVIDIA ConnectX
-  BNXT_RE = 1, // Broadcom NetXtreme
-  IONIC = 2,   // Pensando Ionic RDMA
-  PVRDMA = 3,  // VMware Paravirtualized RDMA
+  MLX5 = 0,       // Mellanox/NVIDIA ConnectX
+  BNXT_RE = 1,    // Broadcom NetXtreme
+  IONIC = 2,      // Pensando Ionic RDMA
+  ROCM_ERNIC = 3, // AMD Emulated RDMA NIC
   UNKNOWN = 0xFF
 };
 
@@ -125,9 +125,9 @@ struct rdma_cqe {
       uint32_t reserved;
     } ionic;
     struct {
-      uint32_t qpn; // Queue pair number (for PVRDMA)
+      uint32_t qpn; // Queue pair number (for rocm-ernic)
       uint32_t reserved;
-    } pvrdma;
+    } rocm_ernic;
     uint64_t vendor_data;
   };
 
@@ -240,8 +240,8 @@ __host__ __device__ static inline const char* rdma_vendor_name(
       return "BNXT_RE";
     case RDMAVendor::IONIC:
       return "IONIC";
-    case RDMAVendor::PVRDMA:
-      return "PVRDMA";
+    case RDMAVendor::ROCM_ERNIC:
+      return "rocm-ernic";
     default:
       return "UNKNOWN";
   }

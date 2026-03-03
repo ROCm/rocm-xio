@@ -19,7 +19,7 @@
 #include "bnxt/bnxt-rdma.h"
 #include "ionic/ionic-rdma.h"
 #include "mlx/mlx5-rdma.h"
-#include "pvrdma/pvrdma-rdma.h"
+#include "rocm-ernic/rocm-ernic-rdma.h"
 
 /*
  * RDMA Endpoint Implementation
@@ -28,7 +28,7 @@
  * - MLX5 (Mellanox/NVIDIA ConnectX)
  * - BNXT_RE (Broadcom NetXtreme)
  * - IONIC (Pensando Ionic RDMA)
- * - PVRDMA (VMware Paravirtualized RDMA)
+ * - rocm-ernic (AMD Emulated RDMA NIC)
  *
  * Reference headers downloaded from linux-rdma/rdma-core:
  *   Run 'make fetch-rdma-headers' to download reference headers
@@ -173,10 +173,10 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData,
       cqe->ionic.qpn = static_cast<uint32_t>(wqe->vendor_specific >> 32);
       cqe->ionic.reserved = 0;
       break;
-    case RDMAVendor::PVRDMA:
+    case RDMAVendor::ROCM_ERNIC:
       // Extract QP number
-      cqe->pvrdma.qpn = static_cast<uint32_t>(wqe->vendor_specific >> 32);
-      cqe->pvrdma.reserved = 0;
+      cqe->rocm_ernic.qpn = static_cast<uint32_t>(wqe->vendor_specific >> 32);
+      cqe->rocm_ernic.reserved = 0;
       break;
     default:
       cqe->vendor_data = 0;
@@ -269,7 +269,7 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
 
   // Vendor selection: if UNKNOWN, cycle through all vendors
   RDMAVendor vendors[] = {RDMAVendor::MLX5, RDMAVendor::BNXT_RE,
-                          RDMAVendor::IONIC, RDMAVendor::PVRDMA};
+                          RDMAVendor::IONIC, RDMAVendor::ROCM_ERNIC};
   int num_vendors = sizeof(vendors) / sizeof(vendors[0]);
   bool use_all_vendors = (vendor == RDMAVendor::UNKNOWN);
 
@@ -315,8 +315,8 @@ __device__ void rdma_ep_driveEndpoint(const XioEndpointConfig& config,
       case RDMAVendor::IONIC:
         ionic_wqe_set_vendor_specific(wqe, 2000 + i, true, false);
         break;
-      case RDMAVendor::PVRDMA:
-        pvrdma_wqe_set_vendor_specific(wqe, 3000 + i, true, false);
+      case RDMAVendor::ROCM_ERNIC:
+        rocm_ernic_wqe_set_vendor_specific(wqe, 3000 + i, true, false);
         break;
       default:
         break;
@@ -371,14 +371,15 @@ __host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config) {
     ->check(CLI::PositiveNumber)
     ->group(rdma_group);
 
-  // Vendor selection: support "mlx5", "bnxt", "ionic", "pvrdma", or "all"
+  // Vendor selection: support "mlx5", "bnxt", "ionic", "rocm-ernic", or "all"
   app
     .add_option("--vendor", config->vendorStr,
-                "RDMA vendor to use: mlx5, bnxt, ionic, pvrdma, or all "
+                "RDMA vendor to use: mlx5, bnxt, ionic, rocm-ernic, or all "
                 "(round-robin)")
     ->default_val("mlx5")
-    ->check(CLI::IsMember({"mlx5", "bnxt", "bnxt_re", "ionic", "pvrdma", "all"},
-                          CLI::ignore_case))
+    ->check(
+      CLI::IsMember({"mlx5", "bnxt", "bnxt_re", "ionic", "rocm-ernic", "all"},
+                    CLI::ignore_case))
     ->group(rdma_group);
 
   app
@@ -430,12 +431,12 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
     config->vendor = RDMAVendor::BNXT_RE;
   } else if (config->vendorStr == "ionic") {
     config->vendor = RDMAVendor::IONIC;
-  } else if (config->vendorStr == "pvrdma") {
-    config->vendor = RDMAVendor::PVRDMA;
+  } else if (config->vendorStr == "rocm-ernic") {
+    config->vendor = RDMAVendor::ROCM_ERNIC;
   } else if (config->vendorStr == "all") {
     config->vendor = RDMAVendor::UNKNOWN; // Use UNKNOWN to indicate "all"
   } else {
-    return "Invalid vendor. Must be: mlx5, bnxt, ionic, pvrdma, or all";
+    return "Invalid vendor. Must be: mlx5, bnxt, ionic, rocm-ernic, or all";
   }
 
   // Validate queue length is power of 2

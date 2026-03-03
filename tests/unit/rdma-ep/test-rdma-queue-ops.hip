@@ -308,7 +308,7 @@ int test_cqe_equal() {
   struct rdma_cqe cqe3 = {};
 
   rdma_cqe_setup_success(&cqe1, 100, RDMAVendor::IONIC, 4096, 0x1111);
-  rdma_cqe_setup_success(&cqe2, 100, RDMAVendor::PVRDMA, 8192, 0x2222);
+  rdma_cqe_setup_success(&cqe2, 100, RDMAVendor::ROCM_ERNIC, 8192, 0x2222);
   rdma_cqe_setup_error(&cqe3, 200, RDMAVendor::IONIC, RDMA_WC_LOC_LEN_ERR,
                        0x3333);
 
@@ -341,11 +341,11 @@ int test_byte_by_byte_preservation() {
 
   // Create CQE with all fields set
   struct rdma_cqe original_cqe = {};
-  rdma_cqe_setup_success(&original_cqe, 888, RDMAVendor::PVRDMA, 0xFFFF,
+  rdma_cqe_setup_success(&original_cqe, 888, RDMAVendor::ROCM_ERNIC, 0xFFFF,
                          0xAAAAAAAA);
   original_cqe.imm_data = 0x87654321;
-  original_cqe.pvrdma.qpn = 5000;
-  original_cqe.pvrdma.reserved = 0x1234;
+  original_cqe.rocm_ernic.qpn = 5000;
+  original_cqe.rocm_ernic.reserved = 0x1234;
 
   // Write and read back
   alignas(64) uint8_t cqe_buffer[RDMA_EP_CQE_SIZE] = {};

@@ -7,7 +7,7 @@ GPU-Direct RDMA endpoint supporting 4 major vendors.
 1. **MLX5** - Mellanox/NVIDIA ConnectX (InfiniBand/RoCE)
 2. **BNXT_RE** - Broadcom NetXtreme RDMA Engine
 3. **IONIC** - Pensando Ionic RDMA (SmartNIC)
-4. **PVRDMA** - VMware Paravirtualized RDMA
+4. **rocm-ernic** - AMD Emulated RDMA NIC
 
 ## Directory Structure
 
@@ -21,8 +21,8 @@ rdma-ep/
 │   └── bnxt-rdma.h     # BNXT_RE doorbell + vendor specifics
 ├── ionic/
 │   └── ionic-rdma.h    # IONIC doorbell + vendor specifics
-├── pvrdma/
-│   └── pvrdma-rdma.h   # PVRDMA doorbell + vendor specifics
+├── rocm-ernic/
+│   └── rocm-ernic-rdma.h # rocm-ernic doorbell + vendor specifics
 └── README.md           # This file
 ```
 
