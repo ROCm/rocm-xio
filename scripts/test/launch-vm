@@ -96,8 +96,9 @@ shadow-size=8192,poll-interval-ns=1000000,addr=4.0 \
     -device pci-testdev,membar=1M,membar-backed=on,addr=5.0 \
     -drive id=nvme0,file="$NVME_IMG",if=none,format=raw \
     -device nvme,serial=nvme0,drive=nvme0,ioeventfd=off,dbcs=off \
-    -device vfio-pci,host=$VFIO_PCI,id=vfio0 \
-    -device vfio-pci,host=c2:00.0,id=vfio1 \
+    -device pcie-root-port,id=pcie.1 \
+    -device vfio-pci,host=$VFIO_PCI,id=vfio0,bus=pcie.1 \
+    -device vfio-pci,host=85:00.0,id=vfio1 \
     -serial mon:stdio \
     -display none \
     -trace pci_mmio_* \

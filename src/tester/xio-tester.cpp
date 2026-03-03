@@ -58,8 +58,10 @@ int main(int argc, char** argv) {
     ->check(CLI::Range(0, 15))
     ->group("Common Options");
 
-  commonConfig.verbose = false;
-  app.add_flag("-v,--verbose", commonConfig.verbose, "Enable detailed output")
+  commonConfig.verbose = 0;
+  app.add_flag("-v,--verbose", commonConfig.verbose,
+               "Enable detailed output (-v) or very verbose with SQE/CQE "
+               "dumping (-vv)")
     ->group("Common Options");
 
   bool printHistogram = false;
@@ -335,7 +337,7 @@ int main(int argc, char** argv) {
   }
 
   // Print raw timing data if verbose
-  if (baseConfig.verbose) {
+  if (baseConfig.verbose >= 1) {
     if (baseConfig.numThreads == 1) {
       std::cout << "\nRaw timing data:" << std::endl;
       std::cout << "Index | Start Time      | End Time        | Duration"

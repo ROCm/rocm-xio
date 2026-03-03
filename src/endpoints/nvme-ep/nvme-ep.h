@@ -38,6 +38,15 @@
 // fetch-nvme-headers') The kernel headers require kernel-specific includes that
 // aren't available in userspace/HIP compilation, so we auto-extract only the
 // enum values we need. Generated file: src/include/nvme-ep-generated.h
+//
+// When USE_LIBNVME is defined, include libnvme.h first to get its definitions,
+// then the generated header will skip conflicting definitions.
+// Only include libnvme.h for host code (not device code).
+#ifndef __HIP_DEVICE_COMPILE__
+#ifdef USE_LIBNVME
+#include <libnvme.h>
+#endif
+#endif
 #include "nvme-ep-generated.h"
 
 // Use lowercase enum values directly from generated file
@@ -58,6 +67,10 @@
 //
 // SMART log page structure (matches Linux kernel struct nvme_smart_log)
 // Note: 128-bit fields are stored as 16-byte arrays in little-endian format
+// When USE_LIBNVME is defined for host code, libnvme provides this struct, so
+// we skip it. Device code always needs the struct definition since libnvme.h
+// is not included for device code.
+#if !defined(USE_LIBNVME) || defined(__HIP_DEVICE_COMPILE__)
 struct nvme_smart_log {
   uint8_t critical_warning;
   uint8_t temperature[2];
@@ -85,6 +98,7 @@ struct nvme_smart_log {
   uint32_t thm_temp2_total_time;   // Bytes 228-231
   uint8_t rsvd232[280];            // Bytes 232-511
 } __attribute__((packed));
+#endif // !USE_LIBNVME || __HIP_DEVICE_COMPILE__
 
 // Helper function to convert 16-byte little-endian array to uint64_t
 // Reads lower 64 bits (first 8 bytes) - sufficient for most practical values
@@ -275,6 +289,28 @@ __host__ int nvme_create_queue_via_ioctl(const char* nvme_device,
                                          uint16_t nvme_bdf,
                                          unsigned memory_mode,
                                          struct nvme_queue_info* info);
+
+/**
+ * Cleanup NVMe queues after use
+ *
+ * This function:
+ * 1. Deletes NVMe queues from controller (DELETE_SQ, DELETE_CQ)
+ * 2. Unregisters queue addresses from kernel module
+ * 3. Frees memory allocations
+ * 4. Closes file descriptors
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
+ * @param kernel_module_device Path to kernel module device (e.g., "/dev/rocm-xio")
+ * @param queue_id Queue ID to delete
+ * @param queue_info Queue information structure from nvme_create_queue_via_ioctl
+ * @param memory_mode Memory allocation mode (same as passed to create function)
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_cleanup_queue_via_ioctl(const char* nvme_device,
+                                          const char* kernel_module_device,
+                                          uint16_t queue_id,
+                                          const struct nvme_queue_info* queue_info,
+                                          unsigned memory_mode);
 
 //
 // Type aliases for queue entries

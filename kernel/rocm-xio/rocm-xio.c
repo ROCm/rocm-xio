@@ -551,17 +551,25 @@ static int get_mmio_bridge_shadow_buffer(
 
 /*
  * Look up physical address for queue (CREATE_SQ/CREATE_CQ).
+ * Can search by virtual address or physical address (ubuffer may be either).
  * Returns physical address if found, 0 otherwise.
  */
-static __u64 lookup_queue_phys_addr(__u64 virt_addr) {
+static __u64 lookup_queue_phys_addr(__u64 addr) {
   struct queue_addr_entry* entry;
   __u64 phys_addr = 0;
 
   spin_lock(&queue_addrs_lock);
   list_for_each_entry(entry, &queue_addrs, list) {
-    if (virt_addr >= entry->virt_addr &&
-        virt_addr < (entry->virt_addr + entry->size)) {
-      phys_addr = entry->phys_addr + (virt_addr - entry->virt_addr);
+    /* Try matching by virtual address */
+    if (addr >= entry->virt_addr &&
+        addr < (entry->virt_addr + entry->size)) {
+      phys_addr = entry->phys_addr + (addr - entry->virt_addr);
+      break;
+    }
+    /* Try matching by physical address (ubuffer may already be physical) */
+    if (addr >= entry->phys_addr &&
+        addr < (entry->phys_addr + entry->size)) {
+      phys_addr = addr; /* Already physical, return as-is */
       break;
     }
   }
@@ -1322,6 +1330,7 @@ static int __init rocm_xio_init(void) {
 static void __exit rocm_xio_exit(void) {
   struct queue_addr_entry *qentry, *qtmp;
   struct vram_buffer_entry *entry, *tmp;
+  struct contig_mem_entry *centry, *ctmp;
 
   /* Unregister kprobe */
   if (inject_enabled) {
@@ -1351,6 +1360,17 @@ static void __exit rocm_xio_exit(void) {
     kfree(entry);
   }
   spin_unlock(&vram_buffers_lock);
+
+  /* Clean up contiguous memory allocations */
+  mutex_lock(&contig_mem_lock);
+  list_for_each_entry_safe(centry, ctmp, &contig_mem_list, list) {
+    list_del(&centry->list);
+    /* Free the pages */
+    unsigned int order = get_order(centry->size);
+    __free_pages(virt_to_page(centry->virt_addr), order);
+    kfree(centry);
+  }
+  mutex_unlock(&contig_mem_lock);
 
   device_destroy(rocm_xio_class, MKDEV(major_number, 0));
   class_destroy(rocm_xio_class);

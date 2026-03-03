@@ -60,7 +60,10 @@ struct XioEndpointConfig {
                               //   (0=host, 1=device)
                               // Bit 2: Doorbell location (doorbell mode only)
                               //   (0=host, 1=device)
-  bool verbose = false;       // Verbose output flag
+  int verbose = 0;            // Verbose output level:
+                              // 0 = no verbose output
+                              // 1 = normal verbose (-v)
+                              // 2 = very verbose (-vv) - enables SQE/CQE dumping
   bool pciMmioBridge = false; // Use PCI MMIO bridge for doorbell routing
 
   // Timing arrays (optional, can be nullptr)

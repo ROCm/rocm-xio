@@ -85,6 +85,14 @@ struct rocm_axiio_register_queue_addr_req {
   uint8_t queue_type;
 };
 
+struct rocm_axiio_unregister_queue_addr_req {
+  uint64_t virt_addr; // Virtual address to unregister
+};
+
+struct rocm_axiio_unregister_buffer_req {
+  uint64_t virt_addr; // Virtual address to unregister
+};
+
 struct rocm_axiio_mmio_bridge_shadow_req {
   uint16_t bridge_bdf;  // Input: PCI MMIO bridge BDF (0xBBDD format)
   uint64_t shadow_gpa;  // Output: Shadow buffer Guest Physical Address
@@ -114,6 +122,8 @@ struct rocm_axiio_free_contig_mem_req {
   _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
 #define ROCM_XIO_REGISTER_QUEUE_ADDR                                           \
   _IOW(ROCM_XIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
+#define ROCM_XIO_UNREGISTER_QUEUE_ADDR                                         \
+  _IOW(ROCM_XIO_IOC_MAGIC, 7, struct rocm_axiio_unregister_queue_addr_req)
 #define ROCM_XIO_REGISTER_BUFFER                                               \
   _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
 #define ROCM_XIO_ALLOC_CONTIG_MEM                                              \
@@ -122,6 +132,8 @@ struct rocm_axiio_free_contig_mem_req {
   _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_axiio_free_contig_mem_req)
 #define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
   _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
+#define ROCM_XIO_UNREGISTER_BUFFER                                              \
+  _IOW(ROCM_XIO_IOC_MAGIC, 9, struct rocm_axiio_unregister_buffer_req)
 #endif // __HIP_DEVICE_COMPILE__
 
 // Namespace all nvme-ep implementation to avoid conflicts
@@ -703,6 +715,7 @@ __device__ void nvme_ep_driveEndpoint(
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
+  int verbose,
   int readIo, int writeIo) {
   // Check if sequential mode (readIo < 0 or writeIo < 0)
   const bool sequential_mode = (readIo < 0 || writeIo < 0);
@@ -827,6 +840,15 @@ __device__ void nvme_ep_driveEndpoint(
       sq_tail = (sq_tail + 1) % queue_size;
       __threadfence_system();
 
+      // Dump SQE information if very verbose
+      if (verbose >= 2) {
+        printf("[SQE] cmd_id=%u opcode=0x%02x nsid=%u lba=%llu blocks=%u "
+               "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
+               cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
+               (unsigned long long)prp1, (unsigned long long)prp2,
+               (sq_tail - 1 + queue_size) % queue_size);
+      }
+
       // Ring doorbell
       nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
                             shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
@@ -862,10 +884,19 @@ __device__ void nvme_ep_driveEndpoint(
 
         // Got a completion with matching CID - verify phase if possible
         uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+        uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
+        uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
         // Accept if phase matches, sq_head increased (sq_head is definitive), or
         // this is the first operation (expected_phase == 0xFF)
         bool phase_matches = (expected_phase == 0xFF) || (phase == expected_phase);
         if (phase_matches || new_sq_head > last_sq_head) {
+          // Dump CQE information if very verbose
+          if (verbose >= 2) {
+            printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
+                   "phase=%u cq_head=%u\n",
+                   cqe_new.command_id, new_sq_head, cqe_new.status, sct, sc,
+                   phase, cq_head);
+          }
           // This is our completion
           if (config.endTimes != nullptr && cmd_id >= 1 &&
               cmd_id <= num_ops) {
@@ -1062,6 +1093,15 @@ __device__ void nvme_ep_driveEndpoint(
           // Write SQE
           nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
           sq_tail = (sq_tail + 1) % queue_size;
+
+          // Dump SQE information if very verbose
+          if (verbose >= 2) {
+            printf("[SQE] cmd_id=%u opcode=0x%02x nsid=%u lba=%llu blocks=%u "
+                   "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
+                   cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
+                   (unsigned long long)prp1, (unsigned long long)prp2,
+                   (sq_tail - 1 + queue_size) % queue_size);
+          }
         }
 
         // Memory fence before doorbell
@@ -1088,6 +1128,13 @@ __device__ void nvme_ep_driveEndpoint(
           uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
           uint16_t sq_head = cqe_new.sq_head;
           
+          // Validate sq_head is within valid range (0 to queue_size-1)
+          // If invalid, skip this CQE (likely stale/uninitialized data)
+          if (sq_head >= queue_size) {
+            cqe_last = cqe_new; // Update last seen CQE
+            continue; // Skip invalid sq_head
+          }
+          
           // Check if phase matches expected phase (skip check if first operation)
           bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
           
@@ -1110,6 +1157,12 @@ __device__ void nvme_ep_driveEndpoint(
             }
           }
           
+          // Cap new_completions to remaining operations to prevent buffer overflow
+          uint16_t remaining_ops = num_ops - completed_count;
+          if (new_completions > remaining_ops) {
+            new_completions = remaining_ops;
+          }
+          
           // For first operation, also check if CQE changed (indicates controller wrote)
           // This helps detect completions even if sq_head hasn't advanced yet
           bool cqe_changed = false;
@@ -1129,6 +1182,15 @@ __device__ void nvme_ep_driveEndpoint(
           // Process completion if phase is OK and (sq_head progressed or CQE changed)
           if (phase_ok && (sq_head_progressed || cqe_changed) && 
               new_completions > 0) {
+              // Dump CQE information if very verbose
+              if (verbose >= 2) {
+                uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
+                uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
+                printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
+                       "phase=%u cq_head=%u new_completions=%u\n",
+                       cqe_new.command_id, sq_head, cqe_new.status, sct, sc,
+                       phase, cq_head, new_completions);
+              }
               // Update end times if needed
               if (config.endTimes != nullptr) {
                 uint64_t end_time = wall_clock64();
@@ -1166,12 +1228,20 @@ __device__ void nvme_ep_driveEndpoint(
               cqe_last = cqe_new; // Update last seen CQE
               
               // If this was the first completion, extract phase
+              // After processing completions, cq_head points to next CQE to read
+              // Phase flips when controller wraps from entry N-1 to 0
               if (expected_phase == 0xFF) {
-                uint16_t next_cq_head = (cq_head) % queue_size;
-                if (next_cq_head == 0) {
-                  expected_phase = phase ^ 1; // Will wrap, phase flips
+                // Extract phase from the completion we just processed
+                // The phase bit in this CQE indicates the phase for entries in this loop
+                // If cq_head == 0, we just wrapped, so phase already flipped
+                // If cq_head != 0, we're in same loop, phase stays same
+                if (cq_head == 0) {
+                  // We just wrapped to index 0 - phase already flipped by controller
+                  // Next loop will have opposite phase
+                  expected_phase = phase ^ 1;
                 } else {
-                  expected_phase = phase; // Same loop, phase stays
+                  // Still in same loop - phase stays same for next completion
+                  expected_phase = phase;
                 }
               }
             } else {
@@ -1195,7 +1265,7 @@ __global__ void nvme_ep_kernel(
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
-  int readIo, int writeIo) {
+  int readIo, int writeIo, int verbose) {
   // Reconstruct XioEndpointConfig from parameters
   XioEndpointConfig config;
   config.submissionQueue = sqeAddr;
@@ -1217,7 +1287,7 @@ __global__ void nvme_ep_kernel(
                         queueId, doorbell_offset, readBuffer, writeBuffer,
                         bufferSize, readBufferDma, writeBufferDma, lfsrSeed,
                         queue_size, lba_range_lbas, use_random_access,
-                        nvmeBar0Gpu, readIo, writeIo);
+                        nvmeBar0Gpu, readIo, writeIo, verbose);
 }
 
 //
@@ -2068,7 +2138,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     useRandomAccess, // true for random access, false for sequential
     nvmeBar0Gpu,     // GPU pointer to NVMe BAR0 (for direct doorbell)
     readIo,          // readIo (negative for sequential mode)
-    writeIo);        // writeIo (negative for sequential mode)
+    writeIo,         // writeIo (negative for sequential mode)
+    config->verbose); // Verbose level (0=none, 1=normal, 2=very verbose)
 
   // Check for kernel launch errors immediately
   hipError_t err = hipGetLastError();
@@ -2099,9 +2170,40 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
             hipGetErrorString(err), err);
   }
 
-  // Free data buffers
-  // Cleanup buffers using correct free function based on actual allocation type
-  // (matching test-gpu-nvme-write.cpp cleanup pattern)
+  // Add a small delay to ensure all NVMe commands have completed
+  // This helps avoid race conditions when cleaning up queues
+  usleep(10000); // 10ms delay
+
+  // Cleanup buffers: unregister from kernel module before freeing
+  int kmod_fd_cleanup = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+  if (kmod_fd_cleanup >= 0) {
+    // Unregister read buffer if it was registered (check if DMA address was set)
+    if (readBuffer && readBufferDma != 0) {
+      struct rocm_axiio_unregister_buffer_req unreg_req = {};
+      unreg_req.virt_addr = reinterpret_cast<uint64_t>(readBuffer);
+      int unreg_ret = ioctl(kmod_fd_cleanup, ROCM_XIO_UNREGISTER_BUFFER,
+                            &unreg_req);
+      if (unreg_ret < 0 && errno != ENOENT) {
+        fprintf(stderr, "Warning: Failed to unregister read buffer: %s\n",
+                strerror(errno));
+      }
+    }
+
+    // Unregister write buffer if it was registered (check if DMA address was set)
+    if (writeBuffer && writeBufferDma != 0) {
+      struct rocm_axiio_unregister_buffer_req unreg_req = {};
+      unreg_req.virt_addr = reinterpret_cast<uint64_t>(writeBuffer);
+      int unreg_ret = ioctl(kmod_fd_cleanup, ROCM_XIO_UNREGISTER_BUFFER,
+                            &unreg_req);
+      if (unreg_ret < 0 && errno != ENOENT) {
+        fprintf(stderr, "Warning: Failed to unregister write buffer: %s\n",
+                strerror(errno));
+      }
+    }
+    close(kmod_fd_cleanup);
+  }
+
+  // Free data buffers after unregistering
   if (readBuffer) {
     if (readBufferActuallyOnDevice) {
       (void)hipFree(readBuffer);
@@ -2115,6 +2217,16 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     } else {
       (void)hipHostFree(writeBuffer);
     }
+  }
+
+  // Cleanup NVMe queues after kernel completes and buffers are freed
+  int cleanup_ret = nvme_ep::nvme_cleanup_queue_via_ioctl(
+    nvmeConfig->device.c_str(), ROCM_XIO_DEVICE_PATH, nvmeConfig->queueId,
+    &queue_info, config->memoryMode);
+  if (cleanup_ret < 0) {
+    fprintf(stderr, "Warning: Queue cleanup failed: %s\n",
+            strerror(-cleanup_ret));
+    // Don't fail the test if cleanup fails - kernel already completed
   }
 
   return err;
@@ -2297,6 +2409,8 @@ __host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
 //
 
 // Structure for NVMe Identify Namespace response (4096 bytes)
+// When USE_LIBNVME is defined, libnvme provides this struct, so we skip it.
+#ifndef USE_LIBNVME
 struct nvme_id_ns {
   uint64_t nsze;  // Namespace size
   uint64_t ncap;  // Namespace capacity
@@ -2322,6 +2436,7 @@ struct nvme_id_ns {
   uint8_t resv[40];   // Reserved
   uint8_t lbaf[64];   // LBA format support (16 formats * 4 bytes each)
 };
+#endif // USE_LIBNVME
 
 __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
                                     unsigned* lba_size) {
@@ -3017,6 +3132,12 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
   uint16_t queue_size, uint16_t nvme_bdf, unsigned memory_mode,
   struct nvme_queue_info* info) {
+  // NOTE: We use manual CREATE_SQ/CREATE_CQ instead of libnvme APIs because:
+  // 1. libnvme uses its own memory allocation (not GPU-accessible)
+  // 2. We need GPU-accessible memory for device-side queue access
+  // 3. We use custom kernel module integration for physical address mapping
+  // libnvme is used only for status code helpers (nvme_status_to_string)
+  // when USE_LIBNVME is defined.
   // Declare all variables at the top to avoid goto scoping issues
   int kmod_fd = -1;
   int nvme_fd = -1;
@@ -3163,9 +3284,31 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     // Device memory allocated via HSA
     memset(cq_virt, 0,
            cq_size_bytes); // HSA fine-grained memory is host-accessible
+    // Ensure memset is visible to GPU before kernel launch
+    // Use memory barrier to ensure writes complete
+    __sync_synchronize();
   } else {
     // Host memory (malloc) - use memset
     memset(cq_virt, 0, cq_size_bytes);
+    // Ensure memset is visible to GPU before kernel launch
+    __sync_synchronize();
+  }
+  
+  // Verify CQ is zeroed (sanity check - helps catch allocation issues)
+  // Check first few entries to ensure memset worked
+  // Use block scope to avoid goto jump issues
+  {
+    volatile struct nvme_cqe* cq_check = static_cast<volatile struct nvme_cqe*>(cq_virt);
+    for (uint16_t i = 0; i < queue_size && i < 4; i++) {
+      nvme_ep::cqeType cqe_check = nvme_ep::cqeRead(
+        reinterpret_cast<volatile nvme_ep::cqeType*>(&cq_check[i]));
+      if (cqe_check.command_id != 0 || cqe_check.status != 0 || 
+          cqe_check.sq_head != 0) {
+        fprintf(stderr, "WARNING: CQ entry %u not properly zeroed: "
+                "cmd_id=%u status=0x%04x sq_head=%u\n",
+                i, cqe_check.command_id, cqe_check.status, cqe_check.sq_head);
+      }
+    }
   }
 
   // For non-contiguous queues (PC=0), we don't need kernel allocation
@@ -3819,9 +3962,16 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
+#ifdef USE_LIBNVME
+    const char* sc_str = nvme_status_to_string(sc, sct);
+    fprintf(stderr,
+            "ERROR: CREATE_CQ failed with status code 0x%02x (SCT=%u): %s\n",
+            sc, sct, sc_str ? sc_str : "Unknown");
+#else
     fprintf(stderr,
             "ERROR: CREATE_CQ failed with status code 0x%02x (SCT=%u)\n", sc,
             sct);
+#endif
     if (sc == NVME_SC_INVALID_FIELD) {
       fprintf(
         stderr,
@@ -3884,9 +4034,16 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
+#ifdef USE_LIBNVME
+    const char* sc_str = nvme_status_to_string(sc, sct);
+    fprintf(stderr,
+            "ERROR: CREATE_SQ failed with status code 0x%02x (SCT=%u): %s\n",
+            sc, sct, sc_str ? sc_str : "Unknown");
+#else
     fprintf(stderr,
             "ERROR: CREATE_SQ failed with status code 0x%02x (SCT=%u)\n", sc,
             sct);
+#endif
     if (sc == NVME_SC_INVALID_FIELD) {
       fprintf(stderr,
               "  Error: Invalid field in command (queue_id=%u, queue_size=%u, "
@@ -4065,6 +4222,123 @@ cleanup:
     close(kmod_fd);
   }
   return ret;
+}
+
+// Cleanup function to free resources after GPU kernel completes
+__host__ int nvme_ep::nvme_cleanup_queue_via_ioctl(
+  const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
+  const struct nvme_queue_info* queue_info, unsigned memory_mode) {
+  int kmod_fd = -1;
+  int nvme_fd = -1;
+  int ret = 0;
+  struct nvme_passthru_cmd cmd;
+
+  if (!nvme_device || !kernel_module_device || !queue_info) {
+    return -EINVAL;
+  }
+
+  // Open kernel module device for unregistration
+  kmod_fd = open(kernel_module_device, O_RDWR);
+  if (kmod_fd < 0) {
+    fprintf(stderr, "Warning: Failed to open kernel module device %s for cleanup: %s\n",
+            kernel_module_device, strerror(errno));
+    // Continue with NVMe queue deletion even if kernel module open fails
+  }
+
+  // Open NVMe device for queue deletion
+  nvme_fd = open(nvme_device, O_RDWR);
+  if (nvme_fd < 0) {
+    fprintf(stderr, "Warning: Failed to open NVMe device %s for cleanup: %s\n",
+            nvme_device, strerror(errno));
+    // Continue with unregistration even if NVMe device open fails
+  }
+
+  // Delete NVMe queues (DELETE_SQ first, then DELETE_CQ)
+  if (nvme_fd >= 0) {
+    // Delete Submission Queue (DELETE_SQ)
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = nvme_admin_delete_sq;
+    cmd.nsid = 0;         // Admin commands use NSID 0
+    cmd.cdw10 = queue_id; // QID
+    cmd.data_len = 0;     // No data transfer for DELETE_SQ
+
+    ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+    if (ret < 0) {
+      fprintf(stderr, "Warning: DELETE_SQ failed during cleanup: %s\n",
+              strerror(errno));
+    }
+
+    // Delete Completion Queue (DELETE_CQ)
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = nvme_admin_delete_cq;
+    cmd.nsid = 0;         // Admin commands use NSID 0
+    cmd.cdw10 = queue_id; // QID
+    cmd.data_len = 0;     // No data transfer for DELETE_CQ
+
+    ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+    if (ret < 0) {
+      fprintf(stderr, "Warning: DELETE_CQ failed during cleanup: %s\n",
+              strerror(errno));
+    }
+  }
+
+  // Unregister queue addresses from kernel module
+  if (kmod_fd >= 0) {
+    struct rocm_axiio_unregister_queue_addr_req unreg_req;
+
+    // Unregister SQ
+    memset(&unreg_req, 0, sizeof(unreg_req));
+    unreg_req.virt_addr = reinterpret_cast<uint64_t>(queue_info->sq_virt);
+    ret = ioctl(kmod_fd, ROCM_XIO_UNREGISTER_QUEUE_ADDR, &unreg_req);
+    if (ret < 0 && errno != ENOENT) {
+      fprintf(stderr, "Warning: Failed to unregister SQ address: %s\n",
+              strerror(errno));
+    }
+
+    // Unregister CQ
+    memset(&unreg_req, 0, sizeof(unreg_req));
+    unreg_req.virt_addr = reinterpret_cast<uint64_t>(queue_info->cq_virt);
+    ret = ioctl(kmod_fd, ROCM_XIO_UNREGISTER_QUEUE_ADDR, &unreg_req);
+    if (ret < 0 && errno != ENOENT) {
+      fprintf(stderr, "Warning: Failed to unregister CQ address: %s\n",
+              strerror(errno));
+    }
+  }
+
+  // Free memory allocations
+  // Note: We use the same allocation functions as creation
+  bool sq_is_device = (memory_mode & 0x1) != 0;
+  bool cq_is_device = (memory_mode & 0x2) != 0;
+
+  if (queue_info->sq_virt != nullptr) {
+    if (sq_is_device) {
+      // Device memory - use hipFree
+      (void)hipFree(queue_info->sq_virt);
+    } else {
+      // Host memory - use xioFreeSubmissionQueue
+      xioFreeSubmissionQueue(queue_info->sq_virt, memory_mode);
+    }
+  }
+
+  if (queue_info->cq_virt != nullptr) {
+    if (cq_is_device) {
+      // Device memory - use hipFree
+      (void)hipFree(queue_info->cq_virt);
+    } else {
+      // Host memory - use xioFreeCompletionQueue
+      xioFreeCompletionQueue(queue_info->cq_virt, memory_mode);
+    }
+  }
+
+  // Close file descriptors
+  if (nvme_fd >= 0) {
+    close(nvme_fd);
+  }
+  if (kmod_fd >= 0) {
+    close(kmod_fd);
+  }
+
+  return 0;
 }
 
 #endif // __HIP_DEVICE_COMPILE__

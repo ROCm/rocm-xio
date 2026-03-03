@@ -123,6 +123,22 @@ else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
 
+# Find libnvme (optional - for host-side NVMe operations)
+# libnvme provides reference implementation and helpers for NVMe operations
+include(FindPkgConfig)
+pkg_check_modules(LIBNVME libnvme)
+if(LIBNVME_FOUND)
+    message(STATUS "libnvme found: ${LIBNVME_VERSION}")
+    message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
+    message(STATUS "  Library dirs: ${LIBNVME_LIBRARY_DIRS}")
+    add_definitions(-DUSE_LIBNVME)
+    # Note: We don't link libnvme here because it's only used in host-side code
+    # and only conditionally compiled with #ifdef USE_LIBNVME guards
+else()
+    message(STATUS "libnvme not found - using built-in NVMe implementation")
+    message(STATUS "  Install libnvme-dev to enable libnvme integration")
+endif()
+
 # Include helper modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
@@ -225,6 +241,10 @@ target_include_directories(rocm-xio
   PRIVATE
     ${INCLUDE_DIR}
 )
+# Add libnvme include directories if found (for host-side code only)
+if(LIBNVME_FOUND)
+  target_include_directories(rocm-xio PRIVATE ${LIBNVME_INCLUDE_DIRS})
+endif()
 foreach(ep ${VALID_ENDPOINTS})
   target_include_directories(rocm-xio PRIVATE
     ${ENDPOINTS_DIR}/${ep})
@@ -238,6 +258,11 @@ target_link_libraries(rocm-xio
     hip::device
     hsakmt::hsakmt
 )
+# Link libnvme if found (for host-side status code helpers)
+if(LIBNVME_FOUND)
+  target_link_libraries(rocm-xio PRIVATE ${LIBNVME_LIBRARIES})
+  target_link_directories(rocm-xio PRIVATE ${LIBNVME_LIBRARY_DIRS})
+endif()
 
 # Apply endpoint defines per source file
 apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
@@ -290,6 +315,10 @@ target_compile_options(xio-tester PRIVATE
 target_include_directories(xio-tester PRIVATE
   ${INCLUDE_DIR}
 )
+# Add libnvme include directories if found (for host-side code only)
+if(LIBNVME_FOUND)
+  target_include_directories(xio-tester PRIVATE ${LIBNVME_INCLUDE_DIRS})
+endif()
 
 target_link_libraries(xio-tester PRIVATE
   rocm-xio
@@ -297,6 +326,11 @@ target_link_libraries(xio-tester PRIVATE
   hip::device
   hsa-runtime64::hsa-runtime64
 )
+# Link libnvme if found (for host-side status code helpers)
+if(LIBNVME_FOUND)
+  target_link_libraries(xio-tester PRIVATE ${LIBNVME_LIBRARIES})
+  target_link_directories(xio-tester PRIVATE ${LIBNVME_LIBRARY_DIRS})
+endif()
 
 # Required when linking relocatable device code (like TransferBench)
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
