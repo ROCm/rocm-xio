@@ -10,6 +10,7 @@
 
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
+#include "xio.h"       // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -376,7 +377,7 @@ int test_config_structure_gpu() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy config to device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_config);
+    HIP_CHECK(hipFree(device_config));
     return 1;
   }
 
@@ -385,7 +386,7 @@ int test_config_structure_gpu() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to allocate device memory for results: %s\n",
             hipGetErrorString(err));
-    hipFree(device_config);
+    HIP_CHECK(hipFree(device_config));
     return 1;
   }
 
@@ -394,8 +395,8 @@ int test_config_structure_gpu() {
                   hipMemcpyHostToDevice);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy to device: %s\n", hipGetErrorString(err));
-    hipFree(device_config);
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_config));
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -406,16 +407,16 @@ int test_config_structure_gpu() {
   err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to launch kernel: %s\n", hipGetErrorString(err));
-    hipFree(device_config);
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_config));
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
   err = hipDeviceSynchronize();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to synchronize: %s\n", hipGetErrorString(err));
-    hipFree(device_config);
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_config));
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -423,13 +424,13 @@ int test_config_structure_gpu() {
                   hipMemcpyDeviceToHost);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy from device: %s\n", hipGetErrorString(err));
-    hipFree(device_config);
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_config));
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
-  hipFree(device_config);
-  hipFree(device_results);
+  HIP_CHECK(hipFree(device_config));
+  HIP_CHECK(hipFree(device_results));
 
   if (!host_result) {
     fprintf(stderr, "GPU kernel test failed\n");

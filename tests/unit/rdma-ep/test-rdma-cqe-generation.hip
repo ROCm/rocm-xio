@@ -13,6 +13,7 @@
 #include "pvrdma/pvrdma-rdma.h"
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
+#include "xio.h"       // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -78,7 +79,7 @@ __global__ void test_cqe_generation_kernel(bool* results) {
 
   // Test error handling for invalid opcode
   struct rdma_wqe invalid_wqe = {};
-  invalid_wqe.opcode = 0xFF + 1; // Invalid opcode
+  invalid_wqe.opcode = static_cast<uint8_t>(0xFF + 1); // Invalid opcode
   invalid_wqe.vendor = static_cast<uint8_t>(RDMAVendor::MLX5);
   invalid_wqe.wqe_id = 999;
   invalid_wqe.length = 4096;
@@ -191,7 +192,8 @@ int test_cqe_generation_pvrdma() {
 // Test error handling for invalid opcode
 int test_cqe_generation_invalid_opcode() {
   struct rdma_wqe wqe = {};
-  wqe.opcode = 0xFF + 1; // Invalid opcode (greater than max)
+  wqe.opcode = static_cast<uint8_t>(0xFF + 1); // Invalid opcode (greater than
+                                               // max)
   wqe.vendor = static_cast<uint8_t>(RDMAVendor::MLX5);
   wqe.wqe_id = 999;
   wqe.length = 4096;
@@ -280,7 +282,7 @@ int test_cqe_generation_gpu() {
                   hipMemcpyHostToDevice);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy to device: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -291,14 +293,14 @@ int test_cqe_generation_gpu() {
   err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to launch kernel: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
   err = hipDeviceSynchronize();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to synchronize: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -306,11 +308,11 @@ int test_cqe_generation_gpu() {
                   hipMemcpyDeviceToHost);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy from device: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
-  hipFree(device_results);
+  HIP_CHECK(hipFree(device_results));
 
   if (!host_result) {
     fprintf(stderr, "GPU kernel test failed\n");
