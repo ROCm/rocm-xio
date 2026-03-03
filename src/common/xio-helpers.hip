@@ -453,14 +453,14 @@ hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
     // Allocate host-accessible memory using HIP (GPU-accessible)
     // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
     // nvme-ep will reallocate with hipHostMallocCoherent if needed
+    // CRITICAL: Must use hipHostMalloc - malloc is not DMA-accessible
     hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
     if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), fall back to malloc
-      *ptr = malloc(size);
-      if (*ptr == nullptr) {
-        std::cerr << "Error: malloc failed for submission queue" << std::endl;
-        return hipErrorMemoryAllocation;
-      }
+      std::cerr << "Error: hipHostMalloc failed for submission queue: "
+                << hipGetErrorString(hipErr) << std::endl;
+      std::cerr << "HIP is required for DMA-accessible queue memory. "
+                << "Cannot fall back to malloc (not DMA-accessible)." << std::endl;
+      return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
   }
@@ -495,14 +495,14 @@ hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
     // Allocate host-accessible memory using HIP (GPU-accessible)
     // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
     // nvme-ep will reallocate with hipHostMallocCoherent if needed
+    // CRITICAL: Must use hipHostMalloc - malloc is not DMA-accessible
     hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
     if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), fall back to malloc
-      *ptr = malloc(size);
-      if (*ptr == nullptr) {
-        std::cerr << "Error: malloc failed for completion queue" << std::endl;
-        return hipErrorMemoryAllocation;
-      }
+      std::cerr << "Error: hipHostMalloc failed for completion queue: "
+                << hipGetErrorString(hipErr) << std::endl;
+      std::cerr << "HIP is required for DMA-accessible queue memory. "
+                << "Cannot fall back to malloc (not DMA-accessible)." << std::endl;
+      return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
   }
