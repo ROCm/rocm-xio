@@ -10,6 +10,7 @@
 
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
+#include "xio.h"       // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -114,7 +115,7 @@ int test_sqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to allocate device memory for success flag: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
+    HIP_CHECK(hipFree(device_buffer));
     return 1;
   }
 
@@ -123,8 +124,8 @@ int test_sqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to memset device buffer: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -134,8 +135,8 @@ int test_sqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy success flag to device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -146,8 +147,8 @@ int test_sqe_read_write() {
   err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to launch kernel: %s\n", hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -156,8 +157,8 @@ int test_sqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to synchronize device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -167,14 +168,14 @@ int test_sqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy result from device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
   // Cleanup
-  hipFree(device_buffer);
-  hipFree(device_success);
+  HIP_CHECK(hipFree(device_buffer));
+  HIP_CHECK(hipFree(device_success));
 
   if (!host_success) {
     fprintf(stderr,
@@ -204,7 +205,7 @@ int test_cqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to allocate device memory for success flag: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
+    HIP_CHECK(hipFree(device_buffer));
     return 1;
   }
 
@@ -213,8 +214,8 @@ int test_cqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to memset device buffer: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -224,8 +225,8 @@ int test_cqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy success flag to device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -236,8 +237,8 @@ int test_cqe_read_write() {
   err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to launch kernel: %s\n", hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -246,8 +247,8 @@ int test_cqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to synchronize device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
@@ -257,14 +258,14 @@ int test_cqe_read_write() {
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy result from device: %s\n",
             hipGetErrorString(err));
-    hipFree(device_buffer);
-    hipFree(device_success);
+    HIP_CHECK(hipFree(device_buffer));
+    HIP_CHECK(hipFree(device_success));
     return 1;
   }
 
   // Cleanup
-  hipFree(device_buffer);
-  hipFree(device_success);
+  HIP_CHECK(hipFree(device_buffer));
+  HIP_CHECK(hipFree(device_success));
 
   if (!host_success) {
     fprintf(stderr,

@@ -14,6 +14,7 @@
 #include "pvrdma/pvrdma-rdma.h"
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
+#include "xio.h"       // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -270,7 +271,7 @@ int test_vendor_specific_gpu() {
                   hipMemcpyHostToDevice);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy to device: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -281,14 +282,14 @@ int test_vendor_specific_gpu() {
   err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to launch kernel: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
   err = hipDeviceSynchronize();
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to synchronize: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
@@ -296,11 +297,11 @@ int test_vendor_specific_gpu() {
                   hipMemcpyDeviceToHost);
   if (err != hipSuccess) {
     fprintf(stderr, "Failed to copy from device: %s\n", hipGetErrorString(err));
-    hipFree(device_results);
+    HIP_CHECK(hipFree(device_results));
     return 1;
   }
 
-  hipFree(device_results);
+  HIP_CHECK(hipFree(device_results));
 
   if (!host_result) {
     fprintf(stderr, "GPU kernel test failed\n");
