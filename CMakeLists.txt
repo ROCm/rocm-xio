@@ -187,7 +187,7 @@ setup_code_generation(
     ${ENDPOINTS_DIR}/rdma-ep/mlx/mlx5-rdma.h
     ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-rdma.h
     ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-rdma.h
-    ${ENDPOINTS_DIR}/rdma-ep/pvrdma/pvrdma-rdma.h
+    ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
 )
 
 # Discover source files
@@ -252,7 +252,7 @@ set(RDMA_VENDOR_HEADER_DEPS
   ${ENDPOINTS_DIR}/rdma-ep/mlx/mlx5-rdma.h
   ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-rdma.h
   ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-rdma.h
-  ${ENDPOINTS_DIR}/rdma-ep/pvrdma/pvrdma-rdma.h
+  ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
 )
 set_source_files_properties(
   ${ENDPOINTS_DIR}/rdma-ep/rdma-ep.hip

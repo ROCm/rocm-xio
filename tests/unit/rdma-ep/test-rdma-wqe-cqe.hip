@@ -50,7 +50,7 @@ __global__ void test_wqe_cqe_setup_kernel(bool* results) {
 
   // Test CQE setup functions
   struct rdma_cqe cqe_success = {};
-  rdma_cqe_setup_success(&cqe_success, 123, RDMAVendor::PVRDMA, 4096,
+  rdma_cqe_setup_success(&cqe_success, 123, RDMAVendor::ROCM_ERNIC, 4096,
                          0x12345678);
   test_passed &= (cqe_success.status == RDMA_WC_SUCCESS);
   test_passed &= (cqe_success.byte_len == 4096);
@@ -130,10 +130,10 @@ int test_wqe_setup_read() {
 // Test CQE setup functions
 int test_cqe_setup_success() {
   struct rdma_cqe cqe = {};
-  rdma_cqe_setup_success(&cqe, 123, RDMAVendor::PVRDMA, 4096, 0x12345678);
+  rdma_cqe_setup_success(&cqe, 123, RDMAVendor::ROCM_ERNIC, 4096, 0x12345678);
 
   ASSERT_EQ(cqe.wqe_id, 123);
-  ASSERT_EQ(cqe.vendor, static_cast<uint8_t>(RDMAVendor::PVRDMA));
+  ASSERT_EQ(cqe.vendor, static_cast<uint8_t>(RDMAVendor::ROCM_ERNIC));
   ASSERT_EQ(cqe.status, RDMA_WC_SUCCESS);
   ASSERT_EQ(cqe.byte_len, 4096);
   ASSERT_EQ(cqe.imm_data, 0);
@@ -197,7 +197,7 @@ int test_vendor_name() {
   ASSERT_STREQ(rdma_vendor_name(RDMAVendor::MLX5), "MLX5");
   ASSERT_STREQ(rdma_vendor_name(RDMAVendor::BNXT_RE), "BNXT_RE");
   ASSERT_STREQ(rdma_vendor_name(RDMAVendor::IONIC), "IONIC");
-  ASSERT_STREQ(rdma_vendor_name(RDMAVendor::PVRDMA), "PVRDMA");
+  ASSERT_STREQ(rdma_vendor_name(RDMAVendor::ROCM_ERNIC), "rocm-ernic");
   ASSERT_STREQ(rdma_vendor_name(RDMAVendor::UNKNOWN), "UNKNOWN");
 
   return 0;

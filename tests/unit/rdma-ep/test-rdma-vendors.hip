@@ -11,10 +11,10 @@
 #include "bnxt/bnxt-rdma.h"
 #include "ionic/ionic-rdma.h"
 #include "mlx/mlx5-rdma.h"
-#include "pvrdma/pvrdma-rdma.h"
 #include "rdma-ep.h"
 #include "rdma-ep.hip" // Include implementation for __device__ functions
-#include "xio.h"       // For HIP_CHECK macro
+#include "rocm-ernic/rocm-ernic-rdma.h"
+#include "xio.h" // For HIP_CHECK macro
 
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -64,16 +64,17 @@ __global__ void test_vendor_specific_kernel(bool* results) {
   rdma_ep::cqeType ionic_cqe = rdma_ep::cqeGenFromSqe(&ionic_wqe, 0);
   test_passed &= (ionic_cqe.ionic.qpn == ionic_qp);
 
-  // Test PVRDMA
-  struct rdma_wqe pvrdma_wqe = {};
-  uint32_t pvrdma_qp = 3000;
-  pvrdma_wqe_set_vendor_specific(&pvrdma_wqe, pvrdma_qp, false, true);
-  uint32_t pvrdma_extracted_qp = static_cast<uint32_t>(
-    pvrdma_wqe.vendor_specific >> 32);
-  test_passed &= (pvrdma_extracted_qp == pvrdma_qp);
+  // Test rocm-ernic
+  struct rdma_wqe rocm_ernic_wqe = {};
+  uint32_t rocm_ernic_qp = 3000;
+  rocm_ernic_wqe_set_vendor_specific(&rocm_ernic_wqe, rocm_ernic_qp, false,
+                                     true);
+  uint32_t rocm_ernic_extracted_qp = static_cast<uint32_t>(
+    rocm_ernic_wqe.vendor_specific >> 32);
+  test_passed &= (rocm_ernic_extracted_qp == rocm_ernic_qp);
 
-  rdma_ep::cqeType pvrdma_cqe = rdma_ep::cqeGenFromSqe(&pvrdma_wqe, 0);
-  test_passed &= (pvrdma_cqe.pvrdma.qpn == pvrdma_qp);
+  rdma_ep::cqeType rocm_ernic_cqe = rdma_ep::cqeGenFromSqe(&rocm_ernic_wqe, 0);
+  test_passed &= (rocm_ernic_cqe.rocm_ernic.qpn == rocm_ernic_qp);
 
   results[0] = test_passed;
 }
@@ -172,14 +173,14 @@ int test_ionic_vendor_specific() {
   return 0;
 }
 
-// Test PVRDMA vendor-specific functions
-int test_pvrdma_vendor_specific() {
+// Test rocm-ernic vendor-specific functions
+int test_rocm_ernic_vendor_specific() {
   struct rdma_wqe wqe = {};
   uint32_t qp_num = 3000;
   bool signaled = false;
   bool fence = true;
 
-  pvrdma_wqe_set_vendor_specific(&wqe, qp_num, signaled, fence);
+  rocm_ernic_wqe_set_vendor_specific(&wqe, qp_num, signaled, fence);
 
   // Verify encoding: QP number in upper 32 bits, flags in lower 32 bits
   uint32_t extracted_qp = static_cast<uint32_t>(wqe.vendor_specific >> 32);
@@ -187,20 +188,20 @@ int test_pvrdma_vendor_specific() {
                                                    0xFFFFFFFF);
 
   ASSERT_EQ(extracted_qp, qp_num);
-  ASSERT_FALSE(extracted_flags & PVRDMA_SEND_SIGNALED);
-  ASSERT_TRUE(extracted_flags & PVRDMA_SEND_FENCE);
+  ASSERT_FALSE(extracted_flags & ROCM_ERNIC_SEND_SIGNALED);
+  ASSERT_TRUE(extracted_flags & ROCM_ERNIC_SEND_FENCE);
 
   // Test with signaled flag
-  pvrdma_wqe_set_vendor_specific(&wqe, qp_num, true, false);
+  rocm_ernic_wqe_set_vendor_specific(&wqe, qp_num, true, false);
   extracted_flags = static_cast<uint32_t>(wqe.vendor_specific & 0xFFFFFFFF);
-  ASSERT_TRUE(extracted_flags & PVRDMA_SEND_SIGNALED);
-  ASSERT_FALSE(extracted_flags & PVRDMA_SEND_FENCE);
+  ASSERT_TRUE(extracted_flags & ROCM_ERNIC_SEND_SIGNALED);
+  ASSERT_FALSE(extracted_flags & ROCM_ERNIC_SEND_FENCE);
 
   // Generate CQE and verify extraction
   rdma_ep::cqeType cqe = rdma_ep::cqeGenFromSqe(&wqe, 0);
   struct rdma_cqe* cqe_ptr = &cqe;
 
-  ASSERT_EQ(pvrdma_cqe_get_qpn(cqe_ptr), qp_num);
+  ASSERT_EQ(rocm_ernic_cqe_get_qpn(cqe_ptr), qp_num);
 
   return 0;
 }
@@ -237,15 +238,16 @@ int test_vendor_cqe_extraction() {
   ASSERT_EQ(ionic_cqe.ionic.qpn, 2002);
   ASSERT_EQ(ionic_cqe.ionic.reserved, 0);
 
-  // PVRDMA
-  struct rdma_wqe pvrdma_wqe = {};
-  pvrdma_wqe.vendor = static_cast<uint8_t>(RDMAVendor::PVRDMA);
-  pvrdma_wqe.wqe_id = 4;
-  pvrdma_wqe.length = 32768;
-  pvrdma_wqe_set_vendor_specific(&pvrdma_wqe, 3003, false, true);
-  rdma_ep::cqeType pvrdma_cqe = rdma_ep::cqeGenFromSqe(&pvrdma_wqe, 0x4444);
-  ASSERT_EQ(pvrdma_cqe.pvrdma.qpn, 3003);
-  ASSERT_EQ(pvrdma_cqe.pvrdma.reserved, 0);
+  // rocm-ernic
+  struct rdma_wqe rocm_ernic_wqe = {};
+  rocm_ernic_wqe.vendor = static_cast<uint8_t>(RDMAVendor::ROCM_ERNIC);
+  rocm_ernic_wqe.wqe_id = 4;
+  rocm_ernic_wqe.length = 32768;
+  rocm_ernic_wqe_set_vendor_specific(&rocm_ernic_wqe, 3003, false, true);
+  rdma_ep::cqeType rocm_ernic_cqe = rdma_ep::cqeGenFromSqe(&rocm_ernic_wqe,
+                                                           0x4444);
+  ASSERT_EQ(rocm_ernic_cqe.rocm_ernic.qpn, 3003);
+  ASSERT_EQ(rocm_ernic_cqe.rocm_ernic.reserved, 0);
 
   return 0;
 }
@@ -321,7 +323,7 @@ int main() {
   failures += test_mlx5_vendor_specific();
   failures += test_bnxt_vendor_specific();
   failures += test_ionic_vendor_specific();
-  failures += test_pvrdma_vendor_specific();
+  failures += test_rocm_ernic_vendor_specific();
   failures += test_vendor_cqe_extraction();
 
   if (failures == 0) {
