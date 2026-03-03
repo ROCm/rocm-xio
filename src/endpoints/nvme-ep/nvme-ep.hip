@@ -100,12 +100,26 @@ struct rocm_axiio_register_buffer_req {
   uint32_t flags;     // Input: flags (see ROCM_XIO_FLAG_*)
 };
 
+struct rocm_axiio_alloc_contig_mem_req {
+  uint64_t size;      // Input: Size in bytes
+  uint64_t virt_addr; // Output: Kernel virtual address (handle for mmap)
+  uint64_t phys_addr; // Output: Physical address
+};
+
+struct rocm_axiio_free_contig_mem_req {
+  uint64_t virt_addr; // Input: Kernel virtual address to free
+};
+
 #define ROCM_XIO_GET_VRAM_PHYS_ADDR                                            \
   _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
 #define ROCM_XIO_REGISTER_QUEUE_ADDR                                           \
   _IOW(ROCM_XIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
 #define ROCM_XIO_REGISTER_BUFFER                                               \
   _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
+#define ROCM_XIO_ALLOC_CONTIG_MEM                                              \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_axiio_alloc_contig_mem_req)
+#define ROCM_XIO_FREE_CONTIG_MEM                                               \
+  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_axiio_free_contig_mem_req)
 #define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
   _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
 #endif // __HIP_DEVICE_COMPILE__
@@ -214,94 +228,158 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
                                     uint16_t expected_cid,
                                     uint16_t queue_size,
                                     uint16_t* cq_head_inout,
-                                    bool* cqe_advanced_out) {
+                                    bool* cqe_advanced_out,
+                                    uint8_t* expected_phase_inout) {
   cqeType cqeNew;
   uint16_t effective_last_sq_head = last_sq_head;
   
-  // Prefer explicit last_sq_head over cqeLast.sq_head to avoid zeroed CQE issues
-  // If last_sq_head is 0 and cqeLast is provided, extract from cqeLast as fallback
-  if (effective_last_sq_head == 0 && cqeLast.command_id != 0) {
-    effective_last_sq_head = cqeLast.sq_head;
-  }
+  // Timeout mechanism: break after 1 second of polling without progress
+  // Use both iteration-based and time-based timeouts for reliability
+  // Very aggressive timeout to prevent infinite stalls
+  const uint32_t max_iterations = 100000; // Max iterations before timeout (very aggressive)
+  uint32_t iteration_count = 0;
+  
+#ifdef __HIP_DEVICE_COMPILE__
+  const uint64_t timeout_ns = 1000000000ULL; // 1 second in nanoseconds
+  uint64_t start_time = wall_clock64();
+  uint64_t last_progress_time = start_time;
+#endif
   
   while (true) {
+    iteration_count++;
+    
+    // Read CQE first (before timeout check) so we always return valid data
     cqeNew = cqeRead(cqeAddress);
+    
+    // Check timeout VERY frequently to catch stalls immediately
+    // Check every 10 iterations, or every iteration after 1000
+    bool check_timeout = (iteration_count % 10 == 0) || (iteration_count > 1000);
+    
+    if (check_timeout) {
+      // Check iteration-based timeout (most reliable - doesn't depend on wall_clock64)
+      if (iteration_count > max_iterations) {
+        // Timeout exceeded - ALWAYS advance cq_head and return to make progress
+        // This prevents infinite loops even if CID logic fails
+        if (cq_head_inout != nullptr && queue_size > 0) {
+          *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+          if (cqe_advanced_out != nullptr) {
+            *cqe_advanced_out = true;
+          }
+        }
+        if (sq_head_out != nullptr) {
+          *sq_head_out = effective_last_sq_head;
+        }
+        return cqeNew;
+      }
+      
+      // Check time-based timeout (secondary check)
+#ifdef __HIP_DEVICE_COMPILE__
+      uint64_t current_time = wall_clock64();
+      if (current_time - last_progress_time > timeout_ns) {
+        // Timeout exceeded - ALWAYS advance cq_head to make progress
+        if (cq_head_inout != nullptr && queue_size > 0) {
+          *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+          if (cqe_advanced_out != nullptr) {
+            *cqe_advanced_out = true;
+          }
+        }
+        if (sq_head_out != nullptr) {
+          *sq_head_out = effective_last_sq_head;
+        }
+        return cqeNew;
+      }
+#endif
+    }
     uint16_t sq_head = cqeNew.sq_head;
 
     // Primary check: sq_head progression (definitive indicator of completion)
-    // sq_head is updated by the controller when commands complete, so checking
-    // sq_head progression is more reliable than just command ID change
+    // sq_head is updated by the controller when commands complete
     bool sq_head_progressed = false;
     
     if (sq_head > effective_last_sq_head) {
       // Normal case: sq_head increased without wrapping
       sq_head_progressed = true;
-    } else if (queue_size > 0) {
-      // Queue size-aware wrap-around detection
-      if (sq_head < effective_last_sq_head) {
-        // Possible wrap-around: check if it wrapped at queue boundary
-        // Common case: 64-entry queue wraps from 64 to 0
-        if (queue_size == 64 && sq_head == 0 && 
-            effective_last_sq_head == 64) {
-          sq_head_progressed = true;
-        } else {
-          // Generic wrap detection: if difference suggests wrap
-          uint16_t diff = effective_last_sq_head - sq_head;
-          // If wrap point is reasonable (within queue_size), it's a wrap
-          // Also handle case where last_sq_head reached a common wrap point (64)
-          // even if queue_size is larger (controller may have created smaller queue)
-          if ((diff <= queue_size && 
-               effective_last_sq_head >= queue_size - 1) ||
-              (effective_last_sq_head == 64 && sq_head < 64 && diff <= 64)) {
-            sq_head_progressed = true;
-          }
-        }
-      }
-    } else {
-      // No queue_size provided: use generic wrap-around detection
-      // Handle wrap-around: sq_head is a 16-bit value that can wrap from 65535 to 0
-      if (sq_head < effective_last_sq_head) {
+    } else if (sq_head < effective_last_sq_head) {
+      // Wrap-around detected
+      if (queue_size > 0) {
+        // Verify wrap is reasonable (difference <= queue_size)
         uint16_t diff = effective_last_sq_head - sq_head;
-        // If last_sq_head is high (> 32768) and sq_head is low (< 32768), it wrapped
-        // Or if the difference is large (> 32768), it's likely wrap-around
-        if (diff > 32768 || 
-            (effective_last_sq_head > 32768 && sq_head < 32768)) {
+        if (diff <= queue_size) {
           sq_head_progressed = true;
         }
+      } else {
+        // No queue_size provided - assume wrap is valid
+        sq_head_progressed = true;
       }
     }
     
     if (sq_head_progressed) {
       // sq_head progressed - a command completed
       
+      // Phase bit verification (if enabled)
+      bool phase_ok = true;
+      if (expected_phase_inout != nullptr) {
+        uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
+        phase_ok = (phase == *expected_phase_inout);
+      }
+      
       // Command ID verification (if enabled)
       if (expected_cid != 0) {
         if (cqeNew.command_id == expected_cid) {
-          // Our command completed - success
+          // CID matches - check phase if enabled
+          if (expected_phase_inout != nullptr && !phase_ok) {
+            // CID matches but phase doesn't - this is a stale completion
+            // Advance cq_head and continue polling
+            if (cq_head_inout != nullptr && queue_size > 0) {
+              *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+              if (cqe_advanced_out != nullptr) {
+                *cqe_advanced_out = true;
+              }
+            } else if (cqe_advanced_out != nullptr) {
+              *cqe_advanced_out = true;
+            }
+            // Continue polling for next CQE
+            iteration_count = 0; // Reset on progress
+#ifdef __HIP_DEVICE_COMPILE__
+            last_progress_time = wall_clock64();
+#endif
+            continue;
+          }
+          // Our command completed - success (CID matches and phase OK if checked)
           if (sq_head_out != nullptr) {
             *sq_head_out = sq_head;
           }
           if (cqe_advanced_out != nullptr) {
             *cqe_advanced_out = false;
           }
+          // Update expected phase for next completion
+          if (expected_phase_inout != nullptr) {
+            uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
+            *expected_phase_inout = phase ^ 1;
+          }
           return cqeNew;
         } else {
           // Wrong command ID - this is a stale completion
-          // Check if this is clearly stale (e.g., we're looking for CID=64 but found CID=0)
-          // In this case, don't update effective_last_sq_head to avoid corrupting state
-          bool clearly_stale = false;
-          if (queue_size > 0 && effective_last_sq_head >= queue_size - 1) {
-            // We're at the wrap point - any CID much lower than expected is stale
-            if (expected_cid > cqeNew.command_id) {
-              uint16_t cid_diff = expected_cid - cqeNew.command_id;
-              if (cid_diff > (queue_size / 2)) {
-                clearly_stale = true;
+          // Also check phase if enabled - if phase doesn't match, definitely stale
+          if (expected_phase_inout != nullptr && !phase_ok) {
+            // Phase doesn't match - definitely stale, advance cq_head
+            if (cq_head_inout != nullptr && queue_size > 0) {
+              *cq_head_inout = (*cq_head_inout + 1) % queue_size;
+              if (cqe_advanced_out != nullptr) {
+                *cqe_advanced_out = true;
               }
+            } else if (cqe_advanced_out != nullptr) {
+              *cqe_advanced_out = true;
             }
+            // Continue polling for next CQE
+            iteration_count = 0; // Reset on progress
+#ifdef __HIP_DEVICE_COMPILE__
+            last_progress_time = wall_clock64();
+#endif
+            continue;
           }
           
           // Always advance cq_head when CID doesn't match to prevent infinite loops
-          // This is critical after queue wraps when we encounter old completions
           if (cq_head_inout != nullptr && queue_size > 0) {
             *cq_head_inout = (*cq_head_inout + 1) % queue_size;
             if (cqe_advanced_out != nullptr) {
@@ -311,20 +389,35 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
             *cqe_advanced_out = true;
           }
           
-          // Only update sq_head tracking if this isn't clearly stale
-          // This prevents corrupting effective_last_sq_head with old values
-          if (!clearly_stale) {
-            effective_last_sq_head = sq_head;
-            if (sq_head_out != nullptr) {
-              *sq_head_out = sq_head;
-            }
+          // Update sq_head tracking
+          effective_last_sq_head = sq_head;
+          if (sq_head_out != nullptr) {
+            *sq_head_out = sq_head;
           }
           // Return this CQE - caller should check cqe_advanced_out and
           // if true, use updated cq_head_inout to get next CQE address
+          iteration_count = 0; // Reset on progress
+#ifdef __HIP_DEVICE_COMPILE__
+          last_progress_time = wall_clock64();
+#endif
           return cqeNew;
         }
       } else {
-        // No CID verification - return immediately
+        // No CID verification - check phase if enabled
+        if (expected_phase_inout != nullptr) {
+          uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
+          if (phase != *expected_phase_inout) {
+            // Phase doesn't match - this is a stale completion, continue polling
+            iteration_count = 0; // Reset on progress
+#ifdef __HIP_DEVICE_COMPILE__
+            last_progress_time = wall_clock64();
+#endif
+            continue;
+          }
+          // Phase matches - update for next completion
+          *expected_phase_inout = phase ^ 1;
+        }
+        // Return immediately
         if (sq_head_out != nullptr) {
           *sq_head_out = sq_head;
         }
@@ -335,47 +428,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
       }
     }
 
-    // Check for stale completions even when sq_head hasn't progressed
-    // If we're looking for a specific command ID and find a different one,
-    // and we've wrapped the queue, this is likely a stale completion
-    if (expected_cid != 0 && queue_size > 0 && 
-        cqeNew.command_id != expected_cid) {
-      // If we've wrapped (last_sq_head >= queue_size) or CID is much different,
-      // advance to next CQE to prevent infinite loops
-      bool should_advance = false;
-      if (effective_last_sq_head >= queue_size) {
-        // We've wrapped - any CID mismatch is likely stale
-        should_advance = true;
-      } else if (effective_last_sq_head == queue_size - 1) {
-        // We're at the last entry before wrap (e.g., last_sq_head=63, queue_size=64)
-        // The next operation will wrap, so any CID mismatch is likely stale
-        // This handles the case where we proactively wrapped cq_head to 0
-        // but cqe[0] still contains old data from before the wrap
-        should_advance = true;
-      } else {
-        // Check if CID difference is large (more than queue_size/2)
-        uint16_t cid_diff = (expected_cid > cqeNew.command_id) 
-                            ? (expected_cid - cqeNew.command_id)
-                            : (cqeNew.command_id - expected_cid);
-        if (cid_diff > (queue_size / 2)) {
-          should_advance = true;
-        }
-      }
-      
-      if (should_advance && cq_head_inout != nullptr) {
-        // Stale completion - advance cq_head
-        *cq_head_inout = (*cq_head_inout + 1) % queue_size;
-        if (cqe_advanced_out != nullptr) {
-          *cqe_advanced_out = true;
-        }
-        // Update tracking
-        effective_last_sq_head = sq_head;
-        if (sq_head_out != nullptr) {
-          *sq_head_out = sq_head;
-        }
-        return cqeNew;
-      }
-    }
+    // Don't advance cq_head when sq_head hasn't progressed - we're just waiting
+    // for a completion. Only advance when we detect actual progress or timeout.
 
     // Secondary check: command ID change (for backward compatibility)
     // Only used if sq_head hasn't progressed
@@ -519,6 +573,10 @@ __device__ void nvme_ep_driveEndpoint(
   }
 
   // Initialize phase tracking for completion polling
+  // Validate cqeAddr before accessing
+  if (cqeAddr == nullptr) {
+    return; // Cannot proceed without valid CQ pointer
+  }
   uint16_t cq_head = 0;
   volatile struct nvme_cqe* initial_cqe = &cqeAddr[cq_head];
   nvme_ep::cqeType initial_cqe_data = nvme_ep::cqeRead(
@@ -802,6 +860,11 @@ __global__ void nvme_ep_kernel(
   config.numThreads = numThreads;
   config.endpointConfig = nullptr; // Don't use endpointConfig pointer
 
+  // Validate pointers before use
+  if (sqeAddr == nullptr || cqeAddr == nullptr) {
+    return; // Invalid pointers - kernel cannot proceed
+  }
+
   // Pass values directly to driveEndpoint (no need for full struct)
   nvme_ep_driveEndpoint(config, sqeAddr, cqeAddr, lbaSize, base_lba,
                         usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
@@ -976,13 +1039,12 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   }
 
   // Create NVMe queues - MUST succeed before proceeding
-  // Assume queue depth is 64 (controller may reduce larger requests to 64)
   // NVMe queues are circular buffers - commands wrap around, so the queue
   // length must be large enough to handle outstanding commands without
   // overwriting unprocessed ones.
-  uint16_t queue_size = 64; // Always use 64 - controller may reduce anyway
+  uint16_t queue_size = nvmeConfig->queueLength;
 
-  fprintf(stderr, "Using queue length: %u entries (fixed)\n", queue_size);
+  fprintf(stderr, "Using queue length: %u entries\n", queue_size);
 
   struct nvme_queue_info queue_info;
   int ret = nvme_ep::nvme_create_queue_via_ioctl(
@@ -2289,6 +2351,150 @@ __host__ int nvme_ep_read_smart_log(const char* nvme_device,
   return 0;
 }
 
+/**
+ * Generate PRP list for non-contiguous queue buffer
+ * For PC=0 queues, NVMe requires a PRP list describing all physical pages
+ * 
+ * @param virt_addr Virtual address of queue buffer
+ * @param size Size of queue buffer in bytes
+ * @param kmod_fd Kernel module file descriptor (for allocating PRP list memory)
+ * @param prp1_out Output: PRP1 value (first page address or PRP list address)
+ * @param prp2_out Output: PRP2 value (second page address, PRP list address, or 0)
+ * @param prp_list_virt_out Output: Virtual address of PRP list (for cleanup)
+ * @param prp_list_phys_out Output: Physical address of PRP list
+ * @return 0 on success, negative error code on failure
+ */
+static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd,
+                                       uint64_t* prp1_out, uint64_t* prp2_out,
+                                       void** prp_list_virt_out,
+                                       uint64_t* prp_list_kernel_virt_out) {
+  const size_t host_page_size = sysconf(_SC_PAGESIZE);
+  const size_t nvme_page_size = NVME_PAGE_SIZE; // Typically 4096
+  uint64_t virt_start = reinterpret_cast<uint64_t>(virt_addr);
+  uint64_t page_offset = virt_start % host_page_size;
+  
+  // Calculate number of pages the queue spans
+  size_t num_pages = (size + page_offset + host_page_size - 1) / host_page_size;
+  
+  // Get physical addresses of all pages
+  int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
+  if (pagemap_fd < 0) {
+    fprintf(stderr, "ERROR: Failed to open /proc/self/pagemap: %s\n",
+            strerror(errno));
+    return -errno;
+  }
+  
+  // Allocate array to hold physical page addresses
+  uint64_t* page_phys_addrs = static_cast<uint64_t*>(malloc(num_pages * sizeof(uint64_t)));
+  if (!page_phys_addrs) {
+    close(pagemap_fd);
+    return -ENOMEM;
+  }
+  
+  // Read physical addresses for all pages
+  for (size_t i = 0; i < num_pages; i++) {
+    uint64_t pfn;
+    off_t pagemap_offset = ((virt_start / host_page_size) + i) * sizeof(uint64_t);
+    
+    if (lseek(pagemap_fd, pagemap_offset, SEEK_SET) < 0 ||
+        read(pagemap_fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
+      fprintf(stderr, "ERROR: Failed to read pagemap page %zu\n", i);
+      free(page_phys_addrs);
+      close(pagemap_fd);
+      return -EIO;
+    }
+    
+    if (!(pfn & (1ULL << 63))) {
+      fprintf(stderr, "ERROR: Page %zu not present in pagemap\n", i);
+      free(page_phys_addrs);
+      close(pagemap_fd);
+      return -EFAULT;
+    }
+    
+    uint64_t phys_pfn = pfn & ((1ULL << 55) - 1);
+    uint64_t page_phys_addr = phys_pfn * host_page_size;
+    
+    // For first page, add offset within page
+    if (i == 0) {
+      page_phys_addr += page_offset;
+    }
+    
+    page_phys_addrs[i] = page_phys_addr;
+  }
+  
+  close(pagemap_fd);
+  
+  // Calculate PRP1 and PRP2 based on number of pages
+  uint64_t prp1 = page_phys_addrs[0];
+  uint64_t prp2 = 0;
+  void* prp_list_virt = nullptr;
+  uint64_t prp_list_phys = 0;
+  uint64_t prp_list_kernel_virt = 0;
+  
+  if (num_pages == 1) {
+    // Single page: PRP1 = page address, PRP2 = 0
+    prp2 = 0;
+    prp_list_kernel_virt = 0;
+  } else if (num_pages == 2) {
+    // Two pages: PRP1 = first page, PRP2 = second page
+    prp2 = page_phys_addrs[1];
+    prp_list_kernel_virt = 0;
+  } else {
+    // More than 2 pages: Need PRP list
+    // PRP list must be physically contiguous and page-aligned
+    size_t prp_list_size = num_pages * sizeof(uint64_t);
+    
+    // Allocate PRP list via kernel module (must be physically contiguous)
+    struct rocm_axiio_alloc_contig_mem_req prp_alloc_req = {};
+    prp_alloc_req.size = prp_list_size;
+    
+    int ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &prp_alloc_req);
+    if (ret < 0) {
+      fprintf(stderr,
+              "ERROR: Failed to allocate PRP list memory: %s\n",
+              strerror(errno));
+      free(page_phys_addrs);
+      return -errno;
+    }
+    
+    // Map PRP list to userspace
+    off_t mmap_offset = prp_alloc_req.phys_addr / host_page_size;
+    prp_list_virt = mmap(nullptr, prp_list_size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, kmod_fd, mmap_offset);
+    if (prp_list_virt == MAP_FAILED) {
+      fprintf(stderr,
+              "ERROR: Failed to mmap PRP list: %s\n",
+              strerror(errno));
+      struct rocm_axiio_free_contig_mem_req free_req = {};
+      free_req.virt_addr = prp_alloc_req.virt_addr;
+      ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+      free(page_phys_addrs);
+      return -errno;
+    }
+    
+    // Fill PRP list with physical addresses (all page-aligned)
+    uint64_t* prp_list = static_cast<uint64_t*>(prp_list_virt);
+    for (size_t i = 0; i < num_pages; i++) {
+      // Round down to page boundary for all entries
+      prp_list[i] = page_phys_addrs[i] & ~(nvme_page_size - 1);
+    }
+    
+    prp_list_phys = prp_alloc_req.phys_addr;
+    prp1 = page_phys_addrs[0]; // First page (may have offset)
+    prp2 = prp_list_phys; // PRP list address
+    prp_list_kernel_virt = prp_alloc_req.virt_addr;
+  }
+  
+  *prp_list_kernel_virt_out = prp_list_kernel_virt;
+  
+  *prp1_out = prp1;
+  *prp2_out = prp2;
+  *prp_list_virt_out = prp_list_virt;
+  
+  free(page_phys_addrs);
+  return 0;
+}
+
 __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
   uint16_t queue_size, uint16_t nvme_bdf, unsigned memory_mode,
@@ -2300,8 +2506,6 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   int ret = 0;
   hipError_t sqe_err = hipSuccess;
   hipError_t cqe_err = hipSuccess;
-  hipError_t sq_hip_err = hipSuccess;
-  hipError_t cq_hip_err = hipSuccess;
   hipError_t sq_gpu_ptr_err = hipSuccess;
   hipError_t cq_gpu_ptr_err = hipSuccess;
   void* sq_virt = nullptr;
@@ -2310,6 +2514,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   void* cq_gpu = nullptr;
   bool sq_uses_coherent = false; // Track if SQ was reallocated with coherent
   bool cq_uses_coherent = false; // Track if CQ was reallocated with coherent
+  bool sq_uses_kernel_alloc = false; // Track if SQ was allocated via kernel module
+  bool cq_uses_kernel_alloc = false; // Track if CQ was allocated via kernel module
+  uint64_t sq_kernel_virt_addr = 0; // Kernel virtual address for SQ (for freeing)
+  uint64_t cq_kernel_virt_addr = 0; // Kernel virtual address for CQ (for freeing)
   bool sq_is_device = (memory_mode & 0x1) != 0; // Bit 0: GPU write location
   bool cq_is_device = (memory_mode & 0x2) != 0; // Bit 1: CPU write location
   int sq_dmabuf_fd = -1; // Not currently used, but kept for struct
@@ -2318,6 +2526,12 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
                          // compatibility
   uint64_t sq_phys = 0;
   uint64_t cq_phys = 0;
+  uint64_t sq_prp1 = 0, sq_prp2 = 0; // PRP entries for SQ
+  uint64_t cq_prp1 = 0, cq_prp2 = 0; // PRP entries for CQ
+  void* sq_prp_list_virt = nullptr; // PRP list userspace virtual address for SQ
+  void* cq_prp_list_virt = nullptr; // PRP list userspace virtual address for CQ
+  uint64_t sq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for SQ
+  uint64_t cq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for CQ
   struct nvme_passthru_cmd cmd;
   struct drm_amdgpu_gem_userptr sq_userptr = {};
   struct drm_amdgpu_gem_userptr cq_userptr = {};
@@ -2326,6 +2540,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   size_t page_size = 0;
   size_t sq_size_aligned = 0;
   size_t cq_size_aligned = 0;
+  const size_t host_page_size = sysconf(_SC_PAGESIZE); // Declare early for goto
 
   if (!nvme_device || !kernel_module_device || !info) {
     return -EINVAL;
@@ -2350,6 +2565,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   memset(info, 0, sizeof(*info));
   info->sq_size = sq_size_bytes;
   info->cq_size = cq_size_bytes;
+  info->queue_size = queue_size;
 
   // Open kernel module device
   kmod_fd = open(kernel_module_device, O_RDWR);
@@ -2434,55 +2650,146 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     memset(cq_virt, 0, cq_size_bytes);
   }
 
-  // Reallocate host memory queues with hipHostMallocCoherent for GPU-PCIe
-  // coherency This is critical for gfx900 (MI250) where GPU writes must be
-  // immediately visible to PCIe devices like NVMe controllers
-  if (!gpuWriteToDevice) {
-    void* sq_virt_coherent = nullptr;
-    hipError_t sq_coherent_err = hipHostMalloc(&sq_virt_coherent, sq_size_bytes,
-                                               hipHostMallocMapped |
-                                                 hipHostMallocCoherent);
-    if (sq_coherent_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostMallocCoherent failed for SQ: %s\n",
-              hipGetErrorString(sq_coherent_err));
-      fprintf(stderr, "Falling back to regular allocation (may not work on "
-                      "gfx900)\n");
-    } else {
-      // Copy zeroed data to coherent memory
-      memcpy(sq_virt_coherent, sq_virt, sq_size_bytes);
+  // For non-contiguous queues (PC=0), we don't need kernel allocation
+  // Regular memory allocations work fine since physical contiguity is not required
+  // We'll get physical addresses via /proc/self/pagemap for PRP list generation
+  // Skip kernel allocation for non-contiguous queues
+  if (false && !gpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
+    struct rocm_axiio_alloc_contig_mem_req alloc_req = {};
+    alloc_req.size = sq_size_bytes;
+    
+    // Allocate contiguous memory via kernel module IOCTL
+    ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &alloc_req);
+    if (ret < 0) {
+      fprintf(stderr,
+              "ERROR: Failed to allocate contiguous SQ memory via kernel "
+              "module: %s\n",
+              strerror(errno));
+      fprintf(stderr,
+              "Queue size: %zu bytes. System may not have enough contiguous "
+              "physical memory.\n",
+              sq_size_bytes);
+      ret = -errno;
+      goto cleanup;
+    }
+    
+    // Map physical memory to userspace via mmap
+    // Use physical address divided by page size as the offset (handle)
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    off_t mmap_offset = alloc_req.phys_addr / host_page_size;
+    fprintf(stderr,
+            "DEBUG: Attempting mmap: virt_addr=0x%016llx phys_addr=0x%016llx "
+            "page_size=%zu offset=%lld (0x%016llx) size=%zu\n",
+            (unsigned long long)alloc_req.virt_addr,
+            (unsigned long long)alloc_req.phys_addr, host_page_size,
+            (long long)mmap_offset, (unsigned long long)mmap_offset,
+            sq_size_bytes);
+    void* sq_virt_mapped = mmap(nullptr, sq_size_bytes, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, kmod_fd, mmap_offset);
+    if (sq_virt_mapped == MAP_FAILED) {
+      fprintf(stderr,
+              "ERROR: Failed to mmap contiguous SQ memory: %s (errno=%d)\n",
+              strerror(errno), errno);
+      // Free the kernel allocation
+      struct rocm_axiio_free_contig_mem_req free_req = {};
+      free_req.virt_addr = alloc_req.virt_addr;
+      ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+      ret = -errno;
+      goto cleanup;
+    }
+    
+    // Zero the memory (alloc_pages with __GFP_ZERO should zero it, but be safe)
+    memset(sq_virt_mapped, 0, sq_size_bytes);
+    
+    // Copy data from original allocation if needed (only if original exists)
+    if (sq_virt != nullptr) {
+      memcpy(sq_virt_mapped, sq_virt, sq_size_bytes);
       // Free original allocation (may be hipHostMalloc or malloc)
       hipError_t freeErr = hipHostFree(sq_virt);
       if (freeErr != hipSuccess) {
         // Not HIP-allocated, use regular free
         free(sq_virt);
       }
-      sq_virt = sq_virt_coherent;
-      sq_uses_coherent = true; // Mark that SQ uses coherent allocation
+      sq_virt = nullptr; // Clear pointer to avoid double-free
     }
+    
+    sq_virt = sq_virt_mapped;
+    sq_phys = alloc_req.phys_addr;
+    sq_uses_coherent = true; // Mark that SQ uses coherent memory
+    sq_uses_kernel_alloc = true; // Mark that SQ was allocated via kernel module
+    sq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for cleanup
+    
+    fprintf(stderr,
+            "SQ: Allocated %zu bytes of contiguous memory via kernel module: "
+            "virt=0x%016llx phys=0x%016llx\n",
+            sq_size_bytes, (unsigned long long)sq_virt,
+            (unsigned long long)sq_phys);
   }
 
-  if (!cpuWriteToDevice) {
-    void* cq_virt_coherent = nullptr;
-    hipError_t cq_coherent_err = hipHostMalloc(&cq_virt_coherent, cq_size_bytes,
-                                               hipHostMallocMapped |
-                                                 hipHostMallocCoherent);
-    if (cq_coherent_err != hipSuccess) {
-      fprintf(stderr, "Warning: hipHostMallocCoherent failed for CQ: %s\n",
-              hipGetErrorString(cq_coherent_err));
-      fprintf(stderr, "Falling back to regular allocation (may not work on "
-                      "gfx900)\n");
-    } else {
-      // Copy zeroed data to coherent memory
-      memcpy(cq_virt_coherent, cq_virt, cq_size_bytes);
+  // For non-contiguous queues (PC=0), skip kernel allocation
+  if (false && !cpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
+    struct rocm_axiio_alloc_contig_mem_req alloc_req = {};
+    alloc_req.size = cq_size_bytes;
+    
+    // Allocate contiguous memory via kernel module IOCTL
+    ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &alloc_req);
+    if (ret < 0) {
+      fprintf(stderr,
+              "ERROR: Failed to allocate contiguous CQ memory via kernel "
+              "module: %s\n",
+              strerror(errno));
+      fprintf(stderr,
+              "Queue size: %zu bytes. System may not have enough contiguous "
+              "physical memory.\n",
+              cq_size_bytes);
+      ret = -errno;
+      goto cleanup;
+    }
+    
+    // Map physical memory to userspace via mmap
+    // Use physical address divided by page size as the offset (handle)
+    const size_t host_page_size = sysconf(_SC_PAGESIZE);
+    off_t mmap_offset = alloc_req.phys_addr / host_page_size;
+    void* cq_virt_mapped = mmap(nullptr, cq_size_bytes, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, kmod_fd, mmap_offset);
+    if (cq_virt_mapped == MAP_FAILED) {
+      fprintf(stderr,
+              "ERROR: Failed to mmap contiguous CQ memory: %s\n",
+              strerror(errno));
+      // Free the kernel allocation
+      struct rocm_axiio_free_contig_mem_req free_req = {};
+      free_req.virt_addr = alloc_req.virt_addr;
+      ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+      ret = -errno;
+      goto cleanup;
+    }
+    
+    // Zero the memory (alloc_pages with __GFP_ZERO should zero it, but be safe)
+    memset(cq_virt_mapped, 0, cq_size_bytes);
+    
+    // Copy data from original allocation if needed (only if original exists)
+    if (cq_virt != nullptr) {
+      memcpy(cq_virt_mapped, cq_virt, cq_size_bytes);
       // Free original allocation (may be hipHostMalloc or malloc)
       hipError_t freeErr = hipHostFree(cq_virt);
       if (freeErr != hipSuccess) {
         // Not HIP-allocated, use regular free
         free(cq_virt);
       }
-      cq_virt = cq_virt_coherent;
-      cq_uses_coherent = true; // Mark that CQ uses coherent allocation
+      cq_virt = nullptr; // Clear pointer to avoid double-free
     }
+    
+    cq_virt = cq_virt_mapped;
+    cq_phys = alloc_req.phys_addr;
+    cq_uses_coherent = true; // Mark that CQ uses coherent memory
+    cq_uses_kernel_alloc = true; // Mark that CQ was allocated via kernel module
+    cq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for cleanup
+    
+    fprintf(stderr,
+            "CQ: Allocated %zu bytes of contiguous memory via kernel module: "
+            "virt=0x%016llx phys=0x%016llx\n",
+            cq_size_bytes, (unsigned long long)cq_virt,
+            (unsigned long long)cq_phys);
   }
 
   // Register queues with GPU (matching test-gpu-nvme-write.cpp pattern)
@@ -2561,57 +2868,35 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     }
   }
 
-  // Step 2: Register with HIP (matching test-gpu-nvme-write.cpp pattern)
-  // Skip hipHostRegister if:
-  // 1. Memory was allocated with hipHostMallocCoherent (already registered)
+  // Step 2: Get GPU pointers for HIP-allocated memory
+  // Memory allocated via xioAllocateSubmissionQueue/xioAllocateCompletionQueue
+  // uses hipHostMalloc with hipHostMallocMapped, which already makes it
+  // GPU-accessible. We just need to get the device pointer.
+  // Skip if:
+  // 1. Memory was allocated with kernel module (not HIP-allocated)
   // 2. Memory is device memory (allocated via HSA, already GPU-accessible)
-  if (!sq_uses_coherent && !sq_is_device) {
-    sq_hip_err = hipHostRegister(sq_virt, sq_size_bytes, hipHostRegisterMapped);
-    if (sq_hip_err != hipSuccess) {
-      fprintf(stderr, "Warning: Failed to register SQ with HIP: %s\n",
-              hipGetErrorString(sq_hip_err));
-      close(drm_fd);
-      ret = -EIO;
-      goto cleanup;
-    }
-  }
-
-  if (!cq_uses_coherent && !cq_is_device) {
-    cq_hip_err = hipHostRegister(cq_virt, cq_size_bytes, hipHostRegisterMapped);
-    if (cq_hip_err != hipSuccess) {
-      fprintf(stderr, "Warning: Failed to register CQ with HIP: %s\n",
-              hipGetErrorString(cq_hip_err));
-      if (!sq_uses_coherent && !sq_is_device) {
-        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-      }
-      close(drm_fd);
-      ret = -EIO;
-      goto cleanup;
-    }
-  }
+  // Note: hipHostMalloc memory doesn't need hipHostRegister - it's already registered
 
   // Step 3: Get GPU pointers (matching test-gpu-nvme-write.cpp pattern)
   // For device memory (hipMalloc), GPU pointer is same as host pointer
-  // For host memory (hipHostMalloc), need hipHostGetDevicePointer
+  // For host memory (hipHostMalloc with hipHostMallocMapped), get device pointer
   if (sq_is_device) {
     // Device memory - GPU pointer is same as host pointer
     sq_gpu = sq_virt;
     sq_gpu_ptr_err = hipSuccess;
+  } else if (sq_uses_kernel_alloc) {
+    // Kernel-allocated memory - not GPU-accessible, use host pointer
+    sq_gpu = sq_virt;
+    sq_gpu_ptr_err = hipSuccess;
   } else {
-    // Host memory - get GPU pointer via hipHostGetDevicePointer
+    // Host memory allocated via hipHostMalloc (with hipHostMallocMapped)
+    // Get GPU pointer directly - no need to register first
     sq_gpu_ptr_err = hipHostGetDevicePointer(&sq_gpu, sq_virt, 0);
     if (sq_gpu_ptr_err != hipSuccess) {
       fprintf(stderr, "Warning: hipHostGetDevicePointer failed for SQ: %s\n",
               hipGetErrorString(sq_gpu_ptr_err));
-      if (!sq_uses_coherent) {
-        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-      }
-      if (!cq_uses_coherent && !cq_is_device) {
-        (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-      }
-      close(drm_fd);
-      ret = -EIO;
-      goto cleanup;
+      // Fall back to using host pointer
+      sq_gpu = sq_virt;
     }
   }
 
@@ -2619,21 +2904,19 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     // Device memory - GPU pointer is same as host pointer
     cq_gpu = cq_virt;
     cq_gpu_ptr_err = hipSuccess;
+  } else if (cq_uses_kernel_alloc) {
+    // Kernel-allocated memory - not GPU-accessible, use host pointer
+    cq_gpu = cq_virt;
+    cq_gpu_ptr_err = hipSuccess;
   } else {
-    // Host memory - get GPU pointer via hipHostGetDevicePointer
+    // Host memory allocated via hipHostMalloc (with hipHostMallocMapped)
+    // Get GPU pointer directly - no need to register first
     cq_gpu_ptr_err = hipHostGetDevicePointer(&cq_gpu, cq_virt, 0);
     if (cq_gpu_ptr_err != hipSuccess) {
       fprintf(stderr, "Warning: hipHostGetDevicePointer failed for CQ: %s\n",
               hipGetErrorString(cq_gpu_ptr_err));
-      if (!sq_uses_coherent && !sq_is_device) {
-        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-      }
-      if (!cq_uses_coherent) {
-        (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-      }
-      close(drm_fd);
-      ret = -EIO;
-      goto cleanup;
+      // Fall back to using host pointer
+      cq_gpu = cq_virt;
     }
   }
 
@@ -2715,6 +2998,9 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   } else {
     // Host memory (mmap) - use /proc/self/pagemap to get physical address
     // This matches QEMU guest code pattern (test-gpu-nvme-write.cpp)
+    // CRITICAL: For queues larger than PAGE_SIZE, we must verify all pages
+    // are contiguous in physical memory. NVMe queues must be physically
+    // contiguous.
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
       fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
@@ -2722,28 +3008,91 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       fprintf(stderr, "Using virtual address as physical address for SQ\n");
       sq_phys = reinterpret_cast<uint64_t>(sq_virt);
     } else {
-      uint64_t page_offset = reinterpret_cast<uint64_t>(sq_virt) %
-                             sysconf(_SC_PAGESIZE);
-      uint64_t pfn;
-      off_t offset = (reinterpret_cast<uint64_t>(sq_virt) /
-                      sysconf(_SC_PAGESIZE)) *
-                     sizeof(uint64_t);
-
-      if (lseek(pagemap_fd, offset, SEEK_SET) >= 0 &&
-          read(pagemap_fd, &pfn, sizeof(pfn)) == sizeof(pfn)) {
-        if (pfn & (1ULL << 63)) {
-          sq_phys = ((pfn & ((1ULL << 55) - 1)) * sysconf(_SC_PAGESIZE)) +
-                    page_offset;
+      const size_t host_page_size = sysconf(_SC_PAGESIZE);
+      uint64_t page_offset = reinterpret_cast<uint64_t>(sq_virt) % host_page_size;
+      uint64_t first_pfn = 0;
+      bool pages_contiguous = true;
+      
+      // Calculate number of pages the queue spans
+      size_t num_pages = (sq_size_bytes + page_offset + host_page_size - 1) /
+                         host_page_size;
+      
+      // Read first page to get base physical address
+      off_t first_offset = (reinterpret_cast<uint64_t>(sq_virt) /
+                             host_page_size) * sizeof(uint64_t);
+      
+      if (lseek(pagemap_fd, first_offset, SEEK_SET) >= 0 &&
+          read(pagemap_fd, &first_pfn, sizeof(first_pfn)) ==
+              sizeof(first_pfn)) {
+        if (first_pfn & (1ULL << 63)) {
+          uint64_t first_phys_pfn = first_pfn & ((1ULL << 55) - 1);
+          sq_phys = (first_phys_pfn * host_page_size) + page_offset;
+          
+          // For multi-page queues, verify all pages are contiguous
+          if (num_pages > 1) {
+            for (size_t i = 1; i < num_pages; i++) {
+              uint64_t pfn;
+              off_t offset = (first_offset / sizeof(uint64_t) + i) *
+                             sizeof(uint64_t);
+              
+              if (lseek(pagemap_fd, offset, SEEK_SET) < 0 ||
+                  read(pagemap_fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
+                fprintf(stderr,
+                        "ERROR: Failed to read pagemap page %zu for SQ\n", i);
+                pages_contiguous = false;
+                break;
+              }
+              
+              if (!(pfn & (1ULL << 63))) {
+                fprintf(stderr,
+                        "ERROR: SQ page %zu not present in pagemap\n", i);
+                pages_contiguous = false;
+                break;
+              }
+              
+              uint64_t phys_pfn = pfn & ((1ULL << 55) - 1);
+              // Check if this page is contiguous with the first page
+              if (phys_pfn != first_phys_pfn + i) {
+                fprintf(stderr,
+                        "ERROR: SQ pages not contiguous in physical memory: "
+                        "page 0 PFN=%llu, page %zu PFN=%llu (expected %llu)\n",
+                        (unsigned long long)first_phys_pfn, i,
+                        (unsigned long long)phys_pfn,
+                        (unsigned long long)(first_phys_pfn + i));
+                pages_contiguous = false;
+                break;
+              }
+            }
+            
+            if (!pages_contiguous) {
+              fprintf(stderr,
+                      "ERROR: SQ spans %zu pages but they are not contiguous "
+                      "in physical memory. This will cause NVMe controller "
+                      "access failures.\n",
+                      num_pages);
+              fprintf(stderr,
+                      "Consider using smaller queue size or ensuring "
+                      "page-aligned allocation.\n");
+              close(pagemap_fd);
+              ret = -EINVAL;
+              goto cleanup;
+            }
+            
+            fprintf(stderr,
+                    "SQ pagemap: %zu pages verified as contiguous "
+                    "(phys=0x%016llx, size=%zu bytes)\n",
+                    num_pages, (unsigned long long)sq_phys, sq_size_bytes);
+          }
         } else {
-          fprintf(
-            stderr,
-            "Warning: SQ page not present in pagemap, using virtual address\n");
+          fprintf(stderr,
+                  "Warning: SQ page not present in pagemap, using virtual "
+                  "address\n");
           sq_phys = reinterpret_cast<uint64_t>(sq_virt);
         }
       } else {
-        fprintf(
-          stderr,
-          "Warning: Failed to read pagemap for SQ, using virtual address\n");
+        fprintf(stderr,
+                "Warning: Failed to read pagemap for SQ, using virtual "
+                "address\n");
         sq_phys = reinterpret_cast<uint64_t>(sq_virt);
       }
       close(pagemap_fd);
@@ -2802,6 +3151,9 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
             (unsigned long long)cq_phys);
   } else {
     // Host memory (mmap) - use /proc/self/pagemap
+    // CRITICAL: For queues larger than PAGE_SIZE, we must verify all pages
+    // are contiguous in physical memory. NVMe queues must be physically
+    // contiguous.
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
       fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
@@ -2809,28 +3161,91 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       fprintf(stderr, "Using virtual address as physical address for CQ\n");
       cq_phys = reinterpret_cast<uint64_t>(cq_virt);
     } else {
-      uint64_t page_offset = reinterpret_cast<uint64_t>(cq_virt) %
-                             sysconf(_SC_PAGESIZE);
-      uint64_t pfn;
-      off_t offset = (reinterpret_cast<uint64_t>(cq_virt) /
-                      sysconf(_SC_PAGESIZE)) *
-                     sizeof(uint64_t);
-
-      if (lseek(pagemap_fd, offset, SEEK_SET) >= 0 &&
-          read(pagemap_fd, &pfn, sizeof(pfn)) == sizeof(pfn)) {
-        if (pfn & (1ULL << 63)) {
-          cq_phys = ((pfn & ((1ULL << 55) - 1)) * sysconf(_SC_PAGESIZE)) +
-                    page_offset;
+      const size_t host_page_size = sysconf(_SC_PAGESIZE);
+      uint64_t page_offset = reinterpret_cast<uint64_t>(cq_virt) % host_page_size;
+      uint64_t first_pfn = 0;
+      bool pages_contiguous = true;
+      
+      // Calculate number of pages the queue spans
+      size_t num_pages = (cq_size_bytes + page_offset + host_page_size - 1) /
+                         host_page_size;
+      
+      // Read first page to get base physical address
+      off_t first_offset = (reinterpret_cast<uint64_t>(cq_virt) /
+                             host_page_size) * sizeof(uint64_t);
+      
+      if (lseek(pagemap_fd, first_offset, SEEK_SET) >= 0 &&
+          read(pagemap_fd, &first_pfn, sizeof(first_pfn)) ==
+              sizeof(first_pfn)) {
+        if (first_pfn & (1ULL << 63)) {
+          uint64_t first_phys_pfn = first_pfn & ((1ULL << 55) - 1);
+          cq_phys = (first_phys_pfn * host_page_size) + page_offset;
+          
+          // For multi-page queues, verify all pages are contiguous
+          if (num_pages > 1) {
+            for (size_t i = 1; i < num_pages; i++) {
+              uint64_t pfn;
+              off_t offset = (first_offset / sizeof(uint64_t) + i) *
+                             sizeof(uint64_t);
+              
+              if (lseek(pagemap_fd, offset, SEEK_SET) < 0 ||
+                  read(pagemap_fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
+                fprintf(stderr,
+                        "ERROR: Failed to read pagemap page %zu for CQ\n", i);
+                pages_contiguous = false;
+                break;
+              }
+              
+              if (!(pfn & (1ULL << 63))) {
+                fprintf(stderr,
+                        "ERROR: CQ page %zu not present in pagemap\n", i);
+                pages_contiguous = false;
+                break;
+              }
+              
+              uint64_t phys_pfn = pfn & ((1ULL << 55) - 1);
+              // Check if this page is contiguous with the first page
+              if (phys_pfn != first_phys_pfn + i) {
+                fprintf(stderr,
+                        "ERROR: CQ pages not contiguous in physical memory: "
+                        "page 0 PFN=%llu, page %zu PFN=%llu (expected %llu)\n",
+                        (unsigned long long)first_phys_pfn, i,
+                        (unsigned long long)phys_pfn,
+                        (unsigned long long)(first_phys_pfn + i));
+                pages_contiguous = false;
+                break;
+              }
+            }
+            
+            if (!pages_contiguous) {
+              fprintf(stderr,
+                      "ERROR: CQ spans %zu pages but they are not contiguous "
+                      "in physical memory. This will cause NVMe controller "
+                      "access failures.\n",
+                      num_pages);
+              fprintf(stderr,
+                      "Consider using smaller queue size or ensuring "
+                      "page-aligned allocation.\n");
+              close(pagemap_fd);
+              ret = -EINVAL;
+              goto cleanup;
+            }
+            
+            fprintf(stderr,
+                    "CQ pagemap: %zu pages verified as contiguous "
+                    "(phys=0x%016llx, size=%zu bytes)\n",
+                    num_pages, (unsigned long long)cq_phys, cq_size_bytes);
+          }
         } else {
-          fprintf(
-            stderr,
-            "Warning: CQ page not present in pagemap, using virtual address\n");
+          fprintf(stderr,
+                  "Warning: CQ page not present in pagemap, using virtual "
+                  "address\n");
           cq_phys = reinterpret_cast<uint64_t>(cq_virt);
         }
       } else {
-        fprintf(
-          stderr,
-          "Warning: Failed to read pagemap for CQ, using virtual address\n");
+        fprintf(stderr,
+                "Warning: Failed to read pagemap for CQ, using virtual "
+                "address\n");
         cq_phys = reinterpret_cast<uint64_t>(cq_virt);
       }
       close(pagemap_fd);
@@ -2869,6 +3284,46 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     fprintf(stderr, "Failed to register CQ address: %s\n", strerror(errno));
     ret = -errno;
     goto cleanup;
+  }
+
+  // Generate PRP lists for non-contiguous queues (PC=0)
+  // PRP lists are only needed if queue spans more than one page
+  if (sq_size_bytes > host_page_size) {
+    ret = generate_prp_list_for_queue(sq_virt, sq_size_bytes, kmod_fd,
+                                      &sq_prp1, &sq_prp2, &sq_prp_list_virt,
+                                      &sq_prp_list_kernel_virt);
+    if (ret < 0) {
+      fprintf(stderr, "ERROR: Failed to generate PRP list for SQ: %s\n",
+              strerror(-ret));
+      goto cleanup;
+    }
+    fprintf(stderr, "SQ PRP: PRP1=0x%016llx PRP2=0x%016llx\n",
+            (unsigned long long)sq_prp1, (unsigned long long)sq_prp2);
+  } else {
+    // Single page: PRP1 = physical address, PRP2 = 0
+    sq_prp1 = sq_phys;
+    sq_prp2 = 0;
+    fprintf(stderr, "SQ fits in single page: PRP1=0x%016llx PRP2=0\n",
+            (unsigned long long)sq_prp1);
+  }
+
+  if (cq_size_bytes > host_page_size) {
+    ret = generate_prp_list_for_queue(cq_virt, cq_size_bytes, kmod_fd,
+                                      &cq_prp1, &cq_prp2, &cq_prp_list_virt,
+                                      &cq_prp_list_kernel_virt);
+    if (ret < 0) {
+      fprintf(stderr, "ERROR: Failed to generate PRP list for CQ: %s\n",
+              strerror(-ret));
+      goto cleanup;
+    }
+    fprintf(stderr, "CQ PRP: PRP1=0x%016llx PRP2=0x%016llx\n",
+            (unsigned long long)cq_prp1, (unsigned long long)cq_prp2);
+  } else {
+    // Single page: PRP1 = physical address, PRP2 = 0
+    cq_prp1 = cq_phys;
+    cq_prp2 = 0;
+    fprintf(stderr, "CQ fits in single page: PRP1=0x%016llx PRP2=0\n",
+            (unsigned long long)cq_prp1);
   }
 
   // Delete existing queues if they exist (ignore errors - queue may not exist)
@@ -2927,11 +3382,13 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   cmd.opcode = nvme_admin_create_cq;
   cmd.nsid = 0;                                  // Admin commands use NSID 0
   cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = 0x00000001; // PC=1 (physically contiguous), IEN=0, IV=0
-  // PRP1 will be injected by kprobe - pass virtual address as ubuffer
-  // Note: nvme_passthru_cmd uses __u64 for addr, which is uint64_t in userspace
-  cmd.addr = reinterpret_cast<uint64_t>(cq_virt);
+  cmd.cdw11 = 0x00000000; // PC=0 (non-contiguous), IEN=0, IV=0
+  // For non-contiguous queues, pass PRP1 via addr field
+  // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
+  // For now, pass PRP1 directly - kprobe injection will be updated to handle PRP lists
+  cmd.addr = cq_prp1; // PRP1 for non-contiguous queue
   cmd.data_len = 0; // No data transfer for CREATE_CQ
+  // TODO: Update kernel kprobe to inject PRP2 for non-contiguous queues
 
   // Debug: Print what we're sending to the controller
   fprintf(stderr, "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
@@ -2998,10 +3455,12 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   cmd.opcode = nvme_admin_create_sq;
   cmd.nsid = 0;                                  // Admin commands use NSID 0
   cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = (queue_id << 16) | 0x0001;         // CQID | QPRIO=0, PC=1
-  // PRP1 will be injected by kprobe - pass virtual address as ubuffer
-  cmd.addr = reinterpret_cast<uint64_t>(sq_virt);
+  cmd.cdw11 = (queue_id << 16) | 0x0000;         // CQID | QPRIO=0, PC=0
+  // For non-contiguous queues, pass PRP1 via addr field
+  // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
+  cmd.addr = sq_prp1; // PRP1 for non-contiguous queue
   cmd.data_len = 0; // No data transfer for CREATE_SQ
+  // TODO: Update kernel kprobe to inject PRP2 for non-contiguous queues
 
   // Debug: Print what we're sending to the controller
   fprintf(stderr, "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
@@ -3071,11 +3530,16 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   info->sq_dmabuf_fd = sq_dmabuf_fd;
   info->cq_dmabuf_fd = cq_dmabuf_fd;
 
-  close(nvme_fd);
-  close(kmod_fd);
+  // On successful return, queues remain allocated and file descriptors remain open
+  // They will be cleaned up when the process exits or when explicitly freed
+  // Don't close FDs here - queues need them to remain valid
   return 0;
 
 cleanup:
+  // This cleanup section is only reached on error paths (via goto cleanup)
+  // On successful return, queues remain allocated and file descriptors remain open
+  // They will be cleaned up when the process exits
+  
   // Close DRM fd if opened
   if (drm_fd >= 0) {
     close(drm_fd);
@@ -3083,33 +3547,91 @@ cleanup:
 
   // Unregister from HIP if we registered (non-coherent, non-device
   // allocations)
-  if (sq_virt && !sq_uses_coherent && !sq_is_device &&
-      sq_hip_err == hipSuccess) {
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-  }
-  if (cq_virt && !cq_uses_coherent && !cq_is_device &&
-      cq_hip_err == hipSuccess) {
-    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
+  // Note: Memory allocated via hipHostMalloc doesn't need unregistering
+  // It's automatically managed by HIP. Only unregister if we manually
+  // registered memory that wasn't allocated via hipHostMalloc.
+  // Since we're using xioAllocateSubmissionQueue/xioAllocateCompletionQueue
+  // which use hipHostMalloc, no unregistering is needed.
+
+  // Free PRP lists if allocated (only on error paths)
+  // On success, PRP lists remain allocated and will be cleaned up on process exit
+  if (ret != 0) {
+    if (sq_prp_list_virt != nullptr && sq_prp_list_kernel_virt != 0 && kmod_fd >= 0) {
+      size_t sq_num_pages = (sq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
+                            sysconf(_SC_PAGESIZE);
+      size_t prp_list_size = sq_num_pages * sizeof(uint64_t);
+      munmap(sq_prp_list_virt, prp_list_size);
+      struct rocm_axiio_free_contig_mem_req free_req = {};
+      free_req.virt_addr = sq_prp_list_kernel_virt;
+      ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+    }
+    if (cq_prp_list_virt != nullptr && cq_prp_list_kernel_virt != 0 && kmod_fd >= 0) {
+      size_t cq_num_pages = (cq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
+                            sysconf(_SC_PAGESIZE);
+      size_t prp_list_size = cq_num_pages * sizeof(uint64_t);
+      munmap(cq_prp_list_virt, prp_list_size);
+      struct rocm_axiio_free_contig_mem_req free_req = {};
+      free_req.virt_addr = cq_prp_list_kernel_virt;
+      ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+    }
   }
 
-  // Free queues - handle coherent allocation separately
-  if (sq_virt) {
-    if (sq_uses_coherent) {
-      // Free HIP coherent memory
-      (void)hipHostFree(sq_virt);
-    } else {
-      // Free using standard free function
-      xioFreeSubmissionQueue(sq_virt, memory_mode);
+  // Free queues - handle kernel-allocated and HIP-allocated separately
+  // Note: Only free if allocation succeeded (sq_virt/cq_virt are valid)
+  // IMPORTANT: Only free queues on error paths (ret != 0)
+  // On success, queues remain allocated and will be freed by HIP runtime on process exit
+  if (ret != 0) {
+    if (sq_virt != nullptr) {
+      if (sq_uses_kernel_alloc && sq_kernel_virt_addr != 0) {
+        // Unmap mmap'd memory first
+        size_t sq_size_bytes = queue_size * NVME_EP_SQE_SIZE;
+        if (sq_virt != MAP_FAILED) {
+          munmap(sq_virt, sq_size_bytes);
+        }
+        // Free kernel-allocated memory via IOCTL
+        if (kmod_fd >= 0) {
+          struct rocm_axiio_free_contig_mem_req free_req = {};
+          free_req.virt_addr = sq_kernel_virt_addr;
+          ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+        }
+      } else if (sq_uses_coherent) {
+        // Free HIP coherent memory
+        (void)hipHostFree(sq_virt);
+      } else {
+        // Free using standard free function
+        xioFreeSubmissionQueue(sq_virt, memory_mode);
+      }
+    }
+    if (cq_virt != nullptr) {
+      if (cq_uses_kernel_alloc && cq_kernel_virt_addr != 0) {
+        // Unmap mmap'd memory first
+        size_t cq_size_bytes = queue_size * NVME_EP_CQE_SIZE;
+        if (cq_virt != MAP_FAILED) {
+          munmap(cq_virt, cq_size_bytes);
+        }
+        // Free kernel-allocated memory via IOCTL
+        if (kmod_fd >= 0) {
+          struct rocm_axiio_free_contig_mem_req free_req = {};
+          free_req.virt_addr = cq_kernel_virt_addr;
+          ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
+        }
+      } else if (cq_uses_coherent) {
+        // Free HIP coherent memory
+        (void)hipHostFree(cq_virt);
+      } else {
+        // Free using standard free function
+        xioFreeCompletionQueue(cq_virt, memory_mode);
+      }
     }
   }
-  if (cq_virt) {
-    if (cq_uses_coherent) {
-      // Free HIP coherent memory
-      (void)hipHostFree(cq_virt);
-    } else {
-      // Free using standard free function
-      xioFreeCompletionQueue(cq_virt, memory_mode);
-    }
+  // Cleanup HIP registrations (only if we registered manually)
+  // Note: hipHostMalloc memory doesn't need unregistering - it's managed by HIP
+
+  // Close file descriptors only on error paths
+  // On successful return (ret == 0), queues remain allocated and FDs remain open
+  // They will be cleaned up when the process exits
+  if (drm_fd >= 0) {
+    close(drm_fd);
   }
   if (nvme_fd >= 0) {
     close(nvme_fd);

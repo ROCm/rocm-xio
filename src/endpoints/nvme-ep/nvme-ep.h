@@ -145,6 +145,7 @@ struct nvme_queue_info {
   uint64_t cq_phys;  // Physical address of completion queue
   uint64_t sq_size;  // Size of submission queue in bytes
   uint64_t cq_size;  // Size of completion queue in bytes
+  uint16_t queue_size; // Queue size in entries
   uint64_t doorbell; // Physical address of doorbell register
   int sq_dmabuf_fd;  // dmabuf file descriptor for SQ
   int cq_dmabuf_fd;  // dmabuf file descriptor for CQ
@@ -341,6 +342,7 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
  * @param queue_size Queue size for wrap-around detection (0 = use generic detection)
  * @param cq_head_inout In/out parameter for cq_head (for stale handling, can be nullptr)
  * @param cqe_advanced_out Output flag indicating if cq_head was advanced (can be nullptr)
+ * @param expected_phase_inout In/out parameter for expected phase bit (nullptr = skip phase check)
  * @return New CQE when command ID changes or sq_head increases
  */
 __host__ __device__ cqeType cqePoll(cqeType cqeLast,
@@ -350,7 +352,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
                                     uint16_t expected_cid = 0,
                                     uint16_t queue_size = 0,
                                     uint16_t* cq_head_inout = nullptr,
-                                    bool* cqe_advanced_out = nullptr);
+                                    bool* cqe_advanced_out = nullptr,
+                                    uint8_t* expected_phase_inout = nullptr);
 
 //
 // Helper functions to create NVMe commands
@@ -411,37 +414,6 @@ __host__ __device__ static inline uint8_t nvme_cqe_status_type(
   return NVME_CQE_STATUS_SCT(cqe->status);
 }
 
-/**
- * Detect actual queue size by observing sq_head wrap-around
- *
- * Controllers may silently reduce queue size (e.g., to 64 entries) even if
- * a larger size was requested. This function detects the actual queue size
- * by observing sq_head wrap-around behavior.
- *
- * @param requested_size Requested queue size
- * @param sq_head Current sq_head value
- * @param last_sq_head Previous sq_head value
- * @return Detected queue size (may be smaller than requested)
- */
-__host__ __device__ static inline uint16_t nvme_detect_queue_size(
-  uint16_t requested_size, uint16_t sq_head, uint16_t last_sq_head) {
-  // If sq_head reached 64 and last was 63, likely 64-entry queue
-  if (requested_size > 64 && sq_head == 64 && last_sq_head == 63) {
-    return 64;
-  }
-  // If sq_head wrapped (decreased), detect wrap point
-  if (requested_size > 64 && sq_head < last_sq_head) {
-    uint16_t wrap_point = last_sq_head + 1;
-    // Reasonable wrap points are powers of 2 and <= 128
-    if (wrap_point <= 128 && (wrap_point & (wrap_point - 1)) == 0) {
-      return wrap_point;
-    }
-  }
-  // No wrap detected - return requested size
-  return requested_size;
-}
-
-//
 // NVMe Data Buffer and PRP Helper Functions
 //
 

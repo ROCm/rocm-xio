@@ -39,6 +39,10 @@
   _IOW(ROCM_XIO_IOC_MAGIC, 9, struct rocm_xio_unregister_buffer_req)
 #define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
   _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_xio_mmio_bridge_shadow_req)
+#define ROCM_XIO_ALLOC_CONTIG_MEM                                              \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_xio_alloc_contig_mem_req)
+#define ROCM_XIO_FREE_CONTIG_MEM                                               \
+  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_xio_free_contig_mem_req)
 
 /* Flags for VRAM physical address request */
 #define ROCM_XIO_FLAG_EMULATED                                                 \
@@ -120,6 +124,18 @@ struct rocm_xio_mmio_bridge_shadow_req {
   __u16 bridge_bdf;  /* Input: PCI MMIO bridge BDF (0xBBDD format) */
   __u64 shadow_gpa;  /* Output: Shadow buffer Guest Physical Address */
   __u64 shadow_size; /* Output: Shadow buffer size in bytes */
+};
+
+/* Allocate physically contiguous host memory */
+struct rocm_xio_alloc_contig_mem_req {
+  __u64 size;      /* Input: Size in bytes */
+  __u64 virt_addr; /* Output: Virtual address (userspace) */
+  __u64 phys_addr; /* Output: Physical address */
+};
+
+/* Free physically contiguous host memory */
+struct rocm_xio_free_contig_mem_req {
+  __u64 virt_addr; /* Input: Virtual address to free */
 };
 
 #endif /* ROCM_XIO_H */

@@ -102,6 +102,18 @@ static __u64 mmio_bridge_shadow_gpa = 0;
 static __u64 mmio_bridge_shadow_size = 0;
 static DEFINE_MUTEX(mmio_bridge_lock);
 
+/* Contiguous memory allocations */
+struct contig_mem_entry {
+  void* virt_addr;     /* Kernel virtual address */
+  __u64 phys_addr;    /* Physical address */
+  __u64 size;         /* Size in bytes */
+  __u64 userspace_addr; /* Userspace virtual address (after mmap) */
+  struct list_head list;
+};
+
+static LIST_HEAD(contig_mem_list);
+static DEFINE_MUTEX(contig_mem_lock);
+
 /*
  * DMA-BUF attach ops for P2P support.
  * We pin the buffer, so move_notify should never be called.
@@ -989,6 +1001,158 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_ALLOC_CONTIG_MEM: {
+      struct rocm_xio_alloc_contig_mem_req req;
+      struct contig_mem_entry* entry;
+      void* virt_addr;
+      __u64 phys_addr;
+      size_t size;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      size = req.size;
+      if (size == 0 || size > SIZE_MAX) {
+        return -EINVAL;
+      }
+
+      /* Allocate contiguous memory using alloc_pages */
+      /* We always use alloc_pages (even for small sizes) because:
+       * 1. It guarantees physically contiguous memory
+       * 2. It's page-aligned, which is required for mmap to userspace
+       * 3. For small sizes (< PAGE_SIZE), order 0 gives us 1 page which is fine
+       */
+      {
+        unsigned int order = get_order(size);
+        struct page* page = NULL;
+        
+        /* Calculate actual size we'll get (may be larger than requested) */
+        size_t actual_size = PAGE_SIZE << order;
+        
+        pr_info("rocm-axiio: Attempting to allocate %zu bytes (order %u, "
+                "actual size %zu bytes)\n",
+                size, order, actual_size);
+        
+        /* Try 1: Standard kernel allocation */
+        page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+        
+        /* Try 2: With __GFP_NOWARN to suppress warnings */
+        if (!page) {
+          page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN, order);
+        }
+        
+        /* Try 3: With __GFP_DMA32 (more restrictive, lower 4GB) */
+        if (!page) {
+          page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_DMA32 |
+                             __GFP_NOWARN, order);
+        }
+        
+        /* Try 4: With __GFP_RETRY_MAYFAIL (may help with fragmentation) */
+        if (!page) {
+          page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_RETRY_MAYFAIL |
+                             __GFP_NOWARN, order);
+        }
+        
+        if (!page) {
+          pr_err("rocm-axiio: Failed to allocate %zu bytes (order %u) of "
+                 "contiguous memory after trying multiple strategies\n",
+                 size, order);
+          pr_err("  Tried: GFP_KERNEL, GFP_KERNEL|__GFP_NOWARN, "
+                 "GFP_KERNEL|__GFP_DMA32, GFP_KERNEL|__GFP_RETRY_MAYFAIL\n");
+          pr_err("  System may be out of contiguous physical memory or "
+                 "fragmented\n");
+          return -ENOMEM;
+        }
+        
+        virt_addr = page_to_virt(page);
+        phys_addr = (__u64)page_to_phys(page);
+        
+        pr_info("rocm-axiio: Successfully allocated %zu bytes (order %u) at "
+                "virt=0x%016llx phys=0x%016llx\n",
+                size, order, (unsigned long long)virt_addr,
+                (unsigned long long)phys_addr);
+      }
+
+      /* Allocate tracking entry */
+      entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+      if (!entry) {
+        /* Free the pages */
+        unsigned int order = get_order(size);
+        __free_pages(virt_to_page(virt_addr), order);
+        return -ENOMEM;
+      }
+
+      entry->virt_addr = virt_addr;
+      entry->phys_addr = phys_addr;
+      entry->size = size;
+      entry->userspace_addr = 0; /* Will be set after mmap */
+
+      mutex_lock(&contig_mem_lock);
+      list_add(&entry->list, &contig_mem_list);
+      mutex_unlock(&contig_mem_lock);
+
+      /* Return kernel virtual address - userspace will mmap to get access */
+      req.virt_addr = (__u64)virt_addr;
+      req.phys_addr = (__u64)phys_addr;
+
+      pr_info("rocm-axiio: Allocated %zu bytes of contiguous memory: "
+              "virt=0x%016llx phys=0x%016llx\n",
+              size, (unsigned long long)req.virt_addr,
+              (unsigned long long)req.phys_addr);
+
+      if (copy_to_user((void __user*)arg, &req, sizeof(req))) {
+        /* Unregister on copy failure */
+        mutex_lock(&contig_mem_lock);
+        list_del(&entry->list);
+        mutex_unlock(&contig_mem_lock);
+        /* Free the pages */
+        unsigned int order = get_order(size);
+        __free_pages(virt_to_page(virt_addr), order);
+        kfree(entry);
+        return -EFAULT;
+      }
+
+      return 0;
+    }
+
+    case ROCM_XIO_FREE_CONTIG_MEM: {
+      struct rocm_xio_free_contig_mem_req req;
+      struct contig_mem_entry *entry, *tmp;
+      bool found = false;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      mutex_lock(&contig_mem_lock);
+      list_for_each_entry_safe(entry, tmp, &contig_mem_list, list) {
+        if (entry->virt_addr == (void*)req.virt_addr ||
+            entry->userspace_addr == req.virt_addr) {
+          list_del(&entry->list);
+          found = true;
+          break;
+        }
+      }
+      mutex_unlock(&contig_mem_lock);
+
+      if (!found) {
+        pr_warn("rocm-axiio: Contiguous memory 0x%016llx not found\n",
+                (unsigned long long)req.virt_addr);
+        return -ENOENT;
+      }
+
+      pr_info("rocm-axiio: Freeing contiguous memory: virt=0x%016llx "
+              "phys=0x%016llx size=%llu\n",
+              (unsigned long long)(__u64)entry->virt_addr,
+              (unsigned long long)entry->phys_addr, entry->size);
+
+      /* Free the pages */
+      unsigned int order = get_order(entry->size);
+      __free_pages(virt_to_page(entry->virt_addr), order);
+      kfree(entry);
+
+      return 0;
+    }
+
     default:
       return -ENOTTY;
   }
@@ -998,13 +1162,65 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   unsigned long pfn;
   int ret;
+  struct contig_mem_entry* entry;
+  /* vm_pgoff is in pages, convert to physical address (handle) */
+  __u64 handle_phys_addr = vma->vm_pgoff << PAGE_SHIFT;
 
+  pr_info("rocm-axiio: mmap called: vm_pgoff=%lu handle_phys=0x%016llx "
+          "size=%lu\n",
+          vma->vm_pgoff, (unsigned long long)handle_phys_addr,
+          vma->vm_end - vma->vm_start);
+
+  /* Check if this is a contiguous memory allocation request */
+  /* Use physical address as handle (returned from ALLOC_CONTIG_MEM) */
+  mutex_lock(&contig_mem_lock);
+  list_for_each_entry(entry, &contig_mem_list, list) {
+    pr_info("rocm-axiio: Checking entry: phys=0x%016llx handle_phys=0x%016llx\n",
+            (unsigned long long)entry->phys_addr,
+            (unsigned long long)handle_phys_addr);
+    if (entry->phys_addr == handle_phys_addr) {
+      /* Found matching allocation - map it */
+      pfn = entry->phys_addr >> PAGE_SHIFT;
+      size_t size = vma->vm_end - vma->vm_start;
+
+      if (size > entry->size) {
+        mutex_unlock(&contig_mem_lock);
+        pr_err("rocm-axiio: mmap size %zu exceeds allocation size %llu\n",
+               size, entry->size);
+        return -EINVAL;
+      }
+
+      /* Remap the physical pages to userspace */
+      ret = remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot);
+      if (ret < 0) {
+        mutex_unlock(&contig_mem_lock);
+        pr_err("rocm-axiio: Failed to remap contiguous memory: %d\n", ret);
+        return ret;
+      }
+
+      entry->userspace_addr = vma->vm_start;
+
+      pr_info("rocm-axiio: Mapped contiguous memory: phys=0x%016llx "
+              "size=%zu vaddr=0x%lx\n",
+              (unsigned long long)entry->phys_addr, size, vma->vm_start);
+
+      mutex_unlock(&contig_mem_lock);
+      return 0;
+    }
+  }
+  mutex_unlock(&contig_mem_lock);
+
+  pr_warn("rocm-axiio: No matching contiguous memory entry found for "
+          "handle_phys=0x%016llx\n",
+          (unsigned long long)handle_phys_addr);
+
+  /* Fall back to PCI MMIO bridge shadow buffer mapping */
   mutex_lock(&mmio_bridge_lock);
 
   /* Check if shadow buffer is configured */
   if (mmio_bridge_shadow_gpa == 0) {
     mutex_unlock(&mmio_bridge_lock);
-    pr_err("rocm-axiio: PCI MMIO bridge shadow buffer not configured\n");
+    pr_err("rocm-axiio: No contiguous memory or shadow buffer configured\n");
     return -EINVAL;
   }
 
