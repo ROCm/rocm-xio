@@ -1218,11 +1218,13 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   }
   mutex_unlock(&contig_mem_lock);
 
-  pr_warn("rocm-axiio: No matching contiguous memory entry found for "
-          "handle_phys=0x%016llx\n",
-          (unsigned long long)handle_phys_addr);
-
   /* Fall back to PCI MMIO bridge shadow buffer mapping */
+  /* Only warn if handle_phys is non-zero (expected contiguous memory request) */
+  if (handle_phys_addr != 0) {
+    pr_warn("rocm-axiio: No matching contiguous memory entry found for "
+            "handle_phys=0x%016llx\n",
+            (unsigned long long)handle_phys_addr);
+  }
   mutex_lock(&mmio_bridge_lock);
 
   /* Check if shadow buffer is configured */

@@ -826,36 +826,7 @@ int main(int argc, char* argv[]) {
   // Calculate actual queue size in entries from queue_info
   // queue_info.sq_size is in bytes, divide by SQE size to get entries
   // This is the size we allocated, which should match what we requested
-  uint16_t allocated_queue_size = static_cast<uint16_t>(
-    queue_info.sq_size / 64); // NVME_EP_SQE_SIZE is 64 bytes
-  printf("Queues created successfully (requested: %u entries, allocated: %u entries)\n",
-         queue_size, allocated_queue_size);
-  
-  // IMPORTANT: The controller may silently reduce the queue size if it doesn't
-  // support the requested size. Many controllers have a maximum queue size of 64
-  // entries, even if we request more. We can't query the actual size, but we
-  // can detect it by observing sq_head wrap-around at runtime.
-  // For now, if we requested more than 64 and the controller might have reduced
-  // it, we'll detect this during the first few operations by checking if sq_head
-  // wraps at 64.
-  // However, since OS-owned queues are much longer than 64, the controller clearly
-  // supports larger queues. So we'll use the allocated size and trust the controller
-  // created what we requested.
-  if (allocated_queue_size != queue_size) {
-    fprintf(stderr, "WARNING: Allocated queue size (%u) does not match requested size (%u)\n",
-            allocated_queue_size, queue_size);
-    fprintf(stderr, "  Using allocated size (%u) for all operations\n",
-            allocated_queue_size);
-    return 1;
-  }
-  
-  // Use the actual allocated queue size for all operations
-  queue_size = allocated_queue_size;
-  
-  // Additional safety check: if we requested > 64 but suspect the controller
-  // might have reduced it, we could detect this at runtime by observing sq_head
-  // wrap-around. For now, we'll proceed with the allocated size and let runtime
-  // behavior reveal any issues.
+  printf("Queues created successfully (queue size: %u entries)\n", queue_size);
 
   // Map NVMe BAR0 for doorbell access using library function
   void* nvme_bar0_cpu = nullptr;

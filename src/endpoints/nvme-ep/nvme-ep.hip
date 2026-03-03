@@ -837,7 +837,6 @@ __device__ void nvme_ep_driveEndpoint(
 
       // Write SQE
       nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-      sq_tail = (sq_tail + 1) % queue_size;
       __threadfence_system();
 
       // Dump SQE information if very verbose
@@ -846,12 +845,16 @@ __device__ void nvme_ep_driveEndpoint(
                "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
                cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
                (unsigned long long)prp1, (unsigned long long)prp2,
-               (sq_tail - 1 + queue_size) % queue_size);
+               sq_tail);
       }
 
-      // Ring doorbell
+      // Ring doorbell with current sq_tail (slot we just wrote to)
+      // First doorbell ring must be slot 0, then 1, 2, ..., 7, then back to 0
       nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
                             shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+
+      // Increment tail after ringing doorbell
+      sq_tail = (sq_tail + 1) % queue_size;
 
       // Wait for this specific completion using improved cqePoll()
       // In sequential mode, we issue one command at a time, so sq_head should
@@ -935,9 +938,9 @@ __device__ void nvme_ep_driveEndpoint(
     struct nvme_sqe* sqe = &sqeLocal;
 
     // Calculate maximum outstanding commands per batch
-    // Cannot write more SQEs than queue_size without overwriting entries.
-    // Leave at least 1 slot free to avoid wrapping back to sq_head.
-    uint16_t max_outstanding = (queue_size > 1) ? (queue_size - 1) : 1;
+    // Can use all queue_size entries - full condition is (tail+1) % queue_size == head
+    // We check actual sq_head from controller to detect full condition
+    uint16_t max_outstanding = queue_size;
 
     // Track overall progress
     uint16_t completed_count = 0;
@@ -947,70 +950,112 @@ __device__ void nvme_ep_driveEndpoint(
     while (submitted_count < num_ops || completed_count < num_ops) {
       // Submit a batch of commands if we haven't submitted all yet
       if (submitted_count < num_ops) {
-        // Calculate current outstanding commands (submitted - completed)
-        uint16_t current_outstanding = submitted_count - completed_count;
-
-        // Wait if queue is full (can't submit more without overwriting)
-        while (current_outstanding >= max_outstanding &&
-               completed_count < submitted_count) {
-          // Poll for completions to free up queue space
-          volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-          nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
-            (volatile nvme_ep::cqeType*)cqe_entry);
-          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-          // Skip phase check if first operation (expected_phase == 0xFF)
-          bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
-          if (phase_ok) {
+        // Read current sq_head to determine available slots
+        // Use last_sq_head as the most accurate value (updated after each completion)
+        // If we have completions, try to read from the last processed CQE
+        uint16_t current_sq_head = last_sq_head; // Default to last known head
+        
+        // Try to read from the last processed CQE (cq_head - 1, wrapped)
+        // This gives us the most recent valid sq_head value
+        if (completed_count > 0 && cq_head > 0) {
+          uint16_t last_cqe_idx = (cq_head - 1 + queue_size) % queue_size;
+          volatile struct nvme_cqe* cqe_check = &cqeAddr[last_cqe_idx];
+          nvme_ep::cqeType cqe_head_check = nvme_ep::cqeRead(
+            (volatile nvme_ep::cqeType*)cqe_check);
+          uint16_t sq_head_from_cqe = cqe_head_check.sq_head;
+          
+          // Validate sq_head is within valid range
+          if (sq_head_from_cqe < queue_size) {
+            current_sq_head = sq_head_from_cqe;
+          }
+        }
+        
+        // Check if queue is full: (sq_tail + 1) % queue_size == sq_head
+        uint16_t next_tail = (sq_tail + 1) % queue_size;
+        bool queue_full = (next_tail == current_sq_head);
+        
+        // If queue is full, wait for completions to free up space
+        if (queue_full) {
+          // Poll for completions until queue has space
+          uint32_t poll_count = 0;
+          const uint32_t max_polls = 100000; // Safety limit
+          while (poll_count < max_polls && queue_full) {
+            volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
+            nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
+              (volatile nvme_ep::cqeType*)cqe_entry);
+            uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+            bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
             uint16_t sq_head = cqe_new.sq_head;
-            // Check for sq_head progression (handle wrap-around)
-            bool sq_head_progressed = false;
-            uint16_t new_completions = 0;
             
-            if (sq_head > last_sq_head) {
-              new_completions = sq_head - last_sq_head;
-              sq_head_progressed = true;
-            } else if (sq_head < last_sq_head) {
-              uint16_t diff = last_sq_head - sq_head;
-              if (diff <= queue_size) {
-                new_completions = (queue_size - last_sq_head) + sq_head;
-                sq_head_progressed = true;
-              }
+            // Validate sq_head
+            if (sq_head >= queue_size) {
+              poll_count++;
+              continue;
             }
             
-            if (sq_head_progressed && new_completions > 0) {
-              // Process each completion: advance cq_head and update phase
-              for (uint16_t i = 0; i < new_completions; i++) {
-                cq_head = (cq_head + 1) % queue_size;
-                if (cq_head == 0) {
-                  expected_phase = expected_phase ^ 1;
-                }
-              }
-              completed_count += new_completions;
-              last_sq_head = sq_head;
-              
-              // Extract phase if first completion
-              if (expected_phase == 0xFF) {
-                uint16_t next_cq_head = (cq_head) % queue_size;
-                if (next_cq_head == 0) {
-                  expected_phase = phase ^ 1;
-                } else {
-                  expected_phase = phase;
-                }
+            if (phase_ok && sq_head != current_sq_head) {
+              // Head has advanced, update tracking
+              uint16_t new_completions = 0;
+              if (sq_head > current_sq_head) {
+                new_completions = sq_head - current_sq_head;
+              } else if (sq_head < current_sq_head) {
+                new_completions = (queue_size - current_sq_head) + sq_head;
               }
               
-              // Recalculate outstanding
-              current_outstanding = submitted_count - completed_count;
+              if (new_completions > 0) {
+                for (uint16_t i = 0; i < new_completions; i++) {
+                  cq_head = (cq_head + 1) % queue_size;
+                  if (cq_head == 0) {
+                    expected_phase = expected_phase ^ 1;
+                  }
+                }
+                completed_count += new_completions;
+                last_sq_head = sq_head;
+                current_sq_head = sq_head;
+                
+                if (expected_phase == 0xFF) {
+                  uint16_t next_cq_head = (cq_head) % queue_size;
+                  if (next_cq_head == 0) {
+                    expected_phase = phase ^ 1;
+                  } else {
+                    expected_phase = phase;
+                  }
+                }
+                
+                // Recheck if queue is still full
+                next_tail = (sq_tail + 1) % queue_size;
+                queue_full = (next_tail == current_sq_head);
+              }
             }
+            poll_count++;
           }
         }
 
         // Calculate how many commands to submit in this batch
-        // Don't exceed max_outstanding or remaining commands
+        // Use current_sq_head from above (already read)
+        // Full condition: (sq_tail + 1) % queue_size == sq_head
+        
+        // Calculate available slots based on actual queue state
+        // Full condition: (sq_tail + 1) % queue_size == sq_head
+        // Like Linux driver, we don't batch a full queue length to avoid
+        // wrap-around ambiguity when head == tail
+        uint16_t used_slots = (sq_tail - current_sq_head + queue_size) % queue_size;
+        // Reserve one slot to avoid wrap-around (can't use all queue_size entries)
+        uint16_t available_slots = queue_size - used_slots - 1;
+        
         uint16_t remaining_to_submit = num_ops - submitted_count;
-        uint16_t available_slots = max_outstanding - current_outstanding;
         uint16_t batch_size = (remaining_to_submit < available_slots)
                                 ? remaining_to_submit
                                 : available_slots;
+
+        // Always print batch info when trying to submit (even if batch_size=0)
+        if (verbose >= 2) {
+          printf("[BATCH] submitted=%u completed=%u remaining=%u "
+                 "sq_head=%u sq_tail=%u used=%u available=%u batch_size=%u\n",
+                 submitted_count, completed_count, remaining_to_submit,
+                 current_sq_head, sq_tail, used_slots, available_slots,
+                 batch_size);
+        }
 
         // Issue commands for this batch
         for (uint16_t batch_i = 0; batch_i < batch_size; batch_i++) {
@@ -1092,7 +1137,6 @@ __device__ void nvme_ep_driveEndpoint(
 
           // Write SQE
           nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-          sq_tail = (sq_tail + 1) % queue_size;
 
           // Dump SQE information if very verbose
           if (verbose >= 2) {
@@ -1100,18 +1144,28 @@ __device__ void nvme_ep_driveEndpoint(
                    "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
                    cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
                    (unsigned long long)prp1, (unsigned long long)prp2,
-                   (sq_tail - 1 + queue_size) % queue_size);
+                   sq_tail);
           }
+
+          // Increment tail after writing SQE (like Linux driver)
+          sq_tail = (sq_tail + 1) % queue_size;
         }
 
-        // Memory fence before doorbell
-        __threadfence_system();
+        // Only ring doorbell if we actually wrote commands
+        if (batch_size > 0) {
+          // Memory fence before doorbell
+          __threadfence_system();
 
-        // Ring doorbell for this batch
-        nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
-                              shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+          // Ring doorbell for this batch
+          // Linux driver writes doorbell with sq_tail (the incremented tail value)
+          // After writing all SQEs, sq_tail points to the next slot after the last written slot
+          // Ring with sq_tail (the next slot, which wraps to 0 after writing 8 commands)
+          // This tells QEMU to process commands up to (but not including) sq_tail
+          nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                                shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
-        submitted_count += batch_size;
+          submitted_count += batch_size;
+        }
       }
 
       // Poll for completions aggressively
@@ -1121,6 +1175,12 @@ __device__ void nvme_ep_driveEndpoint(
         nvme_ep::cqeType cqe_last = {}; // Track last seen CQE for change detection
         
         while (completed_count < num_ops && poll_count < max_polls) {
+          // Break if all submitted commands have completed and more need to be
+          // submitted. This prevents infinite polling when waiting for commands
+          // that haven't been submitted yet.
+          if (completed_count == submitted_count && submitted_count < num_ops) {
+            break; // Exit polling loop to submit more commands
+          }
           poll_count++;
           volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
           nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
@@ -1469,16 +1529,19 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     config->memoryMode, // Respect memory mode like test-ep
     &queue_info);
 
-  // Verify queue_size matches what was created (controller may reduce size)
-  // Use the actual queue_size from queue_info to ensure consistency
-  if (queue_info.queue_size != 0 && queue_info.queue_size != queue_size) {
+  // Warn if requested operations exceed what the queue can handle
+  // max_outstanding = queue_size (can use all queue entries)
+  // If num_ops > max_outstanding, we'll need multiple batches
+  uint16_t max_outstanding = queue_size;
+  uint16_t total_ops = config->iterations;
+  if (total_ops > max_outstanding) {
     fprintf(stderr,
-            "Warning: Controller created queue with size %u entries "
-            "(requested %u entries)\n",
-            queue_info.queue_size, queue_size);
-    fprintf(stderr, "Using actual queue size: %u entries\n",
-            queue_info.queue_size);
-    queue_size = queue_info.queue_size;
+            "Note: Requested %u operations with queue size %u "
+            "(max outstanding: %u)\n",
+            total_ops, queue_size, max_outstanding);
+    fprintf(stderr,
+            "Operations will be submitted in batches of up to %u commands\n",
+            max_outstanding);
   }
 
   if (ret < 0) {
@@ -2106,7 +2169,31 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // queue_size is in entries (calculated above, stored in queue_size variable)
 
   fprintf(stderr, "Calling hipLaunchKernelGGL...\n");
+  fflush(stderr);
   fprintf(stderr, "Queue length: %u entries\n", queue_size);
+  fflush(stderr);
+
+  // Validate pointers before casting and launching kernel
+  if (!config) {
+    fprintf(stderr, "Error: config is null\n");
+    fflush(stderr);
+    return hipErrorInvalidValue;
+  }
+  if (!config->submissionQueue || !config->completionQueue) {
+    fprintf(stderr, "Error: Invalid queue pointers before kernel launch\n");
+    fprintf(stderr, "  submissionQueue=%p, completionQueue=%p\n",
+            config->submissionQueue, config->completionQueue);
+    fflush(stderr);
+    return hipErrorInvalidValue;
+  }
+  
+  // Validate numThreads before kernel launch
+  if (config->numThreads == 0 || config->numThreads > 1024) {
+    fprintf(stderr, "Error: Invalid numThreads=%u (must be 1-1024)\n",
+            config->numThreads);
+    fflush(stderr);
+    return hipErrorInvalidValue;
+  }
 
   // Cast void* to typed pointers like test-ep does (test-ep line 778-779)
   // This helps HIP validate the pointers correctly
@@ -2115,6 +2202,41 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   struct nvme_cqe* cqePtr = static_cast<struct nvme_cqe*>(
     config->completionQueue);
 
+  fprintf(stderr, "About to launch kernel with numThreads=%u\n",
+          config->numThreads);
+  fprintf(stderr, "Kernel parameters: iterations=%u, lbaSize=%u, baseLba=%llu\n",
+          config->iterations, lbaSize, (unsigned long long)baseLba);
+  fprintf(stderr, "Pointers: sqePtr=%p, cqePtr=%p, startTimes=%p, endTimes=%p\n",
+          sqePtr, cqePtr, config->startTimes, config->endTimes);
+  fprintf(stderr, "Buffers: readBuffer=%p, writeBuffer=%p, shadowBuffer=%p\n",
+          readBufferGpu ? readBufferGpu : readBuffer,
+          writeBufferGpu ? writeBufferGpu : writeBuffer,
+          shadowBufferVirt);
+  fflush(stderr);
+
+  // Clear any pending HIP errors before kernel launch
+  hipError_t preLaunchErr = hipGetLastError();
+  if (preLaunchErr != hipSuccess) {
+    fprintf(stderr, "Warning: Pending HIP error before kernel launch: %s\n",
+            hipGetErrorString(preLaunchErr));
+    fflush(stderr);
+  }
+
+  // Flush all output before kernel launch
+  fflush(stderr);
+  fflush(stdout);
+
+  // Ensure HIP device is set and synchronized before kernel launch
+  hipError_t dev_err = hipSetDevice(0);
+  if (dev_err != hipSuccess) {
+    fprintf(stderr, "Error: Failed to set HIP device 0 before launch: %s\n",
+            hipGetErrorString(dev_err));
+    fflush(stderr);
+    return dev_err;
+  }
+
+  // Launch kernel - HIP may crash with many parameters, so we try to catch it
+  // by ensuring all parameters are valid before the call
   hipLaunchKernelGGL(
     nvme_ep_kernel, dim3(1), dim3(config->numThreads), 0, 0,
     sqePtr,             // Cast to typed pointer like test-ep
@@ -2407,6 +2529,107 @@ __host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
 //
 // Host helper function for NVMe queue creation via IOCTL
 //
+
+/**
+ * Read NVMe Controller Capabilities (CAP) register from BAR0
+ *
+ * The CAP register is a 64-bit register at offset 0x00-0x07 in BAR0.
+ * It contains controller capabilities including CQR (Contiguous Queues Required).
+ *
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format
+ * @param cap_out Output parameter for CAP register value
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_read_cap_register(uint16_t nvme_bdf, uint64_t* cap_out) {
+  int bar0_fd = -1;
+  void* bar0_mapped = MAP_FAILED;
+  char resource_path[256];
+  size_t bar0_size = 8; // Only need 8 bytes for CAP register
+  int ret = 0;
+
+  if (!cap_out) {
+    return -EINVAL;
+  }
+
+  // Convert BDF to format: 00:BB:DD.F
+  uint8_t bus = (nvme_bdf >> 8) & 0xFF;
+  uint8_t dev = (nvme_bdf >> 3) & 0x1F;
+  uint8_t func = nvme_bdf & 0x7;
+
+  // Build resource0 path: /sys/bus/pci/devices/0000:BB:DD.F/resource0
+  snprintf(resource_path, sizeof(resource_path),
+           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource0", bus, dev, func);
+
+  // Open BAR0 resource file
+  bar0_fd = open(resource_path, O_RDONLY);
+  if (bar0_fd < 0) {
+    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
+            strerror(errno));
+    return -errno;
+  }
+
+  // Map BAR0 to userspace (read-only for CAP register)
+  bar0_mapped = mmap(nullptr, bar0_size, PROT_READ, MAP_SHARED, bar0_fd, 0);
+  if (bar0_mapped == MAP_FAILED) {
+    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
+    ret = -errno;
+    goto cleanup;
+  }
+
+  // Read CAP register (64-bit little-endian at offset 0x00)
+  // NVMe registers are little-endian
+  *cap_out = *reinterpret_cast<uint64_t*>(bar0_mapped);
+
+  ret = 0;
+
+cleanup:
+  if (bar0_mapped != MAP_FAILED) {
+    munmap(bar0_mapped, bar0_size);
+  }
+  if (bar0_fd >= 0) {
+    close(bar0_fd);
+  }
+  return ret;
+}
+
+/**
+ * Check if NVMe controller supports non-contiguous queues (PC=0)
+ *
+ * Reads the CAP register and checks the CQR (Contiguous Queues Required) bit.
+ * If CQR=0, the controller supports non-contiguous queues (PC=0).
+ * If CQR=1, the controller requires contiguous queues (PC=1).
+ *
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format
+ * @param supports_pc0 Output parameter: true if PC=0 is supported, false if PC=1
+ *                    is required
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_check_pc0_support(uint16_t nvme_bdf, bool* supports_pc0) {
+  uint64_t cap = 0;
+  int ret = 0;
+
+  if (!supports_pc0) {
+    return -EINVAL;
+  }
+
+  ret = nvme_ep_read_cap_register(nvme_bdf, &cap);
+  if (ret < 0) {
+    fprintf(stderr, "Failed to read CAP register: %s\n", strerror(-ret));
+    return ret;
+  }
+
+  // CQR (Contiguous Queues Required) is bit 16 of CAP register
+  // CQR=0 means PC=0 (non-contiguous) is supported
+  // CQR=1 means PC=1 (contiguous) is required
+  const uint64_t CQR_MASK = (1ULL << 16);
+  *supports_pc0 = ((cap & CQR_MASK) == 0);
+
+  fprintf(stderr, "NVMe CAP register: 0x%016llx, CQR=%u, PC=0 supported: %s\n",
+          (unsigned long long)cap, (unsigned)((cap >> 16) & 1),
+          *supports_pc0 ? "YES" : "NO");
+
+  return 0;
+}
 
 // Structure for NVMe Identify Namespace response (4096 bytes)
 // When USE_LIBNVME is defined, libnvme provides this struct, so we skip it.
@@ -3226,6 +3449,24 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   fprintf(stderr, "NVMe device %s detected as: %s\n", nvme_device,
           is_emulated ? "EMULATED" : "PASSTHROUGH");
 
+  // Check controller capabilities for PC=0 support
+  // QEMU emulated devices always require PC=1, but real hardware may support
+  // PC=0. Check the CAP register's CQR bit to determine actual capability.
+  bool supports_pc0 = false;
+  bool use_pc1 = true; // Default to PC=1 (safer)
+  if (!is_emulated) {
+    // For passthrough devices, check CAP register CQR bit
+    int cap_ret = nvme_ep_check_pc0_support(nvme_bdf, &supports_pc0);
+    if (cap_ret == 0) {
+      use_pc1 = !supports_pc0; // Use PC=1 if CQR=1 (PC=0 not supported)
+    } else {
+      fprintf(stderr,
+              "Warning: Failed to read CAP register, defaulting to PC=1\n");
+      use_pc1 = true; // Default to PC=1 on error
+    }
+  }
+  // For emulated devices, always use PC=1 (QEMU requirement)
+
   // Open NVMe device (requires root permissions)
   nvme_fd = open(nvme_device, O_RDWR);
   if (nvme_fd < 0) {
@@ -3918,7 +4159,18 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   cmd.opcode = nvme_admin_create_cq;
   cmd.nsid = 0;                                  // Admin commands use NSID 0
   cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = 0x00000000; // PC=0 (non-contiguous), IEN=0, IV=0
+  // Set IEN based on emulated vs passthrough:
+  // - Emulated (QEMU): IEN=1 required
+  //   QEMU's nvme_create_cq() validates NVME_CQ_FLAGS_PC(qflags) at line 4698
+  //   of hw/nvme/ctrl.c. While the NVMe spec defines bit 0 as IEN (not PC),
+  //   QEMU's implementation requires bit 0=1 (IEN=1) for emulated devices.
+  //   This is a QEMU implementation limitation/simplification.
+  // - Passthrough: IEN=0 (interrupts disabled, polling mode)
+  //   Real hardware may support polling mode (IEN=0) for better performance
+  //   in high-throughput scenarios. Note: We don't check controller capabilities
+  //   for IEN support - if IEN=0 fails, the controller will return an error.
+  // cdw11 format: bits 15:1 = IV (Interrupt Vector), bit 0 = IEN
+  cmd.cdw11 = is_emulated ? 0x00000001 : 0x00000000;
   // For non-contiguous queues, pass PRP1 via addr field
   // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
   // For now, pass PRP1 directly - kprobe injection will be updated to handle PRP lists
@@ -3998,7 +4250,21 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   cmd.opcode = nvme_admin_create_sq;
   cmd.nsid = 0;                                  // Admin commands use NSID 0
   cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = (queue_id << 16) | 0x0000;         // CQID | QPRIO=0, PC=0
+  // Set PC based on controller capabilities:
+  // - Emulated (QEMU): PC=1 required (Physically Contiguous)
+  //   QEMU's nvme_create_sq() validates NVME_SQ_FLAGS_PC(qflags) at line 4322
+  //   of hw/nvme/ctrl.c. QEMU only supports physically contiguous queues
+  //   (PC=1) - it does not implement PRP list handling for non-contiguous
+  //   queues. This is a QEMU implementation limitation, not an NVMe spec
+  //   requirement.
+  // - Passthrough: Check CAP register CQR bit to determine PC support
+  //   If CQR=0 (checked above), controller supports PC=0 (non-contiguous queues)
+  //   If CQR=1, controller requires PC=1 (contiguous queues)
+  //   Real NVMe hardware typically supports both PC=0 and PC=1, but some
+  //   controllers may require PC=1 (CQR=1).
+  // cdw11 format: bits 31:16 = CQID, bits 15:1 = QPRIO, bit 0 = PC
+  cmd.cdw11 = (queue_id << 16) | (use_pc1 ? 0x0001 : 0x0000);
+  // cdw11 format: bits 31:16 = CQID, bits 15:1 = QPRIO, bit 0 = PC
   // For non-contiguous queues, pass PRP1 via addr field
   // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
   cmd.addr = sq_prp1; // PRP1 for non-contiguous queue

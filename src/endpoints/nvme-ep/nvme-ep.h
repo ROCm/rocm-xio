@@ -640,7 +640,7 @@ struct NvmeEpConfig {
  * @param app CLI11 App object to add options to
  * @param config Pointer to NvmeEpConfig structure to populate
  */
-inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
+inline void registerCliOptions(CLI::App& app, nvme_ep::NvmeEpConfig* config) {
   // Group all NVMe endpoint-specific options together
   // This ensures they appear in their own section below global options
   const std::string nvme_group = "NVMe Endpoint Options";
@@ -732,7 +732,7 @@ inline void registerCliOptions(CLI::App& app, NvmeEpConfig* config) {
  * @param config Pointer to NvmeEpConfig structure
  * @return Empty string if valid, error message otherwise
  */
-inline std::string validateConfig(NvmeEpConfig* config) {
+inline std::string validateConfig(nvme_ep::NvmeEpConfig* config) {
   if (config->accessPattern != "sequential" &&
       config->accessPattern != "random") {
     return "Access pattern must be 'sequential' or 'random'";
@@ -797,7 +797,7 @@ inline std::string validateConfig(NvmeEpConfig* config) {
  */
 inline unsigned getIterations(void* endpointConfig) {
   if (endpointConfig) {
-    NvmeEpConfig* nvmeConfig = static_cast<NvmeEpConfig*>(endpointConfig);
+    nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(endpointConfig);
     if (nvmeConfig->writeIo < 0) {
       // Sequential mode: use absolute value of writeIo
       return -nvmeConfig->writeIo;
