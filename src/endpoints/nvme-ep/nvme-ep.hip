@@ -1182,11 +1182,103 @@ __device__ void nvme_ep_driveEndpoint(
             break; // Exit polling loop to submit more commands
           }
           poll_count++;
-          volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-          nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
-            (volatile nvme_ep::cqeType*)cqe_entry);
-          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-          uint16_t sq_head = cqe_new.sq_head;
+          
+          // Declare variables for CQE data
+          nvme_ep::cqeType cqe_new = {};
+          uint8_t phase = 0;
+          uint16_t sq_head = 0;
+          
+          // When cq_head is at the end of the CQ (queue_size - 1), the controller
+          // may have wrapped and written new CQEs. Check slot 7 first (where the
+          // controller writes when wrapping from slot 6), then slot 0 (where it
+          // writes when wrapping from slot 7). We need to check BEFORE reading from
+          // cq_head, as cq_head might point to a stale CQE.
+          bool checked_wrap = false;
+          if (cq_head == queue_size - 1 && expected_phase != 0xFF) {
+            // Check slot 7 first - controller writes here when wrapping from slot 6
+            // (first completion after wrap, e.g., command 9 completes before command 8)
+            volatile struct nvme_cqe* cqe_slot7 = &cqeAddr[queue_size - 1];
+            nvme_ep::cqeType cqe_slot7_data = nvme_ep::cqeRead(
+              (volatile nvme_ep::cqeType*)cqe_slot7);
+            uint8_t slot7_phase = NVME_CQE_STATUS_PHASE(cqe_slot7_data.status);
+            uint16_t slot7_sq_head = cqe_slot7_data.sq_head;
+            
+            // If slot 7 has the expected phase, use it (controller wrapped and
+            // wrote here). The sq_head check will be done later in completion
+            // processing logic.
+            if (slot7_phase == expected_phase && slot7_sq_head < queue_size) {
+              // Controller wrapped and wrote at slot 7 - use this CQE
+              cqe_new = cqe_slot7_data;
+              phase = slot7_phase;
+              sq_head = slot7_sq_head;
+              checked_wrap = true;
+              
+              if (verbose >= 2) {
+                printf("[POLL] Reading from slot %u after wrap "
+                       "phase=%u sq_head=%u last_sq_head=%u cmd_id=%u\n",
+                       queue_size - 1, phase, sq_head, last_sq_head,
+                       cqe_new.command_id);
+              }
+            } else {
+              if (verbose >= 2) {
+                printf("[POLL] Slot 7 check failed: phase=%u expected=%u "
+                       "sq_head=%u last_sq_head=%u cmd_id=%u\n",
+                       slot7_phase, expected_phase, slot7_sq_head,
+                       last_sq_head, cqe_slot7_data.command_id);
+              }
+              // Slot 7 doesn't have expected phase - check slot 0 (controller
+              // writes here after wrapping from slot 7, e.g., command 8 completes
+              // after command 9)
+              volatile struct nvme_cqe* cqe_wrap = &cqeAddr[0];
+              nvme_ep::cqeType cqe_wrap_data = nvme_ep::cqeRead(
+                (volatile nvme_ep::cqeType*)cqe_wrap);
+              uint8_t wrap_phase = NVME_CQE_STATUS_PHASE(cqe_wrap_data.status);
+              uint16_t wrap_sq_head = cqe_wrap_data.sq_head;
+              
+              // If slot 0 has the expected phase and valid sq_head, controller wrapped
+              if (wrap_phase == expected_phase && wrap_sq_head < queue_size) {
+                // Controller wrapped - use CQE from slot 0
+                cqe_new = cqe_wrap_data;
+                phase = wrap_phase;
+                sq_head = wrap_sq_head;
+                // Don't update cq_head - keep it at queue_size - 1 so we continue
+                // checking slot 7 on next iteration (in case slot 7 gets written
+                // later, e.g., if command 9 completes before command 8)
+                checked_wrap = true;
+                
+                if (verbose >= 2) {
+                  printf("[POLL] Detected CQ wrap: reading from slot 0 "
+                         "phase=%u sq_head=%u cmd_id=%u\n",
+                         phase, sq_head, cqe_new.command_id);
+                }
+              } else {
+                if (verbose >= 2) {
+                  printf("[POLL] Slot 0 check failed: phase=%u expected=%u "
+                         "sq_head=%u last_sq_head=%u cmd_id=%u\n",
+                         wrap_phase, expected_phase, wrap_sq_head,
+                         last_sq_head, cqe_wrap_data.command_id);
+                }
+                // Neither slot 7 nor slot 0 had the expected phase - controller
+                // hasn't written new CQEs yet. Continue polling - don't set
+                // checked_wrap so we read from cq_head normally on next iteration
+                // (which will check slot 7 again until controller writes new CQE)
+                if (verbose >= 2) {
+                  printf("[POLL] Neither slot has expected phase, continuing "
+                         "poll (will check slot 7 again)\n");
+                }
+                // Don't set checked_wrap - fall through to read from cq_head
+                // This ensures we keep checking slot 7 until controller writes
+              }
+            }
+          }
+          
+          if (!checked_wrap) {
+            // Normal case: read from current cq_head
+            volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
+            cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
+            phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+            sq_head = cqe_new.sq_head;
+          }
           
           // Validate sq_head is within valid range (0 to queue_size-1)
           // If invalid, skip this CQE (likely stale/uninitialized data)
@@ -1197,6 +1289,13 @@ __device__ void nvme_ep_driveEndpoint(
           
           // Check if phase matches expected phase (skip check if first operation)
           bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
+          
+          // Debug: print phase mismatch if verbose
+          if (verbose >= 2 && !phase_ok && expected_phase != 0xFF) {
+            printf("[POLL] Phase mismatch: expected=%u got=%u cq_head=%u "
+                   "sq_head=%u last_sq_head=%u\n",
+                   expected_phase, phase, cq_head, sq_head, last_sq_head);
+          }
           
           // Check for sq_head progression (handles wrap-around)
           // sq_head is a queue index (0 to queue_size-1), not a command count
@@ -1212,9 +1311,33 @@ __device__ void nvme_ep_driveEndpoint(
             uint16_t diff = last_sq_head - sq_head;
             if (diff <= queue_size) {
               // Wrap-around: from last_sq_head to end, then from 0 to sq_head
+              // Calculate completions: (queue_size - last_sq_head) commands from
+              // last_sq_head to end, plus sq_head commands from 0 to sq_head
               new_completions = (queue_size - last_sq_head) + sq_head;
               sq_head_progressed = true;
             }
+          } else if (sq_head == last_sq_head) {
+            // sq_head == last_sq_head means no new completions detected yet
+            // This is expected when polling - controller hasn't processed more yet
+            // However, if we just detected a CQ wrap and have a valid phase-matched
+            // CQE, we should process at least one completion to advance past the wrap
+            // Check if we're at a wrap boundary (cq_head is 0 or queue_size-1)
+            // and we have a valid phase-matched CQE
+            if (phase_ok && (cq_head == 0 || cq_head == queue_size - 1) &&
+                last_sq_head == queue_size - 1) {
+              // We just wrapped and read a CQE with matching phase
+              // Even if sq_head hasn't advanced yet, we know at least one command
+              // completed (the one that caused the wrap). Process 1 completion.
+              new_completions = 1;
+              sq_head_progressed = true;
+              
+              if (verbose >= 2) {
+                printf("[POLL] Processing wrap completion: cq_head=%u "
+                       "sq_head=%u last_sq_head=%u\n",
+                       cq_head, sq_head, last_sq_head);
+              }
+            }
+            // Otherwise, continue polling
           }
           
           // Cap new_completions to remaining operations to prevent buffer overflow
@@ -1223,25 +1346,9 @@ __device__ void nvme_ep_driveEndpoint(
             new_completions = remaining_ops;
           }
           
-          // For first operation, also check if CQE changed (indicates controller wrote)
-          // This helps detect completions even if sq_head hasn't advanced yet
-          bool cqe_changed = false;
-          if (expected_phase == 0xFF && !sq_head_progressed) {
-            // Check if CQE content changed (controller wrote to it)
-            if (cqe_new.command_id != cqe_last.command_id ||
-                cqe_new.status != cqe_last.status ||
-                cqe_new.sq_head != cqe_last.sq_head) {
-              cqe_changed = true;
-              // If CID matches a submitted command, this is likely a completion
-              if (cqe_new.command_id > 0 && cqe_new.command_id <= num_ops) {
-                new_completions = 1;
-              }
-            }
-          }
-          
-          // Process completion if phase is OK and (sq_head progressed or CQE changed)
-          if (phase_ok && (sq_head_progressed || cqe_changed) && 
-              new_completions > 0) {
+          // Process completion if phase is OK and sq_head progressed
+          // Only count completions when sq_head actually advances
+          if (phase_ok && sq_head_progressed && new_completions > 0) {
               // Dump CQE information if very verbose
               if (verbose >= 2) {
                 uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
@@ -1261,49 +1368,41 @@ __device__ void nvme_ep_driveEndpoint(
                 }
               }
               
-              // Process each completion: advance cq_head and update phase on wrap
-              // Phase flips only when controller wraps CQ (from entry N-1 to 0), not
-              // per completion. All entries in same loop have same phase.
+              // Process each completion: advance cq_head
+              // Phase flips only when controller wraps CQ (from entry N-1 to 0),
+              // not when our cq_head wraps. We detect phase changes by reading
+              // CQEs and checking their phase bits.
               for (uint16_t i = 0; i < new_completions; i++) {
                 cq_head = (cq_head + 1) % queue_size;
-                if (cq_head == 0) {
-                  // cq_head wrapped - phase flips on next loop
-                  expected_phase = expected_phase ^ 1;
-                }
-                // If cq_head != 0, phase stays the same (no update needed)
+                // Phase doesn't flip here - it only flips when controller wraps
               }
               
               completed_count += new_completions;
-              // Update last_sq_head - prefer actual sq_head from CQE
-              if (sq_head_progressed) {
-                last_sq_head = sq_head;
-              } else if (cqe_changed && sq_head > 0) {
-                // CQE changed and sq_head is non-zero - use it
-                last_sq_head = sq_head;
-              }
-              // If sq_head is still 0, keep last_sq_head unchanged (will be updated
-              // when controller advances sq_head)
+              // Update last_sq_head with actual sq_head from CQE
+              // sq_head_progressed is true here, so sq_head is valid
+              last_sq_head = sq_head;
               
               poll_count = 0; // Reset poll count on progress
               cqe_last = cqe_new; // Update last seen CQE
               
-              // If this was the first completion, extract phase
-              // After processing completions, cq_head points to next CQE to read
-              // Phase flips when controller wraps from entry N-1 to 0
+              // Extract phase from the completion we just processed
+              // Phase only changes when controller wraps CQ (from slot N-1 to 0),
+              // which we detect by reading CQEs and checking their phase bits
               if (expected_phase == 0xFF) {
-                // Extract phase from the completion we just processed
-                // The phase bit in this CQE indicates the phase for entries in this loop
-                // If cq_head == 0, we just wrapped, so phase already flipped
-                // If cq_head != 0, we're in same loop, phase stays same
-                if (cq_head == 0) {
-                  // We just wrapped to index 0 - phase already flipped by controller
-                  // Next loop will have opposite phase
-                  expected_phase = phase ^ 1;
-                } else {
-                  // Still in same loop - phase stays same for next completion
+                // First completion - extract phase from CQE
+                // The phase bit indicates the phase for entries in this loop
+                expected_phase = phase;
+              } else if (cq_head == 0) {
+                // We just read from slot 0 - check if controller wrapped
+                // If phase differs from expected, controller wrapped and flipped phase
+                if (phase != expected_phase) {
+                  // Controller wrapped - phase flipped
                   expected_phase = phase;
                 }
+                // If phase matches, we're still in the same loop (controller hasn't
+                // wrapped yet, or we're reading old CQEs)
               }
+              // Otherwise, phase stays the same (controller hasn't wrapped yet)
             } else {
               // No completion detected - update last seen CQE for change detection
               cqe_last = cqe_new;
