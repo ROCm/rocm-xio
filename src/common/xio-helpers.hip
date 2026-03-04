@@ -450,18 +450,29 @@ hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
       // Continue anyway - memory might already be zeroed
     }
   } else {
-    // Allocate host-accessible memory using HIP (GPU-accessible)
-    // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
-    // nvme-ep will reallocate with hipHostMallocCoherent if needed
-    // CRITICAL: Must use hipHostMalloc - malloc is not DMA-accessible
-    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
-    if (hipErr != hipSuccess) {
-      std::cerr << "Error: hipHostMalloc failed for submission queue: "
-                << hipGetErrorString(hipErr) << std::endl;
-      std::cerr << "HIP is required for DMA-accessible queue memory. "
-                << "Cannot fall back to malloc (not DMA-accessible)."
-                << std::endl;
-      return hipErrorMemoryAllocation;
+    // Check if we're in emulate mode (no HIP devices available)
+    int deviceCount = 0;
+    hipError_t countErr = hipGetDeviceCount(&deviceCount);
+    bool emulateMode = (countErr != hipSuccess || deviceCount == 0);
+
+    if (emulateMode) {
+      // Emulate mode: use malloc directly (no HIP devices available)
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        std::cerr << "Error: malloc failed for submission queue" << std::endl;
+        return hipErrorMemoryAllocation;
+      }
+    } else {
+      // Allocate host-accessible memory using HIP (GPU-accessible)
+      // Use hipHostMallocMapped to ensure GPU can access it
+      // (needed for test-ep)
+      // nvme-ep will reallocate with hipHostMallocCoherent if needed
+      hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
+      if (hipErr != hipSuccess) {
+        std::cerr << "Error: hipHostMalloc failed for submission queue: "
+                  << hipGetErrorString(hipErr) << std::endl;
+        return hipErrorMemoryAllocation;
+      }
     }
     memset(*ptr, 0, size);
   }
@@ -493,18 +504,29 @@ hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
       // Continue anyway - memory might already be zeroed
     }
   } else {
-    // Allocate host-accessible memory using HIP (GPU-accessible)
-    // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
-    // nvme-ep will reallocate with hipHostMallocCoherent if needed
-    // CRITICAL: Must use hipHostMalloc - malloc is not DMA-accessible
-    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
-    if (hipErr != hipSuccess) {
-      std::cerr << "Error: hipHostMalloc failed for completion queue: "
-                << hipGetErrorString(hipErr) << std::endl;
-      std::cerr << "HIP is required for DMA-accessible queue memory. "
-                << "Cannot fall back to malloc (not DMA-accessible)."
-                << std::endl;
-      return hipErrorMemoryAllocation;
+    // Check if we're in emulate mode (no HIP devices available)
+    int deviceCount = 0;
+    hipError_t countErr = hipGetDeviceCount(&deviceCount);
+    bool emulateMode = (countErr != hipSuccess || deviceCount == 0);
+
+    if (emulateMode) {
+      // Emulate mode: use malloc directly (no HIP devices available)
+      *ptr = malloc(size);
+      if (*ptr == nullptr) {
+        std::cerr << "Error: malloc failed for completion queue" << std::endl;
+        return hipErrorMemoryAllocation;
+      }
+    } else {
+      // Allocate host-accessible memory using HIP (GPU-accessible)
+      // Use hipHostMallocMapped to ensure GPU can access it
+      // (needed for test-ep)
+      // nvme-ep will reallocate with hipHostMallocCoherent if needed
+      hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
+      if (hipErr != hipSuccess) {
+        std::cerr << "Error: hipHostMalloc failed for completion queue: "
+                  << hipGetErrorString(hipErr) << std::endl;
+        return hipErrorMemoryAllocation;
+      }
     }
     memset(*ptr, 0, size);
   }
