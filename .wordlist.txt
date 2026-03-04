@@ -48,6 +48,8 @@ gib
 InfiniBand
 infiniband
 libhsa
+libnvme
+libnvme-dev
 librocm
 libstdc
 RDMA
