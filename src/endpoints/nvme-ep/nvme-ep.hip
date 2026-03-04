@@ -5,9 +5,9 @@
 
 #include "nvme-ep.h"
 #include "xio-endpoint-registry.h"
-#include "xio.h"
 #include "xio-kmod.h"
 #include "xio-mmio-bridge.h"
+#include "xio.h"
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
@@ -71,16 +71,16 @@ __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
 // to GPU cores. Critical for GPU-PCIe coherency when controller writes via DMA.
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   cqeType result = {};
-  
+
 #ifdef __HIP_DEVICE_COMPILE__
   // On GPU: Ensure memory visibility before reading. Use system-level memory
   // fence to ensure CPU/DMA writes are visible to GPU cores.
   __threadfence_system();
-  
+
   // Wait for all memory operations to complete before reading
   // This ensures we don't read stale cached values
   __builtin_amdgcn_s_waitcnt(0);
-  
+
   // Use atomic loads with acquire semantics for critical fields to ensure
   // CPU/DMA writes are visible. The status field (which contains phase bit) is
   // written LAST by the controller, so reading it LAST with acquire semantics
@@ -90,43 +90,43 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
   // Read command_id with acquire semantics
-  volatile uint16_t* cmd_id_ptr = 
-    reinterpret_cast<volatile uint16_t*>(&cqeAddress->command_id);
+  volatile uint16_t* cmd_id_ptr = reinterpret_cast<volatile uint16_t*>(
+    &cqeAddress->command_id);
   result.command_id = __hip_atomic_load(cmd_id_ptr, __ATOMIC_ACQUIRE,
                                         __HIP_MEMORY_SCOPE_SYSTEM);
-  
+
   // Read sq_head with acquire semantics
-  volatile uint16_t* sq_head_ptr = 
-    reinterpret_cast<volatile uint16_t*>(&cqeAddress->sq_head);
+  volatile uint16_t* sq_head_ptr = reinterpret_cast<volatile uint16_t*>(
+    &cqeAddress->sq_head);
   result.sq_head = __hip_atomic_load(sq_head_ptr, __ATOMIC_ACQUIRE,
-                                      __HIP_MEMORY_SCOPE_SYSTEM);
-  
-  // Read sq_id with acquire semantics
-  volatile uint16_t* sq_id_ptr = 
-    reinterpret_cast<volatile uint16_t*>(&cqeAddress->sq_id);
-  result.sq_id = __hip_atomic_load(sq_id_ptr, __ATOMIC_ACQUIRE,
-                                    __HIP_MEMORY_SCOPE_SYSTEM);
-  
-  // Read result and rsvd with acquire semantics (use 32-bit atomic loads)
-  volatile uint32_t* result_ptr = 
-    reinterpret_cast<volatile uint32_t*>(&cqeAddress->result);
-  result.result = __hip_atomic_load(result_ptr, __ATOMIC_ACQUIRE,
                                      __HIP_MEMORY_SCOPE_SYSTEM);
-  
-  volatile uint32_t* rsvd_ptr = 
-    reinterpret_cast<volatile uint32_t*>(&cqeAddress->rsvd);
-  result.rsvd = __hip_atomic_load(rsvd_ptr, __ATOMIC_ACQUIRE,
+
+  // Read sq_id with acquire semantics
+  volatile uint16_t* sq_id_ptr = reinterpret_cast<volatile uint16_t*>(
+    &cqeAddress->sq_id);
+  result.sq_id = __hip_atomic_load(sq_id_ptr, __ATOMIC_ACQUIRE,
                                    __HIP_MEMORY_SCOPE_SYSTEM);
-  
+
+  // Read result and rsvd with acquire semantics (use 32-bit atomic loads)
+  volatile uint32_t* result_ptr = reinterpret_cast<volatile uint32_t*>(
+    &cqeAddress->result);
+  result.result = __hip_atomic_load(result_ptr, __ATOMIC_ACQUIRE,
+                                    __HIP_MEMORY_SCOPE_SYSTEM);
+
+  volatile uint32_t* rsvd_ptr = reinterpret_cast<volatile uint32_t*>(
+    &cqeAddress->rsvd);
+  result.rsvd = __hip_atomic_load(rsvd_ptr, __ATOMIC_ACQUIRE,
+                                  __HIP_MEMORY_SCOPE_SYSTEM);
+
   // Read status LAST (last field written by controller) with acquire semantics.
   // This acts as a synchronization point - reading status with acquire ensures
   // all previous writes by the controller are visible.
-  volatile uint16_t* status_ptr = 
-    reinterpret_cast<volatile uint16_t*>(&cqeAddress->status);
+  volatile uint16_t* status_ptr = reinterpret_cast<volatile uint16_t*>(
+    &cqeAddress->status);
   result.status = __hip_atomic_load(status_ptr, __ATOMIC_ACQUIRE,
-                                     __HIP_MEMORY_SCOPE_SYSTEM);
+                                    __HIP_MEMORY_SCOPE_SYSTEM);
 #pragma GCC diagnostic pop
-  
+
   // Wait for all loads to complete before returning
   __builtin_amdgcn_s_waitcnt(0);
 #else
@@ -191,43 +191,41 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
 // Poll for new CQE - waits for command ID to change or sq_head progression
 // Improved implementation with command ID verification, stale completion
 // handling, and queue size-aware wrap-around detection
-__host__ __device__ cqeType cqePoll(cqeType cqeLast,
-                                    volatile cqeType* cqeAddress,
-                                    uint16_t last_sq_head,
-                                    uint16_t* sq_head_out,
-                                    uint16_t expected_cid,
-                                    uint16_t queue_size,
-                                    uint16_t* cq_head_inout,
-                                    bool* cqe_advanced_out,
-                                    uint8_t* expected_phase_inout) {
+__host__ __device__ cqeType
+cqePoll(cqeType cqeLast, volatile cqeType* cqeAddress, uint16_t last_sq_head,
+        uint16_t* sq_head_out, uint16_t expected_cid, uint16_t queue_size,
+        uint16_t* cq_head_inout, bool* cqe_advanced_out,
+        uint8_t* expected_phase_inout) {
   cqeType cqeNew;
   uint16_t effective_last_sq_head = last_sq_head;
-  
+
   // Timeout mechanism: break after 1 second of polling without progress
   // Use both iteration-based and time-based timeouts for reliability
   // Very aggressive timeout to prevent infinite stalls
   // Max iterations before timeout (very aggressive)
   const uint32_t max_iterations = 100000;
   uint32_t iteration_count = 0;
-  
+
 #ifdef __HIP_DEVICE_COMPILE__
   const uint64_t timeout_ns = 1000000000ULL; // 1 second in nanoseconds
   uint64_t start_time = wall_clock64();
   uint64_t last_progress_time = start_time;
 #endif
-  
+
   while (true) {
     iteration_count++;
-    
+
     // Read CQE first (before timeout check) so we always return valid data
     cqeNew = cqeRead(cqeAddress);
-    
+
     // Check timeout VERY frequently to catch stalls immediately
     // Check every 10 iterations, or every iteration after 1000
-    bool check_timeout = (iteration_count % 10 == 0) || (iteration_count > 1000);
-    
+    bool check_timeout = (iteration_count % 10 == 0) ||
+                         (iteration_count > 1000);
+
     if (check_timeout) {
-      // Check iteration-based timeout (most reliable - doesn't depend on wall_clock64)
+      // Check iteration-based timeout (most reliable - doesn't depend on
+      // wall_clock64)
       if (iteration_count > max_iterations) {
         // Timeout exceeded - ALWAYS advance cq_head and return to make progress
         // This prevents infinite loops even if CID logic fails
@@ -242,7 +240,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
         }
         return cqeNew;
       }
-      
+
       // Check time-based timeout (secondary check)
 #ifdef __HIP_DEVICE_COMPILE__
       uint64_t current_time = wall_clock64();
@@ -266,7 +264,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
     // Primary check: sq_head progression (definitive indicator of completion)
     // sq_head is updated by the controller when commands complete
     bool sq_head_progressed = false;
-    
+
     if (sq_head > effective_last_sq_head) {
       // Normal case: sq_head increased without wrapping
       sq_head_progressed = true;
@@ -276,13 +274,14 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
       bool phase_validates_wrap = true;
       if (expected_phase_inout != nullptr && queue_size > 0) {
         uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
-        // If phase doesn't match expected, this might be stale data, not real wrap
+        // If phase doesn't match expected, this might be stale data, not real
+        // wrap
         if (phase != *expected_phase_inout) {
           // Phase doesn't match - likely stale data, don't trust sq_head
           phase_validates_wrap = false;
         }
       }
-      
+
       if (phase_validates_wrap) {
         if (queue_size > 0) {
           // Verify wrap is reasonable (difference <= queue_size)
@@ -297,10 +296,10 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
         }
       }
     }
-    
+
     if (sq_head_progressed) {
       // sq_head progressed - a command completed
-      
+
       // Phase bit verification (if enabled)
       // Skip phase check if expected_phase is 0xFF (first operation)
       bool phase_ok = true;
@@ -308,7 +307,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
         uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
         phase_ok = (phase == *expected_phase_inout);
       }
-      
+
       // Command ID verification (if enabled)
       if (expected_cid != 0) {
         if (cqeNew.command_id == expected_cid) {
@@ -333,9 +332,11 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
             } else {
               *expected_phase_inout = phase;
             }
-            // Continue to return this completion (sq_head progression is definitive)
+            // Continue to return this completion (sq_head progression is
+            // definitive)
           }
-          // Our command completed - success (CID matches and phase OK if checked)
+          // Our command completed - success (CID matches and phase OK if
+          // checked)
           if (sq_head_out != nullptr) {
             *sq_head_out = sq_head;
           }
@@ -343,8 +344,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
             *cqe_advanced_out = false;
           }
           // Update expected phase for next completion
-          // Phase flips only when controller wraps CQ (from entry N-1 to 0), not
-          // per completion. All entries in same loop have same phase.
+          // Phase flips only when controller wraps CQ (from entry N-1 to 0),
+          // not per completion. All entries in same loop have same phase.
           if (expected_phase_inout != nullptr && cq_head_inout != nullptr &&
               queue_size > 0) {
             uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
@@ -364,7 +365,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
           return cqeNew;
         } else {
           // Wrong command ID - this is a stale completion
-          // Also check phase if enabled - if phase doesn't match, definitely stale
+          // Also check phase if enabled - if phase doesn't match, definitely
+          // stale
           if (expected_phase_inout != nullptr && !phase_ok) {
             // Phase doesn't match - definitely stale, advance cq_head
             if (cq_head_inout != nullptr && queue_size > 0) {
@@ -382,8 +384,9 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 #endif
             continue;
           }
-          
-          // Always advance cq_head when CID doesn't match to prevent infinite loops
+
+          // Always advance cq_head when CID doesn't match to prevent infinite
+          // loops
           if (cq_head_inout != nullptr && queue_size > 0) {
             *cq_head_inout = (*cq_head_inout + 1) % queue_size;
             if (cqe_advanced_out != nullptr) {
@@ -392,7 +395,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
           } else if (cqe_advanced_out != nullptr) {
             *cqe_advanced_out = true;
           }
-          
+
           // Update sq_head tracking
           effective_last_sq_head = sq_head;
           if (sq_head_out != nullptr) {
@@ -412,7 +415,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
         if (expected_phase_inout != nullptr && *expected_phase_inout != 0xFF) {
           uint8_t phase = NVME_CQE_STATUS_PHASE(cqeNew.status);
           if (phase != *expected_phase_inout) {
-            // Phase doesn't match - this is a stale completion, continue polling
+            // Phase doesn't match - this is a stale completion, continue
+            // polling
             iteration_count = 0; // Reset on progress
 #ifdef __HIP_DEVICE_COMPILE__
             last_progress_time = wall_clock64();
@@ -420,8 +424,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
             continue;
           }
           // Phase matches - update for next completion
-          // Phase flips only when controller wraps CQ (from entry N-1 to 0), not
-          // per completion. All entries in same loop have same phase.
+          // Phase flips only when controller wraps CQ (from entry N-1 to 0),
+          // not per completion. All entries in same loop have same phase.
           if (cq_head_inout != nullptr && queue_size > 0) {
             uint16_t next_cq_head = (*cq_head_inout + 1) % queue_size;
             if (next_cq_head == 0) {
@@ -468,8 +472,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
               *cqe_advanced_out = false;
             }
             // Update expected phase for next completion
-            // Phase flips only when controller wraps CQ (from entry N-1 to 0), not
-            // per completion. All entries in same loop have same phase.
+            // Phase flips only when controller wraps CQ (from entry N-1 to 0),
+            // not per completion. All entries in same loop have same phase.
             if (cq_head_inout != nullptr && queue_size > 0) {
               uint16_t next_cq_head = (*cq_head_inout + 1) % queue_size;
               if (next_cq_head == 0) {
@@ -500,8 +504,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
             *cqe_advanced_out = false;
           }
           // Update expected phase for next completion
-          // Phase flips only when controller wraps CQ (from entry N-1 to 0), not
-          // per completion. All entries in same loop have same phase.
+          // Phase flips only when controller wraps CQ (from entry N-1 to 0),
+          // not per completion. All entries in same loop have same phase.
           if (cq_head_inout != nullptr && queue_size > 0) {
             uint16_t next_cq_head = (*cq_head_inout + 1) % queue_size;
             if (next_cq_head == 0) {
@@ -623,8 +627,7 @@ __host__ __device__ void ringDoorbell(
   uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
   void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
   xio_mmio_bridge::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
-                                 shadowBufferVirt, nvmeTargetBdf,
-                                 nvmeBar0Gpu);
+                                shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 }
 
 /**
@@ -636,8 +639,8 @@ __host__ __device__ void ringCqHeadDoorbell(
   uint16_t cq_head, uint32_t cq_doorbell_offset, bool usePciMmioBridge,
   void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
   xio_mmio_bridge::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-                                       usePciMmioBridge, shadowBufferVirt,
-                                       nvmeTargetBdf, nvmeBar0Gpu);
+                                      usePciMmioBridge, shadowBufferVirt,
+                                      nvmeTargetBdf, nvmeBar0Gpu);
 }
 
 //
@@ -648,9 +651,9 @@ __host__ __device__ void ringCqHeadDoorbell(
  * Calculate LBA for an operation
  */
 __device__ uint64_t calculate_lba(unsigned i, uint16_t cmd_id,
-                                   uint64_t base_lba, uint32_t blocks,
-                                   uint64_t lba_range_lbas,
-                                   bool use_random_access) {
+                                  uint64_t base_lba, uint32_t blocks,
+                                  uint64_t lba_range_lbas,
+                                  bool use_random_access) {
   if (use_random_access && lba_range_lbas > 0) {
     uint64_t seed = (uint64_t)i * 0x9e3779b9 + cmd_id * 0x85ebca6b;
     seed ^= seed >> 16;
@@ -691,12 +694,11 @@ __device__ bool determine_command_type(unsigned i, bool write_only_mode,
  * buffer)
  */
 __device__ void calculate_prps_for_command(
-  unsigned i, bool is_read_command, bool sequential_mode,
-  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
-  bool write_only_mode, bool alternate_mode, size_t transfer_size,
-  size_t bufferSize, uint8_t* readBuffer, uint8_t* writeBuffer,
-  uint64_t readBufferDma, uint64_t writeBufferDma, uint64_t* prp1,
-  uint64_t* prp2) {
+  unsigned i, bool is_read_command, bool sequential_mode, bool has_read_buffer,
+  bool has_write_buffer, bool read_only_mode, bool write_only_mode,
+  bool alternate_mode, size_t transfer_size, size_t bufferSize,
+  uint8_t* readBuffer, uint8_t* writeBuffer, uint64_t readBufferDma,
+  uint64_t writeBufferDma, uint64_t* prp1, uint64_t* prp2) {
   if (is_read_command && has_read_buffer) {
     uint64_t buffer_offset;
     if (sequential_mode) {
@@ -709,8 +711,8 @@ __device__ void calculate_prps_for_command(
     }
     if (buffer_offset + transfer_size <= bufferSize) {
       uint64_t buffer_addr = readBufferDma
-                                ? (readBufferDma + buffer_offset)
-                                : (uint64_t)(readBuffer + buffer_offset);
+                               ? (readBufferDma + buffer_offset)
+                               : (uint64_t)(readBuffer + buffer_offset);
       nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, prp1, prp2);
     } else {
       *prp1 = NVME_EP_INVALID_PRP1;
@@ -728,8 +730,8 @@ __device__ void calculate_prps_for_command(
     }
     if (buffer_offset + transfer_size <= bufferSize) {
       uint64_t buffer_addr = writeBufferDma
-                                ? (writeBufferDma + buffer_offset)
-                                : (uint64_t)(writeBuffer + buffer_offset);
+                               ? (writeBufferDma + buffer_offset)
+                               : (uint64_t)(writeBuffer + buffer_offset);
       nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, prp1, prp2);
     } else {
       *prp1 = NVME_EP_INVALID_PRP1;
@@ -791,16 +793,16 @@ __device__ inline nvme_ep::cqeType nvme_ep_read_cqe(
 __device__ uint16_t nvme_ep_batch_poll_for_cid(
   const XioEndpointConfig& config, struct nvme_cqe* cqeAddr,
   bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
-  uint32_t cq_doorbell_offset, void* nvmeBar0Gpu, int verbose,
-  unsigned num_ops, uint16_t queue_size, uint16_t* completed_count_inout,
-  uint16_t* cq_head_inout, uint16_t target_cid) {
+  uint32_t cq_doorbell_offset, void* nvmeBar0Gpu, int verbose, unsigned num_ops,
+  uint16_t queue_size, uint16_t* completed_count_inout, uint16_t* cq_head_inout,
+  uint16_t target_cid) {
   uint16_t& completed_count = *completed_count_inout;
   uint16_t& cq_head = *cq_head_inout;
 
   if (completed_count >= num_ops || cqeAddr == nullptr) {
     return 0;
   }
-  
+
   if (queue_size == 0) {
     return 0;
   }
@@ -810,30 +812,31 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
   uint16_t processed_count = 0;
   uint16_t start_cq_head = cq_head;
   uint16_t batch_first_cid = completed_count + 1;
-  
+
   // Validate target_cid
   if (target_cid < batch_first_cid || target_cid > num_ops) {
     if (verbose >= 1) {
-      printf("[POLL] Invalid target_cid %u (expected %u-%u)\n",
-             target_cid, batch_first_cid, num_ops);
+      printf("[POLL] Invalid target_cid %u (expected %u-%u)\n", target_cid,
+             batch_first_cid, num_ops);
     }
     return 0;
   }
-  
+
   uint16_t batch_size = target_cid - batch_first_cid + 1;
-  
+
   // Validate batch_size
   if (batch_size == 0 || batch_size > queue_size) {
     if (verbose >= 1) {
-      printf("[POLL] Invalid batch_size %u (queue_size=%u)\n",
-             batch_size, queue_size);
+      printf("[POLL] Invalid batch_size %u (queue_size=%u)\n", batch_size,
+             queue_size);
     }
     return 0;
   }
 
   if (verbose >= 2) {
-    printf("[POLL] Polling for CID %u (batch CIDs %u-%u), starting at slot %u\n",
-           target_cid, batch_first_cid, target_cid, cq_head);
+    printf(
+      "[POLL] Polling for CID %u (batch CIDs %u-%u), starting at slot %u\n",
+      target_cid, batch_first_cid, target_cid, cq_head);
   }
 
   // Scan forward through CQ entries looking for target_cid
@@ -847,8 +850,8 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
     nvme_ep::cqeType cqe_new = nvme_ep_read_cqe(cqe_entry);
 
     if (verbose >= 2 && poll_count % 10000 == 0) {
-      printf("[POLL] slot=%u cmd_id=%u target_cid=%u completed=%u\n",
-             cq_head, cqe_new.command_id, target_cid, completed_count);
+      printf("[POLL] slot=%u cmd_id=%u target_cid=%u completed=%u\n", cq_head,
+             cqe_new.command_id, target_cid, completed_count);
     }
 
     // If we found the target CID, process all completions in the batch
@@ -857,15 +860,17 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
       // scan backwards from found slot to locate batch_first_cid
       uint16_t found_slot = cq_head;
       uint16_t batch_start_slot = found_slot;
-      
+
       // Scan backwards to find where batch_first_cid actually is
       // This handles CQ wraps correctly
-      for (uint16_t scan_back = 0; scan_back < batch_size && scan_back < queue_size; scan_back++) {
-        uint16_t check_slot = (found_slot - scan_back + queue_size) % queue_size;
+      for (uint16_t scan_back = 0;
+           scan_back < batch_size && scan_back < queue_size; scan_back++) {
+        uint16_t check_slot = (found_slot - scan_back + queue_size) %
+                              queue_size;
         volatile struct nvme_cqe* cqe_check = &cqeAddr[check_slot];
         nvme_ep::cqeType cqe_check_val = nvme_ep_read_cqe(cqe_check);
-        
-        if (cqe_check_val.command_id == batch_first_cid && 
+
+        if (cqe_check_val.command_id == batch_first_cid &&
             cqe_check_val.command_id != 0) {
           batch_start_slot = check_slot;
           break;
@@ -878,10 +883,10 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
       // Assign the same finish time to all completions in the batch
       uint64_t end_time = wall_clock64();
       uint16_t current_slot = batch_start_slot;
-      
+
       // Record end time for all CIDs in the batch
-      for (uint16_t expected_cid = batch_first_cid; 
-           expected_cid <= target_cid; expected_cid++) {
+      for (uint16_t expected_cid = batch_first_cid; expected_cid <= target_cid;
+           expected_cid++) {
         // Record end time for this CID (same time for all in batch)
         uint16_t op_idx = expected_cid - 1;
         if (config.endTimes != nullptr && op_idx < num_ops) {
@@ -892,7 +897,7 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
         if (verbose >= 2) {
           volatile struct nvme_cqe* cqe = &cqeAddr[current_slot];
           nvme_ep::cqeType cqe_val = nvme_ep_read_cqe(cqe);
-          
+
           if (cqe_val.command_id == expected_cid && cqe_val.command_id != 0) {
             uint8_t sc = NVME_CQE_STATUS_SC(cqe_val.status);
             uint8_t sct = NVME_CQE_STATUS_SCT(cqe_val.status);
@@ -903,7 +908,7 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
 
         current_slot = (current_slot + 1) % queue_size;
       }
-      
+
       // All completions in batch have been processed
       processed_count = batch_size;
 
@@ -913,18 +918,19 @@ __device__ uint16_t nvme_ep_batch_poll_for_cid(
 
       // Update CQ doorbell
       nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset, usePciMmioBridge,
-                                   shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+                                  shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
 
       if (verbose >= 2) {
-        printf("[POLL] Found target CID %u at slot %u, processed %u completions\n",
-               target_cid, found_slot, processed_count);
+        printf(
+          "[POLL] Found target CID %u at slot %u, processed %u completions\n",
+          target_cid, found_slot, processed_count);
       }
       break;
     }
 
     // Advance to next slot
     cq_head = (cq_head + 1) % queue_size;
-    
+
     // If we've wrapped around without finding it, reset and keep polling
     if (cq_head == start_cq_head && poll_count > queue_size) {
       // Wrapped around - target not ready yet, keep polling from start
@@ -948,17 +954,17 @@ __device__ uint16_t nvme_ep_batch_submit_commands(
   uint32_t doorbell_offset, uint8_t* readBuffer, uint8_t* writeBuffer,
   size_t bufferSize, uint64_t readBufferDma, uint64_t writeBufferDma,
   uint16_t queue_size, uint64_t lba_range_lbas, bool use_random_access,
-  void* nvmeBar0Gpu, int verbose, unsigned num_ops,
-  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
-  bool write_only_mode, bool alternate_mode, size_t transfer_size,
-  uint32_t nsid, uint32_t blocks, uint16_t* sq_tail_inout,
-  uint16_t batch_size, uint16_t submitted_count) {
+  void* nvmeBar0Gpu, int verbose, unsigned num_ops, bool has_read_buffer,
+  bool has_write_buffer, bool read_only_mode, bool write_only_mode,
+  bool alternate_mode, size_t transfer_size, uint32_t nsid, uint32_t blocks,
+  uint16_t* sq_tail_inout, uint16_t batch_size, uint16_t submitted_count) {
   uint16_t& sq_tail = *sq_tail_inout;
 
   // Calculate actual batch size (don't exceed remaining operations)
   uint16_t remaining_to_submit = num_ops - submitted_count;
-  uint16_t actual_batch_size =
-    (remaining_to_submit < batch_size) ? remaining_to_submit : batch_size;
+  uint16_t actual_batch_size = (remaining_to_submit < batch_size)
+                                 ? remaining_to_submit
+                                 : batch_size;
 
   if (verbose >= 2) {
     printf("[BATCH] submitting=%u batch_size=%u remaining=%u sq_tail=%u\n",
@@ -972,19 +978,22 @@ __device__ uint16_t nvme_ep_batch_submit_commands(
 
     uint64_t lba = nvme_ep::calculate_lba(i, cmd_id, base_lba, blocks,
                                           lba_range_lbas, use_random_access);
-    bool is_read_command = nvme_ep::determine_command_type(
-      i, write_only_mode, read_only_mode, alternate_mode);
+    bool is_read_command = nvme_ep::determine_command_type(i, write_only_mode,
+                                                           read_only_mode,
+                                                           alternate_mode);
     bool is_write = !is_read_command;
 
     uint64_t prp1, prp2;
-    nvme_ep::calculate_prps_for_command(
-      i, is_read_command, false, has_read_buffer, has_write_buffer,
-      read_only_mode, write_only_mode, alternate_mode, transfer_size,
-      bufferSize, readBuffer, writeBuffer, readBufferDma, writeBufferDma,
-      &prp1, &prp2);
+    nvme_ep::calculate_prps_for_command(i, is_read_command, false,
+                                        has_read_buffer, has_write_buffer,
+                                        read_only_mode, write_only_mode,
+                                        alternate_mode, transfer_size,
+                                        bufferSize, readBuffer, writeBuffer,
+                                        readBufferDma, writeBufferDma, &prp1,
+                                        &prp2);
 
     nvme_ep::setup_and_write_sqe(sqeAddr, sq_tail, is_write, cmd_id, nsid, lba,
-                                  blocks, prp1, prp2, i, config, verbose);
+                                 blocks, prp1, prp2, i, config, verbose);
 
     sq_tail = (sq_tail + 1) % queue_size;
   }
@@ -1010,10 +1019,10 @@ __device__ void nvme_ep_sequential_mode(
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
-  int verbose, unsigned num_ops, bool sequential_is_read,
-  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
-  bool write_only_mode, bool alternate_mode, size_t transfer_size,
-  uint32_t nsid, uint32_t blocks, uint32_t cq_doorbell_offset) {
+  int verbose, unsigned num_ops, bool sequential_is_read, bool has_read_buffer,
+  bool has_write_buffer, bool read_only_mode, bool write_only_mode,
+  bool alternate_mode, size_t transfer_size, uint32_t nsid, uint32_t blocks,
+  uint32_t cq_doorbell_offset) {
   // Track submission queue tail
   uint16_t sq_tail = 0;
   uint16_t last_sq_head = 0;
@@ -1026,7 +1035,7 @@ __device__ void nvme_ep_sequential_mode(
 
     // Calculate LBA using helper function
     uint64_t lba = nvme_ep::calculate_lba(i, cmd_id, base_lba, blocks,
-                                           lba_range_lbas, use_random_access);
+                                          lba_range_lbas, use_random_access);
 
     // Calculate PRPs using helper function
     uint64_t prp1, prp2;
@@ -1038,8 +1047,8 @@ __device__ void nvme_ep_sequential_mode(
 
     // Setup and write SQE using helper function
     nvme_ep::setup_and_write_sqe(sqeAddr, sq_tail, !sequential_is_read, cmd_id,
-                                  nsid, lba, blocks, prp1, prp2, i, config,
-                                  verbose);
+                                 nsid, lba, blocks, prp1, prp2, i, config,
+                                 verbose);
 
     // Ring doorbell
     nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
@@ -1058,15 +1067,15 @@ __device__ void nvme_ep_sequential_mode(
       volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
       uint16_t new_sq_head = 0;
 
-      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(
-        cqe_last, (volatile nvme_ep::cqeType*)cqe_entry, last_sq_head,
-        &new_sq_head, cmd_id, queue_size, &cq_head, &cqe_advanced,
-        &expected_phase);
+      nvme_ep::cqeType cqe_new =
+        nvme_ep::cqePoll(cqe_last, (volatile nvme_ep::cqeType*)cqe_entry,
+                         last_sq_head, &new_sq_head, cmd_id, queue_size,
+                         &cq_head, &cqe_advanced, &expected_phase);
 
       if (cqe_advanced) {
         nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-                                     usePciMmioBridge, shadowBufferVirt,
-                                     nvmeTargetBdf, nvmeBar0Gpu);
+                                    usePciMmioBridge, shadowBufferVirt,
+                                    nvmeTargetBdf, nvmeBar0Gpu);
         last_sq_head = new_sq_head;
         poll_count = 0;
         continue;
@@ -1075,8 +1084,8 @@ __device__ void nvme_ep_sequential_mode(
       uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
       uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
       uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
-      bool phase_matches =
-        (expected_phase == 0xFF) || (phase == expected_phase);
+      bool phase_matches = (expected_phase == 0xFF) ||
+                           (phase == expected_phase);
       if (phase_matches || new_sq_head > last_sq_head) {
         if (verbose >= 2) {
           printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
@@ -1084,8 +1093,7 @@ __device__ void nvme_ep_sequential_mode(
                  cqe_new.command_id, new_sq_head, cqe_new.status, sct, sc,
                  phase, cq_head);
         }
-        if (config.endTimes != nullptr && cmd_id >= 1 &&
-            cmd_id <= num_ops) {
+        if (config.endTimes != nullptr && cmd_id >= 1 && cmd_id <= num_ops) {
           unsigned idx = cmd_id - 1;
           config.endTimes[idx] = wall_clock64();
         }
@@ -1099,8 +1107,8 @@ __device__ void nvme_ep_sequential_mode(
         }
         cq_head = (cq_head + 1) % queue_size;
         nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-                                     usePciMmioBridge, shadowBufferVirt,
-                                     nvmeTargetBdf, nvmeBar0Gpu);
+                                    usePciMmioBridge, shadowBufferVirt,
+                                    nvmeTargetBdf, nvmeBar0Gpu);
         last_sq_head = new_sq_head;
         break;
       }
@@ -1129,9 +1137,11 @@ __device__ inline uint32_t nvme_ep_calculate_cq_doorbell_offset(
 }
 
 // Helper: Determine operation mode and parameters
-__device__ inline void nvme_ep_determine_mode(
-  int readIo, int writeIo, unsigned config_iterations, bool* sequential_mode,
-  unsigned* num_ops, bool* sequential_is_read) {
+__device__ inline void nvme_ep_determine_mode(int readIo, int writeIo,
+                                              unsigned config_iterations,
+                                              bool* sequential_mode,
+                                              unsigned* num_ops,
+                                              bool* sequential_is_read) {
   *sequential_mode = (readIo < 0 || writeIo < 0);
   if (*sequential_mode) {
     if (readIo < 0) {
@@ -1166,8 +1176,7 @@ __device__ void nvme_ep_driveEndpoint(
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
-  int verbose,
-  int readIo, int writeIo, uint16_t batch_size) {
+  int verbose, int readIo, int writeIo, uint16_t batch_size) {
   // Validate inputs
   if (cqeAddr == nullptr) {
     return; // Cannot proceed without valid CQ pointer
@@ -1196,9 +1205,9 @@ __device__ void nvme_ep_driveEndpoint(
   bool write_only_mode;
   bool alternate_mode;
   nvme_ep_determine_buffer_modes(readBuffer, writeBuffer, bufferSize,
-                                  &has_read_buffer, &has_write_buffer,
-                                  &read_only_mode, &write_only_mode,
-                                  &alternate_mode);
+                                 &has_read_buffer, &has_write_buffer,
+                                 &read_only_mode, &write_only_mode,
+                                 &alternate_mode);
 
   // Generate write data if needed
   if (has_write_buffer) {
@@ -1220,19 +1229,21 @@ __device__ void nvme_ep_driveEndpoint(
   // Route to appropriate mode handler
   if (sequential_mode) {
     // Sequential mode: submit and wait for each command individually
-    nvme_ep_sequential_mode(
-      config, sqeAddr, cqeAddr, lbaSize, base_lba, usePciMmioBridge,
-      shadowBufferVirt, nvmeTargetBdf, queueId, doorbell_offset, readBuffer,
-      writeBuffer, bufferSize, readBufferDma, writeBufferDma, lfsrSeed,
-      queue_size, lba_range_lbas, use_random_access, nvmeBar0Gpu, verbose,
-      num_ops, sequential_is_read, has_read_buffer, has_write_buffer,
-      read_only_mode, write_only_mode, alternate_mode, transfer_size, nsid,
-      blocks, cq_doorbell_offset);
+    nvme_ep_sequential_mode(config, sqeAddr, cqeAddr, lbaSize, base_lba,
+                            usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
+                            queueId, doorbell_offset, readBuffer, writeBuffer,
+                            bufferSize, readBufferDma, writeBufferDma, lfsrSeed,
+                            queue_size, lba_range_lbas, use_random_access,
+                            nvmeBar0Gpu, verbose, num_ops, sequential_is_read,
+                            has_read_buffer, has_write_buffer, read_only_mode,
+                            write_only_mode, alternate_mode, transfer_size,
+                            nsid, blocks, cq_doorbell_offset);
   } else {
     // Batch mode: submit commands in fixed-size batches and poll for last CID
     uint16_t completed_count = 0;
     uint16_t submitted_count = 0;
-    uint16_t last_batch_last_cid = 0; // Track last CID of most recently submitted batch
+    uint16_t last_batch_last_cid = 0; // Track last CID of most recently
+                                      // submitted batch
 
     while (submitted_count < num_ops || completed_count < num_ops) {
       // Submit a batch of commands if needed
@@ -1253,14 +1264,18 @@ __device__ void nvme_ep_driveEndpoint(
       // Poll for completions if needed
       if (completed_count < submitted_count && last_batch_last_cid > 0) {
         // Poll until we see the last CID of the most recently submitted batch
-        // Note: Return value is not used as completed_count is updated via pointer
-        (void)nvme_ep_batch_poll_for_cid(
-          config, cqeAddr, usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
-          cq_doorbell_offset, nvmeBar0Gpu, verbose, num_ops, queue_size,
-          &completed_count, &cq_head, last_batch_last_cid);
-        
+        // Note: Return value is not used as completed_count is updated via
+        // pointer
+        (void)nvme_ep_batch_poll_for_cid(config, cqeAddr, usePciMmioBridge,
+                                         shadowBufferVirt, nvmeTargetBdf,
+                                         cq_doorbell_offset, nvmeBar0Gpu,
+                                         verbose, num_ops, queue_size,
+                                         &completed_count, &cq_head,
+                                         last_batch_last_cid);
+
         // If we didn't process any completions, we're still waiting
-        // Continue the loop to check if we can submit more or need to keep polling
+        // Continue the loop to check if we can submit more or need to keep
+        // polling
       }
     }
   }
@@ -1330,14 +1345,14 @@ __host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
   // Open BAR0 resource file
   bar0_fd = open(resource_path, O_RDWR);
   if (bar0_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n",
-            resource_path, strerror(errno));
+    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
+            strerror(errno));
     return -errno;
   }
 
   // Map BAR0 to userspace
-  mapped = mmap(nullptr, bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                bar0_fd, 0);
+  mapped = mmap(nullptr, bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar0_fd,
+                0);
   if (mapped == MAP_FAILED) {
     fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
     close(bar0_fd);
@@ -1425,7 +1440,8 @@ __host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
  * Read NVMe Controller Capabilities (CAP) register from BAR0
  *
  * The CAP register is a 64-bit register at offset 0x00-0x07 in BAR0.
- * It contains controller capabilities including CQR (Contiguous Queues Required).
+ * It contains controller capabilities including CQR (Contiguous Queues
+ * Required).
  *
  * @param nvme_bdf NVMe device BDF in 0xBBDD format
  * @param cap_out Output parameter for CAP register value
@@ -1454,8 +1470,8 @@ __host__ int nvme_ep_read_cap_register(uint16_t nvme_bdf, uint64_t* cap_out) {
   // Open BAR0 resource file
   bar0_fd = open(resource_path, O_RDONLY);
   if (bar0_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n",
-            resource_path, strerror(errno));
+    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
+            strerror(errno));
     return -errno;
   }
 
@@ -1545,8 +1561,7 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
   req.size = size;
   req.nvme_bdf = nvme_bdf;
-  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
-                           : ROCM_XIO_FLAG_PASSTHROUGH;
+  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED : ROCM_XIO_FLAG_PASSTHROUGH;
 
   ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &req);
   if (ret < 0) {
@@ -1706,8 +1721,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   if (nvmeConfig->usePciMmioBridge) {
     void* shadow_virt = nullptr;
     int ret_shadow = xio_mmio_bridge::map_shadow_buffer(
-      nvmeConfig->mmioBridgeBdf,
-                                                   &shadow_virt);
+      nvmeConfig->mmioBridgeBdf, &shadow_virt);
     if (ret_shadow < 0) {
       fprintf(stderr, "Failed to map PCI MMIO bridge shadow buffer\n");
       return hipErrorInvalidValue;
@@ -1855,7 +1869,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   uint64_t baseLba = 0;      // Default value
   uint64_t lbaRangeLbas = 0; // 0 means no range limit (use original behavior)
   bool useRandomAccess = false;
-  uint16_t batchSize = 0;    // Default: auto-calculate
+  uint16_t batchSize = 0; // Default: auto-calculate
   if (nvmeConfig) {
     lbaSize = nvmeConfig->lbaSize;
     baseLba = nvmeConfig->baseLba;
@@ -2243,7 +2257,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
                       "MMIO bridge mode\n");
       shadowBufferVirt = nullptr;
       usePciMmioBridge = false;
-      // Note: shadowBufferDrmFd is managed by nvmeConfig, not this local variable
+      // Note: shadowBufferDrmFd is managed by nvmeConfig, not this local
+      // variable
     } else {
       fprintf(stderr,
               "Shadow buffer GPU accessibility verified: type=%d, device=%d\n",
@@ -2323,7 +2338,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     fflush(stderr);
     return hipErrorInvalidValue;
   }
-  
+
   // Validate numThreads before kernel launch
   if (config->numThreads == 0 || config->numThreads > 1024) {
     fprintf(stderr, "Error: Invalid numThreads=%u (must be 1-1024)\n",
@@ -2349,8 +2364,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           sqePtr, cqePtr, config->startTimes, config->endTimes);
   fprintf(stderr, "Buffers: readBuffer=%p, writeBuffer=%p, shadowBuffer=%p\n",
           readBufferGpu ? readBufferGpu : readBuffer,
-          writeBufferGpu ? writeBufferGpu : writeBuffer,
-          shadowBufferVirt);
+          writeBufferGpu ? writeBufferGpu : writeBuffer, shadowBufferVirt);
   fflush(stderr);
 
   // Verify DRM file descriptor is still open if using PCI MMIO bridge
@@ -2432,12 +2446,12 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     writeBufferGpu ? writeBufferGpu
                    : writeBuffer, // GPU pointer if available (host memory)
     dataBufferSize, readBufferDma, writeBufferDma, lfsrSeed, queue_size,
-    lbaRangeLbas,    // LBA range in LBAs (0 = no limit)
-    useRandomAccess, // true for random access, false for sequential
-    nvmeBar0Gpu,     // GPU pointer to NVMe BAR0 (for direct doorbell)
-    readIo,          // readIo (negative for sequential mode)
-    writeIo,         // writeIo (negative for sequential mode)
-    batchSize,       // Batch size (0 = auto: min(queue_size/2, 16))
+    lbaRangeLbas,     // LBA range in LBAs (0 = no limit)
+    useRandomAccess,  // true for random access, false for sequential
+    nvmeBar0Gpu,      // GPU pointer to NVMe BAR0 (for direct doorbell)
+    readIo,           // readIo (negative for sequential mode)
+    writeIo,          // writeIo (negative for sequential mode)
+    batchSize,        // Batch size (0 = auto: min(queue_size/2, 16))
     config->verbose); // Verbose level (0=none, 1=normal, 2=very verbose)
 
   // Check for kernel launch errors immediately
@@ -2476,7 +2490,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // Cleanup buffers: unregister from kernel module before freeing
   int kmod_fd_cleanup = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
   if (kmod_fd_cleanup >= 0) {
-    // Unregister read buffer if it was registered (check if DMA address was set)
+    // Unregister read buffer if it was registered (check if DMA address was
+    // set)
     if (readBuffer && readBufferDma != 0) {
       rocm_axiio_unregister_buffer_req unreg_req = {};
       unreg_req.virt_addr = reinterpret_cast<uint64_t>(readBuffer);
@@ -2488,7 +2503,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       }
     }
 
-    // Unregister write buffer if it was registered (check if DMA address was set)
+    // Unregister write buffer if it was registered (check if DMA address was
+    // set)
     if (writeBuffer && writeBufferDma != 0) {
       rocm_axiio_unregister_buffer_req unreg_req = {};
       unreg_req.virt_addr = reinterpret_cast<uint64_t>(writeBuffer);
@@ -2533,8 +2549,10 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   if (nvmeConfig->shadowBufferCpu != nullptr) {
     hipError_t unreg_err = hipHostUnregister(nvmeConfig->shadowBufferCpu);
     if (unreg_err != hipSuccess) {
-      fprintf(stderr, "Warning: Failed to unregister shadow buffer from HIP: "
-              "%s\n", hipGetErrorString(unreg_err));
+      fprintf(stderr,
+              "Warning: Failed to unregister shadow buffer from HIP: "
+              "%s\n",
+              hipGetErrorString(unreg_err));
     } else {
       fprintf(stderr, "Shadow buffer unregistered from HIP\n");
     }
@@ -2579,8 +2597,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
  * If CQR=1, the controller requires contiguous queues (PC=1).
  *
  * @param nvme_bdf NVMe device BDF in 0xBBDD format
- * @param supports_pc0 Output parameter: true if PC=0 is supported, false if PC=1
- *                    is required
+ * @param supports_pc0 Output parameter: true if PC=0 is supported, false if
+ * PC=1 is required
  * @return 0 on success, negative error code on failure
  */
 __host__ int nvme_ep_check_pc0_support(uint16_t nvme_bdf, bool* supports_pc0) {
@@ -3004,19 +3022,21 @@ __host__ int nvme_ep_read_smart_log(const char* nvme_device,
 /**
  * Generate PRP list for non-contiguous queue buffer
  * For PC=0 queues, NVMe requires a PRP list describing all physical pages
- * 
+ *
  * @param virt_addr Virtual address of queue buffer
  * @param size Size of queue buffer in bytes
  * @param kmod_fd Kernel module file descriptor (for allocating PRP list memory)
- * @param base_phys_addr Base physical address (0 = use pagemap, non-zero = use this for DMA-BUF)
+ * @param base_phys_addr Base physical address (0 = use pagemap, non-zero = use
+ * this for DMA-BUF)
  * @param prp1_out Output: PRP1 value (first page address or PRP list address)
- * @param prp2_out Output: PRP2 value (second page address, PRP list address, or 0)
+ * @param prp2_out Output: PRP2 value (second page address, PRP list address, or
+ * 0)
  * @param prp_list_virt_out Output: Virtual address of PRP list (for cleanup)
  * @param prp_list_phys_out Output: Physical address of PRP list
  * @return 0 on success, negative error code on failure
  */
-static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd,
-                                       uint64_t base_phys_addr,
+static int generate_prp_list_for_queue(void* virt_addr, size_t size,
+                                       int kmod_fd, uint64_t base_phys_addr,
                                        uint64_t* prp1_out, uint64_t* prp2_out,
                                        void** prp_list_virt_out,
                                        uint64_t* prp_list_kernel_virt_out) {
@@ -3024,23 +3044,24 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
   const size_t nvme_page_size = NVME_PAGE_SIZE; // Typically 4096
   uint64_t virt_start = reinterpret_cast<uint64_t>(virt_addr);
   uint64_t page_offset = virt_start % host_page_size;
-  
+
   // Calculate number of pages the queue spans
   size_t num_pages = (size + page_offset + host_page_size - 1) / host_page_size;
-  
+
   // Allocate array to hold physical page addresses
-  uint64_t* page_phys_addrs = static_cast<uint64_t*>(malloc(num_pages * sizeof(uint64_t)));
+  uint64_t* page_phys_addrs = static_cast<uint64_t*>(
+    malloc(num_pages * sizeof(uint64_t)));
   if (!page_phys_addrs) {
     return -ENOMEM;
   }
-  
+
   // Get physical addresses of all pages
   if (base_phys_addr != 0) {
     // DMA-BUF memory: use provided base physical address
     // Calculate page addresses from base address
     uint64_t base_page_phys = base_phys_addr & ~(host_page_size - 1);
     uint64_t base_offset = base_phys_addr & (host_page_size - 1);
-    
+
     for (size_t i = 0; i < num_pages; i++) {
       uint64_t page_phys_addr = base_page_phys + (i * host_page_size);
       // For first page, add offset within page
@@ -3058,12 +3079,13 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       free(page_phys_addrs);
       return -errno;
     }
-    
+
     // Read physical addresses for all pages
     for (size_t i = 0; i < num_pages; i++) {
       uint64_t pfn;
-      off_t pagemap_offset = ((virt_start / host_page_size) + i) * sizeof(uint64_t);
-      
+      off_t pagemap_offset = ((virt_start / host_page_size) + i) *
+                             sizeof(uint64_t);
+
       if (lseek(pagemap_fd, pagemap_offset, SEEK_SET) < 0 ||
           read(pagemap_fd, &pfn, sizeof(pfn)) != sizeof(pfn)) {
         fprintf(stderr, "ERROR: Failed to read pagemap page %zu\n", i);
@@ -3071,35 +3093,37 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         close(pagemap_fd);
         return -EIO;
       }
-      
+
       if (!(pfn & (1ULL << 63))) {
         fprintf(stderr, "ERROR: Page %zu not present in pagemap\n", i);
         free(page_phys_addrs);
         close(pagemap_fd);
         return -EFAULT;
       }
-      
+
       uint64_t phys_pfn = pfn & ((1ULL << 55) - 1);
       uint64_t page_phys_addr = phys_pfn * host_page_size;
-      
+
       // For first page, add offset within page
       if (i == 0) {
         page_phys_addr += page_offset;
       }
-      
+
       page_phys_addrs[i] = page_phys_addr;
     }
-    
+
     close(pagemap_fd);
   }
-  
+
   // Calculate PRP1 and PRP2 based on number of pages
   uint64_t prp1 = page_phys_addrs[0];
   uint64_t prp2 = 0;
   void* prp_list_virt = nullptr;
-  uint64_t prp_list_phys = 0; // Will be set to kernel or userspace physical address
-  uint64_t prp_list_kernel_virt = 0; // 0 means userspace-allocated, non-zero means kernel-allocated
-  
+  uint64_t prp_list_phys = 0; // Will be set to kernel or userspace physical
+                              // address
+  uint64_t prp_list_kernel_virt = 0; // 0 means userspace-allocated, non-zero
+                                     // means kernel-allocated
+
   if (num_pages == 1) {
     // Single page: PRP1 = page address, PRP2 = 0
     prp2 = 0;
@@ -3113,34 +3137,33 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
     // PRP list must be physically contiguous and page-aligned
     size_t prp_list_size = num_pages * sizeof(uint64_t);
     // Ensure PRP list size is page-aligned for mmap
-    size_t prp_list_size_aligned = 
-      (prp_list_size + host_page_size - 1) & ~(host_page_size - 1);
-    
+    size_t prp_list_size_aligned = (prp_list_size + host_page_size - 1) &
+                                   ~(host_page_size - 1);
+
     // Allocate PRP list via kernel module (must be physically contiguous)
     // Allocate page-aligned size for mmap compatibility
     rocm_axiio_alloc_contig_mem_req prp_alloc_req = {};
     prp_alloc_req.size = prp_list_size_aligned;
-    
+
     fprintf(stderr,
             "DEBUG: Allocating PRP list: size=%zu bytes (%zu entries), "
             "aligned=%zu\n",
             prp_list_size, num_pages, prp_list_size_aligned);
-    
+
     int ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &prp_alloc_req);
     if (ret < 0) {
-      fprintf(stderr,
-              "ERROR: Failed to allocate PRP list memory: %s\n",
+      fprintf(stderr, "ERROR: Failed to allocate PRP list memory: %s\n",
               strerror(errno));
       free(page_phys_addrs);
       return -errno;
     }
-    
+
     fprintf(stderr,
             "DEBUG: PRP list allocated: virt=0x%016llx phys=0x%016llx "
             "size=%zu\n",
             (unsigned long long)prp_alloc_req.virt_addr,
             (unsigned long long)prp_alloc_req.phys_addr, prp_list_size_aligned);
-    
+
     // Map PRP list to userspace
     // Kernel mmap handler expects vm_pgoff = phys_addr / PAGE_SIZE (in pages)
     // Ensure physical address is page-aligned (it should be from alloc_pages)
@@ -3154,18 +3177,17 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       free(page_phys_addrs);
       return -EINVAL;
     }
-    
+
     off_t mmap_offset = prp_alloc_req.phys_addr / host_page_size;
     fprintf(stderr,
             "DEBUG: PRP list mmap: phys=0x%016llx size=%zu offset=%ld "
             "(pages), kmod_fd=%d\n",
             (unsigned long long)prp_alloc_req.phys_addr, prp_list_size_aligned,
             (long)mmap_offset, kmod_fd);
-    
+
     // Verify file descriptor is valid
     if (fcntl(kmod_fd, F_GETFD) < 0) {
-      fprintf(stderr,
-              "ERROR: Invalid file descriptor for mmap: %s\n",
+      fprintf(stderr, "ERROR: Invalid file descriptor for mmap: %s\n",
               strerror(errno));
       rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = prp_alloc_req.virt_addr;
@@ -3173,23 +3195,25 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       free(page_phys_addrs);
       return -errno;
     }
-    
+
     // Try mmap first, but if it fails, we'll use a workaround
     prp_list_virt = mmap(nullptr, prp_list_size_aligned, PROT_READ | PROT_WRITE,
-                        MAP_SHARED, kmod_fd, mmap_offset);
+                         MAP_SHARED, kmod_fd, mmap_offset);
     if (prp_list_virt == MAP_FAILED) {
       // mmap failed - this is a known issue with character devices
       // Workaround: Allocate PRP list in userspace and use its physical address
       // Note: This requires the PRP list to be in physically accessible memory
-      fprintf(stderr,
-              "WARNING: mmap failed for PRP list (this is expected for character "
-              "devices). Using userspace allocation workaround.\n");
-      
-      // Allocate PRP list in userspace (must be page-aligned for physical address lookup)
-      void* prp_list_userspace = aligned_alloc(host_page_size, prp_list_size_aligned);
+      fprintf(
+        stderr,
+        "WARNING: mmap failed for PRP list (this is expected for character "
+        "devices). Using userspace allocation workaround.\n");
+
+      // Allocate PRP list in userspace (must be page-aligned for physical
+      // address lookup)
+      void* prp_list_userspace = aligned_alloc(host_page_size,
+                                               prp_list_size_aligned);
       if (!prp_list_userspace) {
-        fprintf(stderr,
-                "ERROR: Failed to allocate PRP list in userspace: %s\n",
+        fprintf(stderr, "ERROR: Failed to allocate PRP list in userspace: %s\n",
                 strerror(errno));
         rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
@@ -3197,12 +3221,12 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         free(page_phys_addrs);
         return -ENOMEM;
       }
-      
+
       // Zero-initialize the memory to ensure it's physically mapped
       // This is necessary because aligned_alloc may allocate memory that isn't
       // physically mapped until first access
       memset(prp_list_userspace, 0, prp_list_size_aligned);
-      
+
       // Pin the memory to prevent swapping (required for DMA access)
       if (mlock(prp_list_userspace, prp_list_size_aligned) < 0) {
         fprintf(stderr,
@@ -3210,7 +3234,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
                 strerror(errno));
         // Continue anyway - some systems allow DMA without mlock
       }
-      
+
       // Get physical address of userspace-allocated PRP list
       int pagemap_fd_prp = open("/proc/self/pagemap", O_RDONLY);
       if (pagemap_fd_prp < 0) {
@@ -3224,14 +3248,14 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         free(page_phys_addrs);
         return -errno;
       }
-      
+
       uint64_t prp_pfn;
       off_t prp_offset = (reinterpret_cast<uint64_t>(prp_list_userspace) /
-                          host_page_size) * sizeof(uint64_t);
+                          host_page_size) *
+                         sizeof(uint64_t);
       if (lseek(pagemap_fd_prp, prp_offset, SEEK_SET) < 0 ||
           read(pagemap_fd_prp, &prp_pfn, sizeof(prp_pfn)) != sizeof(prp_pfn)) {
-        fprintf(stderr,
-                "ERROR: Failed to read pagemap for PRP list: %s\n",
+        fprintf(stderr, "ERROR: Failed to read pagemap for PRP list: %s\n",
                 strerror(errno));
         close(pagemap_fd_prp);
         free(prp_list_userspace);
@@ -3242,10 +3266,9 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         return -errno;
       }
       close(pagemap_fd_prp);
-      
+
       if (!(prp_pfn & (1ULL << 63))) {
-        fprintf(stderr,
-                "ERROR: PRP list page not present in pagemap\n");
+        fprintf(stderr, "ERROR: PRP list page not present in pagemap\n");
         free(prp_list_userspace);
         rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
@@ -3253,20 +3276,20 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         free(page_phys_addrs);
         return -EFAULT;
       }
-      
+
       uint64_t prp_phys_pfn = prp_pfn & ((1ULL << 55) - 1);
       uint64_t prp_list_phys_userspace = prp_phys_pfn * host_page_size;
-      
+
       // Free kernel-allocated PRP list (we'll use userspace one instead)
       rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = prp_alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
-      
+
       // Use userspace-allocated PRP list
       prp_list_virt = prp_list_userspace;
       prp_list_phys = prp_list_phys_userspace;
       prp_list_kernel_virt = 0; // Mark as userspace-allocated
-      
+
       fprintf(stderr,
               "DEBUG: Using userspace PRP list: virt=%p phys=0x%016llx\n",
               prp_list_virt, (unsigned long long)prp_list_phys);
@@ -3275,7 +3298,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       prp_list_phys = prp_alloc_req.phys_addr;
       prp_list_kernel_virt = prp_alloc_req.virt_addr;
     }
-    
+
     // Fill PRP list with physical addresses (all page-aligned)
     // Only fill the actual number of entries needed, not the full aligned size
     uint64_t* prp_list = static_cast<uint64_t*>(prp_list_virt);
@@ -3283,24 +3306,24 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       // Round down to page boundary for all entries
       prp_list[i] = page_phys_addrs[i] & ~(nvme_page_size - 1);
     }
-    
-    // Set PRP1 and PRP2 (prp_list_phys was set above in the mmap success/failure branches)
+
+    // Set PRP1 and PRP2 (prp_list_phys was set above in the mmap
+    // success/failure branches)
     prp1 = page_phys_addrs[0]; // First page (may have offset)
-    prp2 = prp_list_phys; // PRP list address (either kernel or userspace)
-    
+    prp2 = prp_list_phys;      // PRP list address (either kernel or userspace)
+
     fprintf(stderr,
             "DEBUG: PRP list filled: %zu entries, PRP1=0x%016llx "
             "PRP2=0x%016llx\n",
-            num_pages, (unsigned long long)prp1,
-            (unsigned long long)prp2);
+            num_pages, (unsigned long long)prp1, (unsigned long long)prp2);
   }
-  
+
   *prp_list_kernel_virt_out = prp_list_kernel_virt;
-  
+
   *prp1_out = prp1;
   *prp2_out = prp2;
   *prp_list_virt_out = prp_list_virt;
-  
+
   free(page_phys_addrs);
   return 0;
 }
@@ -3347,8 +3370,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   uint64_t cq_prp1 = 0, cq_prp2 = 0; // PRP entries for CQ
   void* sq_prp_list_virt = nullptr; // PRP list userspace virtual address for SQ
   void* cq_prp_list_virt = nullptr; // PRP list userspace virtual address for CQ
-  uint64_t sq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for SQ
-  uint64_t cq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for CQ
+  uint64_t sq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for
+                                        // SQ
+  uint64_t cq_prp_list_kernel_virt = 0; // PRP list kernel virtual address for
+                                        // CQ
   struct nvme_passthru_cmd cmd;
   struct drm_amdgpu_gem_userptr sq_userptr = {};
   struct drm_amdgpu_gem_userptr cq_userptr = {};
@@ -3489,18 +3514,20 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     // Ensure memset is visible to GPU before kernel launch
     __sync_synchronize();
   }
-  
+
   // Verify CQ is zeroed (sanity check - helps catch allocation issues)
   // Check first few entries to ensure memset worked
   // Use block scope to avoid goto jump issues
   {
-    volatile struct nvme_cqe* cq_check = static_cast<volatile struct nvme_cqe*>(cq_virt);
+    volatile struct nvme_cqe* cq_check = static_cast<volatile struct nvme_cqe*>(
+      cq_virt);
     for (uint16_t i = 0; i < queue_size && i < 4; i++) {
       nvme_ep::cqeType cqe_check = nvme_ep::cqeRead(
         reinterpret_cast<volatile nvme_ep::cqeType*>(&cq_check[i]));
-      if (cqe_check.command_id != 0 || cqe_check.status != 0 || 
+      if (cqe_check.command_id != 0 || cqe_check.status != 0 ||
           cqe_check.sq_head != 0) {
-        fprintf(stderr, "WARNING: CQ entry %u not properly zeroed: "
+        fprintf(stderr,
+                "WARNING: CQ entry %u not properly zeroed: "
                 "cmd_id=%u status=0x%04x sq_head=%u\n",
                 i, cqe_check.command_id, cqe_check.status, cqe_check.sq_head);
       }
@@ -3508,13 +3535,13 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   }
 
   // For non-contiguous queues (PC=0), we don't need kernel allocation
-  // Regular memory allocations work fine since physical contiguity is not required
-  // We'll get physical addresses via /proc/self/pagemap for PRP list generation
-  // Skip kernel allocation for non-contiguous queues
+  // Regular memory allocations work fine since physical contiguity is not
+  // required We'll get physical addresses via /proc/self/pagemap for PRP list
+  // generation Skip kernel allocation for non-contiguous queues
   if (false && !gpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
     rocm_axiio_alloc_contig_mem_req alloc_req = {};
     alloc_req.size = sq_size_bytes;
-    
+
     // Allocate contiguous memory via kernel module IOCTL
     ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &alloc_req);
     if (ret < 0) {
@@ -3529,7 +3556,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       ret = -errno;
       goto cleanup;
     }
-    
+
     // Map physical memory to userspace via mmap
     // Use physical address divided by page size as the offset (handle)
     const size_t host_page_size = sysconf(_SC_PAGESIZE);
@@ -3554,10 +3581,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       ret = -errno;
       goto cleanup;
     }
-    
+
     // Zero the memory (alloc_pages with __GFP_ZERO should zero it, but be safe)
     memset(sq_virt_mapped, 0, sq_size_bytes);
-    
+
     // Copy data from original allocation if needed (only if original exists)
     if (sq_virt != nullptr) {
       memcpy(sq_virt_mapped, sq_virt, sq_size_bytes);
@@ -3569,13 +3596,14 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       }
       sq_virt = nullptr; // Clear pointer to avoid double-free
     }
-    
+
     sq_virt = sq_virt_mapped;
     sq_phys = alloc_req.phys_addr;
-    sq_uses_coherent = true; // Mark that SQ uses coherent memory
+    sq_uses_coherent = true;     // Mark that SQ uses coherent memory
     sq_uses_kernel_alloc = true; // Mark that SQ was allocated via kernel module
-    sq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for cleanup
-    
+    sq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for
+                                               // cleanup
+
     fprintf(stderr,
             "SQ: Allocated %zu bytes of contiguous memory via kernel module: "
             "virt=0x%016llx phys=0x%016llx\n",
@@ -3587,7 +3615,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   if (false && !cpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
     rocm_axiio_alloc_contig_mem_req alloc_req = {};
     alloc_req.size = cq_size_bytes;
-    
+
     // Allocate contiguous memory via kernel module IOCTL
     ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_MEM, &alloc_req);
     if (ret < 0) {
@@ -3602,7 +3630,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       ret = -errno;
       goto cleanup;
     }
-    
+
     // Map physical memory to userspace via mmap
     // Use physical address divided by page size as the offset (handle)
     const size_t host_page_size = sysconf(_SC_PAGESIZE);
@@ -3610,8 +3638,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     void* cq_virt_mapped = mmap(nullptr, cq_size_bytes, PROT_READ | PROT_WRITE,
                                 MAP_SHARED, kmod_fd, mmap_offset);
     if (cq_virt_mapped == MAP_FAILED) {
-      fprintf(stderr,
-              "ERROR: Failed to mmap contiguous CQ memory: %s\n",
+      fprintf(stderr, "ERROR: Failed to mmap contiguous CQ memory: %s\n",
               strerror(errno));
       // Free the kernel allocation
       rocm_axiio_free_contig_mem_req free_req = {};
@@ -3620,10 +3647,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       ret = -errno;
       goto cleanup;
     }
-    
+
     // Zero the memory (alloc_pages with __GFP_ZERO should zero it, but be safe)
     memset(cq_virt_mapped, 0, cq_size_bytes);
-    
+
     // Copy data from original allocation if needed (only if original exists)
     if (cq_virt != nullptr) {
       memcpy(cq_virt_mapped, cq_virt, cq_size_bytes);
@@ -3635,13 +3662,14 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       }
       cq_virt = nullptr; // Clear pointer to avoid double-free
     }
-    
+
     cq_virt = cq_virt_mapped;
     cq_phys = alloc_req.phys_addr;
-    cq_uses_coherent = true; // Mark that CQ uses coherent memory
+    cq_uses_coherent = true;     // Mark that CQ uses coherent memory
     cq_uses_kernel_alloc = true; // Mark that CQ was allocated via kernel module
-    cq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for cleanup
-    
+    cq_kernel_virt_addr = alloc_req.virt_addr; // Save kernel virt addr for
+                                               // cleanup
+
     fprintf(stderr,
             "CQ: Allocated %zu bytes of contiguous memory via kernel module: "
             "virt=0x%016llx phys=0x%016llx\n",
@@ -3732,11 +3760,13 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   // Skip if:
   // 1. Memory was allocated with kernel module (not HIP-allocated)
   // 2. Memory is device memory (allocated via HSA, already GPU-accessible)
-  // Note: hipHostMalloc memory doesn't need hipHostRegister - it's already registered
+  // Note: hipHostMalloc memory doesn't need hipHostRegister - it's already
+  // registered
 
   // Step 3: Get GPU pointers (matching test-gpu-nvme-write.cpp pattern)
   // For device memory (hipMalloc), GPU pointer is same as host pointer
-  // For host memory (hipHostMalloc with hipHostMallocMapped), get device pointer
+  // For host memory (hipHostMalloc with hipHostMallocMapped), get device
+  // pointer
   if (sq_is_device) {
     // Device memory - GPU pointer is same as host pointer
     sq_gpu = sq_virt;
@@ -3855,7 +3885,8 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   } else {
     // Host memory (mmap) - use /proc/self/pagemap to get physical address
     // For non-contiguous queues (PC=0), we only need the first page's physical
-    // address. The PRP list generation will handle all pages (contiguous or not).
+    // address. The PRP list generation will handle all pages (contiguous or
+    // not).
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
       fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
@@ -3864,16 +3895,18 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       sq_phys = reinterpret_cast<uint64_t>(sq_virt);
     } else {
       const size_t host_page_size = sysconf(_SC_PAGESIZE);
-      uint64_t page_offset = reinterpret_cast<uint64_t>(sq_virt) % host_page_size;
+      uint64_t page_offset = reinterpret_cast<uint64_t>(sq_virt) %
+                             host_page_size;
       uint64_t first_pfn = 0;
-      
+
       // Read first page to get base physical address
       off_t first_offset = (reinterpret_cast<uint64_t>(sq_virt) /
-                             host_page_size) * sizeof(uint64_t);
-      
+                            host_page_size) *
+                           sizeof(uint64_t);
+
       if (lseek(pagemap_fd, first_offset, SEEK_SET) >= 0 &&
           read(pagemap_fd, &first_pfn, sizeof(first_pfn)) ==
-              sizeof(first_pfn)) {
+            sizeof(first_pfn)) {
         if (first_pfn & (1ULL << 63)) {
           uint64_t first_phys_pfn = first_pfn & ((1ULL << 55) - 1);
           sq_phys = (first_phys_pfn * host_page_size) + page_offset;
@@ -3884,9 +3917,8 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
           sq_phys = reinterpret_cast<uint64_t>(sq_virt);
         }
       } else {
-        fprintf(stderr,
-                "Warning: Failed to read pagemap for SQ, using virtual "
-                "address\n");
+        fprintf(stderr, "Warning: Failed to read pagemap for SQ, using virtual "
+                        "address\n");
         sq_phys = reinterpret_cast<uint64_t>(sq_virt);
       }
       close(pagemap_fd);
@@ -3946,7 +3978,8 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   } else {
     // Host memory (mmap) - use /proc/self/pagemap
     // For non-contiguous queues (PC=0), we only need the first page's physical
-    // address. The PRP list generation will handle all pages (contiguous or not).
+    // address. The PRP list generation will handle all pages (contiguous or
+    // not).
     int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
     if (pagemap_fd < 0) {
       fprintf(stderr, "Warning: Failed to open /proc/self/pagemap: %s\n",
@@ -3955,16 +3988,18 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
       cq_phys = reinterpret_cast<uint64_t>(cq_virt);
     } else {
       const size_t host_page_size = sysconf(_SC_PAGESIZE);
-      uint64_t page_offset = reinterpret_cast<uint64_t>(cq_virt) % host_page_size;
+      uint64_t page_offset = reinterpret_cast<uint64_t>(cq_virt) %
+                             host_page_size;
       uint64_t first_pfn = 0;
-      
+
       // Read first page to get base physical address
       off_t first_offset = (reinterpret_cast<uint64_t>(cq_virt) /
-                             host_page_size) * sizeof(uint64_t);
-      
+                            host_page_size) *
+                           sizeof(uint64_t);
+
       if (lseek(pagemap_fd, first_offset, SEEK_SET) >= 0 &&
           read(pagemap_fd, &first_pfn, sizeof(first_pfn)) ==
-              sizeof(first_pfn)) {
+            sizeof(first_pfn)) {
         if (first_pfn & (1ULL << 63)) {
           uint64_t first_phys_pfn = first_pfn & ((1ULL << 55) - 1);
           cq_phys = (first_phys_pfn * host_page_size) + page_offset;
@@ -3975,9 +4010,8 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
           cq_phys = reinterpret_cast<uint64_t>(cq_virt);
         }
       } else {
-        fprintf(stderr,
-                "Warning: Failed to read pagemap for CQ, using virtual "
-                "address\n");
+        fprintf(stderr, "Warning: Failed to read pagemap for CQ, using virtual "
+                        "address\n");
         cq_phys = reinterpret_cast<uint64_t>(cq_virt);
       }
       close(pagemap_fd);
@@ -4122,23 +4156,27 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   //   This is a QEMU implementation limitation/simplification.
   // - Passthrough: IEN=0 (interrupts disabled, polling mode)
   //   Real hardware may support polling mode (IEN=0) for better performance
-  //   in high-throughput scenarios. Note: We don't check controller capabilities
-  //   for IEN support - if IEN=0 fails, the controller will return an error.
+  //   in high-throughput scenarios. Note: We don't check controller
+  //   capabilities for IEN support - if IEN=0 fails, the controller will return
+  //   an error.
   // cdw11 format: bits 15:1 = IV (Interrupt Vector), bit 0 = IEN
   cmd.cdw11 = is_emulated ? 0x00000001 : 0x00000000;
   // For non-contiguous queues, pass PRP1 via addr field
   // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
-  // For now, pass PRP1 directly - kprobe injection will be updated to handle PRP lists
+  // For now, pass PRP1 directly - kprobe injection will be updated to handle
+  // PRP lists
   cmd.addr = cq_prp1; // PRP1 for non-contiguous queue
-  cmd.data_len = 0; // No data transfer for CREATE_CQ
+  cmd.data_len = 0;   // No data transfer for CREATE_CQ
   // TODO: Update kernel kprobe to inject PRP2 for non-contiguous queues
 
   // Debug: Print what we're sending to the controller
-  fprintf(stderr, "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
-                  "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
+  fprintf(stderr,
+          "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
-  fprintf(stderr, "  Buffer address: virt=0x%016llx, size=%zu bytes "
-                  "(%u entries * %u bytes/entry)\n",
+  fprintf(stderr,
+          "  Buffer address: virt=0x%016llx, size=%zu bytes "
+          "(%u entries * %u bytes/entry)\n",
           (unsigned long long)reinterpret_cast<uint64_t>(cq_virt),
           cq_size_bytes, queue_size, NVME_EP_CQE_SIZE);
 
@@ -4207,27 +4245,29 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   //   queues. This is a QEMU implementation limitation, not an NVMe spec
   //   requirement.
   // - Passthrough: Check CAP register CQR bit to determine PC support
-  //   If CQR=0 (checked above), controller supports PC=0 (non-contiguous queues)
-  //   If CQR=1, controller requires PC=1 (contiguous queues)
-  //   Real NVMe hardware typically supports both PC=0 and PC=1, but some
-  //   controllers may require PC=1 (CQR=1).
+  //   If CQR=0 (checked above), controller supports PC=0 (non-contiguous
+  //   queues) If CQR=1, controller requires PC=1 (contiguous queues) Real NVMe
+  //   hardware typically supports both PC=0 and PC=1, but some controllers may
+  //   require PC=1 (CQR=1).
   // cdw11 format: bits 31:16 = CQID, bits 15:1 = QPRIO, bit 0 = PC
   cmd.cdw11 = (queue_id << 16) | (use_pc1 ? 0x0001 : 0x0000);
   // cdw11 format: bits 31:16 = CQID, bits 15:1 = QPRIO, bit 0 = PC
   // For non-contiguous queues, pass PRP1 via addr field
   // The kprobe will inject PRP1, and we'll need to handle PRP2 separately
   cmd.addr = sq_prp1; // PRP1 for non-contiguous queue
-  cmd.data_len = 0; // No data transfer for CREATE_SQ
+  cmd.data_len = 0;   // No data transfer for CREATE_SQ
   // TODO: Update kernel kprobe to inject PRP2 for non-contiguous queues
 
   // Debug: Print what we're sending to the controller
-  fprintf(stderr, "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
-                  "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0), "
-                  "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
+  fprintf(stderr,
+          "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
+          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0), "
+          "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
           cmd.cdw11, queue_id);
-  fprintf(stderr, "  Buffer address: virt=0x%016llx, size=%zu bytes "
-                  "(%u entries * %u bytes/entry)\n",
+  fprintf(stderr,
+          "  Buffer address: virt=0x%016llx, size=%zu bytes "
+          "(%u entries * %u bytes/entry)\n",
           (unsigned long long)reinterpret_cast<uint64_t>(sq_virt),
           sq_size_bytes, queue_size, NVME_EP_SQE_SIZE);
 
@@ -4289,16 +4329,16 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   info->sq_dmabuf_fd = sq_dmabuf_fd;
   info->cq_dmabuf_fd = cq_dmabuf_fd;
 
-  // On successful return, queues remain allocated and file descriptors remain open
-  // They will be cleaned up when the process exits or when explicitly freed
-  // Don't close FDs here - queues need them to remain valid
+  // On successful return, queues remain allocated and file descriptors remain
+  // open They will be cleaned up when the process exits or when explicitly
+  // freed Don't close FDs here - queues need them to remain valid
   return 0;
 
 cleanup:
   // This cleanup section is only reached on error paths (via goto cleanup)
-  // On successful return, queues remain allocated and file descriptors remain open
-  // They will be cleaned up when the process exits
-  
+  // On successful return, queues remain allocated and file descriptors remain
+  // open They will be cleaned up when the process exits
+
   // Close DRM fd if opened
   if (drm_fd >= 0) {
     close(drm_fd);
@@ -4313,7 +4353,8 @@ cleanup:
   // which use hipHostMalloc, no unregistering is needed.
 
   // Free PRP lists if allocated (only on error paths)
-  // On success, PRP lists remain allocated and will be cleaned up on process exit
+  // On success, PRP lists remain allocated and will be cleaned up on process
+  // exit
   if (ret != 0) {
     if (sq_prp_list_virt != nullptr) {
       if (sq_prp_list_kernel_virt != 0 && kmod_fd >= 0) {
@@ -4321,9 +4362,9 @@ cleanup:
         size_t sq_num_pages = (sq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
                               sysconf(_SC_PAGESIZE);
         size_t prp_list_size = sq_num_pages * sizeof(uint64_t);
-        size_t prp_list_size_aligned = 
-          (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
-          ~(sysconf(_SC_PAGESIZE) - 1);
+        size_t prp_list_size_aligned = (prp_list_size + sysconf(_SC_PAGESIZE) -
+                                        1) &
+                                       ~(sysconf(_SC_PAGESIZE) - 1);
         munmap(sq_prp_list_virt, prp_list_size_aligned);
         rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = sq_prp_list_kernel_virt;
@@ -4333,9 +4374,9 @@ cleanup:
         size_t sq_num_pages = (sq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
                               sysconf(_SC_PAGESIZE);
         size_t prp_list_size = sq_num_pages * sizeof(uint64_t);
-        size_t prp_list_size_aligned = 
-          (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
-          ~(sysconf(_SC_PAGESIZE) - 1);
+        size_t prp_list_size_aligned = (prp_list_size + sysconf(_SC_PAGESIZE) -
+                                        1) &
+                                       ~(sysconf(_SC_PAGESIZE) - 1);
         munlock(sq_prp_list_virt, prp_list_size_aligned);
         free(sq_prp_list_virt);
       }
@@ -4346,9 +4387,9 @@ cleanup:
         size_t cq_num_pages = (cq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
                               sysconf(_SC_PAGESIZE);
         size_t prp_list_size = cq_num_pages * sizeof(uint64_t);
-        size_t prp_list_size_aligned = 
-          (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
-          ~(sysconf(_SC_PAGESIZE) - 1);
+        size_t prp_list_size_aligned = (prp_list_size + sysconf(_SC_PAGESIZE) -
+                                        1) &
+                                       ~(sysconf(_SC_PAGESIZE) - 1);
         munmap(cq_prp_list_virt, prp_list_size_aligned);
         rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = cq_prp_list_kernel_virt;
@@ -4358,9 +4399,9 @@ cleanup:
         size_t cq_num_pages = (cq_size_bytes + sysconf(_SC_PAGESIZE) - 1) /
                               sysconf(_SC_PAGESIZE);
         size_t prp_list_size = cq_num_pages * sizeof(uint64_t);
-        size_t prp_list_size_aligned = 
-          (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
-          ~(sysconf(_SC_PAGESIZE) - 1);
+        size_t prp_list_size_aligned = (prp_list_size + sysconf(_SC_PAGESIZE) -
+                                        1) &
+                                       ~(sysconf(_SC_PAGESIZE) - 1);
         munlock(cq_prp_list_virt, prp_list_size_aligned);
         free(cq_prp_list_virt);
       }
@@ -4370,7 +4411,8 @@ cleanup:
   // Free queues - handle kernel-allocated and HIP-allocated separately
   // Note: Only free if allocation succeeded (sq_virt/cq_virt are valid)
   // IMPORTANT: Only free queues on error paths (ret != 0)
-  // On success, queues remain allocated and will be freed by HIP runtime on process exit
+  // On success, queues remain allocated and will be freed by HIP runtime on
+  // process exit
   if (ret != 0) {
     if (sq_virt != nullptr) {
       if (sq_uses_kernel_alloc && sq_kernel_virt_addr != 0) {
@@ -4419,8 +4461,8 @@ cleanup:
   // Note: hipHostMalloc memory doesn't need unregistering - it's managed by HIP
 
   // Close file descriptors only on error paths
-  // On successful return (ret == 0), queues remain allocated and FDs remain open
-  // They will be cleaned up when the process exits
+  // On successful return (ret == 0), queues remain allocated and FDs remain
+  // open They will be cleaned up when the process exits
   if (drm_fd >= 0) {
     close(drm_fd);
   }
@@ -4449,7 +4491,8 @@ __host__ int nvme_ep::nvme_cleanup_queue_via_ioctl(
   // Open kernel module device for unregistration
   kmod_fd = open(kernel_module_device, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stderr, "Warning: Failed to open kernel module device %s for cleanup: %s\n",
+    fprintf(stderr,
+            "Warning: Failed to open kernel module device %s for cleanup: %s\n",
             kernel_module_device, strerror(errno));
     // Continue with NVMe queue deletion even if kernel module open fails
   }

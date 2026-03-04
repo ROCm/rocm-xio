@@ -104,9 +104,9 @@ static DEFINE_MUTEX(mmio_bridge_lock);
 
 /* Contiguous memory allocations */
 struct contig_mem_entry {
-  void* virt_addr;     /* Kernel virtual address */
-  __u64 phys_addr;    /* Physical address */
-  __u64 size;         /* Size in bytes */
+  void* virt_addr;      /* Kernel virtual address */
+  __u64 phys_addr;      /* Physical address */
+  __u64 size;           /* Size in bytes */
   __u64 userspace_addr; /* Userspace virtual address (after mmap) */
   struct list_head list;
 };
@@ -1056,34 +1056,36 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       {
         unsigned int order = get_order(size);
         struct page* page = NULL;
-        
+
         /* Calculate actual size we'll get (may be larger than requested) */
         size_t actual_size = PAGE_SIZE << order;
-        
+
         pr_info("rocm-axiio: Attempting to allocate %zu bytes (order %u, "
                 "actual size %zu bytes)\n",
                 size, order, actual_size);
-        
+
         /* Try 1: Standard kernel allocation */
         page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
-        
+
         /* Try 2: With __GFP_NOWARN to suppress warnings */
         if (!page) {
           page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN, order);
         }
-        
+
         /* Try 3: With __GFP_DMA32 (more restrictive, lower 4GB) */
         if (!page) {
           page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_DMA32 |
-                             __GFP_NOWARN, order);
+                               __GFP_NOWARN,
+                             order);
         }
-        
+
         /* Try 4: With __GFP_RETRY_MAYFAIL (may help with fragmentation) */
         if (!page) {
           page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_RETRY_MAYFAIL |
-                             __GFP_NOWARN, order);
+                               __GFP_NOWARN,
+                             order);
         }
-        
+
         if (!page) {
           pr_err("rocm-axiio: Failed to allocate %zu bytes (order %u) of "
                  "contiguous memory after trying multiple strategies\n",
@@ -1094,10 +1096,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
                  "fragmented\n");
           return -ENOMEM;
         }
-        
+
         virt_addr = page_to_virt(page);
         phys_addr = (__u64)page_to_phys(page);
-        
+
         pr_info("rocm-axiio: Successfully allocated %zu bytes (order %u) at "
                 "virt=0x%016llx phys=0x%016llx\n",
                 size, order, (unsigned long long)virt_addr,
@@ -1206,9 +1208,10 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   /* Use physical address as handle (returned from ALLOC_CONTIG_MEM) */
   mutex_lock(&contig_mem_lock);
   list_for_each_entry(entry, &contig_mem_list, list) {
-    pr_info("rocm-axiio: Checking entry: phys=0x%016llx handle_phys=0x%016llx\n",
-            (unsigned long long)entry->phys_addr,
-            (unsigned long long)handle_phys_addr);
+    pr_info(
+      "rocm-axiio: Checking entry: phys=0x%016llx handle_phys=0x%016llx\n",
+      (unsigned long long)entry->phys_addr,
+      (unsigned long long)handle_phys_addr);
     if (entry->phys_addr == handle_phys_addr) {
       /* Found matching allocation - map it */
       pfn = entry->phys_addr >> PAGE_SHIFT;
@@ -1216,8 +1219,8 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
 
       if (size > entry->size) {
         mutex_unlock(&contig_mem_lock);
-        pr_err("rocm-axiio: mmap size %zu exceeds allocation size %llu\n",
-               size, entry->size);
+        pr_err("rocm-axiio: mmap size %zu exceeds allocation size %llu\n", size,
+               entry->size);
         return -EINVAL;
       }
 
@@ -1242,7 +1245,8 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   mutex_unlock(&contig_mem_lock);
 
   /* Fall back to PCI MMIO bridge shadow buffer mapping */
-  /* Only warn if handle_phys is non-zero (expected contiguous memory request) */
+  /* Only warn if handle_phys is non-zero (expected contiguous memory request)
+   */
   if (handle_phys_addr != 0) {
     pr_warn("rocm-axiio: No matching contiguous memory entry found for "
             "handle_phys=0x%016llx\n",

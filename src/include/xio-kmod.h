@@ -92,8 +92,7 @@ typedef struct rocm_xio_register_queue_addr_req
   rocm_axiio_register_queue_addr_req;
 typedef struct rocm_xio_unregister_queue_addr_req
   rocm_axiio_unregister_queue_addr_req;
-typedef struct rocm_xio_unregister_buffer_req
-  rocm_axiio_unregister_buffer_req;
+typedef struct rocm_xio_unregister_buffer_req rocm_axiio_unregister_buffer_req;
 typedef struct rocm_xio_register_buffer_req rocm_axiio_register_buffer_req;
 typedef struct rocm_xio_alloc_contig_mem_req rocm_axiio_alloc_contig_mem_req;
 typedef struct rocm_xio_free_contig_mem_req rocm_axiio_free_contig_mem_req;

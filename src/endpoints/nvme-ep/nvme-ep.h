@@ -151,18 +151,18 @@ __device__ void nvme_ep_driveEndpoint(
  * Structure to hold queue creation results
  */
 struct nvme_queue_info {
-  void* sq_virt;     // Virtual address of submission queue (host pointer)
-  void* cq_virt;     // Virtual address of completion queue (host pointer)
-  void* sq_gpu;      // GPU-accessible pointer for submission queue
-  void* cq_gpu;      // GPU-accessible pointer for completion queue
-  uint64_t sq_phys;  // Physical address of submission queue
-  uint64_t cq_phys;  // Physical address of completion queue
-  uint64_t sq_size;  // Size of submission queue in bytes
-  uint64_t cq_size;  // Size of completion queue in bytes
+  void* sq_virt;       // Virtual address of submission queue (host pointer)
+  void* cq_virt;       // Virtual address of completion queue (host pointer)
+  void* sq_gpu;        // GPU-accessible pointer for submission queue
+  void* cq_gpu;        // GPU-accessible pointer for completion queue
+  uint64_t sq_phys;    // Physical address of submission queue
+  uint64_t cq_phys;    // Physical address of completion queue
+  uint64_t sq_size;    // Size of submission queue in bytes
+  uint64_t cq_size;    // Size of completion queue in bytes
   uint16_t queue_size; // Queue size in entries
-  uint64_t doorbell; // Physical address of doorbell register
-  int sq_dmabuf_fd;  // dmabuf file descriptor for SQ
-  int cq_dmabuf_fd;  // dmabuf file descriptor for CQ
+  uint64_t doorbell;   // Physical address of doorbell register
+  int sq_dmabuf_fd;    // dmabuf file descriptor for SQ
+  int cq_dmabuf_fd;    // dmabuf file descriptor for CQ
 };
 
 /**
@@ -304,17 +304,17 @@ __host__ int nvme_create_queue_via_ioctl(const char* nvme_device,
  * 4. Closes file descriptors
  *
  * @param nvme_device Path to NVMe device (e.g., "/dev/nvme0")
- * @param kernel_module_device Path to kernel module device (e.g., "/dev/rocm-xio")
+ * @param kernel_module_device Path to kernel module device (e.g.,
+ * "/dev/rocm-xio")
  * @param queue_id Queue ID to delete
- * @param queue_info Queue information structure from nvme_create_queue_via_ioctl
+ * @param queue_info Queue information structure from
+ * nvme_create_queue_via_ioctl
  * @param memory_mode Memory allocation mode (same as passed to create function)
  * @return 0 on success, negative error code on failure
  */
-__host__ int nvme_cleanup_queue_via_ioctl(const char* nvme_device,
-                                          const char* kernel_module_device,
-                                          uint16_t queue_id,
-                                          const struct nvme_queue_info* queue_info,
-                                          unsigned memory_mode);
+__host__ int nvme_cleanup_queue_via_ioctl(
+  const char* nvme_device, const char* kernel_module_device, uint16_t queue_id,
+  const struct nvme_queue_info* queue_info, unsigned memory_mode);
 
 //
 // Type aliases for queue entries
@@ -379,21 +379,21 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
  * cqeLast.sq_head to avoid zeroed CQE issues)
  * @param sq_head_out Output parameter for new sq_head value (can be nullptr)
  * @param expected_cid Expected command ID for verification (0 = skip CID check)
- * @param queue_size Queue size for wrap-around detection (0 = use generic detection)
- * @param cq_head_inout In/out parameter for cq_head (for stale handling, can be nullptr)
- * @param cqe_advanced_out Output flag indicating if cq_head was advanced (can be nullptr)
- * @param expected_phase_inout In/out parameter for expected phase bit (nullptr = skip phase check)
+ * @param queue_size Queue size for wrap-around detection (0 = use generic
+ * detection)
+ * @param cq_head_inout In/out parameter for cq_head (for stale handling, can be
+ * nullptr)
+ * @param cqe_advanced_out Output flag indicating if cq_head was advanced (can
+ * be nullptr)
+ * @param expected_phase_inout In/out parameter for expected phase bit (nullptr
+ * = skip phase check)
  * @return New CQE when command ID changes or sq_head increases
  */
-__host__ __device__ cqeType cqePoll(cqeType cqeLast,
-                                    volatile cqeType* cqeAddress,
-                                    uint16_t last_sq_head = 0,
-                                    uint16_t* sq_head_out = nullptr,
-                                    uint16_t expected_cid = 0,
-                                    uint16_t queue_size = 0,
-                                    uint16_t* cq_head_inout = nullptr,
-                                    bool* cqe_advanced_out = nullptr,
-                                    uint8_t* expected_phase_inout = nullptr);
+__host__ __device__ cqeType cqePoll(
+  cqeType cqeLast, volatile cqeType* cqeAddress, uint16_t last_sq_head = 0,
+  uint16_t* sq_head_out = nullptr, uint16_t expected_cid = 0,
+  uint16_t queue_size = 0, uint16_t* cq_head_inout = nullptr,
+  bool* cqe_advanced_out = nullptr, uint8_t* expected_phase_inout = nullptr);
 
 //
 // Helper functions to create NVMe commands
@@ -616,7 +616,8 @@ struct NvmeEpConfig {
   int writeIo; // Number of write I/O operations (negative for sequential mode)
 
   // Batch mode configuration
-  uint16_t batchSize; // Batch size for batch mode (0 = auto: min(queueLength/2, 16))
+  uint16_t batchSize; // Batch size for batch mode (0 = auto: min(queueLength/2,
+                      // 16))
 
   // PCI MMIO Bridge configuration (Requires OOT QEMU)
   bool usePciMmioBridge;  // Use PCI MMIO bridge for doorbell routing
@@ -624,17 +625,19 @@ struct NvmeEpConfig {
                           // for 00:04.0)
   uint16_t nvmeTargetBdf; // NVMe target device BDF (0xBBDD format, e.g., 0x0600
                           // for 00:06.0)
-  void* shadowBufferVirt; // GPU-accessible pointer to PCI MMIO bridge shadow buffer
-                          // (mapped from GPA)
-  void* shadowBufferCpu; // CPU-accessible pointer to PCI MMIO bridge shadow buffer
-                          // (for cleanup/unregister)
-  int shadowBufferDrmFd; // DRM file descriptor for shadow buffer GEM_USERPTR registration
-                          // (must remain open for registration to remain valid)
+  void* shadowBufferVirt; // GPU-accessible pointer to PCI MMIO bridge shadow
+                          // buffer (mapped from GPA)
+  void* shadowBufferCpu;  // CPU-accessible pointer to PCI MMIO bridge shadow
+                          // buffer (for cleanup/unregister)
+  int shadowBufferDrmFd;  // DRM file descriptor for shadow buffer GEM_USERPTR
+                          // registration (must remain open for registration to
+                          // remain valid)
 
   // Direct doorbell configuration (when PCI MMIO bridge is disabled)
   void* nvmeBar0Gpu; // GPU-accessible pointer to NVMe BAR0 (for direct doorbell
                      // access)
-  void* nvmeBar0Cpu; // CPU-accessible pointer to NVMe BAR0 (for cleanup/unregister)
+  void* nvmeBar0Cpu; // CPU-accessible pointer to NVMe BAR0 (for
+                     // cleanup/unregister)
 
   // Default constructor
   NvmeEpConfig()
@@ -651,8 +654,7 @@ struct NvmeEpConfig {
       nvmeTargetBdf(0x0030), // Default: 00:06.0 (bus=0, device=6, function=0 =
                              // 0x0030)
       shadowBufferVirt(nullptr), shadowBufferCpu(nullptr),
-      shadowBufferDrmFd(-1), nvmeBar0Gpu(nullptr),
-      nvmeBar0Cpu(nullptr) {
+      shadowBufferDrmFd(-1), nvmeBar0Gpu(nullptr), nvmeBar0Cpu(nullptr) {
   }
 };
 
@@ -704,8 +706,9 @@ inline void registerCliOptions(CLI::App& app, nvme_ep::NvmeEpConfig* config) {
     ->group(nvme_group);
 
   app
-    .add_option("--batch-size", config->batchSize,
-                "Batch size for batch mode IO (0 = auto: min(queue-length/2, 16))")
+    .add_option(
+      "--batch-size", config->batchSize,
+      "Batch size for batch mode IO (0 = auto: min(queue-length/2, 16))")
     ->default_val(0)
     ->check(CLI::Range(0, 65535))
     ->group(nvme_group);
@@ -835,7 +838,8 @@ inline std::string validateConfig(nvme_ep::NvmeEpConfig* config) {
  */
 inline unsigned getIterations(void* endpointConfig) {
   if (endpointConfig) {
-    nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(endpointConfig);
+    nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
+      endpointConfig);
     if (nvmeConfig->writeIo < 0) {
       // Sequential mode: use absolute value of writeIo
       return -nvmeConfig->writeIo;

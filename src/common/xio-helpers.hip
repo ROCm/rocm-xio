@@ -459,7 +459,8 @@ hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
       std::cerr << "Error: hipHostMalloc failed for submission queue: "
                 << hipGetErrorString(hipErr) << std::endl;
       std::cerr << "HIP is required for DMA-accessible queue memory. "
-                << "Cannot fall back to malloc (not DMA-accessible)." << std::endl;
+                << "Cannot fall back to malloc (not DMA-accessible)."
+                << std::endl;
       return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
@@ -501,7 +502,8 @@ hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
       std::cerr << "Error: hipHostMalloc failed for completion queue: "
                 << hipGetErrorString(hipErr) << std::endl;
       std::cerr << "HIP is required for DMA-accessible queue memory. "
-                << "Cannot fall back to malloc (not DMA-accessible)." << std::endl;
+                << "Cannot fall back to malloc (not DMA-accessible)."
+                << std::endl;
       return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);

@@ -47,23 +47,23 @@ class App;
  */
 struct XioEndpointConfig {
   // Common testing parameters
-  unsigned iterations = 128;  // Number of iterations
-  unsigned numThreads = 1;    // Number of GPU threads (1-32)
-  long long delayNs = 0;      // Delay in nanoseconds
-                              // Negative: fixed delay of |delayNs|
-                              // Positive: random delay 0 to delayNs
-                              // Zero: no delay
-  unsigned memoryMode = 0;    // Memory mode bits:
-                              // Bit 0 (LSB): GPU write location (SQE)
-                              //   (0=host, 1=device)
-                              // Bit 1: CPU write location (CQE)
-                              //   (0=host, 1=device)
-                              // Bit 2: Doorbell location (doorbell mode only)
-                              //   (0=host, 1=device)
-  int verbose = 0;            // Verbose output level:
-                              // 0 = no verbose output
-                              // 1 = normal verbose (-v)
-                              // 2 = very verbose (-vv) - enables SQE/CQE dumping
+  unsigned iterations = 128; // Number of iterations
+  unsigned numThreads = 1;   // Number of GPU threads (1-32)
+  long long delayNs = 0;     // Delay in nanoseconds
+                             // Negative: fixed delay of |delayNs|
+                             // Positive: random delay 0 to delayNs
+                             // Zero: no delay
+  unsigned memoryMode = 0;   // Memory mode bits:
+                             // Bit 0 (LSB): GPU write location (SQE)
+                             //   (0=host, 1=device)
+                             // Bit 1: CPU write location (CQE)
+                             //   (0=host, 1=device)
+                             // Bit 2: Doorbell location (doorbell mode only)
+                             //   (0=host, 1=device)
+  int verbose = 0;           // Verbose output level:
+                             // 0 = no verbose output
+                             // 1 = normal verbose (-v)
+                             // 2 = very verbose (-vv) - enables SQE/CQE dumping
   bool pciMmioBridge = false; // Use PCI MMIO bridge for doorbell routing
 
   // Timing arrays (optional, can be nullptr)

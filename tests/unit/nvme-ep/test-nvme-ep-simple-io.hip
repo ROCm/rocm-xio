@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <atomic>
 #include <thread>
-#include <chrono>
 
 #include <hip/hip_runtime.h>
 
@@ -17,11 +17,14 @@
 #include "xio.h"
 
 // Debug function: scan all CQE slots looking for a matching command ID
-// This helps debug if the controller is writing completions to unexpected locations
+// This helps debug if the controller is writing completions to unexpected
+// locations
 static void debug_scan_cqe_for_cid(struct nvme_cqe* cqe, uint16_t queue_size,
-                                    uint16_t expected_cid, uint16_t current_cq_head,
-                                    uint16_t last_sq_head) {
-  fprintf(stderr, "DEBUG: Scanning all CQE slots for CID=%u (current cq_head=%u, "
+                                   uint16_t expected_cid,
+                                   uint16_t current_cq_head,
+                                   uint16_t last_sq_head) {
+  fprintf(stderr,
+          "DEBUG: Scanning all CQE slots for CID=%u (current cq_head=%u, "
           "last_sq_head=%u):\n",
           expected_cid, current_cq_head, last_sq_head);
   bool found = false;
@@ -33,11 +36,11 @@ static void debug_scan_cqe_for_cid(struct nvme_cqe* cqe, uint16_t queue_size,
     uint16_t cmd_id = cqe_data.command_id;
     uint16_t sq_head = cqe_data.sq_head;
     uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_data.status);
-    
+
     if (sq_head > max_sq_head) {
       max_sq_head = sq_head;
     }
-    
+
     if (cmd_id == expected_cid) {
       found = true;
       fprintf(stderr, "  *** FOUND CID=%u at cqe[%u]: sq_head=%u, phase=%u%s\n",
@@ -45,16 +48,19 @@ static void debug_scan_cqe_for_cid(struct nvme_cqe* cqe, uint16_t queue_size,
               (i == current_cq_head) ? " <-- current cq_head" : "");
     } else if (cmd_id != 0 || sq_head != 0 || phase != 0) {
       // Show non-zero entries even if CID doesn't match
-      fprintf(stderr, "  cqe[%u]: cmd_id=%u, sq_head=%u, phase=%u%s\n",
-              i, cmd_id, sq_head, phase,
+      fprintf(stderr, "  cqe[%u]: cmd_id=%u, sq_head=%u, phase=%u%s\n", i,
+              cmd_id, sq_head, phase,
               (i == current_cq_head) ? " <-- current cq_head" : "");
     } else if (i == current_cq_head) {
       // Always show current cq_head even if it's zero
-      fprintf(stderr, "  cqe[%u]: cmd_id=%u, sq_head=%u, phase=%u <-- current cq_head (STALE)\n",
+      fprintf(stderr,
+              "  cqe[%u]: cmd_id=%u, sq_head=%u, phase=%u <-- current cq_head "
+              "(STALE)\n",
               i, cmd_id, sq_head, phase);
     }
   }
-  fprintf(stderr, "  Max sq_head seen: %u (last_sq_head was %u, expected next: %u)\n",
+  fprintf(stderr,
+          "  Max sq_head seen: %u (last_sq_head was %u, expected next: %u)\n",
           max_sq_head, last_sq_head, last_sq_head + 1);
   if (!found) {
     fprintf(stderr, "  CID=%u NOT FOUND in any CQE slot\n", expected_cid);
@@ -62,18 +68,21 @@ static void debug_scan_cqe_for_cid(struct nvme_cqe* cqe, uint16_t queue_size,
 }
 
 // Background thread that periodically scans CQE slots for a matching CID
-// This helps debug if the controller is writing completions to unexpected locations
+// This helps debug if the controller is writing completions to unexpected
+// locations
 static void debug_scan_thread(struct nvme_cqe* cqe, uint16_t queue_size,
-                               uint16_t expected_cid, uint16_t initial_cq_head,
-                               uint16_t last_sq_head, std::atomic<bool>* stop_flag) {
+                              uint16_t expected_cid, uint16_t initial_cq_head,
+                              uint16_t last_sq_head,
+                              std::atomic<bool>* stop_flag) {
   uint32_t scan_count = 0;
   while (!stop_flag->load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Scan every 100ms
-    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Scan every
+                                                                 // 100ms
+
     // Scan every 10 iterations (1 second) or more frequently near wrap-around
     if ((++scan_count % 10 == 0) || initial_cq_head >= queue_size - 1) {
       debug_scan_cqe_for_cid(cqe, queue_size, expected_cid, initial_cq_head,
-                              last_sq_head);
+                             last_sq_head);
     }
   }
 }
@@ -108,7 +117,7 @@ __global__ void test_simple_write_kernel(
   // Write SQE to queue (includes memory fence)
   uint16_t sqe_slot = sq_tail; // Remember which slot we're writing to
   nvme_ep::sqeWrite(sqe_local, &sqe[sq_tail]);
-  sq_tail = (sq_tail + 1);// % queue_size;
+  sq_tail = (sq_tail + 1); // % queue_size;
 
   // Ensure SQE write is visible before ringing doorbell (critical for
   // wrap-around)
@@ -116,8 +125,9 @@ __global__ void test_simple_write_kernel(
 
   // Debug: Show SQE submission details (only for wrap-around cases)
   if (sqe_slot >= queue_size - 1) {
-    printf("DEBUG: Writing CID=%u to sqe[%u], ringing doorbell with sq_tail=%u\n",
-           cid, sqe_slot, sq_tail);
+    printf(
+      "DEBUG: Writing CID=%u to sqe[%u], ringing doorbell with sq_tail=%u\n",
+      cid, sqe_slot, sq_tail);
   }
 
   // Ring doorbell
@@ -132,8 +142,10 @@ __global__ void test_simple_write_kernel(
   bool cqe_advanced = false;
 
   // For first operation (expected_phase_start == 0xFF), don't check phase
-  // Controller will write with correct phase, which we'll use for next operation
-  uint8_t* phase_ptr = (expected_phase_start == 0xFF) ? nullptr : &expected_phase;
+  // Controller will write with correct phase, which we'll use for next
+  // operation
+  uint8_t* phase_ptr = (expected_phase_start == 0xFF) ? nullptr
+                                                      : &expected_phase;
 
   while (true) {
     volatile struct nvme_cqe* cqe_entry = &cqe[cq_head];
@@ -145,10 +157,9 @@ __global__ void test_simple_write_kernel(
     // after wrap-around - wrong CID or phase causes cqePoll to advance cq_head
     // For first operation, phase_ptr is nullptr so phase isn't checked
     nvme_ep::cqeType cqe_result = nvme_ep::cqePoll(
-        cqe_last,
-        reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
-        last_sq_head, &new_sq_head, cid, queue_size, &cq_head,
-        &cqe_advanced, phase_ptr);
+      cqe_last, reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
+      last_sq_head, &new_sq_head, cid, queue_size, &cq_head, &cqe_advanced,
+      phase_ptr);
 
     // If cqePoll advanced past stale completions (wrong CID detected),
     // update state and continue polling
@@ -194,16 +205,17 @@ __global__ void test_simple_read_kernel(
 
   // Write SQE to queue (includes memory fence)
   nvme_ep::sqeWrite(sqe_local, &sqe[sq_tail]);
-  sq_tail = (sq_tail + 1);// % queue_size;
+  sq_tail = (sq_tail + 1); // % queue_size;
   // Ensure SQE write is visible before ringing doorbell (critical for
   // wrap-around)
   //__threadfence_system();
 
   // Debug: Show SQE submission details (only for wrap-around cases)
-  //if (sq_tail >= queue_size - 1) {
-  //  printf("DEBUG: Writing CID=%u to sqe[%u], ringing doorbell with sq_tail=%u\n",
+  // if (sq_tail >= queue_size - 1) {
+  //  printf("DEBUG: Writing CID=%u to sqe[%u], ringing doorbell with
+  //  sq_tail=%u\n",
   //         cid, sqe_slot, sq_tail);
- // }
+  // }
 
   // Ring doorbell with tail pointer (BAR0 must be mapped)
   nvme_ep::ringDoorbell(sq_tail, doorbell_offset, false, nullptr, 0,
@@ -217,8 +229,10 @@ __global__ void test_simple_read_kernel(
   bool cqe_advanced = false;
 
   // For first operation (expected_phase_start == 0xFF), don't check phase
-  // Controller will write with correct phase, which we'll use for next operation
-  uint8_t* phase_ptr = (expected_phase_start == 0xFF) ? nullptr : &expected_phase;
+  // Controller will write with correct phase, which we'll use for next
+  // operation
+  uint8_t* phase_ptr = (expected_phase_start == 0xFF) ? nullptr
+                                                      : &expected_phase;
 
   while (true) {
     volatile struct nvme_cqe* cqe_entry = &cqe[cq_head];
@@ -230,10 +244,9 @@ __global__ void test_simple_read_kernel(
     // after wrap-around - wrong CID or phase causes cqePoll to advance cq_head
     // For first operation, phase_ptr is nullptr so phase isn't checked
     nvme_ep::cqeType cqe_result = nvme_ep::cqePoll(
-        cqe_last,
-        reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
-        last_sq_head, &new_sq_head, cid, queue_size, &cq_head,
-        &cqe_advanced, phase_ptr);
+      cqe_last, reinterpret_cast<volatile nvme_ep::cqeType*>(cqe_entry),
+      last_sq_head, &new_sq_head, cid, queue_size, &cq_head, &cqe_advanced,
+      phase_ptr);
 
     // If cqePoll advanced past stale completions (wrong CID detected),
     // update state and continue polling
@@ -251,13 +264,11 @@ __global__ void test_simple_read_kernel(
 }
 
 // Test simple write operation
-static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
-                             uint32_t lba_size, uint64_t base_lba,
-                             uint32_t blocks, struct nvme_queue_info* queue_info,
-                             void* nvme_bar0_gpu, uint16_t* cq_head_inout,
-                             uint16_t* last_sq_head_inout,
-                             uint16_t* sq_tail_inout, uint16_t cid,
-                             uint8_t* expected_phase_inout) {
+static int test_simple_write(
+  const char* /* nvme_device */, uint32_t nsid, uint32_t lba_size,
+  uint64_t base_lba, uint32_t blocks, struct nvme_queue_info* queue_info,
+  void* nvme_bar0_gpu, uint16_t* cq_head_inout, uint16_t* last_sq_head_inout,
+  uint16_t* sq_tail_inout, uint16_t cid, uint8_t* expected_phase_inout) {
   hipError_t err;
   const uint32_t transfer_size = blocks * lba_size;
   const uint16_t queue_id = 63; // Use high queue ID to avoid conflicts with OS
@@ -299,10 +310,8 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
                                  base_lba * lba_size, lba_size, 0);
 
   // Get CQ pointer for reading completions after kernel finishes
-  struct nvme_cqe* cqe =
-    static_cast<struct nvme_cqe*>(queue_info->cq_gpu
-                                     ? queue_info->cq_gpu
-                                     : queue_info->cq_virt);
+  struct nvme_cqe* cqe = static_cast<struct nvme_cqe*>(
+    queue_info->cq_gpu ? queue_info->cq_gpu : queue_info->cq_virt);
 
   // Don't zero SQ - we write to sequential slots matching the controller's head
   // Don't zero CQ - it may contain previous completions that we need to skip
@@ -315,12 +324,12 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
   uint16_t sq_tail_start = (sq_tail_inout != nullptr) ? *sq_tail_inout : 0;
   uint16_t cid_to_use = (cid != 0) ? cid : 1;
 
-  // Determine expected phase: use provided phase, or pass 0xFF to skip phase check
-  // Phase bit flips only when controller wraps CQ (from entry 7 to 0), not per
-  // completion. All entries in same loop have same phase.
-  // For first operation, we can't trust CQE phase (may be stale/uninitialized),
-  // so pass 0xFF to kernel to skip phase checking. Controller will write with
-  // correct phase, which we'll extract after first completion.
+  // Determine expected phase: use provided phase, or pass 0xFF to skip phase
+  // check Phase bit flips only when controller wraps CQ (from entry 7 to 0),
+  // not per completion. All entries in same loop have same phase. For first
+  // operation, we can't trust CQE phase (may be stale/uninitialized), so pass
+  // 0xFF to kernel to skip phase checking. Controller will write with correct
+  // phase, which we'll extract after first completion.
   uint8_t expected_phase;
   if (expected_phase_inout != nullptr && *expected_phase_inout != 0xFF) {
     // Use provided phase (from last valid completion)
@@ -341,33 +350,29 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
           last_sq_head_start, sq_tail_start, queue_info->queue_size);
 
   // Launch kernel
-  struct nvme_sqe* sqe_kernel =
-    static_cast<struct nvme_sqe*>(queue_info->sq_gpu
-                                     ? queue_info->sq_gpu
-                                     : queue_info->sq_virt);
-  struct nvme_cqe* cqe_kernel =
-    static_cast<struct nvme_cqe*>(queue_info->cq_gpu
-                                     ? queue_info->cq_gpu
-                                     : queue_info->cq_virt);
-  
+  struct nvme_sqe* sqe_kernel = static_cast<struct nvme_sqe*>(
+    queue_info->sq_gpu ? queue_info->sq_gpu : queue_info->sq_virt);
+  struct nvme_cqe* cqe_kernel = static_cast<struct nvme_cqe*>(
+    queue_info->cq_gpu ? queue_info->cq_gpu : queue_info->cq_virt);
+
   // Start background debug thread to scan CQE slots while kernel polls
   std::atomic<bool> stop_scan(false);
   std::thread scan_thread(debug_scan_thread, cqe, queue_info->queue_size,
-                          cid_to_use, cq_head_start, last_sq_head_start, &stop_scan);
-  
+                          cid_to_use, cq_head_start, last_sq_head_start,
+                          &stop_scan);
+
   hipLaunchKernelGGL(test_simple_write_kernel, dim3(1), dim3(1), 0, 0,
                      sqe_kernel, cqe_kernel, queue_info->queue_size,
                      write_buffer_dma, nsid, base_lba, blocks, lba_size,
-                     doorbell_offset, nvme_bar0_gpu, cid_to_use,
-                     cq_head_start, last_sq_head_start, sq_tail_start,
-                     expected_phase);
+                     doorbell_offset, nvme_bar0_gpu, cid_to_use, cq_head_start,
+                     last_sq_head_start, sq_tail_start, expected_phase);
 
   err = hipDeviceSynchronize();
-  
+
   // Stop debug thread
   stop_scan.store(true);
   scan_thread.join();
-  
+
   if (err != hipSuccess) {
     fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
     HIP_CHECK(hipHostFree(write_buffer));
@@ -389,7 +394,7 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
           "(last=%u), phase=%u, cq_head=%u\n",
           cmd_id, cid_to_use, sq_head, last_sq_head_start, phase,
           cq_head_start);
-  
+
   // If this was the first operation (expected_phase was 0xFF), extract phase
   // from completion for use in next operation
   if (expected_phase_inout != nullptr && *expected_phase_inout == 0xFF) {
@@ -426,7 +431,7 @@ static int test_simple_write(const char* /* nvme_device */, uint32_t nsid,
   if (sq_tail_inout != nullptr) {
     *sq_tail_inout = new_sq_tail;
   }
-  
+
   // Update phase for next operation: flip only when cq_head wraps to 0
   if (expected_phase_inout != nullptr) {
     if (new_cq_head == 0) {
@@ -493,10 +498,8 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
   memset(read_buffer, 0, transfer_size);
 
   // Get CQ pointer for reading completions after kernel finishes
-  struct nvme_cqe* cqe =
-    static_cast<struct nvme_cqe*>(queue_info->cq_gpu
-                                     ? queue_info->cq_gpu
-                                     : queue_info->cq_virt);
+  struct nvme_cqe* cqe = static_cast<struct nvme_cqe*>(
+    queue_info->cq_gpu ? queue_info->cq_gpu : queue_info->cq_virt);
 
   // Don't zero SQ - we write to sequential slots matching the controller's head
   // Don't zero CQ - it may contain previous completions that we need to skip
@@ -509,12 +512,12 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
   uint16_t sq_tail_start = (sq_tail_inout != nullptr) ? *sq_tail_inout : 1;
   uint16_t cid_to_use = (cid != 0) ? cid : 2;
 
-  // Determine expected phase: use provided phase, or pass 0xFF to skip phase check
-  // Phase bit flips only when controller wraps CQ (from entry 7 to 0), not per
-  // completion. All entries in same loop have same phase.
-  // For first operation, we can't trust CQE phase (may be stale/uninitialized),
-  // so pass 0xFF to kernel to skip phase checking. Controller will write with
-  // correct phase, which we'll extract after first completion.
+  // Determine expected phase: use provided phase, or pass 0xFF to skip phase
+  // check Phase bit flips only when controller wraps CQ (from entry 7 to 0),
+  // not per completion. All entries in same loop have same phase. For first
+  // operation, we can't trust CQE phase (may be stale/uninitialized), so pass
+  // 0xFF to kernel to skip phase checking. Controller will write with correct
+  // phase, which we'll extract after first completion.
   uint8_t expected_phase;
   if (expected_phase_inout != nullptr && *expected_phase_inout != 0xFF) {
     // Use provided phase (from last valid completion)
@@ -538,33 +541,29 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
           queue_info->queue_size);
 
   // Launch kernel
-  struct nvme_sqe* sqe_kernel =
-    static_cast<struct nvme_sqe*>(queue_info->sq_gpu
-                                     ? queue_info->sq_gpu
-                                     : queue_info->sq_virt);
-  struct nvme_cqe* cqe_kernel =
-    static_cast<struct nvme_cqe*>(queue_info->cq_gpu
-                                     ? queue_info->cq_gpu
-                                     : queue_info->cq_virt);
-  
+  struct nvme_sqe* sqe_kernel = static_cast<struct nvme_sqe*>(
+    queue_info->sq_gpu ? queue_info->sq_gpu : queue_info->sq_virt);
+  struct nvme_cqe* cqe_kernel = static_cast<struct nvme_cqe*>(
+    queue_info->cq_gpu ? queue_info->cq_gpu : queue_info->cq_virt);
+
   // Start background debug thread to scan CQE slots while kernel polls
   std::atomic<bool> stop_scan(false);
   std::thread scan_thread(debug_scan_thread, cqe, queue_info->queue_size,
-                          cid_to_use, cq_head_start, last_sq_head_start, &stop_scan);
-  
+                          cid_to_use, cq_head_start, last_sq_head_start,
+                          &stop_scan);
+
   hipLaunchKernelGGL(test_simple_read_kernel, dim3(1), dim3(1), 0, 0,
                      sqe_kernel, cqe_kernel, queue_info->queue_size,
                      read_buffer_dma, nsid, base_lba, blocks, lba_size,
-                     doorbell_offset, nvme_bar0_gpu, cid_to_use,
-                     cq_head_start, last_sq_head_start, sq_tail_start,
-                     expected_phase);
+                     doorbell_offset, nvme_bar0_gpu, cid_to_use, cq_head_start,
+                     last_sq_head_start, sq_tail_start, expected_phase);
 
   err = hipDeviceSynchronize();
-  
+
   // Stop debug thread
   stop_scan.store(true);
   scan_thread.join();
-  
+
   if (err != hipSuccess) {
     fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(err));
     HIP_CHECK(hipHostFree(read_buffer));
@@ -586,7 +585,7 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
           "(last=%u), phase=%u, cq_head=%u\n",
           cmd_id, cid_to_use, sq_head, last_sq_head_start, phase,
           cq_head_start);
-  
+
   // If this was the first operation (expected_phase was 0xFF), extract phase
   // from completion for use in next operation
   if (expected_phase_inout != nullptr && *expected_phase_inout == 0xFF) {
@@ -623,7 +622,7 @@ static int test_simple_read(const char* /* nvme_device */, uint32_t nsid,
   if (sq_tail_inout != nullptr) {
     *sq_tail_inout = new_sq_tail;
   }
-  
+
   // Update phase for next operation: flip only when cq_head wraps to 0
   if (expected_phase_inout != nullptr) {
     if (new_cq_head == 0) {
@@ -821,7 +820,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Failed to create queues: %s\n", strerror(-ret));
     return 1;
   }
-  
+
   // Calculate actual queue size in entries from queue_info
   // queue_info.sq_size is in bytes, divide by SQE size to get entries
   // This is the size we allocated, which should match what we requested
@@ -845,7 +844,8 @@ int main(int argc, char* argv[]) {
     uint16_t cq_head = 0;
     uint16_t last_sq_head = 0;
     uint16_t sq_tail = 0;
-    uint8_t expected_phase = 0xFF; // Initialize to invalid, will be read from CQE
+    uint8_t expected_phase = 0xFF; // Initialize to invalid, will be read from
+                                   // CQE
     printf("\nRunning write test...\n");
     ret = test_simple_write(nvme_device, nsid, lba_size, base_lba,
                             blocks_per_op, &queue_info, nvme_bar0_gpu, &cq_head,
@@ -933,8 +933,9 @@ int main(int argc, char* argv[]) {
     uint16_t last_sq_head = 0;
     uint16_t sq_tail = 0;
     uint16_t next_cid = 1;
-    uint8_t expected_phase = 0xFF; // Initialize to invalid, will be read from CQE
-    
+    uint8_t expected_phase = 0xFF; // Initialize to invalid, will be read from
+                                   // CQE
+
     // Assume queue depth is 64 (controller may reduce larger requests to 64)
     // Generate random LBAs for operations (same LBAs used for both writes and
     // reads)
@@ -963,7 +964,7 @@ int main(int argc, char* argv[]) {
       if (sq_tail >= queue_info.queue_size) {
         sq_tail = sq_tail % queue_info.queue_size;
       }
-      
+
       uint64_t base_lba = random_lbas[op];
       ret = test_simple_write(nvme_device, nsid, lba_size, base_lba,
                               blocks_per_op, &queue_info, nvme_bar0_gpu,
@@ -990,7 +991,7 @@ int main(int argc, char* argv[]) {
       if (sq_tail >= queue_info.queue_size) {
         sq_tail = sq_tail % queue_info.queue_size;
       }
-      
+
       uint64_t base_lba = random_lbas[op];
       ret = test_simple_read(nvme_device, nsid, lba_size, base_lba,
                              blocks_per_op, &queue_info, nvme_bar0_gpu,

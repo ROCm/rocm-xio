@@ -59,9 +59,10 @@ int main(int argc, char** argv) {
     ->group("Common Options");
 
   commonConfig.verbose = 0;
-  app.add_flag("-v,--verbose", commonConfig.verbose,
-               "Enable detailed output (-v) or very verbose with SQE/CQE "
-               "dumping (-vv)")
+  app
+    .add_flag("-v,--verbose", commonConfig.verbose,
+              "Enable detailed output (-v) or very verbose with SQE/CQE "
+              "dumping (-vv)")
     ->group("Common Options");
 
   bool printHistogram = false;

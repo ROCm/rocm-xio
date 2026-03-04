@@ -15,8 +15,7 @@ __host__ __device__ void ringDoorbell(
   if (usePciMmioBridge && shadowBufferVirt != nullptr) {
     // PCI MMIO Bridge mode - complex command structure
     volatile struct pci_mmio_bridge_ring_meta* meta =
-      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-        shadowBufferVirt);
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
     uint32_t slot = meta->producer_idx % meta->queue_depth;
     volatile struct pci_mmio_bridge_command* cmd =
       reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
@@ -58,8 +57,7 @@ __host__ __device__ void ringCqHeadDoorbell(
   if (usePciMmioBridge && shadowBufferVirt != nullptr) {
     // PCI MMIO Bridge mode - complex command structure
     volatile struct pci_mmio_bridge_ring_meta* meta =
-      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
-        shadowBufferVirt);
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
     uint32_t slot = meta->producer_idx % meta->queue_depth;
     volatile struct pci_mmio_bridge_command* cmd =
       reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
@@ -96,13 +94,14 @@ __host__ __device__ void ringCqHeadDoorbell(
 #ifndef __HIP_DEVICE_COMPILE__
 
 #include <errno.h>
+
+#include <cstdio>
+#include <cstring>
+
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-#include <cstdio>
-#include <cstring>
 
 #include "xio-kmod.h"
 
@@ -135,8 +134,7 @@ int map_shadow_buffer(uint16_t bridge_bdf, void** virt_addr) {
   req.bridge_bdf = bridge_bdf;
   ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
   if (ret < 0) {
-    fprintf(stderr,
-            "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
+    fprintf(stderr, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
             strerror(errno));
     close(kmod_fd);
     return -errno;
