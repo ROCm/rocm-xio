@@ -33,7 +33,9 @@ jobs:
           cmake \
           curl \
           libcli11-dev \
-          libdrm-dev
+          libdrm-dev \
+          libnvme-dev \
+          pkg-config
     - name: Build (with ROCm for compilation, but will run in emulate mode)
       run: |
         mkdir -p build && cd build

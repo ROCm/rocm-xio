@@ -19,7 +19,7 @@ list of supported devices we can issue IO to is given in the
 ```bash
 # Install required packages
 sudo apt install rocm-hip-sdk rocminfo libcli11-dev cmake \
-  libdrm-dev libhsa-runtime-dev
+  libdrm-dev libhsa-runtime-dev libnvme-dev pkg-config
 ```
 
 ### Build and Run

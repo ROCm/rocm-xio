@@ -163,11 +163,32 @@ endif()
 
 # Find libnvme (required - for host-side NVMe operations)
 # libnvme provides reference implementation and helpers for NVMe operations
-include(FindPkgConfig)
-pkg_check_modules(LIBNVME REQUIRED libnvme)
-message(STATUS "libnvme found: ${LIBNVME_VERSION}")
-message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
-message(STATUS "  Library dirs: ${LIBNVME_LIBRARY_DIRS}")
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(LIBNVME REQUIRED libnvme)
+  message(STATUS "libnvme found: ${LIBNVME_VERSION}")
+  message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
+  message(STATUS "  Library dirs: ${LIBNVME_LIBRARY_DIRS}")
+else()
+  # Fallback: try to find libnvme manually if pkg-config is not available
+  find_path(LIBNVME_INCLUDE_DIRS
+    NAMES libnvme.h
+    PATHS /usr/include /usr/local/include
+    REQUIRED
+  )
+  find_library(LIBNVME_LIBRARIES
+    NAMES nvme
+    PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+    REQUIRED
+  )
+  # Set version to unknown if we can't get it from pkg-config
+  set(LIBNVME_VERSION "unknown")
+  set(LIBNVME_LIBRARY_DIRS "")
+  message(STATUS "libnvme found (via find_path/find_library)")
+  message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
+  message(STATUS "  Library dirs: ${LIBNVME_LIBRARIES}")
+  message(WARNING "pkg-config not found. Install pkg-config for better libnvme detection.")
+endif()
 # Note: We don't link libnvme here because it's only used in host-side code
 # but it's always required and available
 
