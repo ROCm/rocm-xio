@@ -48,6 +48,14 @@ function(setup_rdma_test TEST_NAME SOURCE_FILE NEEDS_VENDOR_DIRS)
     hip::device
   )
 
+  # If ASan is enabled, ensure test executable also links ASan runtime
+  if(ENABLE_ASAN)
+    target_link_options(${TEST_NAME} PRIVATE -fsanitize=address)
+    target_compile_options(${TEST_NAME} PRIVATE
+      -Wno-option-ignored
+    )
+  endif()
+
   # Add to CTest
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()

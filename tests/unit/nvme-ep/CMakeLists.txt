@@ -48,6 +48,15 @@ function(setup_nvme_test TEST_NAME SOURCE_FILE)
   # Required when linking relocatable device code
   target_link_options(${TEST_NAME} PRIVATE -fgpu-rdc)
 
+  # If ASan is enabled, ensure test executable also links ASan runtime
+  # (rocm-xio uses INTERFACE linking, so this should propagate, but be explicit)
+  if(ENABLE_ASAN)
+    target_link_options(${TEST_NAME} PRIVATE -fsanitize=address)
+    target_compile_options(${TEST_NAME} PRIVATE
+      -Wno-option-ignored
+    )
+  endif()
+
   # Add to CTest
   # Note: This test requires --controller argument, so CTest registration
   # is just for discovery. Run manually with: ./test-nvme-ep-simple-io --controller /dev/nvme0

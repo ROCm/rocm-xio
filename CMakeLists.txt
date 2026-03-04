@@ -42,7 +42,9 @@ project(rocm-xio
 option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 
 # AddressSanitizer option
-option(ENABLE_ASAN "Enable AddressSanitizer for memory leak detection" OFF)
+# NOTE: ASan works for host code in HIP files. Device code instrumentation requires
+# xnack+ architecture (e.g., gfx90a:xnack+). Without xnack+, only host code is instrumented.
+option(ENABLE_ASAN "Enable AddressSanitizer for host code memory leak detection" OFF)
 
 # Use position-independent code everywhere
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -283,14 +285,31 @@ target_compile_options(rocm-xio PRIVATE
 )
 
 # Add AddressSanitizer flags if enabled
+# Note: AddressSanitizer can be used with HIP files for HOST code leak detection.
+# Device code instrumentation requires xnack+ architecture (e.g., gfx90a:xnack+).
+# Without xnack+, device code won't be instrumented (warnings will appear, but harmless).
+# Host code will be fully instrumented for memory leak detection.
+# To avoid linker errors, ensure OFFLOAD_ARCH doesn't include xnack+.
 if(ENABLE_ASAN)
+  # Check if OFFLOAD_ARCH includes xnack+ (which enables device code ASan)
+  if(OFFLOAD_ARCH AND OFFLOAD_ARCH MATCHES "xnack\\+")
+    message(WARNING "OFFLOAD_ARCH includes xnack+ - device code ASan may cause linker errors")
+    message(WARNING "For host-only leak detection, use architecture without xnack+ (e.g., gfx1201)")
+  endif()
+  
+  # Enable ASan for host code (device code won't be instrumented without xnack+)
   target_compile_options(rocm-xio PRIVATE
     -fsanitize=address
     -fno-omit-frame-pointer
     -g
+    # Suppress warnings about ASan not being supported for device code (expected)
+    -Wno-option-ignored
   )
-  target_link_options(rocm-xio PRIVATE -fsanitize=address)
-  message(STATUS "AddressSanitizer enabled for rocm-xio")
+  # Use INTERFACE linking so targets linking against rocm-xio also get ASan runtime
+  target_link_options(rocm-xio INTERFACE -fsanitize=address)
+  message(STATUS "AddressSanitizer enabled for rocm-xio (host code only)")
+  message(STATUS "  Device code will not be instrumented (requires xnack+ architecture)")
+  message(STATUS "  Host code memory leaks will be detected")
 endif()
 
 # HIP-specific compilation flags (relocatable device code)
@@ -373,14 +392,18 @@ target_compile_options(xio-tester PRIVATE
 )
 
 # Add AddressSanitizer flags if enabled
+# Note: ASan works for host code in HIP files. Device code won't be instrumented
+# unless xnack+ architecture is used (which may cause linker errors).
 if(ENABLE_ASAN)
   target_compile_options(xio-tester PRIVATE
     -fsanitize=address
     -fno-omit-frame-pointer
     -g
+    # Suppress warnings about ASan not being supported for device code (expected)
+    -Wno-option-ignored
   )
   target_link_options(xio-tester PRIVATE -fsanitize=address)
-  message(STATUS "AddressSanitizer enabled for xio-tester")
+  message(STATUS "AddressSanitizer enabled for xio-tester (host code only)")
 endif()
 
 target_include_directories(xio-tester PRIVATE

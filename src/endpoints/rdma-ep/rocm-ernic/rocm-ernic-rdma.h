@@ -45,8 +45,9 @@
 #define ROCM_ERNIC_SEND_FENCE (1 << 3)
 
 // Helper function to set ROCM-ERNIC-specific WQE fields
-__host__ __device__ static inline void rocm_ernic_wqe_set_vendor_specific(
-  struct rdma_wqe* wqe, uint32_t qp_num, bool signaled, bool fence) {
+__host__ __device__ static inline void
+rocm_ernic_wqe_set_vendor_specific(struct rdma_wqe* wqe, uint32_t qp_num,
+                                   bool signaled, bool fence) {
   uint64_t flags = 0;
   if (signaled)
     flags |= ROCM_ERNIC_SEND_SIGNALED;
@@ -56,8 +57,8 @@ __host__ __device__ static inline void rocm_ernic_wqe_set_vendor_specific(
 }
 
 // Helper function to extract ROCM-ERNIC-specific CQE fields
-__host__ __device__ static inline uint32_t rocm_ernic_cqe_get_qpn(
-  const struct rdma_cqe* cqe) {
+__host__ __device__ static inline uint32_t
+rocm_ernic_cqe_get_qpn(const struct rdma_cqe* cqe) {
   return cqe->rocm_ernic.qpn;
 }
 
