@@ -626,12 +626,15 @@ struct NvmeEpConfig {
                           // for 00:04.0)
   uint16_t nvmeTargetBdf; // NVMe target device BDF (0xBBDD format, e.g., 0x0600
                           // for 00:06.0)
-  void* shadowBufferVirt; // Virtual address of PCI MMIO bridge shadow buffer
+  void* shadowBufferVirt; // GPU-accessible pointer to PCI MMIO bridge shadow buffer
                           // (mapped from GPA)
+  void* shadowBufferCpu; // CPU-accessible pointer to PCI MMIO bridge shadow buffer
+                          // (for cleanup/unregister)
 
   // Direct doorbell configuration (when PCI MMIO bridge is disabled)
   void* nvmeBar0Gpu; // GPU-accessible pointer to NVMe BAR0 (for direct doorbell
                      // access)
+  void* nvmeBar0Cpu; // CPU-accessible pointer to NVMe BAR0 (for cleanup/unregister)
 
   // Default constructor
   NvmeEpConfig()
@@ -647,7 +650,8 @@ struct NvmeEpConfig {
                              // 0x0020)
       nvmeTargetBdf(0x0030), // Default: 00:06.0 (bus=0, device=6, function=0 =
                              // 0x0030)
-      shadowBufferVirt(nullptr), nvmeBar0Gpu(nullptr) {
+      shadowBufferVirt(nullptr), shadowBufferCpu(nullptr),
+      nvmeBar0Gpu(nullptr), nvmeBar0Cpu(nullptr) {
   }
 };
 

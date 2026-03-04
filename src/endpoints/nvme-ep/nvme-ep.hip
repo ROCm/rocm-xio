@@ -1745,6 +1745,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         close(drm_fd);
         munmap(shadow_virt, shadow_size);
         nvmeConfig->shadowBufferVirt = nullptr;
+        nvmeConfig->shadowBufferCpu = nullptr;
         nvmeConfig->usePciMmioBridge = false;
       } else {
         fprintf(stderr,
@@ -1765,6 +1766,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           close(drm_fd);
           munmap(shadow_virt, shadow_size);
           nvmeConfig->shadowBufferVirt = nullptr;
+          nvmeConfig->shadowBufferCpu = nullptr;
           nvmeConfig->usePciMmioBridge = false;
         } else {
           fprintf(stderr, "Shadow buffer registered with HIP for GPU access\n");
@@ -1788,8 +1790,9 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
             fprintf(stderr,
                     "Shadow buffer GPU pointer obtained: %p (host: %p)\n",
                     shadow_gpu_ptr, shadow_virt);
-            // Store GPU pointer for kernel use
+            // Store GPU pointer for kernel use and CPU pointer for cleanup
             nvmeConfig->shadowBufferVirt = shadow_gpu_ptr;
+            nvmeConfig->shadowBufferCpu = shadow_virt;
           }
           // Note: We keep drm_fd open for the mapping to remain valid
           // In a production system, you might want to track this fd and close
@@ -1814,9 +1817,11 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         stderr,
         "Direct doorbell mode disabled - GPU kernel will skip doorbell.\n");
       nvmeConfig->nvmeBar0Gpu = nullptr;
+      nvmeConfig->nvmeBar0Cpu = nullptr;
     } else {
       fprintf(stderr, "NVMe BAR0 mapped for direct doorbell access\n");
       nvmeConfig->nvmeBar0Gpu = bar0_gpu;
+      nvmeConfig->nvmeBar0Cpu = bar0_cpu; // Store for cleanup
     }
   }
 
@@ -2354,6 +2359,16 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     return dev_err;
   }
 
+  // Synchronize HIP before kernel launch to ensure all memory operations
+  // (including BAR0 registration) are complete
+  hipError_t sync_err = hipDeviceSynchronize();
+  if (sync_err != hipSuccess) {
+    fprintf(stderr, "Warning: hipDeviceSynchronize before launch failed: %s\n",
+            hipGetErrorString(sync_err));
+    fflush(stderr);
+    // Continue anyway - this might not be fatal
+  }
+
   // Launch kernel - HIP may crash with many parameters, so we try to catch it
   // by ensuring all parameters are valid before the call
   hipLaunchKernelGGL(
@@ -2469,6 +2484,34 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     fprintf(stderr, "Warning: Queue cleanup failed: %s\n",
             strerror(-cleanup_ret));
     // Don't fail the test if cleanup fails - kernel already completed
+  }
+
+  // Unregister shadow buffer from HIP if it was registered
+  // This must be done before unmapping to avoid heap corruption
+  if (nvmeConfig->shadowBufferCpu != nullptr) {
+    hipError_t unreg_err = hipHostUnregister(nvmeConfig->shadowBufferCpu);
+    if (unreg_err != hipSuccess) {
+      fprintf(stderr, "Warning: Failed to unregister shadow buffer from HIP: "
+              "%s\n", hipGetErrorString(unreg_err));
+    } else {
+      fprintf(stderr, "Shadow buffer unregistered from HIP\n");
+    }
+    // Note: We don't unmap shadow buffer here - it's mmap'd and will be cleaned
+    // up when the process exits. The file descriptors are also kept open.
+  }
+
+  // Unregister BAR0 from HIP if it was registered
+  // This must be done before unmapping to avoid heap corruption
+  if (nvmeConfig->nvmeBar0Cpu != nullptr) {
+    hipError_t unreg_err = hipHostUnregister(nvmeConfig->nvmeBar0Cpu);
+    if (unreg_err != hipSuccess) {
+      fprintf(stderr, "Warning: Failed to unregister BAR0 from HIP: %s\n",
+              hipGetErrorString(unreg_err));
+    } else {
+      fprintf(stderr, "BAR0 unregistered from HIP\n");
+    }
+    // Note: We don't unmap BAR0 here - it's mmap'd and will be cleaned up
+    // when the process exits. The file descriptors are also kept open.
   }
 
   return err;
