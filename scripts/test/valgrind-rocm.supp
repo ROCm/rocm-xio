@@ -1,0 +1,77 @@
+# Valgrind suppression file for ROCm libraries
+# This file suppresses known false positives from ROCm runtime libraries
+#
+# To generate new suppressions, run:
+#   valgrind --gen-suppressions=all <executable>
+# Then add the generated suppressions to this file
+
+# HSA Runtime allocations
+{
+   hsa_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*hsa*
+}
+
+# HIP Runtime internal allocations
+{
+   hip_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*hip*
+}
+
+# ROCm driver/kernel module interactions
+{
+   rocm_driver_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*drm*
+   ...
+   fun:*amdgpu*
+}
+
+# libdrm allocations
+{
+   libdrm_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*drm*
+}
+
+# HSAKMT library allocations
+{
+   hsakmt_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   fun:*hsakmt*
+}
+
+# Generic ROCm library allocations (catch-all for other ROCm libs)
+{
+   rocm_lib_leak
+   Memcheck:Leak
+   match-leak-kinds: definite
+   ...
+   obj:*/opt/rocm*/lib/*
+}
+
+# Suppress errors in ROCm libraries (not leaks, but other errors)
+{
+   rocm_lib_error
+   Memcheck:Value4
+   ...
+   obj:*/opt/rocm*/lib/*
+}
+
+{
+   rocm_lib_error2
+   Memcheck:Value8
+   ...
+   obj:*/opt/rocm*/lib/*
+}
