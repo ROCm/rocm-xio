@@ -39,13 +39,11 @@
 // aren't available in userspace/HIP compilation, so we auto-extract only the
 // enum values we need. Generated file: src/include/nvme-ep-generated.h
 //
-// When USE_LIBNVME is defined, include libnvme.h first to get its definitions,
-// then the generated header will skip conflicting definitions.
+// Include libnvme.h for host code to get its definitions.
+// The generated header will skip conflicting definitions.
 // Only include libnvme.h for host code (not device code).
 #ifndef __HIP_DEVICE_COMPILE__
-#ifdef USE_LIBNVME
 #include <libnvme.h>
-#endif
 #endif
 #include "nvme-ep-generated.h"
 
@@ -67,10 +65,10 @@
 //
 // SMART log page structure (matches Linux kernel struct nvme_smart_log)
 // Note: 128-bit fields are stored as 16-byte arrays in little-endian format
-// When USE_LIBNVME is defined for host code, libnvme provides this struct, so
-// we skip it. Device code always needs the struct definition since libnvme.h
+// libnvme provides this struct for host code, so we skip it.
+// Device code always needs the struct definition since libnvme.h
 // is not included for device code.
-#if !defined(USE_LIBNVME) || defined(__HIP_DEVICE_COMPILE__)
+#ifdef __HIP_DEVICE_COMPILE__
 struct nvme_smart_log {
   uint8_t critical_warning;
   uint8_t temperature[2];
@@ -98,7 +96,7 @@ struct nvme_smart_log {
   uint32_t thm_temp2_total_time;   // Bytes 228-231
   uint8_t rsvd232[280];            // Bytes 232-511
 } __attribute__((packed));
-#endif // !USE_LIBNVME || __HIP_DEVICE_COMPILE__
+#endif // __HIP_DEVICE_COMPILE__
 
 // Helper function to convert 16-byte little-endian array to uint64_t
 // Reads lower 64 bits (first 8 bytes) - sufficient for most practical values
@@ -630,6 +628,8 @@ struct NvmeEpConfig {
                           // (mapped from GPA)
   void* shadowBufferCpu; // CPU-accessible pointer to PCI MMIO bridge shadow buffer
                           // (for cleanup/unregister)
+  int shadowBufferDrmFd; // DRM file descriptor for shadow buffer GEM_USERPTR registration
+                          // (must remain open for registration to remain valid)
 
   // Direct doorbell configuration (when PCI MMIO bridge is disabled)
   void* nvmeBar0Gpu; // GPU-accessible pointer to NVMe BAR0 (for direct doorbell
@@ -642,16 +642,17 @@ struct NvmeEpConfig {
       cqBaseAddr(0), sqSize(0), cqSize(0), accessPattern("random"),
       lbaSize(512), baseLba(0),    // Default: start at LBA 0
       dataBufferSize(1024 * 1024), // 1 MB default
+      lfsrSeed(0),                 // Seed for LFSR pattern
+      readIo(0), writeIo(0),       // Default: 0 (must specify at least one)
       batchSize(0),                // 0 = auto-calculate
-      lfsrSeed(0), readIo(0),
-      writeIo(0), // Default: 0 (must specify at least one)
       usePciMmioBridge(false),
       mmioBridgeBdf(0x0020), // Default: 00:04.0 (bus=0, device=4, function=0 =
                              // 0x0020)
       nvmeTargetBdf(0x0030), // Default: 00:06.0 (bus=0, device=6, function=0 =
                              // 0x0030)
       shadowBufferVirt(nullptr), shadowBufferCpu(nullptr),
-      nvmeBar0Gpu(nullptr), nvmeBar0Cpu(nullptr) {
+      shadowBufferDrmFd(-1), nvmeBar0Gpu(nullptr),
+      nvmeBar0Cpu(nullptr) {
   }
 };
 

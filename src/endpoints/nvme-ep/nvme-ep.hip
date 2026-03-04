@@ -85,6 +85,10 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   // CPU/DMA writes are visible. The status field (which contains phase bit) is
   // written LAST by the controller, so reading it LAST with acquire semantics
   // ensures all previous writes to other fields are visible.
+  // Suppress warnings about taking address of packed members - this is
+  // intentional for NVMe structures which must match hardware layout exactly
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
   // Read command_id with acquire semantics
   volatile uint16_t* cmd_id_ptr = 
     reinterpret_cast<volatile uint16_t*>(&cqeAddress->command_id);
@@ -121,6 +125,7 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
     reinterpret_cast<volatile uint16_t*>(&cqeAddress->status);
   result.status = __hip_atomic_load(status_ptr, __ATOMIC_ACQUIRE,
                                      __HIP_MEMORY_SCOPE_SYSTEM);
+#pragma GCC diagnostic pop
   
   // Wait for all loads to complete before returning
   __builtin_amdgcn_s_waitcnt(0);
@@ -1248,7 +1253,8 @@ __device__ void nvme_ep_driveEndpoint(
       // Poll for completions if needed
       if (completed_count < submitted_count && last_batch_last_cid > 0) {
         // Poll until we see the last CID of the most recently submitted batch
-        uint16_t processed = nvme_ep_batch_poll_for_cid(
+        // Note: Return value is not used as completed_count is updated via pointer
+        (void)nvme_ep_batch_poll_for_cid(
           config, cqeAddr, usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
           cq_doorbell_offset, nvmeBar0Gpu, verbose, num_ops, queue_size,
           &completed_count, &cq_head, last_batch_last_cid);
@@ -1728,6 +1734,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         "Disabling PCI MMIO bridge mode - GPU kernel will skip doorbell.\n");
       munmap(shadow_virt, shadow_size);
       nvmeConfig->shadowBufferVirt = nullptr;
+      nvmeConfig->shadowBufferCpu = nullptr;
+      nvmeConfig->shadowBufferDrmFd = -1;
       nvmeConfig->usePciMmioBridge = false;
     } else {
       struct drm_amdgpu_gem_userptr gem_userptr = {};
@@ -1746,6 +1754,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
         munmap(shadow_virt, shadow_size);
         nvmeConfig->shadowBufferVirt = nullptr;
         nvmeConfig->shadowBufferCpu = nullptr;
+        nvmeConfig->shadowBufferDrmFd = -1;
         nvmeConfig->usePciMmioBridge = false;
       } else {
         fprintf(stderr,
@@ -1767,6 +1776,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           munmap(shadow_virt, shadow_size);
           nvmeConfig->shadowBufferVirt = nullptr;
           nvmeConfig->shadowBufferCpu = nullptr;
+          nvmeConfig->shadowBufferDrmFd = -1;
           nvmeConfig->usePciMmioBridge = false;
         } else {
           fprintf(stderr, "Shadow buffer registered with HIP for GPU access\n");
@@ -1785,6 +1795,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
             close(drm_fd);
             munmap(shadow_virt, shadow_size);
             nvmeConfig->shadowBufferVirt = nullptr;
+            nvmeConfig->shadowBufferCpu = nullptr;
+            nvmeConfig->shadowBufferDrmFd = -1;
             nvmeConfig->usePciMmioBridge = false;
           } else {
             fprintf(stderr,
@@ -1793,15 +1805,17 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
             // Store GPU pointer for kernel use and CPU pointer for cleanup
             nvmeConfig->shadowBufferVirt = shadow_gpu_ptr;
             nvmeConfig->shadowBufferCpu = shadow_virt;
+            // Store DRM file descriptor - must remain open for GEM_USERPTR
+            // registration to remain valid (matching BAR0 behavior)
+            nvmeConfig->shadowBufferDrmFd = drm_fd;
+            fprintf(stderr,
+                    "Shadow buffer DRM file descriptor stored: fd=%d (will "
+                    "remain open)\n",
+                    nvmeConfig->shadowBufferDrmFd);
+            fflush(stderr);
           }
-          // Note: We keep drm_fd open for the mapping to remain valid
-          // In a production system, you might want to track this fd and close
-          // it on cleanup
         }
       }
-      // Keep drm_fd open - the mapping persists even after close
-      // The kernel will clean it up when the process exits
-      close(drm_fd);
     }
   } else {
     // PCI MMIO bridge is disabled - set up direct doorbell via BAR0
@@ -2229,6 +2243,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
                       "MMIO bridge mode\n");
       shadowBufferVirt = nullptr;
       usePciMmioBridge = false;
+      // Note: shadowBufferDrmFd is managed by nvmeConfig, not this local variable
     } else {
       fprintf(stderr,
               "Shadow buffer GPU accessibility verified: type=%d, device=%d\n",
@@ -2338,6 +2353,33 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
           shadowBufferVirt);
   fflush(stderr);
 
+  // Verify DRM file descriptor is still open if using PCI MMIO bridge
+  // Do this BEFORE clearing HIP errors to catch any fd issues early
+  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
+    if (nvmeConfig->shadowBufferDrmFd >= 0) {
+      // Check if DRM fd is still valid
+      int fd_check = fcntl(nvmeConfig->shadowBufferDrmFd, F_GETFD);
+      if (fd_check < 0) {
+        fprintf(stderr,
+                "Error: Shadow buffer DRM file descriptor is invalid before "
+                "kernel launch: %s (fd=%d)\n",
+                strerror(errno), nvmeConfig->shadowBufferDrmFd);
+        fflush(stderr);
+        return hipErrorInvalidValue;
+      }
+      fprintf(stderr,
+              "Shadow buffer DRM file descriptor verified: fd=%d (valid)\n",
+              nvmeConfig->shadowBufferDrmFd);
+      fflush(stderr);
+    } else {
+      fprintf(stderr,
+              "Warning: Shadow buffer DRM file descriptor not set "
+              "(shadowBufferDrmFd=%d)\n",
+              nvmeConfig->shadowBufferDrmFd);
+      fflush(stderr);
+    }
+  }
+
   // Clear any pending HIP errors before kernel launch
   hipError_t preLaunchErr = hipGetLastError();
   if (preLaunchErr != hipSuccess) {
@@ -2360,7 +2402,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   }
 
   // Synchronize HIP before kernel launch to ensure all memory operations
-  // (including BAR0 registration) are complete
+  // (including shadow buffer and BAR0 registration) are complete
   hipError_t sync_err = hipDeviceSynchronize();
   if (sync_err != hipSuccess) {
     fprintf(stderr, "Warning: hipDeviceSynchronize before launch failed: %s\n",
@@ -2497,7 +2539,15 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
       fprintf(stderr, "Shadow buffer unregistered from HIP\n");
     }
     // Note: We don't unmap shadow buffer here - it's mmap'd and will be cleaned
-    // up when the process exits. The file descriptors are also kept open.
+    // up when the process exits.
+  }
+
+  // Close DRM file descriptor for shadow buffer if it was opened
+  // This must be done after HIP unregistration
+  if (nvmeConfig->shadowBufferDrmFd >= 0) {
+    close(nvmeConfig->shadowBufferDrmFd);
+    nvmeConfig->shadowBufferDrmFd = -1;
+    fprintf(stderr, "Shadow buffer DRM file descriptor closed\n");
   }
 
   // Unregister BAR0 from HIP if it was registered
@@ -2561,34 +2611,9 @@ __host__ int nvme_ep_check_pc0_support(uint16_t nvme_bdf, bool* supports_pc0) {
 }
 
 // Structure for NVMe Identify Namespace response (4096 bytes)
-// When USE_LIBNVME is defined, libnvme provides this struct, so we skip it.
-#ifndef USE_LIBNVME
-struct nvme_id_ns {
-  uint64_t nsze;  // Namespace size
-  uint64_t ncap;  // Namespace capacity
-  uint64_t nuse;  // Namespace utilization
-  uint8_t nsfeat; // Namespace features
-  uint8_t nlbaf;  // Number of LBA formats
-  uint8_t flbas;  // Formatted LBA size (bits 3:0 = current format index)
-  uint8_t mc;     // Metadata capabilities
-  uint8_t dpc;    // End-to-end data protection capabilities
-  uint8_t dps;    // End-to-end data protection type settings
-  uint8_t nmic;   // Namespace multi-path I/O and namespace sharing capabilities
-  uint8_t rescap; // Reservation capabilities
-  uint8_t fpi;    // Format progress indicator
-  uint8_t dlfeat; // Deallocate logical block features
-  uint16_t nawun; // Namespace atomic write unit normal
-  uint16_t nawupf;    // Namespace atomic write unit power fail
-  uint16_t nacwu;     // Namespace atomic compare and write unit
-  uint16_t nabsn;     // Namespace atomic boundary size normal
-  uint16_t nabo;      // Namespace atomic boundary offset
-  uint16_t nabspf;    // Namespace atomic boundary size power fail
-  uint16_t noiob;     // Namespace optimal I/O boundary
-  uint8_t nvmcap[16]; // NVM capacity
-  uint8_t resv[40];   // Reserved
-  uint8_t lbaf[64];   // LBA format support (16 formats * 4 bytes each)
-};
-#endif // USE_LIBNVME
+// libnvme provides this struct, so we don't need to define it here.
+// This struct is only needed for device code, but libnvme.h is not included
+// for device code, so we rely on libnvme's definition for host code.
 
 __host__ int nvme_ep_query_lba_size(const char* nvme_device, uint32_t nsid,
                                     unsigned* lba_size) {
@@ -3288,8 +3313,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   // 1. libnvme uses its own memory allocation (not GPU-accessible)
   // 2. We need GPU-accessible memory for device-side queue access
   // 3. We use custom kernel module integration for physical address mapping
-  // libnvme is used only for status code helpers (nvme_status_to_string)
-  // when USE_LIBNVME is defined.
+  // libnvme is used for status code helpers (nvme_status_to_string)
   // Declare all variables at the top to avoid goto scoping issues
   int kmod_fd = -1;
   int nvme_fd = -1;
@@ -4145,16 +4169,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
-#ifdef USE_LIBNVME
     const char* sc_str = nvme_status_to_string(sc, sct);
     fprintf(stderr,
             "ERROR: CREATE_CQ failed with status code 0x%02x (SCT=%u): %s\n",
             sc, sct, sc_str ? sc_str : "Unknown");
-#else
-    fprintf(stderr,
-            "ERROR: CREATE_CQ failed with status code 0x%02x (SCT=%u)\n", sc,
-            sct);
-#endif
     if (sc == NVME_SC_INVALID_FIELD) {
       fprintf(
         stderr,
@@ -4231,16 +4249,10 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
-#ifdef USE_LIBNVME
     const char* sc_str = nvme_status_to_string(sc, sct);
     fprintf(stderr,
             "ERROR: CREATE_SQ failed with status code 0x%02x (SCT=%u): %s\n",
             sc, sct, sc_str ? sc_str : "Unknown");
-#else
-    fprintf(stderr,
-            "ERROR: CREATE_SQ failed with status code 0x%02x (SCT=%u)\n", sc,
-            sct);
-#endif
     if (sc == NVME_SC_INVALID_FIELD) {
       fprintf(stderr,
               "  Error: Invalid field in command (queue_id=%u, queue_size=%u, "

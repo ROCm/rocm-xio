@@ -41,6 +41,9 @@ project(rocm-xio
 # This project uses static libraries by necessity
 option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 
+# AddressSanitizer option
+option(ENABLE_ASAN "Enable AddressSanitizer for memory leak detection" OFF)
+
 # Use position-independent code everywhere
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -58,6 +61,41 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
   "Debug" "Release" "None"
 )
+
+#-----------------------------------------------------------------------------
+# Valgrind memory leak detection configuration
+#-----------------------------------------------------------------------------
+# Option to enable/disable valgrind integration
+option(ENABLE_VALGRIND "Enable valgrind memory leak detection" ON)
+
+if(ENABLE_VALGRIND)
+  # Find valgrind executable
+  find_program(MEMORYCHECK_COMMAND valgrind)
+  if(MEMORYCHECK_COMMAND)
+    message(STATUS "valgrind found: ${MEMORYCHECK_COMMAND}")
+    
+    # Set valgrind options for memcheck
+    # Note: Must be a single string with space-separated options, not a list
+    set(MEMORYCHECK_COMMAND_OPTIONS
+      "--tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 --quiet"
+      CACHE STRING "Valgrind memcheck options")
+    
+    # Set suppression file path
+    set(MEMORYCHECK_SUPPRESSIONS_FILE
+      "${CMAKE_SOURCE_DIR}/scripts/test/valgrind-rocm.supp"
+      CACHE FILEPATH "Valgrind suppression file")
+    
+    message(STATUS "Valgrind memcheck enabled")
+    message(STATUS "  Options: ${MEMORYCHECK_COMMAND_OPTIONS}")
+    message(STATUS "  Suppressions: ${MEMORYCHECK_SUPPRESSIONS_FILE}")
+  else()
+    message(STATUS "valgrind not found - memory leak detection disabled")
+    message(STATUS "  Install valgrind to enable memory leak detection")
+    set(ENABLE_VALGRIND OFF)
+  endif()
+else()
+  message(STATUS "Valgrind memory leak detection disabled")
+endif()
 
 # Enable CTest (the include line automatically calls enable_testing())
 include(CTest)
@@ -123,21 +161,15 @@ else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
 
-# Find libnvme (optional - for host-side NVMe operations)
+# Find libnvme (required - for host-side NVMe operations)
 # libnvme provides reference implementation and helpers for NVMe operations
 include(FindPkgConfig)
-pkg_check_modules(LIBNVME libnvme)
-if(LIBNVME_FOUND)
-    message(STATUS "libnvme found: ${LIBNVME_VERSION}")
-    message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
-    message(STATUS "  Library dirs: ${LIBNVME_LIBRARY_DIRS}")
-    add_definitions(-DUSE_LIBNVME)
-    # Note: We don't link libnvme here because it's only used in host-side code
-    # and only conditionally compiled with #ifdef USE_LIBNVME guards
-else()
-    message(STATUS "libnvme not found - using built-in NVMe implementation")
-    message(STATUS "  Install libnvme-dev to enable libnvme integration")
-endif()
+pkg_check_modules(LIBNVME REQUIRED libnvme)
+message(STATUS "libnvme found: ${LIBNVME_VERSION}")
+message(STATUS "  Include dirs: ${LIBNVME_INCLUDE_DIRS}")
+message(STATUS "  Library dirs: ${LIBNVME_LIBRARY_DIRS}")
+# Note: We don't link libnvme here because it's only used in host-side code
+# but it's always required and available
 
 # Include helper modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
@@ -229,6 +261,17 @@ target_compile_options(rocm-xio PRIVATE
   -Wno-unused-parameter
 )
 
+# Add AddressSanitizer flags if enabled
+if(ENABLE_ASAN)
+  target_compile_options(rocm-xio PRIVATE
+    -fsanitize=address
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(rocm-xio PRIVATE -fsanitize=address)
+  message(STATUS "AddressSanitizer enabled for rocm-xio")
+endif()
+
 # HIP-specific compilation flags (relocatable device code)
 target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
 
@@ -241,10 +284,8 @@ target_include_directories(rocm-xio
   PRIVATE
     ${INCLUDE_DIR}
 )
-# Add libnvme include directories if found (for host-side code only)
-if(LIBNVME_FOUND)
-  target_include_directories(rocm-xio PRIVATE ${LIBNVME_INCLUDE_DIRS})
-endif()
+# Add libnvme include directories (required for host-side code)
+target_include_directories(rocm-xio PRIVATE ${LIBNVME_INCLUDE_DIRS})
 foreach(ep ${VALID_ENDPOINTS})
   target_include_directories(rocm-xio PRIVATE
     ${ENDPOINTS_DIR}/${ep})
@@ -258,11 +299,9 @@ target_link_libraries(rocm-xio
     hip::device
     hsakmt::hsakmt
 )
-# Link libnvme if found (for host-side status code helpers)
-if(LIBNVME_FOUND)
-  target_link_libraries(rocm-xio PRIVATE ${LIBNVME_LIBRARIES})
-  target_link_directories(rocm-xio PRIVATE ${LIBNVME_LIBRARY_DIRS})
-endif()
+# Link libnvme (required for host-side status code helpers)
+target_link_libraries(rocm-xio PRIVATE ${LIBNVME_LIBRARIES})
+target_link_directories(rocm-xio PRIVATE ${LIBNVME_LIBRARY_DIRS})
 
 # Apply endpoint defines per source file
 apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
@@ -312,13 +351,22 @@ target_compile_options(xio-tester PRIVATE
   -Wno-unused-parameter
 )
 
+# Add AddressSanitizer flags if enabled
+if(ENABLE_ASAN)
+  target_compile_options(xio-tester PRIVATE
+    -fsanitize=address
+    -fno-omit-frame-pointer
+    -g
+  )
+  target_link_options(xio-tester PRIVATE -fsanitize=address)
+  message(STATUS "AddressSanitizer enabled for xio-tester")
+endif()
+
 target_include_directories(xio-tester PRIVATE
   ${INCLUDE_DIR}
 )
-# Add libnvme include directories if found (for host-side code only)
-if(LIBNVME_FOUND)
-  target_include_directories(xio-tester PRIVATE ${LIBNVME_INCLUDE_DIRS})
-endif()
+# Add libnvme include directories (required for host-side code)
+target_include_directories(xio-tester PRIVATE ${LIBNVME_INCLUDE_DIRS})
 
 target_link_libraries(xio-tester PRIVATE
   rocm-xio
@@ -326,14 +374,38 @@ target_link_libraries(xio-tester PRIVATE
   hip::device
   hsa-runtime64::hsa-runtime64
 )
-# Link libnvme if found (for host-side status code helpers)
-if(LIBNVME_FOUND)
-  target_link_libraries(xio-tester PRIVATE ${LIBNVME_LIBRARIES})
-  target_link_directories(xio-tester PRIVATE ${LIBNVME_LIBRARY_DIRS})
-endif()
+# Link libnvme (required for host-side status code helpers)
+target_link_libraries(xio-tester PRIVATE ${LIBNVME_LIBRARIES})
+target_link_directories(xio-tester PRIVATE ${LIBNVME_LIBRARY_DIRS})
 
 # Required when linking relocatable device code (like TransferBench)
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
+
+#-----------------------------------------------------------------------------
+# Register xio-tester tests with CTest for valgrind memcheck
+#-----------------------------------------------------------------------------
+if(BUILD_TESTING)
+  # Helper function to register xio-tester test cases
+  function(add_xio_tester_test TEST_NAME COMMAND_ARGS)
+    add_test(NAME ${TEST_NAME} COMMAND xio-tester ${COMMAND_ARGS})
+    # Note: xio-tester is built in CMAKE_CURRENT_BINARY_DIR, not bin/ subdirectory
+    set_tests_properties(${TEST_NAME} PROPERTIES
+      LABELS "xio-tester"
+      REQUIRED_FILES "${CMAKE_CURRENT_BINARY_DIR}/xio-tester"
+    )
+  endfunction()
+  
+  # Register basic test cases (these may require hardware)
+  # Mark as manual since they require NVMe hardware
+  add_xio_tester_test(xio-tester-help --help)
+  set_tests_properties(xio-tester-help PROPERTIES LABELS "manual")
+  
+  add_xio_tester_test(xio-tester-list-endpoints --list-endpoints)
+  set_tests_properties(xio-tester-list-endpoints PROPERTIES LABELS "manual")
+  
+  # Note: Tests requiring hardware (e.g., --controller /dev/nvme0) should
+  # be run manually or via test scripts, not through CTest
+endif()
 
 #-----------------------------------------------------------------------------
 # Install configuration

@@ -218,6 +218,111 @@ when accessing host memory.
 **Note**: On MI-series accelerators (MI300X, etc.), this is typically not
 required as fine-grained memory is available by default.
 
+## Memory Leak Detection
+
+This project includes support for detecting memory leaks using valgrind and
+AddressSanitizer (ASan). Both tools can help identify memory leaks in host-side
+code, though they have different strengths and limitations.
+
+### Valgrind Integration
+
+Valgrind is integrated with CMake's CTest framework for automated memory leak
+detection.
+
+**Prerequisites:**
+```bash
+sudo apt-get install valgrind
+```
+
+**Using CMake Native Integration (Recommended):**
+
+```bash
+# Configure with valgrind support (auto-detected if installed)
+cd build && cmake ..
+
+# Run all tests with valgrind memcheck
+ctest -T memcheck
+
+# Run specific test with valgrind
+ctest -T memcheck -R test-name
+
+# Use convenience target
+cmake --build . --target valgrind-check
+
+# View valgrind logs
+cat build/Testing/Temporary/MemoryChecker.*.log
+```
+
+**Using Standalone Wrapper Script:**
+
+For manual testing outside CTest:
+
+```bash
+# Run with standalone wrapper script
+./scripts/test/run-valgrind.sh ./build/bin/xio-tester nvme-ep \
+  --controller /dev/nvme1
+
+# Use valgrind with run-test script
+./run-test --valgrind
+```
+
+**Valgrind Configuration:**
+
+- Suppression file: `scripts/test/valgrind-rocm.supp` (suppresses ROCm library
+  false positives)
+- Logs: `build/valgrind-logs/valgrind_*.log`
+- Options can be configured in `CMakeLists.txt` via `MEMORYCHECK_COMMAND_OPTIONS`
+
+**Disable Valgrind Integration:**
+```bash
+cmake -DENABLE_VALGRIND=OFF ..
+```
+
+### AddressSanitizer (ASan)
+
+AddressSanitizer provides faster detection with better C++ support but requires
+rebuilding.
+
+**Build with AddressSanitizer:**
+```bash
+cd build
+cmake -DENABLE_ASAN=ON ..
+cmake --build .
+```
+
+**Run with ASan:**
+```bash
+# Use wrapper script
+./scripts/test/run-asan.sh ./build/bin/xio-tester nvme-ep \
+  --controller /dev/nvme1
+
+# Or run directly (ASAN_OPTIONS will be set automatically)
+./build/bin/xio-tester nvme-ep --controller /dev/nvme1
+```
+
+**ASan Logs:**
+- Logs: `build/asan-logs/asan_*.log`
+- ASan output is also printed to stderr
+
+### Limitations and Notes
+
+- **GPU Memory**: Neither valgrind nor ASan can directly track GPU device memory
+  (`hipMalloc`, HSA allocations). Use `hipMemGetInfo()` or ROCm profiling tools
+  to check device memory usage.
+
+- **Performance**: Valgrind is significantly slower (10-50x), so use shorter test
+  iterations when running with valgrind.
+
+- **False Positives**: ROCm runtime libraries may show false positives. The
+  suppression file (`valgrind-rocm.supp`) filters known issues.
+
+- **ASan vs Valgrind**: ASan requires rebuilding but provides better C++ detection
+  and is faster. Valgrind works on existing binaries but is slower.
+
+- **Log Location**: Valgrind logs from CTest are in
+  `build/Testing/Temporary/MemoryChecker.*.log`. Standalone wrapper logs are in
+  `build/valgrind-logs/`.
+
 ## Additional Useful Information
 
 On MI300X, the host allocation should be always `UNCACHED`. I think a

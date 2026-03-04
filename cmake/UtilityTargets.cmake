@@ -145,3 +145,22 @@ else()
     COMMAND ${CMAKE_COMMAND} -E false
   )
 endif()
+
+# Valgrind memory leak check target
+if(ENABLE_VALGRIND AND MEMORYCHECK_COMMAND)
+  add_custom_target(valgrind-check
+    COMMAND ${CMAKE_CTEST_COMMAND} -T memcheck --output-on-failure
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running valgrind memcheck on tests"
+    DEPENDS xio-tester
+  )
+  message(STATUS "valgrind-check target available: cmake --build . --target valgrind-check")
+else()
+  add_custom_target(valgrind-check
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "Error: valgrind not available or disabled"
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "  Configure with valgrind installed or set ENABLE_VALGRIND=ON"
+    COMMAND ${CMAKE_COMMAND} -E false
+  )
+endif()

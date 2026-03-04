@@ -41,11 +41,9 @@ function(setup_nvme_test TEST_NAME SOURCE_FILE)
     hsa-runtime64::hsa-runtime64
   )
 
-  # Link libnvme if found (for host-side status code helpers)
-  if(LIBNVME_FOUND)
-    target_link_libraries(${TEST_NAME} PRIVATE ${LIBNVME_LIBRARIES})
-    target_link_directories(${TEST_NAME} PRIVATE ${LIBNVME_LIBRARY_DIRS})
-  endif()
+  # Link libnvme (required for host-side status code helpers)
+  target_link_libraries(${TEST_NAME} PRIVATE ${LIBNVME_LIBRARIES})
+  target_link_directories(${TEST_NAME} PRIVATE ${LIBNVME_LIBRARY_DIRS})
 
   # Required when linking relocatable device code
   target_link_options(${TEST_NAME} PRIVATE -fgpu-rdc)

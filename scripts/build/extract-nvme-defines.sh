@@ -54,6 +54,8 @@ grep -E "^#define NVME_IDENTIFY_DATA_SIZE" "$INPUT_FILE" | \
 cat >> "$OUTPUT_FILE" << 'EOF'
 
 // Command opcodes (from kernel: enum nvme_opcode)
+// Only define if libnvme hasn't already defined them (for device code)
+#ifndef _LIBNVME_TYPES_H
 enum {
 EOF
 
@@ -75,8 +77,11 @@ sed -i '$ s/,$//' "$OUTPUT_FILE"
 
 cat >> "$OUTPUT_FILE" << 'EOF'
 };
+#endif // !_LIBNVME_TYPES_H
 
 // Admin command opcodes (from kernel: enum nvme_admin_opcode)
+// Only define if libnvme hasn't already defined them (for device code)
+#ifndef _LIBNVME_TYPES_H
 enum {
 EOF
 
@@ -97,6 +102,7 @@ sed -i '$ s/,$//' "$OUTPUT_FILE"
 
 cat >> "$OUTPUT_FILE" << 'EOF'
 };
+#endif // !_LIBNVME_TYPES_H
 
 // Status code types (from kernel: NVME_SCT_*)
 // These are the SCT values (0-7) used in status field bits 9-11

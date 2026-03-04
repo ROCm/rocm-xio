@@ -193,7 +193,6 @@ __global__ void test_simple_read_kernel(
                                cid, nsid, slba, nlb, prp1, prp2);
 
   // Write SQE to queue (includes memory fence)
-  uint16_t sqe_slot = sq_tail; // Remember which slot we're writing to
   nvme_ep::sqeWrite(sqe_local, &sqe[sq_tail]);
   sq_tail = (sq_tail + 1);// % queue_size;
   // Ensure SQE write is visible before ringing doorbell (critical for
@@ -201,7 +200,7 @@ __global__ void test_simple_read_kernel(
   //__threadfence_system();
 
   // Debug: Show SQE submission details (only for wrap-around cases)
-  //if (sqe_slot >= queue_size - 1) {
+  //if (sq_tail >= queue_size - 1) {
   //  printf("DEBUG: Writing CID=%u to sqe[%u], ringing doorbell with sq_tail=%u\n",
   //         cid, sqe_slot, sq_tail);
  // }
