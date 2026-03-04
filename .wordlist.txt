@@ -101,6 +101,8 @@ hipcc
 hipHostMalloc
 hipHostMallocCoherent
 hipImportExternalMemory
+hipMalloc
+hipMemGetInfo
 HSA
 hsa
 MiB
@@ -181,10 +183,26 @@ VirtFS
 wH
 
 # ===== Commands and Tools =====
+ASAN
+ASan
+AddressSanitizer
+CTest
+DENABLE
+MEMORYCHECK
+MemoryChecker
+VALGRIND
+Valgrind
 alola
+asan
 aspell
 bashrc
+ctest
+memcheck
+stderr
+valgrind
 CMake
+CMake's
+CMakeLists
 CMAKE
 cmake
 CMakeFiles
@@ -366,6 +384,7 @@ unmapped
 unmapped
 usermod
 userspace
+Userspace
 usr
 utils
 virtfs
