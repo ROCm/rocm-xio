@@ -47,11 +47,10 @@ __global__ void test_atomic_ref() {
   doca_hip::atomic_ref<uint64_t, doca_hip::thread_scope_block> add_ref(sh_add);
   add_ref.fetch_add(1, doca_hip::memory_order_relaxed);
 
-  /* lock/unlock via CAS */
-  if (threadIdx.x % 2 == 0) {
-    while (doca_hip_atomic_cas_block(&lock, 0, 1) != 0)
-      continue;
-    /* critical section */
+  /* lock/unlock via CAS (single-lane to avoid indefinite contention) */
+  if (threadIdx.x == 0) {
+    int prior = doca_hip_atomic_cas_block(&lock, 0, 1);
+    assert(prior == 0);
     add_ref.fetch_add(10, doca_hip::memory_order_relaxed);
     doca_hip::atomic_ref<int, doca_hip::thread_scope_block> lock_ref(lock);
     lock_ref.store(0, doca_hip::memory_order_release);
@@ -61,8 +60,8 @@ __global__ void test_atomic_ref() {
   if (threadIdx.x == 0) {
     /* max over 0..blockDim.x-1 + 1 => blockDim.x */
     assert(sh_max == (uint64_t)blockDim.x);
-    /* each thread added 1; half added 10 in critical section */
-    assert(sh_add == (uint64_t)blockDim.x + (blockDim.x / 2) * 10);
+    /* each thread added 1; thread 0 added extra 10 in critical section */
+    assert(sh_add == (uint64_t)blockDim.x + 10);
   }
 }
 
