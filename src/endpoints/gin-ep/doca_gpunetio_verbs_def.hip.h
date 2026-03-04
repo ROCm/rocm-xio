@@ -227,6 +227,16 @@ enum radaki_dev_mem_type {
 };
 
 /**
+ * @enum doca_gpu_verbs_send_dbr_mode_ext
+ * @brief Send DBR mode.
+ */
+enum doca_gpu_verbs_send_dbr_mode_ext {
+  DOCA_GPUNETIO_VERBS_SEND_DBR_MODE_EXT_VALID_DBR = 0,
+  DOCA_GPUNETIO_VERBS_SEND_DBR_MODE_EXT_NO_DBR_HW = 1,
+  DOCA_GPUNETIO_VERBS_SEND_DBR_MODE_EXT_NO_DBR_SW_EMULATED = 2,
+};
+
+/**
  * @enum radaki_dev_mem_type
  * @brief Memory type of the buffer.
  */
@@ -267,6 +277,13 @@ enum radaki_dev_resource_sharing_mode {
   DOCA_GPUNETIO_VERBS_RESOURCE_SHARING_MODE_MAX = INT_MAX ///< Sentinel value
 };
 
+enum {
+  DOCA_GPUNETIO_VERBS_NIC_HANDLER_FLAG_CPU_PROXY = 1 << 0,
+  DOCA_GPUNETIO_VERBS_NIC_HANDLER_FLAG_GPU_SM = 1 << 1,
+  DOCA_GPUNETIO_VERBS_NIC_HANDLER_FLAG_BF = 1 << 2,
+  DOCA_GPUNETIO_VERBS_NIC_HANDLER_FLAG_NO_DBR = 1 << 3,
+};
+
 /**
  * @enum radaki_dev_nic_handler
  * @brief The processor that handles the NIC.
@@ -279,6 +296,15 @@ enum radaki_dev_nic_handler {
   DOCA_GPUNETIO_VERBS_NIC_HANDLER_GPU_SM_BF = 3, ///< GPU SM, BlueFlame DB
   DOCA_GPUNETIO_VERBS_NIC_HANDLER_TYPE_MAX,      ///< Sentinel value
 };
+
+/* Host API compatibility aliases used by NCCL GIN host path. */
+typedef enum radaki_dev_mem_type doca_gpu_dev_verbs_mem_type;
+typedef enum radaki_dev_qp_type doca_gpu_dev_verbs_qp_type;
+typedef enum radaki_dev_exec_scope doca_gpu_dev_verbs_exec_scope;
+typedef enum radaki_dev_sync_scope doca_gpu_dev_verbs_sync_scope;
+typedef enum radaki_dev_resource_sharing_mode
+  doca_gpu_dev_verbs_resource_sharing_mode;
+typedef enum radaki_dev_nic_handler doca_gpu_dev_verbs_nic_handler;
 
 /**
  * @enum radaki_dev_gpu_code_opt

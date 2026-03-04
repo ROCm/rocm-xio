@@ -312,8 +312,11 @@ add_executable(doca-gin-doorbell-test
 add_executable(doca-gin-wqe-test
   ${UNIT_TESTS_DIR}/gin-ep/gin-ep-wqe-test.hip
 )
+add_executable(doca-gin-alloc-test
+  ${UNIT_TESTS_DIR}/gin-ep/gin-ep-alloc-test.hip
+)
 
-foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test)
+foreach(tgt doca-gin-atomic-test doca-gin-doorbell-test doca-gin-wqe-test doca-gin-alloc-test)
   target_compile_options(${tgt} PRIVATE
     -std=c++17
     -Wall
