@@ -6,38 +6,8 @@
 #include "nvme-ep.h"
 #include "xio-endpoint-registry.h"
 #include "xio.h"
-
-// PCI MMIO Bridge structures (matching QEMU implementation)
-// These must be defined before device code that uses them
-struct pci_mmio_bridge_ring_meta {
-  uint32_t producer_idx; // Guest/device write index (tail)
-  uint32_t consumer_idx; // QEMU read index (head)
-  uint32_t queue_depth;  // Total number of command slots
-  uint32_t reserved;
-} __attribute__((packed));
-
-struct pci_mmio_bridge_command {
-  uint16_t target_bdf; // Bus:Device:Function (bus|devfn)
-  uint8_t target_bar;  // Which BAR on target device (0-5)
-  uint8_t reserved1;
-  uint32_t offset; // Offset within BAR
-  uint64_t value;  // Value to write, or returned value for read
-  uint8_t command; // Command type (WRITE=1, READ=2)
-  uint8_t size;    // Transfer size: 1, 2, 4, or 8 bytes
-  uint8_t status;  // Status (PENDING=0, COMPLETE=1, ERROR=2)
-  uint8_t reserved2;
-  uint32_t sequence; // Sequence number for ordering
-} __attribute__((packed));
-
-// Command types
-#define PCI_MMIO_BRIDGE_CMD_NOP 0
-#define PCI_MMIO_BRIDGE_CMD_WRITE 1
-#define PCI_MMIO_BRIDGE_CMD_READ 2
-
-// Status codes
-#define PCI_MMIO_BRIDGE_STATUS_PENDING 0
-#define PCI_MMIO_BRIDGE_STATUS_COMPLETE 1
-#define PCI_MMIO_BRIDGE_STATUS_ERROR 2
+#include "xio-kmod.h"
+#include "xio-mmio-bridge.h"
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
@@ -58,82 +28,6 @@ struct pci_mmio_bridge_command {
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-// Include kernel module header for IOCTL definitions
-// We need to define userspace-compatible structures since the kernel header
-// uses kernel-specific types
-#define ROCM_XIO_IOC_MAGIC 'R'
-
-// Flags for VRAM physical address request (matching
-// kernel/rocm-xio/rocm-xio.h)
-#define ROCM_XIO_FLAG_EMULATED (1 << 0)    // Return BAR GPA for emulated NVMe
-#define ROCM_XIO_FLAG_PASSTHROUGH (1 << 1) // Return P2PDMA IOVA for passthrough
-
-// Userspace-compatible structures (matching kernel/rocm-xio/rocm-xio.h)
-struct rocm_axiio_vram_req {
-  int dmabuf_fd;
-  uint16_t nvme_bdf;
-  uint32_t flags;
-  uint64_t phys_addr;
-  uint64_t size;
-};
-
-struct rocm_axiio_register_queue_addr_req {
-  uint64_t virt_addr;
-  uint64_t phys_addr;
-  uint64_t size;
-  uint8_t queue_type;
-};
-
-struct rocm_axiio_unregister_queue_addr_req {
-  uint64_t virt_addr; // Virtual address to unregister
-};
-
-struct rocm_axiio_unregister_buffer_req {
-  uint64_t virt_addr; // Virtual address to unregister
-};
-
-struct rocm_axiio_mmio_bridge_shadow_req {
-  uint16_t bridge_bdf;  // Input: PCI MMIO bridge BDF (0xBBDD format)
-  uint64_t shadow_gpa;  // Output: Shadow buffer Guest Physical Address
-  uint64_t shadow_size; // Output: Shadow buffer size in bytes
-};
-
-struct rocm_axiio_register_buffer_req {
-  int dmabuf_fd;      // Input: dmabuf file descriptor (-1 if not available)
-  uint64_t virt_addr; // Input: Virtual address (userspace pointer)
-  uint64_t phys_addr; // Output: Physical address (filled by kernel)
-  uint64_t size;      // Input: Buffer size
-  uint16_t nvme_bdf;  // Input: NVMe device BDF (0xBBDD format)
-  uint32_t flags;     // Input: flags (see ROCM_XIO_FLAG_*)
-};
-
-struct rocm_axiio_alloc_contig_mem_req {
-  uint64_t size;      // Input: Size in bytes
-  uint64_t virt_addr; // Output: Kernel virtual address (handle for mmap)
-  uint64_t phys_addr; // Output: Physical address
-};
-
-struct rocm_axiio_free_contig_mem_req {
-  uint64_t virt_addr; // Input: Kernel virtual address to free
-};
-
-#define ROCM_XIO_GET_VRAM_PHYS_ADDR                                            \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
-#define ROCM_XIO_REGISTER_QUEUE_ADDR                                           \
-  _IOW(ROCM_XIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
-#define ROCM_XIO_UNREGISTER_QUEUE_ADDR                                         \
-  _IOW(ROCM_XIO_IOC_MAGIC, 7, struct rocm_axiio_unregister_queue_addr_req)
-#define ROCM_XIO_REGISTER_BUFFER                                               \
-  _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
-#define ROCM_XIO_ALLOC_CONTIG_MEM                                              \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_axiio_alloc_contig_mem_req)
-#define ROCM_XIO_FREE_CONTIG_MEM                                               \
-  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_axiio_free_contig_mem_req)
-#define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
-#define ROCM_XIO_UNREGISTER_BUFFER                                              \
-  _IOW(ROCM_XIO_IOC_MAGIC, 9, struct rocm_axiio_unregister_buffer_req)
 #endif // __HIP_DEVICE_COMPILE__
 
 // Namespace all nvme-ep implementation to avoid conflicts
@@ -307,7 +201,8 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
   // Timeout mechanism: break after 1 second of polling without progress
   // Use both iteration-based and time-based timeouts for reliability
   // Very aggressive timeout to prevent infinite stalls
-  const uint32_t max_iterations = 100000; // Max iterations before timeout (very aggressive)
+  // Max iterations before timeout (very aggressive)
+  const uint32_t max_iterations = 100000;
   uint32_t iteration_count = 0;
   
 #ifdef __HIP_DEVICE_COMPILE__
@@ -718,43 +613,13 @@ __host__ __device__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
 
 // Use HIP's built-in wall_clock64() function directly - no wrapper needed
 
-// Ring NVMe doorbell with support for both PCI MMIO bridge and direct BAR0
-// modes
+// Ring NVMe doorbell - use common implementation
 __host__ __device__ void ringDoorbell(
   uint16_t sq_tail, uint32_t doorbell_offset, bool usePciMmioBridge,
   void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
-  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-    // PCI MMIO Bridge mode - complex command structure
-    volatile struct pci_mmio_bridge_ring_meta* meta =
-      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
-    uint32_t slot = meta->producer_idx % meta->queue_depth;
-    volatile struct pci_mmio_bridge_command* cmd =
-      reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-        static_cast<volatile uint8_t*>(shadowBufferVirt) +
-        sizeof(struct pci_mmio_bridge_ring_meta) +
-        (slot * sizeof(struct pci_mmio_bridge_command)));
-    cmd->target_bdf = nvmeTargetBdf;
-    cmd->target_bar = 0;
-    cmd->reserved1 = 0;
-    cmd->offset = doorbell_offset;
-    cmd->value = sq_tail;
-    cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-    cmd->size = 4;
-    cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-    cmd->reserved2 = 0;
-    cmd->sequence = slot;
-#ifdef __HIP_DEVICE_COMPILE__
-    __threadfence_system();
-#endif
-    meta->producer_idx = meta->producer_idx + 1;
-#ifdef __HIP_DEVICE_COMPILE__
-    __threadfence_system();
-#endif
-  } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-    // Direct BAR0 mode - use generic xio_ep function
-    xio_ep::ringDoorbell(nvmeBar0Gpu, doorbell_offset, sq_tail);
-  }
-  // If neither mode is available, silently skip (matches current behavior)
+  xio_mmio_bridge::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                                 shadowBufferVirt, nvmeTargetBdf,
+                                 nvmeBar0Gpu);
 }
 
 /**
@@ -765,41 +630,480 @@ __host__ __device__ void ringDoorbell(
 __host__ __device__ void ringCqHeadDoorbell(
   uint16_t cq_head, uint32_t cq_doorbell_offset, bool usePciMmioBridge,
   void* shadowBufferVirt, uint16_t nvmeTargetBdf, void* nvmeBar0Gpu) {
-  if (usePciMmioBridge && shadowBufferVirt != nullptr) {
-    // PCI MMIO Bridge mode - complex command structure
-    volatile struct pci_mmio_bridge_ring_meta* meta =
-      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
-    uint32_t slot = meta->producer_idx % meta->queue_depth;
-    volatile struct pci_mmio_bridge_command* cmd =
-      reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-        static_cast<volatile uint8_t*>(shadowBufferVirt) +
-        sizeof(struct pci_mmio_bridge_ring_meta) +
-        (slot * sizeof(struct pci_mmio_bridge_command)));
-    cmd->target_bdf = nvmeTargetBdf;
-    cmd->target_bar = 0;
-    cmd->reserved1 = 0;
-    cmd->offset = cq_doorbell_offset;
-    cmd->value = cq_head;
-    cmd->command = PCI_MMIO_BRIDGE_CMD_WRITE;
-    cmd->size = 4;
-    cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-    cmd->reserved2 = 0;
-    cmd->sequence = slot;
-#ifdef __HIP_DEVICE_COMPILE__
-    __threadfence_system();
-#endif
-    meta->producer_idx = meta->producer_idx + 1;
-#ifdef __HIP_DEVICE_COMPILE__
-    __threadfence_system();
-#endif
-  } else if (!usePciMmioBridge && nvmeBar0Gpu != nullptr) {
-    // Direct BAR0 mode - use generic xio_ep function
-    xio_ep::ringDoorbell(nvmeBar0Gpu, cq_doorbell_offset, cq_head);
+  xio_mmio_bridge::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+                                       usePciMmioBridge, shadowBufferVirt,
+                                       nvmeTargetBdf, nvmeBar0Gpu);
+}
+
+//
+// Helper functions for command construction
+//
+
+/**
+ * Calculate LBA for an operation
+ */
+__device__ uint64_t calculate_lba(unsigned i, uint16_t cmd_id,
+                                   uint64_t base_lba, uint32_t blocks,
+                                   uint64_t lba_range_lbas,
+                                   bool use_random_access) {
+  if (use_random_access && lba_range_lbas > 0) {
+    uint64_t seed = (uint64_t)i * 0x9e3779b9 + cmd_id * 0x85ebca6b;
+    seed ^= seed >> 16;
+    seed *= 0xc2b2ae35;
+    seed ^= seed >> 13;
+    seed *= 0x9e3779b9;
+    seed ^= seed >> 16;
+    return base_lba + (seed % lba_range_lbas);
+  } else {
+    if (lba_range_lbas > 0) {
+      return base_lba + ((i * blocks) % lba_range_lbas);
+    } else {
+      return base_lba + (i * blocks);
+    }
   }
-  // If neither mode is available, silently skip (matches current behavior)
+}
+
+/**
+ * Determine command type (read or write) for an operation
+ */
+__device__ bool determine_command_type(unsigned i, bool write_only_mode,
+                                       bool read_only_mode,
+                                       bool alternate_mode) {
+  if (write_only_mode) {
+    return false; // Write
+  } else if (read_only_mode) {
+    return true; // Read
+  } else if (alternate_mode) {
+    return (i % 2 == 0); // Alternate
+  } else {
+    return (i % 2 == 0); // Default to alternate
+  }
+}
+
+/**
+ * Calculate PRPs for a command
+ * Handles both sequential mode (reuse buffer) and batch mode (per-operation
+ * buffer)
+ */
+__device__ void calculate_prps_for_command(
+  unsigned i, bool is_read_command, bool sequential_mode,
+  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
+  bool write_only_mode, bool alternate_mode, size_t transfer_size,
+  size_t bufferSize, uint8_t* readBuffer, uint8_t* writeBuffer,
+  uint64_t readBufferDma, uint64_t writeBufferDma, uint64_t* prp1,
+  uint64_t* prp2) {
+  if (is_read_command && has_read_buffer) {
+    uint64_t buffer_offset;
+    if (sequential_mode) {
+      // Sequential mode: reuse same buffer
+      buffer_offset = 0;
+    } else {
+      // Batch mode: per-operation buffer
+      buffer_offset = read_only_mode ? (i * transfer_size)
+                                     : ((i / 2) * transfer_size);
+    }
+    if (buffer_offset + transfer_size <= bufferSize) {
+      uint64_t buffer_addr = readBufferDma
+                                ? (readBufferDma + buffer_offset)
+                                : (uint64_t)(readBuffer + buffer_offset);
+      nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, prp1, prp2);
+    } else {
+      *prp1 = NVME_EP_INVALID_PRP1;
+      *prp2 = NVME_EP_INVALID_PRP2;
+    }
+  } else if (!is_read_command && has_write_buffer) {
+    uint64_t buffer_offset;
+    if (sequential_mode) {
+      // Sequential mode: per-operation buffer
+      buffer_offset = i * transfer_size;
+    } else {
+      // Batch mode: per-operation buffer
+      buffer_offset = write_only_mode ? (i * transfer_size)
+                                      : ((i / 2) * transfer_size);
+    }
+    if (buffer_offset + transfer_size <= bufferSize) {
+      uint64_t buffer_addr = writeBufferDma
+                                ? (writeBufferDma + buffer_offset)
+                                : (uint64_t)(writeBuffer + buffer_offset);
+      nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, prp1, prp2);
+    } else {
+      *prp1 = NVME_EP_INVALID_PRP1;
+      *prp2 = NVME_EP_INVALID_PRP2;
+    }
+  } else {
+    *prp1 = NVME_EP_INVALID_PRP1;
+    *prp2 = NVME_EP_INVALID_PRP2;
+  }
+}
+
+/**
+ * Setup and write SQE for a command
+ */
+__device__ void setup_and_write_sqe(
+  struct nvme_sqe* sqeAddr, uint16_t sq_tail, bool is_write, uint16_t cmd_id,
+  uint32_t nsid, uint64_t lba, uint32_t blocks, uint64_t prp1, uint64_t prp2,
+  unsigned operation_index, const XioEndpointConfig& config, int verbose) {
+  nvme_ep::sqeType sqeLocal = {};
+  struct nvme_sqe* sqe = &sqeLocal;
+  nvme_ep::nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks, prp1,
+                             prp2);
+
+  // Record start time
+  if (config.startTimes != nullptr) {
+    config.startTimes[operation_index] = wall_clock64();
+  }
+
+  // Write SQE
+  nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+  __threadfence_system();
+
+  // Dump SQE information if very verbose
+  if (verbose >= 2) {
+    printf("[SQE] cmd_id=%u opcode=0x%02x nsid=%u lba=%llu blocks=%u "
+           "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
+           cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
+           (unsigned long long)prp1, (unsigned long long)prp2, sq_tail);
+  }
 }
 
 } // namespace nvme_ep
+
+//
+// Batch mode helper: poll for a specific CID
+//
+
+// Helper: Read CQE entry
+__device__ inline nvme_ep::cqeType nvme_ep_read_cqe(
+  volatile struct nvme_cqe* cqe_ptr) {
+  return nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_ptr);
+}
+
+//
+// Batch mode helper: poll for a specific CID (last command in batch)
+// Scans CQ entries forward from cq_head until target_cid is found
+// Returns number of completions processed
+//
+__device__ uint16_t nvme_ep_batch_poll_for_cid(
+  const XioEndpointConfig& config, struct nvme_cqe* cqeAddr,
+  bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
+  uint32_t cq_doorbell_offset, void* nvmeBar0Gpu, int verbose,
+  unsigned num_ops, uint16_t queue_size, uint16_t* completed_count_inout,
+  uint16_t* cq_head_inout, uint16_t target_cid) {
+  uint16_t& completed_count = *completed_count_inout;
+  uint16_t& cq_head = *cq_head_inout;
+
+  if (completed_count >= num_ops || cqeAddr == nullptr) {
+    return 0;
+  }
+  
+  if (queue_size == 0) {
+    return 0;
+  }
+
+  uint32_t poll_count = 0;
+  const uint32_t max_polls = 10000000;
+  uint16_t processed_count = 0;
+  uint16_t start_cq_head = cq_head;
+  uint16_t batch_first_cid = completed_count + 1;
+  
+  // Validate target_cid
+  if (target_cid < batch_first_cid || target_cid > num_ops) {
+    if (verbose >= 1) {
+      printf("[POLL] Invalid target_cid %u (expected %u-%u)\n",
+             target_cid, batch_first_cid, num_ops);
+    }
+    return 0;
+  }
+  
+  uint16_t batch_size = target_cid - batch_first_cid + 1;
+  
+  // Validate batch_size
+  if (batch_size == 0 || batch_size > queue_size) {
+    if (verbose >= 1) {
+      printf("[POLL] Invalid batch_size %u (queue_size=%u)\n",
+             batch_size, queue_size);
+    }
+    return 0;
+  }
+
+  if (verbose >= 2) {
+    printf("[POLL] Polling for CID %u (batch CIDs %u-%u), starting at slot %u\n",
+           target_cid, batch_first_cid, target_cid, cq_head);
+  }
+
+  // Scan forward through CQ entries looking for target_cid
+  // NVMe guarantees in-order completion, so once we find target_cid,
+  // all previous CIDs in the batch have also completed
+  while (poll_count < max_polls && processed_count == 0) {
+    poll_count++;
+
+    // Check current slot
+    volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
+    nvme_ep::cqeType cqe_new = nvme_ep_read_cqe(cqe_entry);
+
+    if (verbose >= 2 && poll_count % 10000 == 0) {
+      printf("[POLL] slot=%u cmd_id=%u target_cid=%u completed=%u\n",
+             cq_head, cqe_new.command_id, target_cid, completed_count);
+    }
+
+    // If we found the target CID, process all completions in the batch
+    if (cqe_new.command_id == target_cid && cqe_new.command_id != 0) {
+      // Found target CID - since NVMe guarantees in-order completion,
+      // scan backwards from found slot to locate batch_first_cid
+      uint16_t found_slot = cq_head;
+      uint16_t batch_start_slot = found_slot;
+      
+      // Scan backwards to find where batch_first_cid actually is
+      // This handles CQ wraps correctly
+      for (uint16_t scan_back = 0; scan_back < batch_size && scan_back < queue_size; scan_back++) {
+        uint16_t check_slot = (found_slot - scan_back + queue_size) % queue_size;
+        volatile struct nvme_cqe* cqe_check = &cqeAddr[check_slot];
+        nvme_ep::cqeType cqe_check_val = nvme_ep_read_cqe(cqe_check);
+        
+        if (cqe_check_val.command_id == batch_first_cid && 
+            cqe_check_val.command_id != 0) {
+          batch_start_slot = check_slot;
+          break;
+        }
+      }
+
+      // Process all completions in this batch (forward from batch_start_slot)
+      // Since NVMe guarantees in-order completion, when we find target_cid,
+      // all completions from batch_first_cid to target_cid are present
+      // Assign the same finish time to all completions in the batch
+      uint64_t end_time = wall_clock64();
+      uint16_t current_slot = batch_start_slot;
+      
+      // Record end time for all CIDs in the batch
+      for (uint16_t expected_cid = batch_first_cid; 
+           expected_cid <= target_cid; expected_cid++) {
+        // Record end time for this CID (same time for all in batch)
+        uint16_t op_idx = expected_cid - 1;
+        if (config.endTimes != nullptr && op_idx < num_ops) {
+          config.endTimes[op_idx] = end_time;
+        }
+
+        // Read and log CQE if verbose
+        if (verbose >= 2) {
+          volatile struct nvme_cqe* cqe = &cqeAddr[current_slot];
+          nvme_ep::cqeType cqe_val = nvme_ep_read_cqe(cqe);
+          
+          if (cqe_val.command_id == expected_cid && cqe_val.command_id != 0) {
+            uint8_t sc = NVME_CQE_STATUS_SC(cqe_val.status);
+            uint8_t sct = NVME_CQE_STATUS_SCT(cqe_val.status);
+            printf("[CQE] slot=%u cmd_id=%u status=0x%04x (SCT=%u SC=0x%02x)\n",
+                   current_slot, cqe_val.command_id, cqe_val.status, sct, sc);
+          }
+        }
+
+        current_slot = (current_slot + 1) % queue_size;
+      }
+      
+      // All completions in batch have been processed
+      processed_count = batch_size;
+
+      // Advance cq_head past the last completion (target_cid)
+      cq_head = (found_slot + 1) % queue_size;
+      completed_count += processed_count;
+
+      // Update CQ doorbell
+      nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset, usePciMmioBridge,
+                                   shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+
+      if (verbose >= 2) {
+        printf("[POLL] Found target CID %u at slot %u, processed %u completions\n",
+               target_cid, found_slot, processed_count);
+      }
+      break;
+    }
+
+    // Advance to next slot
+    cq_head = (cq_head + 1) % queue_size;
+    
+    // If we've wrapped around without finding it, reset and keep polling
+    if (cq_head == start_cq_head && poll_count > queue_size) {
+      // Wrapped around - target not ready yet, keep polling from start
+      if (verbose >= 2 && poll_count % 100000 == 0) {
+        printf("[POLL] Wrapped around, still waiting for CID %u\n", target_cid);
+      }
+    }
+  }
+
+  return processed_count;
+}
+
+//
+// Batch mode helper: submit a batch of commands
+// Returns number of commands submitted
+//
+__device__ uint16_t nvme_ep_batch_submit_commands(
+  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
+  struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
+  bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
+  uint32_t doorbell_offset, uint8_t* readBuffer, uint8_t* writeBuffer,
+  size_t bufferSize, uint64_t readBufferDma, uint64_t writeBufferDma,
+  uint16_t queue_size, uint64_t lba_range_lbas, bool use_random_access,
+  void* nvmeBar0Gpu, int verbose, unsigned num_ops,
+  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
+  bool write_only_mode, bool alternate_mode, size_t transfer_size,
+  uint32_t nsid, uint32_t blocks, uint16_t* sq_tail_inout,
+  uint16_t batch_size, uint16_t submitted_count) {
+  uint16_t& sq_tail = *sq_tail_inout;
+
+  // Calculate actual batch size (don't exceed remaining operations)
+  uint16_t remaining_to_submit = num_ops - submitted_count;
+  uint16_t actual_batch_size =
+    (remaining_to_submit < batch_size) ? remaining_to_submit : batch_size;
+
+  if (verbose >= 2) {
+    printf("[BATCH] submitting=%u batch_size=%u remaining=%u sq_tail=%u\n",
+           submitted_count, actual_batch_size, remaining_to_submit, sq_tail);
+  }
+
+  // Issue commands for this batch
+  for (uint16_t batch_i = 0; batch_i < actual_batch_size; batch_i++) {
+    unsigned i = submitted_count + batch_i;
+    uint16_t cmd_id = (uint16_t)(i + 1);
+
+    uint64_t lba = nvme_ep::calculate_lba(i, cmd_id, base_lba, blocks,
+                                          lba_range_lbas, use_random_access);
+    bool is_read_command = nvme_ep::determine_command_type(
+      i, write_only_mode, read_only_mode, alternate_mode);
+    bool is_write = !is_read_command;
+
+    uint64_t prp1, prp2;
+    nvme_ep::calculate_prps_for_command(
+      i, is_read_command, false, has_read_buffer, has_write_buffer,
+      read_only_mode, write_only_mode, alternate_mode, transfer_size,
+      bufferSize, readBuffer, writeBuffer, readBufferDma, writeBufferDma,
+      &prp1, &prp2);
+
+    nvme_ep::setup_and_write_sqe(sqeAddr, sq_tail, is_write, cmd_id, nsid, lba,
+                                  blocks, prp1, prp2, i, config, verbose);
+
+    sq_tail = (sq_tail + 1) % queue_size;
+  }
+
+  // Ring doorbell if we wrote commands
+  if (actual_batch_size > 0) {
+    __threadfence_system();
+    nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                          shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+  }
+
+  return actual_batch_size;
+}
+
+//
+// Sequential mode implementation
+//
+__device__ void nvme_ep_sequential_mode(
+  const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
+  struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
+  bool usePciMmioBridge, void* shadowBufferVirt, uint16_t nvmeTargetBdf,
+  uint16_t queueId, uint32_t doorbell_offset, uint8_t* readBuffer,
+  uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
+  uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
+  uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
+  int verbose, unsigned num_ops, bool sequential_is_read,
+  bool has_read_buffer, bool has_write_buffer, bool read_only_mode,
+  bool write_only_mode, bool alternate_mode, size_t transfer_size,
+  uint32_t nsid, uint32_t blocks, uint32_t cq_doorbell_offset) {
+  // Track submission queue tail
+  uint16_t sq_tail = 0;
+  uint16_t last_sq_head = 0;
+  uint16_t cq_head = 0;
+  uint8_t expected_phase = 0xFF;
+
+  // Sequential mode: issue one SQE, wait for completion, repeat
+  for (unsigned i = 0; i < num_ops; i++) {
+    uint16_t cmd_id = (uint16_t)(i + 1);
+
+    // Calculate LBA using helper function
+    uint64_t lba = nvme_ep::calculate_lba(i, cmd_id, base_lba, blocks,
+                                           lba_range_lbas, use_random_access);
+
+    // Calculate PRPs using helper function
+    uint64_t prp1, prp2;
+    nvme_ep::calculate_prps_for_command(
+      i, sequential_is_read, true, // sequential_mode = true
+      has_read_buffer, has_write_buffer, read_only_mode, write_only_mode,
+      alternate_mode, transfer_size, bufferSize, readBuffer, writeBuffer,
+      readBufferDma, writeBufferDma, &prp1, &prp2);
+
+    // Setup and write SQE using helper function
+    nvme_ep::setup_and_write_sqe(sqeAddr, sq_tail, !sequential_is_read, cmd_id,
+                                  nsid, lba, blocks, prp1, prp2, i, config,
+                                  verbose);
+
+    // Ring doorbell
+    nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
+                          shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
+
+    // Increment tail after ringing doorbell
+    sq_tail = (sq_tail + 1) % queue_size;
+
+    // Wait for completion
+    uint32_t poll_count = 0;
+    const uint32_t max_polls = 10000000;
+    nvme_ep::cqeType cqe_last = {};
+    bool cqe_advanced = false;
+
+    while (poll_count < max_polls) {
+      volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
+      uint16_t new_sq_head = 0;
+
+      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(
+        cqe_last, (volatile nvme_ep::cqeType*)cqe_entry, last_sq_head,
+        &new_sq_head, cmd_id, queue_size, &cq_head, &cqe_advanced,
+        &expected_phase);
+
+      if (cqe_advanced) {
+        nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+                                     usePciMmioBridge, shadowBufferVirt,
+                                     nvmeTargetBdf, nvmeBar0Gpu);
+        last_sq_head = new_sq_head;
+        poll_count = 0;
+        continue;
+      }
+
+      uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+      uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
+      uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
+      bool phase_matches =
+        (expected_phase == 0xFF) || (phase == expected_phase);
+      if (phase_matches || new_sq_head > last_sq_head) {
+        if (verbose >= 2) {
+          printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
+                 "phase=%u cq_head=%u\n",
+                 cqe_new.command_id, new_sq_head, cqe_new.status, sct, sc,
+                 phase, cq_head);
+        }
+        if (config.endTimes != nullptr && cmd_id >= 1 &&
+            cmd_id <= num_ops) {
+          unsigned idx = cmd_id - 1;
+          config.endTimes[idx] = wall_clock64();
+        }
+        if (expected_phase == 0xFF) {
+          uint16_t next_cq_head = (cq_head + 1) % queue_size;
+          if (next_cq_head == 0) {
+            expected_phase = phase ^ 1;
+          } else {
+            expected_phase = phase;
+          }
+        }
+        cq_head = (cq_head + 1) % queue_size;
+        nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
+                                     usePciMmioBridge, shadowBufferVirt,
+                                     nvmeTargetBdf, nvmeBar0Gpu);
+        last_sq_head = new_sq_head;
+        break;
+      }
+
+      poll_count++;
+    }
+  }
+}
 
 //
 // Drive Endpoint (with data buffers) - Acts as NVMe host driver
@@ -808,6 +1112,47 @@ __host__ __device__ void ringCqHeadDoorbell(
 // Sequential mode: if writeIo < 0, issues one SQE at a time waiting for
 // completion
 //
+// Helper: Calculate CQ head doorbell offset
+__device__ inline uint32_t nvme_ep_calculate_cq_doorbell_offset(
+  uint16_t queueId) {
+  const uint32_t doorbell_stride = 0; // Usually 0 (4 bytes per doorbell)
+  const uint32_t stride_bytes = 4 << doorbell_stride;
+  const uint32_t doorbell_base = 0x1000;
+  // SQ doorbell: doorbell_base + (2 * queueId) * stride_bytes (even)
+  // CQ head doorbell: doorbell_base + (2 * queueId + 1) * stride_bytes (odd)
+  return doorbell_base + (2 * queueId + 1) * stride_bytes;
+}
+
+// Helper: Determine operation mode and parameters
+__device__ inline void nvme_ep_determine_mode(
+  int readIo, int writeIo, unsigned config_iterations, bool* sequential_mode,
+  unsigned* num_ops, bool* sequential_is_read) {
+  *sequential_mode = (readIo < 0 || writeIo < 0);
+  if (*sequential_mode) {
+    if (readIo < 0) {
+      *num_ops = -readIo;
+      *sequential_is_read = true;
+    } else {
+      *num_ops = -writeIo;
+      *sequential_is_read = false;
+    }
+  } else {
+    *num_ops = config_iterations;
+  }
+}
+
+// Helper: Determine buffer operation modes
+__device__ inline void nvme_ep_determine_buffer_modes(
+  uint8_t* readBuffer, uint8_t* writeBuffer, size_t bufferSize,
+  bool* has_read_buffer, bool* has_write_buffer, bool* read_only_mode,
+  bool* write_only_mode, bool* alternate_mode) {
+  *has_write_buffer = (writeBuffer != nullptr && bufferSize > 0);
+  *has_read_buffer = (readBuffer != nullptr && bufferSize > 0);
+  *write_only_mode = *has_write_buffer && !*has_read_buffer;
+  *read_only_mode = *has_read_buffer && !*has_write_buffer;
+  *alternate_mode = *has_write_buffer && *has_read_buffer;
+}
+
 __device__ void nvme_ep_driveEndpoint(
   const XioEndpointConfig& config, struct nvme_sqe* sqeAddr,
   struct nvme_cqe* cqeAddr, uint32_t lbaSize, uint64_t base_lba,
@@ -817,926 +1162,99 @@ __device__ void nvme_ep_driveEndpoint(
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
   int verbose,
-  int readIo, int writeIo) {
-  // Calculate CQ head doorbell offset
-  // SQ doorbell: doorbell_base + (2 * queueId) * stride_bytes (even)
-  // CQ head doorbell: doorbell_base + (2 * queueId + 1) * stride_bytes (odd)
-  const uint32_t doorbell_stride = 0; // Usually 0 (4 bytes per doorbell)
-  const uint32_t stride_bytes = 4 << doorbell_stride;
-  const uint32_t doorbell_base = 0x1000;
-  const uint32_t cq_doorbell_offset = doorbell_base + 
-    (2 * queueId + 1) * stride_bytes;
-  // Check if sequential mode (readIo < 0 or writeIo < 0)
-  const bool sequential_mode = (readIo < 0 || writeIo < 0);
-  // Determine number of operations and command type for sequential mode
-  unsigned num_ops;
-  bool sequential_is_read = false;
-  if (sequential_mode) {
-    if (readIo < 0) {
-      num_ops = -readIo;
-      sequential_is_read = true;
-    } else {
-      num_ops = -writeIo;
-      sequential_is_read = false;
-    }
-  } else {
-    num_ops = config.iterations;
+  int readIo, int writeIo, uint16_t batch_size) {
+  // Validate inputs
+  if (cqeAddr == nullptr) {
+    return; // Cannot proceed without valid CQ pointer
   }
+
+  // Calculate doorbell offsets
+  const uint32_t cq_doorbell_offset = nvme_ep_calculate_cq_doorbell_offset(
+    queueId);
+
+  // Determine operation mode
+  bool sequential_mode;
+  unsigned num_ops;
+  bool sequential_is_read;
+  nvme_ep_determine_mode(readIo, writeIo, config.iterations, &sequential_mode,
+                         &num_ops, &sequential_is_read);
 
   // Test parameters
   const uint32_t nsid = 1;   // Namespace ID
   const uint32_t blocks = 8; // Number of blocks per operation
   const size_t transfer_size = blocks * lbaSize;
 
-  // Determine operation mode based on buffer availability
-  const bool has_write_buffer = (writeBuffer != nullptr && bufferSize > 0);
-  const bool has_read_buffer = (readBuffer != nullptr && bufferSize > 0);
-  const bool write_only_mode = has_write_buffer && !has_read_buffer;
-  const bool read_only_mode = has_read_buffer && !has_write_buffer;
-  const bool alternate_mode = has_write_buffer && has_read_buffer;
+  // Determine buffer operation modes
+  bool has_write_buffer;
+  bool has_read_buffer;
+  bool read_only_mode;
+  bool write_only_mode;
+  bool alternate_mode;
+  nvme_ep_determine_buffer_modes(readBuffer, writeBuffer, bufferSize,
+                                  &has_read_buffer, &has_write_buffer,
+                                  &read_only_mode, &write_only_mode,
+                                  &alternate_mode);
 
-  // If using write buffer, generate write data upfront
+  // Generate write data if needed
   if (has_write_buffer) {
     nvme_ep::nvme_generate_pattern(writeBuffer, bufferSize, 0, lbaSize,
                                    lfsrSeed);
   }
 
-  // Initialize phase tracking for completion polling
-  // Validate cqeAddr before accessing
-  if (cqeAddr == nullptr) {
-    return; // Cannot proceed without valid CQ pointer
+  // Calculate effective batch size (default: min(queue_size/2, 16))
+  uint16_t effective_batch_size = batch_size;
+  if (effective_batch_size == 0) {
+    uint16_t half_queue = queue_size / 2;
+    effective_batch_size = (half_queue < 16) ? half_queue : 16;
   }
-  uint16_t cq_head = 0;
-  volatile struct nvme_cqe* initial_cqe = &cqeAddr[cq_head];
-  nvme_ep::cqeType initial_cqe_data = nvme_ep::cqeRead(
-    (volatile nvme_ep::cqeType*)initial_cqe);
-  // Initialize expected_phase: for first operation, use 0xFF to skip phase check
-  // (initial CQE may be uninitialized/stale). Controller will write with correct
-  // phase, which we'll extract after first completion.
-  uint8_t expected_phase = 0xFF;
 
-  // Track submission queue tail
+  // Initialize queue state (for batch mode)
   uint16_t sq_tail = 0;
-  uint16_t last_sq_head = 0; // Track last seen sq_head for completion detection
+  uint16_t cq_head = 0;
 
+  // Route to appropriate mode handler
   if (sequential_mode) {
-    // Sequential mode: issue one SQE, wait for completion, repeat
-    for (unsigned i = 0; i < num_ops; i++) {
-      uint16_t cmd_id = (uint16_t)(i + 1);
-
-      // Calculate LBA
-      uint64_t lba;
-      if (use_random_access && lba_range_lbas > 0) {
-        uint64_t seed = (uint64_t)i * 0x9e3779b9 + cmd_id * 0x85ebca6b;
-        seed ^= seed >> 16;
-        seed *= 0xc2b2ae35;
-        seed ^= seed >> 13;
-        seed *= 0x9e3779b9;
-        seed ^= seed >> 16;
-        lba = base_lba + (seed % lba_range_lbas);
-      } else {
-        if (lba_range_lbas > 0) {
-          lba = base_lba + ((i * blocks) % lba_range_lbas);
-        } else {
-          lba = base_lba + (i * blocks);
-        }
-      }
-
-      // Calculate PRPs based on command type (read or write)
-      uint64_t prp1, prp2;
-      if (sequential_is_read && has_read_buffer) {
-        // For sequential reads, reuse the same buffer for every I/O
-        uint64_t buffer_offset = 0;
-        if (buffer_offset + transfer_size <= bufferSize) {
-          uint64_t buffer_addr = readBufferDma
-                                   ? (readBufferDma + buffer_offset)
-                                   : (uint64_t)(readBuffer + buffer_offset);
-          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1, &prp2);
-        } else {
-          prp1 = 0xDEADBEEF00000000ULL;
-          prp2 = 0xCAFEBABE00000000ULL;
-        }
-      } else if (!sequential_is_read && has_write_buffer) {
-        uint64_t buffer_offset = i * transfer_size;
-        if (buffer_offset + transfer_size <= bufferSize) {
-          uint64_t buffer_addr = writeBufferDma
-                                   ? (writeBufferDma + buffer_offset)
-                                   : (uint64_t)(writeBuffer + buffer_offset);
-          nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
-                                       &prp2);
-        } else {
-          prp1 = 0xDEADBEEF00000000ULL;
-          prp2 = 0xCAFEBABE00000000ULL;
-        }
-      } else {
-        prp1 = 0xDEADBEEF00000000ULL;
-        prp2 = 0xCAFEBABE00000000ULL;
-      }
-
-      // Setup read or write command
-      nvme_ep::sqeType sqeLocal = {};
-      struct nvme_sqe* sqe = &sqeLocal;
-      nvme_ep::nvme_sqe_setup_rw(sqe, !sequential_is_read, cmd_id, nsid, lba,
-                                 blocks, prp1, prp2);
-
-      // Record start time
-      if (config.startTimes != nullptr) {
-        config.startTimes[i] = wall_clock64();
-      }
-
-      // Write SQE
-      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-      __threadfence_system();
-
-      // Dump SQE information if very verbose
-      if (verbose >= 2) {
-        printf("[SQE] cmd_id=%u opcode=0x%02x nsid=%u lba=%llu blocks=%u "
-               "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
-               cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
-               (unsigned long long)prp1, (unsigned long long)prp2,
-               sq_tail);
-      }
-
-      // Ring doorbell with current sq_tail (slot we just wrote to)
-      // First doorbell ring must be slot 0, then 1, 2, ..., 7, then back to 0
-      nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
-                            shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-
-      // Increment tail after ringing doorbell
-      sq_tail = (sq_tail + 1) % queue_size;
-
-      // Wait for this specific completion using improved cqePoll()
-      // In sequential mode, we issue one command at a time, so sq_head should
-      // increase by 1 when this command completes
-      uint32_t poll_count = 0;
-      const uint32_t max_polls = 10000000; // Safety limit
-      nvme_ep::cqeType cqe_last = {}; // Initialize to zero
-      bool cqe_advanced = false;
-
-      while (poll_count < max_polls) {
-        volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-        uint16_t new_sq_head = 0;
-        
-        // Use improved cqePoll() with command ID verification
-        // Pass expected_phase so cqePoll() can update it correctly when it finds
-        // our completion
-        nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(
-          cqe_last, (volatile nvme_ep::cqeType*)cqe_entry, last_sq_head,
-          &new_sq_head, cmd_id, queue_size, &cq_head, &cqe_advanced,
-          &expected_phase);
-
-        // Check if we advanced past stale completions
-        if (cqe_advanced) {
-          // cq_head was advanced by cqePoll() - update CQ head doorbell and
-          // continue. This is needed even when skipping stale entries.
-          nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-            usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-          last_sq_head = new_sq_head;
-          poll_count = 0; // Reset poll count when we find progress
-          continue;
-        }
-
-        // Got a completion with matching CID - verify phase if possible
-        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-        uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
-        uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
-        // Accept if phase matches, sq_head increased (sq_head is definitive), or
-        // this is the first operation (expected_phase == 0xFF)
-        bool phase_matches = (expected_phase == 0xFF) || (phase == expected_phase);
-        if (phase_matches || new_sq_head > last_sq_head) {
-          // Dump CQE information if very verbose
-          if (verbose >= 2) {
-            printf("[CQE] cmd_id=%u sq_head=%u status=0x%04x (SCT=%u SC=0x%02x) "
-                   "phase=%u cq_head=%u\n",
-                   cqe_new.command_id, new_sq_head, cqe_new.status, sct, sc,
-                   phase, cq_head);
-          }
-          // This is our completion
-          if (config.endTimes != nullptr && cmd_id >= 1 &&
-              cmd_id <= num_ops) {
-            unsigned idx = cmd_id - 1;
-            config.endTimes[idx] = wall_clock64();
-          }
-          // If this was the first operation (expected_phase == 0xFF), extract phase
-          // from completion for use in next operation
-          if (expected_phase == 0xFF) {
-            // First operation - extract phase from completion
-            uint16_t next_cq_head = (cq_head + 1) % queue_size;
-            if (next_cq_head == 0) {
-              expected_phase = phase ^ 1; // Will wrap, phase flips
-            } else {
-              expected_phase = phase; // Same loop, phase stays
-            }
-          } else {
-            // cqePoll() already updated expected_phase correctly based on the next
-            // cq_head value (it calculated (*cq_head_inout + 1) % queue_size)
-          }
-          // Now advance cq_head for the next iteration
-          cq_head = (cq_head + 1) % queue_size;
-          // Update CQ head doorbell to notify controller that CQE has been consumed
-          // This is critical - without this, controller will run out of CQ slots
-          nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-            usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-          last_sq_head = new_sq_head;
-          break;
-        }
-        
-        poll_count++;
-      }
-    }
+    // Sequential mode: submit and wait for each command individually
+    nvme_ep_sequential_mode(
+      config, sqeAddr, cqeAddr, lbaSize, base_lba, usePciMmioBridge,
+      shadowBufferVirt, nvmeTargetBdf, queueId, doorbell_offset, readBuffer,
+      writeBuffer, bufferSize, readBufferDma, writeBufferDma, lfsrSeed,
+      queue_size, lba_range_lbas, use_random_access, nvmeBar0Gpu, verbose,
+      num_ops, sequential_is_read, has_read_buffer, has_write_buffer,
+      read_only_mode, write_only_mode, alternate_mode, transfer_size, nsid,
+      blocks, cq_doorbell_offset);
   } else {
-    // Batch mode: issue all SQEs, then ring doorbell, then poll for all
-    // completions
-    // IMPORTANT: Cannot write more SQEs than queue_size without overwriting
-    // entries. Submit in batches and wait for completions before submitting more.
-    nvme_ep::sqeType sqeLocal = {};
-    struct nvme_sqe* sqe = &sqeLocal;
-
-    // Calculate maximum outstanding commands per batch
-    // Can use all queue_size entries - full condition is (tail+1) % queue_size == head
-    // We check actual sq_head from controller to detect full condition
-    uint16_t max_outstanding = queue_size;
-
-    // Track overall progress
+    // Batch mode: submit commands in fixed-size batches and poll for last CID
     uint16_t completed_count = 0;
     uint16_t submitted_count = 0;
+    uint16_t last_batch_last_cid = 0; // Track last CID of most recently submitted batch
 
-    // Submit commands in batches
     while (submitted_count < num_ops || completed_count < num_ops) {
-      // Submit a batch of commands if we haven't submitted all yet
+      // Submit a batch of commands if needed
       if (submitted_count < num_ops) {
-        // Read current sq_head to determine available slots
-        // Use last_sq_head as the most accurate value (updated after each completion)
-        // If we have completions, try to read from the last processed CQE
-        uint16_t current_sq_head = last_sq_head; // Default to last known head
-        
-        // Try to read from the last processed CQE (cq_head - 1, wrapped)
-        // This gives us the most recent valid sq_head value
-        if (completed_count > 0 && cq_head > 0) {
-          uint16_t last_cqe_idx = (cq_head - 1 + queue_size) % queue_size;
-          volatile struct nvme_cqe* cqe_check = &cqeAddr[last_cqe_idx];
-          nvme_ep::cqeType cqe_head_check = nvme_ep::cqeRead(
-            (volatile nvme_ep::cqeType*)cqe_check);
-          uint16_t sq_head_from_cqe = cqe_head_check.sq_head;
-          
-          // Validate sq_head is within valid range
-          if (sq_head_from_cqe < queue_size) {
-            current_sq_head = sq_head_from_cqe;
-          }
-        }
-        
-        // Check if queue is full: (sq_tail + 1) % queue_size == sq_head
-        uint16_t next_tail = (sq_tail + 1) % queue_size;
-        bool queue_full = (next_tail == current_sq_head);
-        
-        // If queue is full, wait for completions to free up space
-        if (queue_full) {
-          // Poll for completions until queue has space
-          uint32_t poll_count = 0;
-          const uint32_t max_polls = 100000; // Safety limit
-          while (poll_count < max_polls && queue_full) {
-            volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-            nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
-              (volatile nvme_ep::cqeType*)cqe_entry);
-            uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-            bool phase_ok = (expected_phase == 0xFF) || (phase == expected_phase);
-            uint16_t sq_head = cqe_new.sq_head;
-            
-            // Validate sq_head
-            if (sq_head >= queue_size) {
-              poll_count++;
-              continue;
-            }
-            
-            if (phase_ok && sq_head != current_sq_head) {
-              // Head has advanced, update tracking
-              uint16_t new_completions = 0;
-              if (sq_head > current_sq_head) {
-                new_completions = sq_head - current_sq_head;
-              } else if (sq_head < current_sq_head) {
-                new_completions = (queue_size - current_sq_head) + sq_head;
-              }
-              
-              if (new_completions > 0) {
-                for (uint16_t i = 0; i < new_completions; i++) {
-                  cq_head = (cq_head + 1) % queue_size;
-                  if (cq_head == 0) {
-                    expected_phase = expected_phase ^ 1;
-                  }
-                }
-                // Update CQ head doorbell after processing completions
-                nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-                  usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-                completed_count += new_completions;
-                last_sq_head = sq_head;
-                current_sq_head = sq_head;
-                
-                if (expected_phase == 0xFF) {
-                  uint16_t next_cq_head = (cq_head) % queue_size;
-                  if (next_cq_head == 0) {
-                    expected_phase = phase ^ 1;
-                  } else {
-                    expected_phase = phase;
-                  }
-                }
-                
-                // Recheck if queue is still full
-                next_tail = (sq_tail + 1) % queue_size;
-                queue_full = (next_tail == current_sq_head);
-              }
-            }
-            poll_count++;
-          }
-        }
-
-        // Calculate how many commands to submit in this batch
-        // Use current_sq_head from above (already read)
-        // Full condition: (sq_tail + 1) % queue_size == sq_head
-        
-        // Calculate available slots based on actual queue state
-        // Full condition: (sq_tail + 1) % queue_size == sq_head
-        // Like Linux driver, we don't batch a full queue length to avoid
-        // wrap-around ambiguity when head == tail
-        // Handle wrap-around: if sq_head wrapped (sq_head < last_sq_head when last_sq_head > 0),
-        // OR if sq_head==0 and all submitted commands completed, then controller wrapped
-        // and queue is empty
-        // Also detect wrap when sq_head is at the end (queue_size-1) and we've completed commands
-        bool controller_wrapped_sq = (completed_count > 0) && 
-                                     ((current_sq_head < last_sq_head && last_sq_head > 0) ||
-                                      (current_sq_head == 0 && completed_count == submitted_count && sq_tail > 0) ||
-                                      (current_sq_head == (queue_size - 1) && last_sq_head < (queue_size - 1)));
-        uint16_t used_slots;
-        if (controller_wrapped_sq || current_sq_head == sq_tail) {
-          // Controller wrapped or queue is empty - all commands processed
-          used_slots = 0;
-        } else if (current_sq_head < sq_tail) {
-          // Normal case: controller hasn't wrapped
-          used_slots = sq_tail - current_sq_head;
-        } else {
-          // Controller has wrapped: sq_head > sq_tail
-          // sq_head indicates how many commands controller has processed
-          // Controller has processed slots [0..sq_head-1] (sq_head commands total)
-          // We've written slots [0..sq_tail-1] (sq_tail commands total)
-          // Outstanding commands are slots [sq_tail..sq_head-1]
-          // Number of outstanding slots = sq_head - sq_tail
-          // Examples:
-          // - sq_head=7, sq_tail=6: outstanding = slot 6 only = 1 slot (7-6=1) ✓
-          // - sq_head=6, sq_tail=5: outstanding = slot 5 only = 1 slot (6-5=1) ✓
-          // - sq_head=5, sq_tail=3: outstanding = slots [3,4] = 2 slots (5-3=2) ✓
-          // - sq_head=7, sq_tail=0: outstanding = slots [0..6] = 7 slots (7-0=7) ✓
-          used_slots = current_sq_head - sq_tail;
-        }
-        // Reserve one slot to avoid wrap-around (can't use all queue_size entries)
-        uint16_t available_slots = queue_size - used_slots - 1;
-        
-        uint16_t remaining_to_submit = num_ops - submitted_count;
-        uint16_t batch_size = (remaining_to_submit < available_slots)
-                                ? remaining_to_submit
-                                : available_slots;
-
-        // Always print batch info when trying to submit (even if batch_size=0)
-        if (verbose >= 2) {
-          printf("[BATCH] submitted=%u completed=%u remaining=%u "
-                 "sq_head=%u sq_tail=%u used=%u available=%u batch_size=%u\n",
-                 submitted_count, completed_count, remaining_to_submit,
-                 current_sq_head, sq_tail, used_slots, available_slots,
-                 batch_size);
-        }
-
-        // Issue commands for this batch
-        for (uint16_t batch_i = 0; batch_i < batch_size; batch_i++) {
-          unsigned i = submitted_count + batch_i;
-          uint16_t cmd_id = (uint16_t)(i + 1);
-
-          // Calculate LBA
-          uint64_t lba;
-          if (use_random_access && lba_range_lbas > 0) {
-            uint64_t seed = (uint64_t)i * 0x9e3779b9 + cmd_id * 0x85ebca6b;
-            seed ^= seed >> 16;
-            seed *= 0xc2b2ae35;
-            seed ^= seed >> 13;
-            seed *= 0x9e3779b9;
-            seed ^= seed >> 16;
-            lba = base_lba + (seed % lba_range_lbas);
-          } else {
-            if (lba_range_lbas > 0) {
-              lba = base_lba + ((i * blocks) % lba_range_lbas);
-            } else {
-              lba = base_lba + (i * blocks);
-            }
-          }
-
-          // Determine command type
-          bool is_read_command = false;
-          if (write_only_mode) {
-            is_read_command = false;
-          } else if (read_only_mode) {
-            is_read_command = true;
-          } else if (alternate_mode) {
-            is_read_command = (i % 2 == 0);
-          } else {
-            is_read_command = (i % 2 == 0);
-          }
-
-          // Calculate PRPs
-          uint64_t prp1, prp2;
-          bool is_write = !is_read_command;
-          if (is_read_command && has_read_buffer) {
-            uint64_t buffer_offset = read_only_mode ? (i * transfer_size)
-                                                    : ((i / 2) * transfer_size);
-            if (buffer_offset + transfer_size <= bufferSize) {
-              uint64_t buffer_addr = readBufferDma
-                                       ? (readBufferDma + buffer_offset)
-                                       : (uint64_t)(readBuffer + buffer_offset);
-              nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
-                                           &prp2);
-            } else {
-              prp1 = 0xDEADBEEF00000000ULL;
-              prp2 = 0xCAFEBABE00000000ULL;
-            }
-          } else if (is_write && has_write_buffer) {
-            uint64_t buffer_offset = write_only_mode ? (i * transfer_size)
-                                                     : ((i / 2) * transfer_size);
-            if (buffer_offset + transfer_size <= bufferSize) {
-              uint64_t buffer_addr = writeBufferDma
-                                       ? (writeBufferDma + buffer_offset)
-                                       : (uint64_t)(writeBuffer + buffer_offset);
-              nvme_ep::nvme_calculate_prps(buffer_addr, transfer_size, &prp1,
-                                           &prp2);
-            } else {
-              prp1 = 0xDEADBEEF00000000ULL;
-              prp2 = 0xCAFEBABE00000000ULL;
-            }
-          } else {
-            prp1 = 0xDEADBEEF00000000ULL;
-            prp2 = 0xCAFEBABE00000000ULL;
-          }
-
-          // Setup command
-          nvme_ep::nvme_sqe_setup_rw(sqe, is_write, cmd_id, nsid, lba, blocks,
-                                     prp1, prp2);
-
-          // Record start time
-          if (config.startTimes != nullptr) {
-            config.startTimes[i] = wall_clock64();
-          }
-
-          // Write SQE
-          nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-
-          // Dump SQE information if very verbose
-          if (verbose >= 2) {
-            printf("[SQE] cmd_id=%u opcode=0x%02x nsid=%u lba=%llu blocks=%u "
-                   "prp1=0x%016llx prp2=0x%016llx sq_tail=%u\n",
-                   cmd_id, sqe->opcode, nsid, (unsigned long long)lba, blocks,
-                   (unsigned long long)prp1, (unsigned long long)prp2,
-                   sq_tail);
-          }
-
-          // Increment tail after writing SQE (like Linux driver)
-          sq_tail = (sq_tail + 1) % queue_size;
-        }
-
-        // Only ring doorbell if we actually wrote commands
-        if (batch_size > 0) {
-          // Memory fence before doorbell
-          __threadfence_system();
-
-          // Ring doorbell for this batch
-          // Linux driver writes doorbell with sq_tail (the incremented tail value)
-          // After writing all SQEs, sq_tail points to the next slot after the last written slot
-          // Ring with sq_tail (the next slot, which wraps to 0 after writing 8 commands)
-          // This tells QEMU to process commands up to (but not including) sq_tail
-          nvme_ep::ringDoorbell(sq_tail, doorbell_offset, usePciMmioBridge,
-                                shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-
-          submitted_count += batch_size;
-        }
+        uint16_t batch_count = nvme_ep_batch_submit_commands(
+          config, sqeAddr, cqeAddr, lbaSize, base_lba, usePciMmioBridge,
+          shadowBufferVirt, nvmeTargetBdf, doorbell_offset, readBuffer,
+          writeBuffer, bufferSize, readBufferDma, writeBufferDma, queue_size,
+          lba_range_lbas, use_random_access, nvmeBar0Gpu, verbose, num_ops,
+          has_read_buffer, has_write_buffer, read_only_mode, write_only_mode,
+          alternate_mode, transfer_size, nsid, blocks, &sq_tail,
+          effective_batch_size, submitted_count);
+        submitted_count += batch_count;
+        // Last CID of the batch we just submitted (CIDs are 1-indexed)
+        last_batch_last_cid = submitted_count;
       }
 
-      // Poll for completions aggressively
-      if (completed_count < num_ops) {
-        uint32_t poll_count = 0;
-        const uint32_t max_polls = 10000000; // Safety limit
-        nvme_ep::cqeType cqe_last = {}; // Track last seen CQE for change detection
-        uint16_t last_processed_cid = 0; // Track CID from last processed slot
-        uint16_t last_logged_slot = 0xFFFF; // Track last slot we logged to avoid spam
+      // Poll for completions if needed
+      if (completed_count < submitted_count && last_batch_last_cid > 0) {
+        // Poll until we see the last CID of the most recently submitted batch
+        uint16_t processed = nvme_ep_batch_poll_for_cid(
+          config, cqeAddr, usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
+          cq_doorbell_offset, nvmeBar0Gpu, verbose, num_ops, queue_size,
+          &completed_count, &cq_head, last_batch_last_cid);
         
-        while (completed_count < num_ops && poll_count < max_polls) {
-          // Break if all submitted commands have completed and more need to be
-          // submitted. This prevents infinite polling when waiting for commands
-          // that haven't been submitted yet.
-          // BUT: Don't break if we're in the middle of processing a queue
-          // wrap-around (cq_head at slot 7) - we must process slot 7 before
-          // wrapping to slot 0, otherwise we'll miss completions.
-          if (completed_count == submitted_count && submitted_count < num_ops) {
-            // Check if we're reading stale data at any slot
-            // If so, and all submitted commands are done, break to submit more
-            volatile struct nvme_cqe* cqe_stale_check = &cqeAddr[cq_head];
-            nvme_ep::cqeType cqe_stale_val = nvme_ep::cqeRead(
-              (volatile nvme_ep::cqeType*)cqe_stale_check);
-            uint8_t phase_stale = NVME_CQE_STATUS_PHASE(cqe_stale_val.status);
-            bool phase_ok_stale = (expected_phase == 0xFF) || 
-                                  (phase_stale == expected_phase);
-            uint16_t sq_head_stale = cqe_stale_val.sq_head;
-            
-            // Don't break on stale data - continue polling until we see new data
-            // The controller will write new completions sequentially, and we need to
-            // wait for them rather than breaking prematurely
-            // Only break if we're NOT reading stale data (phase_ok_stale is true)
-            // and we're not at the last slot waiting for a completion
-            if (phase_ok_stale && cq_head != (queue_size - 1)) {
-              break; // Exit polling loop to submit more commands
-            }
-            // If at slot 7, check if there's a valid completion waiting
-            // We need to be careful: if the controller has wrapped (sq_head wrapped),
-            // slot 7 might have stale data from before the wrap. In that case, we
-            // should continue polling to wait for the controller to write a new
-            // completion to slot 7, not break.
-            volatile struct nvme_cqe* cqe_check = &cqeAddr[cq_head];
-            nvme_ep::cqeType cqe_check_val = nvme_ep::cqeRead(
-              (volatile nvme_ep::cqeType*)cqe_check);
-            uint8_t phase_check = NVME_CQE_STATUS_PHASE(cqe_check_val.status);
-            bool phase_ok_check = (expected_phase == 0xFF) || 
-                                  (phase_check == expected_phase);
-            uint16_t sq_head_check = cqe_check_val.sq_head;
-            // Check if controller has wrapped (sq_head wrapped back to smaller value)
-            // If so, slot 7 might have stale data and we should continue polling
-            bool controller_wrapped = (sq_head_check < queue_size) &&
-                                      (sq_head_check < last_sq_head) && 
-                                      (last_sq_head != 0);
-            // Determine if all commands are completed:
-            // - sq_head=0 means controller has processed all commands (queue empty)
-            // - If slot 7 has no completion (cmd_id=0), all commands are done
-            // - If slot 7 has phase mismatch AND (controller hasn't wrapped OR sq_head=0),
-            //   then slot 7 is stale and all commands are done
-            // Break if all commands are done - we can submit more (if remaining) or exit
-            bool all_commands_done = (sq_head_check == 0) || 
-                                     (cqe_check_val.command_id == 0) ||
-                                     (!phase_ok_check && (!controller_wrapped || sq_head_check == 0));
-            
-            if (all_commands_done) {
-              // All submitted commands have been processed - break to submit more
-              // (if submitted_count < num_ops) or exit (if all operations done)
-              break; // Exit polling loop
-            }
-            // Otherwise, continue polling slot 7 - there may be a valid completion
-            // coming (controller wrapped but sq_head != 0 means commands still pending)
-          }
-          poll_count++;
-          
-          // CQ slots are filled consecutively by the controller. cq_head represents
-          // the current slot we're checking. We read from cq_head, and only advance
-          // cq_head after successfully processing a valid completion.
-          // Phase flips every time we go from slot 7 to slot 0 (controller wraps).
-          volatile struct nvme_cqe* cqe_entry = &cqeAddr[cq_head];
-          nvme_ep::cqeType cqe_new = nvme_ep::cqeRead(
-            (volatile nvme_ep::cqeType*)cqe_entry);
-          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-          uint16_t sq_head = cqe_new.sq_head;
-          
-          // Only log [POLL] message once per slot to avoid spam
-          if (verbose >= 2 && cq_head != last_logged_slot) {
-            printf("[POLL] Reading from slot %u: phase=%u expected=%u "
-                   "sq_head=%u last_sq_head=%u cmd_id=%u\n",
-                   cq_head, phase, expected_phase, sq_head, last_sq_head,
-                   cqe_new.command_id);
-            last_logged_slot = cq_head;
-          }
-          
-          // NEVER skip a CQ slot - the controller MUST update each slot
-          // Check if submission queue wrapped - if sq_head wrapped, the controller
-          // has processed all commands and written completions. When we're at the
-          // last slot, the completion for the last command should be there.
-          // We must wait for it, not skip it.
-          // IMPORTANT: Only detect sq_wrapped if we're at the last slot AND we've
-          // seen a valid completion (cmd_id != 0) - this ensures the controller
-          // has actually written to this slot, not just that sq_head wrapped.
-          bool sq_wrapped = (sq_head < queue_size) &&
-                            (sq_head < last_sq_head) && 
-                            (last_sq_head != 0) && 
-                            (cq_head == (queue_size - 1)) &&
-                            (cqe_new.command_id != 0);
-          
-          // Validate sq_head is within valid range (0 to queue_size-1)
-          // If invalid, continue polling this slot (don't skip)
-          if (sq_head >= queue_size) {
-            cqe_last = cqe_new;
-            continue; // Keep polling this slot
-          }
-          
-          // Check phase FIRST - phase bit flips when controller wraps from slot 7 to 0
-          // Initialize expected_phase from first valid CQE we read
-          bool phase_ok = false;
-          bool phase_flipped = false;
-          
-          if (expected_phase == 0xFF) {
-            // First read - initialize expected_phase from this CQE's phase
-            // Only initialize if this is a real CQE (cmd_id != 0)
-            if (cqe_new.command_id != 0) {
-              expected_phase = phase;
-              phase_ok = true;
-              if (verbose >= 2) {
-                printf("[POLL] Initializing expected_phase=%u from slot %u "
-                       "cmd_id=%u sq_head=%u\n",
-                       expected_phase, cq_head, cqe_new.command_id, sq_head);
-              }
-            } else {
-              // Uninitialized CQE (cmd_id=0) - wait for controller to write it
-              if (verbose >= 2 && cq_head != last_logged_slot) {
-                printf("[POLL] Uninitialized CQE at slot %u (cmd_id=0), "
-                       "waiting for controller to write completion\n", cq_head);
-                last_logged_slot = cq_head;
-              }
-              cqe_last = cqe_new;
-              continue; // Keep polling this slot
-            }
-          } else {
-            // expected_phase is initialized - check if it matches
-            phase_ok = (phase == expected_phase);
-            
-            if (!phase_ok) {
-              // Phase mismatch - could be stale data or phase flip
-              // If we're reading stale data, only continue polling if there are
-              // outstanding commands. If all commands are done, break to submit more.
-              
-              // Phase mismatch - check if this is a valid phase flip
-              // Phase flips when controller wraps:
-              // - From last slot (e.g., slot 15) to slot 0
-              // - Or when controller wraps CQ and writes to last slot
-              if (cq_head == 0) {
-                // Phase flip at slot 0 - controller wrapped and wrote new CQE
-                phase_flipped = true;
-                expected_phase = phase;
-                phase_ok = true;
-                
-                if (verbose >= 2 && cq_head != last_logged_slot) {
-                  printf("[POLL] Phase flip detected at slot 0: %u -> %u "
-                         "(controller wrapped, new CQE written) cmd_id=%u "
-                         "sq_head=%u last_sq_head=%u\n",
-                         expected_phase ^ 1, phase, cqe_new.command_id,
-                         sq_head, last_sq_head);
-                  last_logged_slot = cq_head;
-                }
-              } else if (cq_head == (queue_size - 1)) {
-                // At last slot (slot 7) with phase mismatch
-                // Phase only flips when controller wraps from slot 7 to slot 0,
-                // NOT when we're waiting at slot 7. So slot 7 should have the
-                // SAME phase as slots 0-6. If we see a mismatch, it means we're
-                // reading stale data from slot 7 (old completion from previous
-                // round). Keep expecting the same phase and wait for controller
-                // to write a new completion to slot 7.
-                if (verbose >= 2 && cq_head != last_logged_slot) {
-                  printf("[POLL] Phase mismatch at last slot %u: phase=%u "
-                         "expected=%u (stale data, waiting for controller to "
-                         "write new completion to slot 7)\n",
-                         cq_head, phase, expected_phase);
-                  last_logged_slot = cq_head;
-                }
-                // DON'T flip expected_phase - phase only flips when controller
-                // wraps to slot 0. Keep expecting the same phase and wait.
-                // Re-read CQE to ensure we see the controller's write
-                cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
-                phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-                sq_head = cqe_new.sq_head;
-                phase_ok = (phase == expected_phase);
-                // Wait for controller to write completion (cmd_id != 0)
-                // We must proceed sequentially - slot 7 must be written before
-                // the controller wraps to slot 0. Keep polling slot 7 until
-                // we see valid data (cmd_id != 0 and phase matches).
-                if (cqe_new.command_id == 0) {
-                  // At last slot with phase matching but cmd_id=0.
-                  // The controller MUST write to this slot before wrapping.
-                  // Keep polling slot 7 until we see valid data.
-                  static uint32_t scan_poll_count = 0;
-                  scan_poll_count++;
-                  bool run_scan = (scan_poll_count == 1 || scan_poll_count % 50 == 0);
-                  
-                  if (run_scan) {
-                    printf("[POLL] Waiting for controller to write to slot %u "
-                           "(phase=%u expected=%u cmd_id=0) (poll #%u)\n",
-                           cq_head, phase, expected_phase, scan_poll_count);
-                    cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
-                    phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-                    sq_head = cqe_new.sq_head;
-                    phase_ok = (phase == expected_phase);
-                    // If we now see valid data, process it instead of continuing
-                    if (cqe_new.command_id != 0 && phase_ok) {
-                      // Valid data now visible - fall through to process it
-                      // Don't continue - we have valid data
-                    } else {
-                      // Still stale - continue polling
-                      cqe_last = cqe_new;
-                      continue; // Keep polling slot 7 until valid data appears
-                    }
-                  } else {
-                    cqe_last = cqe_new;
-                    continue; // Keep polling slot 7 until valid data appears
-                  }
-                }
-                // If phase still doesn't match, continue waiting
-                if (!phase_ok) {
-                  cqe_last = cqe_new;
-                  continue;
-                }
-              } else if (sq_wrapped) {
-                // SQ wrapped and we're at last slot - controller has written
-                // completion to this slot, but phase doesn't match yet.
-                // This means the controller wrapped and flipped phase, but we
-                // haven't seen it yet. Flip expected_phase and re-read the CQE
-                // to ensure we see the controller's write with atomic acquire.
-                if (verbose >= 2 && cq_head != last_logged_slot) {
-                  printf("[POLL] SQ wrapped at slot %u, phase mismatch "
-                         "(phase=%u expected=%u), flipping expected_phase and "
-                         "re-reading CQE\n",
-                         cq_head, phase, expected_phase);
-                  last_logged_slot = cq_head;
-                }
-                expected_phase = expected_phase ^ 1;
-                // Re-read CQE after flipping expected_phase to ensure we see
-                // the controller's write with atomic acquire semantics
-                cqe_new = nvme_ep::cqeRead((volatile nvme_ep::cqeType*)cqe_entry);
-                phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-                sq_head = cqe_new.sq_head;
-                phase_ok = (phase == expected_phase);
-                // Even if phase matches, don't process if cmd_id=0 (stale data)
-                if (phase_ok && cqe_new.command_id == 0) {
-                  if (verbose >= 2) {
-                    printf("[POLL] SQ wrapped, phase matches but cmd_id=0 at "
-                           "slot %u, waiting for controller to write completion\n",
-                           cq_head);
-                  }
-                  cqe_last = cqe_new;
-                  continue; // Wait for controller to write cmd_id != 0
-                }
-                if (!phase_ok) {
-                  // Phase still doesn't match - wait for controller to update
-                  cqe_last = cqe_new;
-                  continue;
-                }
-              } else {
-                // Phase mismatch at slot != 0 and SQ didn't wrap - stale CQE
-                // from previous pass. Wait for controller to write new completion.
-                // The controller always updates CQE slots sequentially, so we must
-                // wait for slot 7 to be written before it wraps to slot 0.
-                // Only continue polling if there are outstanding commands.
-                // If all commands are done, break to submit more.
-                if (completed_count == submitted_count && submitted_count < num_ops) {
-                  // All submitted commands done, stale data at this slot - break to submit more
-                  if (verbose >= 2) {
-                    printf("[POLL] Stale CQE at slot %u: phase=%u expected=%u, "
-                           "all commands done (completed=%u submitted=%u), "
-                           "breaking to submit more\n",
-                           cq_head, phase, expected_phase, 
-                           completed_count, submitted_count);
-                  }
-                  break;
-                }
-                // Outstanding commands exist - continue polling this slot until unstale
-                if (verbose >= 2 && cq_head != last_logged_slot) {
-                  printf("[POLL] Stale CQE at slot %u: phase=%u expected=%u, "
-                         "waiting for controller to write new completion "
-                         "(outstanding: %u)\n",
-                         cq_head, phase, expected_phase,
-                         submitted_count - completed_count);
-                  last_logged_slot = cq_head;
-                }
-                cqe_last = cqe_new;
-                continue; // Keep polling this slot
-              }
-            } else if (cqe_new.command_id == 0) {
-              // Phase matches but cmd_id=0 - controller hasn't written completion yet
-              // Wait for it (don't skip this slot)
-              if (verbose >= 2 && cq_head != last_logged_slot) {
-                printf("[POLL] Phase matches but cmd_id=0 at slot %u, waiting "
-                       "for controller to write completion\n", cq_head);
-                // CQ scan disabled - using QEMU traces for debugging
-                // if (cq_head == (queue_size - 1)) {
-                //   nvme_ep::scanCQ(cqeAddr, queue_size, expected_phase, cq_head,
-                //                   last_sq_head);
-                // }
-                last_logged_slot = cq_head;
-              }
-              cqe_last = cqe_new;
-              continue; // Keep polling this slot
-            }
-          }
-          
-          // Process exactly ONE completion per CQE slot
-          // sq_head in CQE indicates controller's position, not completion count
-          // Each CQE slot contains exactly one completion entry
-          bool sq_head_progressed = false;
-          uint16_t new_completions = 0;
-          
-          if (phase_ok && cqe_new.command_id != 0) {
-            // Phase matches and cmd_id is valid - this is a valid completion
-            // Process exactly 1 completion from this CQE slot
-            new_completions = 1;
-            sq_head_progressed = true;
-            
-            if (verbose >= 2) {
-              if (sq_head != last_sq_head) {
-                printf("[POLL] Processing completion: cmd_id=%u sq_head=%u "
-                       "last_sq_head=%u (sq_head advanced)\n",
-                       cqe_new.command_id, sq_head, last_sq_head);
-              } else {
-                printf("[POLL] Processing completion: cmd_id=%u sq_head=%u "
-                       "last_sq_head=%u (out-of-order completion)\n",
-                       cqe_new.command_id, sq_head, last_sq_head);
-              }
-            }
-          }
-          // If phase doesn't match, continue polling - wait for phase to match or flip
-          
-          // Phase mismatch should have been handled above (phase flip detection)
-          // This should never be reached if phase_flipped logic works correctly
-          
-          // Cap new_completions to remaining operations to prevent buffer overflow
-          uint16_t remaining_ops = num_ops - completed_count;
-          if (new_completions > remaining_ops) {
-            new_completions = remaining_ops;
-          }
-          
-          // Process completion if phase is OK and sq_head progressed
-          // Only count completions when sq_head actually advances
-          if (phase_ok && sq_head_progressed && new_completions > 0) {
-              // Dump CQE information if very verbose
-              if (verbose >= 2) {
-                uint8_t sc = NVME_CQE_STATUS_SC(cqe_new.status);
-                uint8_t sct = NVME_CQE_STATUS_SCT(cqe_new.status);
-                uint16_t slot_before_advance = cq_head;
-                printf("[CQE] slot=%u cmd_id=%u sq_head=%u status=0x%04x "
-                       "(SCT=%u SC=0x%02x) phase=%u cq_head=%u "
-                       "new_completions=%u\n",
-                       slot_before_advance, cqe_new.command_id, sq_head,
-                       cqe_new.status, sct, sc, phase, cq_head,
-                       new_completions);
-              }
-              // Update end times if needed
-              if (config.endTimes != nullptr) {
-                uint64_t end_time = wall_clock64();
-                for (uint16_t i = 0; i < new_completions && 
-                     (completed_count + i) < num_ops; i++) {
-                  unsigned idx = completed_count + i;
-                  config.endTimes[idx] = end_time;
-                }
-              }
-              
-              // Process each completion: advance cq_head
-              // Phase flips only when controller wraps CQ (from entry N-1 to 0),
-              // not when our cq_head wraps. We detect phase changes by reading
-              // CQEs and checking their phase bits in the polling loop.
-              // Do NOT flip expected_phase here - let the phase flip detection
-              // logic in the polling loop handle it when the controller actually
-              // wraps.
-              for (uint16_t i = 0; i < new_completions; i++) {
-                cq_head = (cq_head + 1) % queue_size;
-                // Reset logged slot when we advance to a new slot
-                last_logged_slot = 0xFFFF;
-              }
-              
-              // Update CQ head doorbell after processing all completions
-              // This is critical - without this, controller will run out of CQ
-              // slots and stall. Update once after processing all completions in
-              // this batch.
-              nvme_ep::ringCqHeadDoorbell(cq_head, cq_doorbell_offset,
-                usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf, nvmeBar0Gpu);
-              
-              completed_count += new_completions;
-              // Update last_sq_head with actual sq_head from CQE
-              // sq_head_progressed is true here, so sq_head is valid
-              last_sq_head = sq_head;
-              
-              // Track CID from the slot we just processed (next_slot, before
-              // advancing cq_head). This helps detect stale CQEs when wrapping.
-              // When cq_head wraps from 7 to 0, next_slot was 0, so we track that CID.
-              last_processed_cid = cqe_new.command_id;
-              
-              poll_count = 0; // Reset poll count on progress
-              cqe_last = cqe_new; // Update last seen CQE
-              
-              // Update expected_phase based on what we just processed
-              // Phase flips every time controller wraps from slot 7 to slot 0
-              if (expected_phase == 0xFF) {
-                // First completion - extract phase from CQE
-                expected_phase = phase;
-              } else if (phase_flipped) {
-                // Phase already updated when we detected the flip
-                // expected_phase is already set to the new phase
-              } else {
-                // Phase didn't flip - check if we're about to wrap
-                uint16_t next_cq_head = (cq_head + 1) % queue_size;
-                if (next_cq_head == 0) {
-                  // We just processed slot 7, next will be slot 0
-                  // Phase will flip on next read from slot 0
-                  // Keep current expected_phase for now
-                }
-              }
-            } else {
-              // No completion detected - update last seen CQE for change detection
-              cqe_last = cqe_new;
-            }
-        }
+        // If we didn't process any completions, we're still waiting
+        // Continue the loop to check if we can submit more or need to keep polling
       }
     }
   }
@@ -1753,7 +1271,7 @@ __global__ void nvme_ep_kernel(
   uint8_t* writeBuffer, size_t bufferSize, uint64_t readBufferDma,
   uint64_t writeBufferDma, uint32_t lfsrSeed, uint16_t queue_size,
   uint64_t lba_range_lbas, bool use_random_access, void* nvmeBar0Gpu,
-  int readIo, int writeIo, int verbose) {
+  int readIo, int writeIo, uint16_t batch_size, int verbose) {
   // Reconstruct XioEndpointConfig from parameters
   XioEndpointConfig config;
   config.submissionQueue = sqeAddr;
@@ -1769,20 +1287,189 @@ __global__ void nvme_ep_kernel(
     return; // Invalid pointers - kernel cannot proceed
   }
 
-  // Pass values directly to driveEndpoint (no need for full struct)
   nvme_ep_driveEndpoint(config, sqeAddr, cqeAddr, lbaSize, base_lba,
                         usePciMmioBridge, shadowBufferVirt, nvmeTargetBdf,
                         queueId, doorbell_offset, readBuffer, writeBuffer,
                         bufferSize, readBufferDma, writeBufferDma, lfsrSeed,
                         queue_size, lba_range_lbas, use_random_access,
-                        nvmeBar0Gpu, readIo, writeIo, verbose);
+                        nvmeBar0Gpu, verbose, readIo, writeIo, batch_size);
+}
+
+// Host-side helper functions
+#ifndef __HIP_DEVICE_COMPILE__
+
+// Old PCI config reading functions removed - now using kernel module IOCTL
+// PCI MMIO bridge shadow buffer mapping moved to xio-mmio-bridge.hip
+
+// Map NVMe BAR0 for direct doorbell access
+// Similar to test-gpu-nvme-write.cpp's map_nvme_bar0 function
+__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
+                              void** bar0_gpu) {
+  int bar0_fd = -1;
+  int drm_fd = -1;
+  void* mapped = MAP_FAILED;
+  char resource_path[256];
+  size_t bar0_size = 8192; // Map 8KB (enough for doorbell registers)
+  hipError_t hip_err = hipSuccess;
+
+  // Convert BDF to format: 00:BB:DD.F
+  uint8_t bus = (nvme_bdf >> 8) & 0xFF;
+  uint8_t dev = (nvme_bdf >> 3) & 0x1F;
+  uint8_t func = nvme_bdf & 0x7;
+
+  // Build resource0 path: /sys/bus/pci/devices/0000:BB:DD.F/resource0
+  snprintf(resource_path, sizeof(resource_path),
+           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource0", bus, dev, func);
+
+  // Open BAR0 resource file
+  bar0_fd = open(resource_path, O_RDWR);
+  if (bar0_fd < 0) {
+    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n",
+            resource_path, strerror(errno));
+    return -errno;
+  }
+
+  // Map BAR0 to userspace
+  mapped = mmap(nullptr, bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                bar0_fd, 0);
+  if (mapped == MAP_FAILED) {
+    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
+    close(bar0_fd);
+    return -errno;
+  }
+
+  fprintf(stderr, "NVMe BAR0 mapped at %p (size=%zu)\n", mapped, bar0_size);
+
+  // Register with DRM GEM_USERPTR (required for GPU access to PCI MMIO)
+  drm_fd = open("/dev/dri/renderD128", O_RDWR);
+  if (drm_fd < 0) {
+    fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
+            strerror(errno));
+    fprintf(stderr, "Cannot register BAR0 with GPU via GEM_USERPTR.\n");
+    munmap(mapped, bar0_size);
+    close(bar0_fd);
+    return -errno;
+  }
+
+  struct drm_amdgpu_gem_userptr gem_userptr = {};
+  gem_userptr.addr = (uint64_t)mapped;
+  gem_userptr.size = bar0_size;
+  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
+    fprintf(stderr,
+            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for BAR0: %s\n",
+            strerror(errno));
+    fprintf(stderr, "Cannot register BAR0 with GPU.\n");
+    close(drm_fd);
+    munmap(mapped, bar0_size);
+    close(bar0_fd);
+    return -errno;
+  }
+
+  fprintf(stderr, "NVMe BAR0 registered with DRM GEM_USERPTR (handle: %u)\n",
+          gem_userptr.handle);
+
+  // Register with HIP
+  hip_err = hipHostRegister(mapped, bar0_size, hipHostRegisterMapped);
+  if (hip_err != hipSuccess) {
+    fprintf(stderr, "Warning: Failed to register BAR0 with HIP: %s\n",
+            hipGetErrorString(hip_err));
+    close(drm_fd);
+    munmap(mapped, bar0_size);
+    close(bar0_fd);
+    return -EINVAL;
+  }
+
+  fprintf(stderr, "NVMe BAR0 registered with HIP for GPU access\n");
+
+  // Get GPU pointer
+  void* gpu_ptr = nullptr;
+  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
+  if (gpu_ptr_err != hipSuccess) {
+    fprintf(stderr, "Warning: hipHostGetDevicePointer failed for BAR0: %s\n",
+            hipGetErrorString(gpu_ptr_err));
+    (void)hipHostUnregister(mapped);
+    close(drm_fd);
+    munmap(mapped, bar0_size);
+    close(bar0_fd);
+    return -EINVAL;
+  }
+
+  fprintf(stderr, "NVMe BAR0 GPU pointer obtained: %p (host: %p)\n", gpu_ptr,
+          mapped);
+
+  // Keep bar0_fd and drm_fd open for the mapping to remain valid
+  // The kernel will clean them up when the process exits
+
+  *bar0_cpu = mapped;
+  *bar0_gpu = gpu_ptr;
+
+  // Note: We keep bar0_fd and drm_fd open - the mappings persist even after
+  // close The kernel will clean them up when the process exits
+
+  return 0;
 }
 
 //
-// Host helper functions for PCI MMIO bridge support
+// Host helper function for NVMe queue creation via IOCTL
 //
 
-#ifndef __HIP_DEVICE_COMPILE__
+/**
+ * Read NVMe Controller Capabilities (CAP) register from BAR0
+ *
+ * The CAP register is a 64-bit register at offset 0x00-0x07 in BAR0.
+ * It contains controller capabilities including CQR (Contiguous Queues Required).
+ *
+ * @param nvme_bdf NVMe device BDF in 0xBBDD format
+ * @param cap_out Output parameter for CAP register value
+ * @return 0 on success, negative error code on failure
+ */
+__host__ int nvme_ep_read_cap_register(uint16_t nvme_bdf, uint64_t* cap_out) {
+  int bar0_fd = -1;
+  void* bar0_mapped = MAP_FAILED;
+  char resource_path[256];
+  size_t bar0_size = 8; // Only need 8 bytes for CAP register
+  int ret = 0;
+
+  if (!cap_out) {
+    return -EINVAL;
+  }
+
+  // Convert BDF to format: 00:BB:DD.F
+  uint8_t bus = (nvme_bdf >> 8) & 0xFF;
+  uint8_t dev = (nvme_bdf >> 3) & 0x1F;
+  uint8_t func = nvme_bdf & 0x7;
+
+  // Build resource0 path: /sys/bus/pci/devices/0000:BB:DD.F/resource0
+  snprintf(resource_path, sizeof(resource_path),
+           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource0", bus, dev, func);
+
+  // Open BAR0 resource file
+  bar0_fd = open(resource_path, O_RDONLY);
+  if (bar0_fd < 0) {
+    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n",
+            resource_path, strerror(errno));
+    return -errno;
+  }
+
+  // Map BAR0 to userspace (read-only for CAP register)
+  bar0_mapped = mmap(nullptr, bar0_size, PROT_READ, MAP_SHARED, bar0_fd, 0);
+  if (bar0_mapped == MAP_FAILED) {
+    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
+    close(bar0_fd);
+    return -errno;
+  }
+
+  // Read CAP register (64-bit at offset 0)
+  *cap_out = *reinterpret_cast<volatile uint64_t*>(bar0_mapped);
+
+  // Cleanup
+  munmap(bar0_mapped, bar0_size);
+  close(bar0_fd);
+
+  return ret;
+}
 
 // Export HSA-allocated VRAM as DMA-BUF and register with kernel module
 // Based on QEMU reference code: test-gpu-nvme-write.cpp
@@ -1847,12 +1534,13 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
   }
 
   // Register buffer with kernel module to get physical address
-  struct rocm_axiio_register_buffer_req req = {};
+  rocm_axiio_register_buffer_req req = {};
   req.dmabuf_fd = dmabuf_fd;
   req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
   req.size = size;
   req.nvme_bdf = nvme_bdf;
-  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED : ROCM_XIO_FLAG_PASSTHROUGH;
+  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED
+                           : ROCM_XIO_FLAG_PASSTHROUGH;
 
   ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &req);
   if (ret < 0) {
@@ -1882,9 +1570,7 @@ static int export_and_register_vram_buffer(void* vram_ptr, size_t size,
 // Physical address translation is now provided by xioGetPhysAddr() from xio.h
 
 // Forward declarations
-static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf, void** virt_addr);
-__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
-                              void** bar0_gpu);
+// Forward declaration removed - using common function from xio-mmio-bridge.hip
 
 // Run endpoint test - launches GPU kernel and waits for completion
 __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
@@ -2013,7 +1699,8 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   // memory that QEMU sees.
   if (nvmeConfig->usePciMmioBridge) {
     void* shadow_virt = nullptr;
-    int ret_shadow = map_mmio_bridge_shadow_buffer(nvmeConfig->mmioBridgeBdf,
+    int ret_shadow = xio_mmio_bridge::map_shadow_buffer(
+      nvmeConfig->mmioBridgeBdf,
                                                    &shadow_virt);
     if (ret_shadow < 0) {
       fprintf(stderr, "Failed to map PCI MMIO bridge shadow buffer\n");
@@ -2149,6 +1836,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   uint64_t baseLba = 0;      // Default value
   uint64_t lbaRangeLbas = 0; // 0 means no range limit (use original behavior)
   bool useRandomAccess = false;
+  uint16_t batchSize = 0;    // Default: auto-calculate
   if (nvmeConfig) {
     lbaSize = nvmeConfig->lbaSize;
     baseLba = nvmeConfig->baseLba;
@@ -2161,6 +1849,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     dataBufferSize = nvmeConfig->dataBufferSize;
     readIo = nvmeConfig->readIo;
     writeIo = nvmeConfig->writeIo;
+    batchSize = nvmeConfig->batchSize;
 
     // Query namespace capacity in LBAs
     uint64_t namespace_capacity = 0;
@@ -2632,9 +2321,11 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
 
   fprintf(stderr, "About to launch kernel with numThreads=%u\n",
           config->numThreads);
-  fprintf(stderr, "Kernel parameters: iterations=%u, lbaSize=%u, baseLba=%llu\n",
+  fprintf(stderr,
+          "Kernel parameters: iterations=%u, lbaSize=%u, baseLba=%llu\n",
           config->iterations, lbaSize, (unsigned long long)baseLba);
-  fprintf(stderr, "Pointers: sqePtr=%p, cqePtr=%p, startTimes=%p, endTimes=%p\n",
+  fprintf(stderr,
+          "Pointers: sqePtr=%p, cqePtr=%p, startTimes=%p, endTimes=%p\n",
           sqePtr, cqePtr, config->startTimes, config->endTimes);
   fprintf(stderr, "Buffers: readBuffer=%p, writeBuffer=%p, shadowBuffer=%p\n",
           readBufferGpu ? readBufferGpu : readBuffer,
@@ -2689,6 +2380,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
     nvmeBar0Gpu,     // GPU pointer to NVMe BAR0 (for direct doorbell)
     readIo,          // readIo (negative for sequential mode)
     writeIo,         // writeIo (negative for sequential mode)
+    batchSize,       // Batch size (0 = auto: min(queue_size/2, 16))
     config->verbose); // Verbose level (0=none, 1=normal, 2=very verbose)
 
   // Check for kernel launch errors immediately
@@ -2729,7 +2421,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
   if (kmod_fd_cleanup >= 0) {
     // Unregister read buffer if it was registered (check if DMA address was set)
     if (readBuffer && readBufferDma != 0) {
-      struct rocm_axiio_unregister_buffer_req unreg_req = {};
+      rocm_axiio_unregister_buffer_req unreg_req = {};
       unreg_req.virt_addr = reinterpret_cast<uint64_t>(readBuffer);
       int unreg_ret = ioctl(kmod_fd_cleanup, ROCM_XIO_UNREGISTER_BUFFER,
                             &unreg_req);
@@ -2741,7 +2433,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
 
     // Unregister write buffer if it was registered (check if DMA address was set)
     if (writeBuffer && writeBufferDma != 0) {
-      struct rocm_axiio_unregister_buffer_req unreg_req = {};
+      rocm_axiio_unregister_buffer_req unreg_req = {};
       unreg_req.virt_addr = reinterpret_cast<uint64_t>(writeBuffer);
       int unreg_ret = ioctl(kmod_fd_cleanup, ROCM_XIO_UNREGISTER_BUFFER,
                             &unreg_req);
@@ -2784,241 +2476,7 @@ __host__ hipError_t nvme_ep_run(XioEndpointConfig* config) {
 
 // Read PCI config space register
 // Old PCI config reading functions removed - now using kernel module IOCTL
-
-// Map PCI MMIO bridge shadow buffer via kernel module
-static int map_mmio_bridge_shadow_buffer(uint16_t bridge_bdf,
-                                         void** virt_addr) {
-  int kmod_fd = -1;
-  int ret = 0;
-  struct rocm_axiio_mmio_bridge_shadow_req req;
-  void* mapped = MAP_FAILED;
-
-  // Open kernel module device
-  kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
-  if (kmod_fd < 0) {
-    fprintf(stderr, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
-            strerror(errno));
-    fprintf(stderr, "Please ensure the rocm-xio kernel module is loaded\n");
-    return -errno;
-  }
-
-  // Get shadow buffer info from kernel module
-  memset(&req, 0, sizeof(req));
-  req.bridge_bdf = bridge_bdf;
-  ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
-  if (ret < 0) {
-    fprintf(stderr, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
-            strerror(errno));
-    close(kmod_fd);
-    return -errno;
-  }
-
-  if (req.shadow_gpa == 0) {
-    fprintf(stderr, "PCI MMIO bridge shadow GPA is 0 (not configured)\n");
-    close(kmod_fd);
-    return -EINVAL;
-  }
-
-  // Map shadow buffer via kernel module mmap
-  mapped = mmap(nullptr, req.shadow_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                kmod_fd, 0);
-  if (mapped == MAP_FAILED) {
-    fprintf(stderr, "Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
-            strerror(errno));
-    close(kmod_fd);
-    return -errno;
-  }
-
-  // Keep kmod_fd open for the mapping to remain valid
-  // Note: In a production system, you might want to track this fd
-  // and close it on cleanup, but for simplicity we'll leave it open
-  // The kernel will clean it up when the process exits
-
-  *virt_addr = mapped;
-  fprintf(stderr,
-          "PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
-          "size=%llu, vaddr=%p\n",
-          (unsigned long long)req.shadow_gpa,
-          (unsigned long long)req.shadow_size, mapped);
-
-  return 0;
-}
-
-// Map NVMe BAR0 for direct doorbell access
-// Similar to test-gpu-nvme-write.cpp's map_nvme_bar0 function
-__host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
-                              void** bar0_gpu) {
-  int bar0_fd = -1;
-  int drm_fd = -1;
-  void* mapped = MAP_FAILED;
-  char resource_path[256];
-  size_t bar0_size = 8192; // Map 8KB (enough for doorbell registers)
-  hipError_t hip_err = hipSuccess;
-
-  // Convert BDF to format: 00:BB:DD.F
-  uint8_t bus = (nvme_bdf >> 8) & 0xFF;
-  uint8_t dev = (nvme_bdf >> 3) & 0x1F;
-  uint8_t func = nvme_bdf & 0x7;
-
-  // Build resource0 path: /sys/bus/pci/devices/0000:BB:DD.F/resource0
-  snprintf(resource_path, sizeof(resource_path),
-           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource0", bus, dev, func);
-
-  // Open BAR0 resource file
-  bar0_fd = open(resource_path, O_RDWR);
-  if (bar0_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
-            strerror(errno));
-    return -errno;
-  }
-
-  // Map BAR0 to userspace
-  mapped = mmap(nullptr, bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar0_fd,
-                0);
-  if (mapped == MAP_FAILED) {
-    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
-    close(bar0_fd);
-    return -errno;
-  }
-
-  fprintf(stderr, "NVMe BAR0 mapped at %p (size=%zu)\n", mapped, bar0_size);
-
-  // Register with DRM GEM_USERPTR (required for GPU access to PCI MMIO)
-  drm_fd = open("/dev/dri/renderD128", O_RDWR);
-  if (drm_fd < 0) {
-    fprintf(stderr, "Warning: Failed to open DRM device: %s\n",
-            strerror(errno));
-    fprintf(stderr, "Cannot register BAR0 with GPU via GEM_USERPTR.\n");
-    munmap(mapped, bar0_size);
-    close(bar0_fd);
-    return -errno;
-  }
-
-  struct drm_amdgpu_gem_userptr gem_userptr = {};
-  gem_userptr.addr = (uint64_t)mapped;
-  gem_userptr.size = bar0_size;
-  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-    fprintf(stderr,
-            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for BAR0: %s\n",
-            strerror(errno));
-    fprintf(stderr, "Cannot register BAR0 with GPU.\n");
-    close(drm_fd);
-    munmap(mapped, bar0_size);
-    close(bar0_fd);
-    return -errno;
-  }
-
-  fprintf(stderr, "NVMe BAR0 registered with DRM GEM_USERPTR (handle: %u)\n",
-          gem_userptr.handle);
-
-  // Register with HIP
-  hip_err = hipHostRegister(mapped, bar0_size, hipHostRegisterMapped);
-  if (hip_err != hipSuccess) {
-    fprintf(stderr, "Warning: Failed to register BAR0 with HIP: %s\n",
-            hipGetErrorString(hip_err));
-    close(drm_fd);
-    munmap(mapped, bar0_size);
-    close(bar0_fd);
-    return -EINVAL;
-  }
-
-  fprintf(stderr, "NVMe BAR0 registered with HIP for GPU access\n");
-
-  // Get GPU pointer
-  void* gpu_ptr = nullptr;
-  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
-  if (gpu_ptr_err != hipSuccess) {
-    fprintf(stderr, "Warning: hipHostGetDevicePointer failed for BAR0: %s\n",
-            hipGetErrorString(gpu_ptr_err));
-    (void)hipHostUnregister(mapped);
-    close(drm_fd);
-    munmap(mapped, bar0_size);
-    close(bar0_fd);
-    return -EINVAL;
-  }
-
-  fprintf(stderr, "NVMe BAR0 GPU pointer obtained: %p (host: %p)\n", gpu_ptr,
-          mapped);
-
-  // Keep bar0_fd and drm_fd open for the mapping to remain valid
-  // The kernel will clean them up when the process exits
-
-  *bar0_cpu = mapped;
-  *bar0_gpu = gpu_ptr;
-
-  // Note: We keep bar0_fd and drm_fd open - the mappings persist even after
-  // close The kernel will clean them up when the process exits
-
-  return 0;
-}
-
-//
-// Host helper function for NVMe queue creation via IOCTL
-//
-
-/**
- * Read NVMe Controller Capabilities (CAP) register from BAR0
- *
- * The CAP register is a 64-bit register at offset 0x00-0x07 in BAR0.
- * It contains controller capabilities including CQR (Contiguous Queues Required).
- *
- * @param nvme_bdf NVMe device BDF in 0xBBDD format
- * @param cap_out Output parameter for CAP register value
- * @return 0 on success, negative error code on failure
- */
-__host__ int nvme_ep_read_cap_register(uint16_t nvme_bdf, uint64_t* cap_out) {
-  int bar0_fd = -1;
-  void* bar0_mapped = MAP_FAILED;
-  char resource_path[256];
-  size_t bar0_size = 8; // Only need 8 bytes for CAP register
-  int ret = 0;
-
-  if (!cap_out) {
-    return -EINVAL;
-  }
-
-  // Convert BDF to format: 00:BB:DD.F
-  uint8_t bus = (nvme_bdf >> 8) & 0xFF;
-  uint8_t dev = (nvme_bdf >> 3) & 0x1F;
-  uint8_t func = nvme_bdf & 0x7;
-
-  // Build resource0 path: /sys/bus/pci/devices/0000:BB:DD.F/resource0
-  snprintf(resource_path, sizeof(resource_path),
-           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource0", bus, dev, func);
-
-  // Open BAR0 resource file
-  bar0_fd = open(resource_path, O_RDONLY);
-  if (bar0_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe BAR0 resource %s: %s\n", resource_path,
-            strerror(errno));
-    return -errno;
-  }
-
-  // Map BAR0 to userspace (read-only for CAP register)
-  bar0_mapped = mmap(nullptr, bar0_size, PROT_READ, MAP_SHARED, bar0_fd, 0);
-  if (bar0_mapped == MAP_FAILED) {
-    fprintf(stderr, "Failed to mmap NVMe BAR0: %s\n", strerror(errno));
-    ret = -errno;
-    goto cleanup;
-  }
-
-  // Read CAP register (64-bit little-endian at offset 0x00)
-  // NVMe registers are little-endian
-  *cap_out = *reinterpret_cast<uint64_t*>(bar0_mapped);
-
-  ret = 0;
-
-cleanup:
-  if (bar0_mapped != MAP_FAILED) {
-    munmap(bar0_mapped, bar0_size);
-  }
-  if (bar0_fd >= 0) {
-    close(bar0_fd);
-  }
-  return ret;
-}
+// PCI MMIO bridge shadow buffer mapping moved to xio-mmio-bridge.hip
 
 /**
  * Check if NVMe controller supports non-contiguous queues (PC=0)
@@ -3592,7 +3050,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
     
     // Allocate PRP list via kernel module (must be physically contiguous)
     // Allocate page-aligned size for mmap compatibility
-    struct rocm_axiio_alloc_contig_mem_req prp_alloc_req = {};
+    rocm_axiio_alloc_contig_mem_req prp_alloc_req = {};
     prp_alloc_req.size = prp_list_size_aligned;
     
     fprintf(stderr,
@@ -3622,7 +3080,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       fprintf(stderr,
               "ERROR: PRP list physical address not page-aligned: 0x%016llx\n",
               (unsigned long long)prp_alloc_req.phys_addr);
-      struct rocm_axiio_free_contig_mem_req free_req = {};
+      rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = prp_alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       free(page_phys_addrs);
@@ -3641,7 +3099,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       fprintf(stderr,
               "ERROR: Invalid file descriptor for mmap: %s\n",
               strerror(errno));
-      struct rocm_axiio_free_contig_mem_req free_req = {};
+      rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = prp_alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       free(page_phys_addrs);
@@ -3665,7 +3123,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         fprintf(stderr,
                 "ERROR: Failed to allocate PRP list in userspace: %s\n",
                 strerror(errno));
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         free(page_phys_addrs);
@@ -3692,7 +3150,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
                 "ERROR: Failed to open /proc/self/pagemap for PRP list: %s\n",
                 strerror(errno));
         free(prp_list_userspace);
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         free(page_phys_addrs);
@@ -3709,7 +3167,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
                 strerror(errno));
         close(pagemap_fd_prp);
         free(prp_list_userspace);
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         free(page_phys_addrs);
@@ -3721,7 +3179,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
         fprintf(stderr,
                 "ERROR: PRP list page not present in pagemap\n");
         free(prp_list_userspace);
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = prp_alloc_req.virt_addr;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         free(page_phys_addrs);
@@ -3732,7 +3190,7 @@ static int generate_prp_list_for_queue(void* virt_addr, size_t size, int kmod_fd
       uint64_t prp_list_phys_userspace = prp_phys_pfn * host_page_size;
       
       // Free kernel-allocated PRP list (we'll use userspace one instead)
-      struct rocm_axiio_free_contig_mem_req free_req = {};
+      rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = prp_alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       
@@ -3804,10 +3262,12 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   void* cq_gpu = nullptr;
   bool sq_uses_coherent = false; // Track if SQ was reallocated with coherent
   bool cq_uses_coherent = false; // Track if CQ was reallocated with coherent
-  bool sq_uses_kernel_alloc = false; // Track if SQ was allocated via kernel module
-  bool cq_uses_kernel_alloc = false; // Track if CQ was allocated via kernel module
-  uint64_t sq_kernel_virt_addr = 0; // Kernel virtual address for SQ (for freeing)
-  uint64_t cq_kernel_virt_addr = 0; // Kernel virtual address for CQ (for freeing)
+  // Track if SQ/CQ were allocated via kernel module
+  bool sq_uses_kernel_alloc = false;
+  bool cq_uses_kernel_alloc = false;
+  // Kernel virtual addresses for SQ/CQ (for freeing)
+  uint64_t sq_kernel_virt_addr = 0;
+  uint64_t cq_kernel_virt_addr = 0;
   bool sq_is_device = (memory_mode & 0x1) != 0; // Bit 0: GPU write location
   bool cq_is_device = (memory_mode & 0x2) != 0; // Bit 1: CPU write location
   int sq_dmabuf_fd = -1; // Not currently used, but kept for struct
@@ -3985,7 +3445,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   // We'll get physical addresses via /proc/self/pagemap for PRP list generation
   // Skip kernel allocation for non-contiguous queues
   if (false && !gpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
-    struct rocm_axiio_alloc_contig_mem_req alloc_req = {};
+    rocm_axiio_alloc_contig_mem_req alloc_req = {};
     alloc_req.size = sq_size_bytes;
     
     // Allocate contiguous memory via kernel module IOCTL
@@ -4021,7 +3481,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
               "ERROR: Failed to mmap contiguous SQ memory: %s (errno=%d)\n",
               strerror(errno), errno);
       // Free the kernel allocation
-      struct rocm_axiio_free_contig_mem_req free_req = {};
+      rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       ret = -errno;
@@ -4058,7 +3518,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
 
   // For non-contiguous queues (PC=0), skip kernel allocation
   if (false && !cpuWriteToDevice) { // Disabled for PC=0 (non-contiguous queues)
-    struct rocm_axiio_alloc_contig_mem_req alloc_req = {};
+    rocm_axiio_alloc_contig_mem_req alloc_req = {};
     alloc_req.size = cq_size_bytes;
     
     // Allocate contiguous memory via kernel module IOCTL
@@ -4087,7 +3547,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
               "ERROR: Failed to mmap contiguous CQ memory: %s\n",
               strerror(errno));
       // Free the kernel allocation
-      struct rocm_axiio_free_contig_mem_req free_req = {};
+      rocm_axiio_free_contig_mem_req free_req = {};
       free_req.virt_addr = alloc_req.virt_addr;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       ret = -errno;
@@ -4300,7 +3760,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     }
 
     // Get physical address via kernel module
-    struct rocm_axiio_register_buffer_req buf_req = {};
+    rocm_axiio_register_buffer_req buf_req = {};
     buf_req.dmabuf_fd = sq_dmabuf_fd;
     buf_req.virt_addr = reinterpret_cast<uint64_t>(sq_virt);
     buf_req.size = sq_size_bytes;
@@ -4391,7 +3851,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
     }
 
     // Get physical address via kernel module
-    struct rocm_axiio_register_buffer_req buf_req = {};
+    rocm_axiio_register_buffer_req buf_req = {};
     buf_req.dmabuf_fd = cq_dmabuf_fd;
     buf_req.virt_addr = reinterpret_cast<uint64_t>(cq_virt);
     buf_req.size = cq_size_bytes;
@@ -4461,7 +3921,7 @@ __host__ int nvme_ep::nvme_create_queue_via_ioctl(
   // Note: For device memory queues, ROCM_XIO_REGISTER_BUFFER was already
   // called above to map the DMA-BUF. This registration is for kprobe tracking
   // and works for both host and device memory queues.
-  struct rocm_axiio_register_queue_addr_req reg_req;
+  rocm_axiio_register_queue_addr_req reg_req;
 
   // Register SQ
   memset(&reg_req, 0, sizeof(reg_req));
@@ -4810,7 +4270,7 @@ cleanup:
           (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
           ~(sysconf(_SC_PAGESIZE) - 1);
         munmap(sq_prp_list_virt, prp_list_size_aligned);
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = sq_prp_list_kernel_virt;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       } else {
@@ -4835,7 +4295,7 @@ cleanup:
           (prp_list_size + sysconf(_SC_PAGESIZE) - 1) & 
           ~(sysconf(_SC_PAGESIZE) - 1);
         munmap(cq_prp_list_virt, prp_list_size_aligned);
-        struct rocm_axiio_free_contig_mem_req free_req = {};
+        rocm_axiio_free_contig_mem_req free_req = {};
         free_req.virt_addr = cq_prp_list_kernel_virt;
         ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
       } else {
@@ -4866,7 +4326,7 @@ cleanup:
         }
         // Free kernel-allocated memory via IOCTL
         if (kmod_fd >= 0) {
-          struct rocm_axiio_free_contig_mem_req free_req = {};
+          rocm_axiio_free_contig_mem_req free_req = {};
           free_req.virt_addr = sq_kernel_virt_addr;
           ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         }
@@ -4887,7 +4347,7 @@ cleanup:
         }
         // Free kernel-allocated memory via IOCTL
         if (kmod_fd >= 0) {
-          struct rocm_axiio_free_contig_mem_req free_req = {};
+          rocm_axiio_free_contig_mem_req free_req = {};
           free_req.virt_addr = cq_kernel_virt_addr;
           ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_MEM, &free_req);
         }
@@ -4978,7 +4438,7 @@ __host__ int nvme_ep::nvme_cleanup_queue_via_ioctl(
 
   // Unregister queue addresses from kernel module
   if (kmod_fd >= 0) {
-    struct rocm_axiio_unregister_queue_addr_req unreg_req;
+    rocm_axiio_unregister_queue_addr_req unreg_req;
 
     // Unregister SQ
     memset(&unreg_req, 0, sizeof(unreg_req));

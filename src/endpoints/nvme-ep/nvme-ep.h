@@ -264,6 +264,10 @@ __host__ int nvme_ep_map_bar0(uint16_t nvme_bdf, void** bar0_cpu,
 
 namespace nvme_ep {
 
+// Invalid PRP marker constants (used when buffer calculation fails)
+static constexpr uint64_t NVME_EP_INVALID_PRP1 = 0xDEADBEEF00000000ULL;
+static constexpr uint64_t NVME_EP_INVALID_PRP2 = 0xCAFEBABE00000000ULL;
+
 /**
  * Create NVMe IO queue pair via IOCTL interface using kernel module
  *
@@ -613,6 +617,9 @@ struct NvmeEpConfig {
   int readIo;  // Number of read I/O operations (negative for sequential mode)
   int writeIo; // Number of write I/O operations (negative for sequential mode)
 
+  // Batch mode configuration
+  uint16_t batchSize; // Batch size for batch mode (0 = auto: min(queueLength/2, 16))
+
   // PCI MMIO Bridge configuration (Requires OOT QEMU)
   bool usePciMmioBridge;  // Use PCI MMIO bridge for doorbell routing
   uint16_t mmioBridgeBdf; // PCI MMIO bridge BDF (0xBBDD format, e.g., 0x0400
@@ -632,6 +639,7 @@ struct NvmeEpConfig {
       cqBaseAddr(0), sqSize(0), cqSize(0), accessPattern("random"),
       lbaSize(512), baseLba(0),    // Default: start at LBA 0
       dataBufferSize(1024 * 1024), // 1 MB default
+      batchSize(0),                // 0 = auto-calculate
       lfsrSeed(0), readIo(0),
       writeIo(0), // Default: 0 (must specify at least one)
       usePciMmioBridge(false),
@@ -688,6 +696,13 @@ inline void registerCliOptions(CLI::App& app, nvme_ep::NvmeEpConfig* config) {
     .add_option("--base-lba", config->baseLba,
                 "Starting LBA for I/O operations (default: 0)")
     ->default_val(0)
+    ->group(nvme_group);
+
+  app
+    .add_option("--batch-size", config->batchSize,
+                "Batch size for batch mode IO (0 = auto: min(queue-length/2, 16))")
+    ->default_val(0)
+    ->check(CLI::Range(0, 65535))
     ->group(nvme_group);
 
   app
