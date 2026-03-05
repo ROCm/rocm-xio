@@ -8,7 +8,10 @@ on:
     paths:
       - '**.hip'
       - '**.cpp'
+      - '**.c'
       - '**.h'
+      - '**.hpp'
+      - '**.cc'
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'scripts/**'
