@@ -21,12 +21,24 @@
 #include <hip/hip_runtime.h>
 
 #include <dirent.h>
+#include <drm/amdgpu_drm.h>
+#include <drm/drm.h>
 #include <fcntl.h>
+#include <linux/ioctl.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "rocm-xio-kmod.h"
 #include "xio.h"
+
+#ifndef __HIP_DEVICE_COMPILE__
+#include <cstdint>
+
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
+#endif // __HIP_DEVICE_COMPILE__
 
 void xioPrintDeviceInfo() {
   int deviceCount;
@@ -426,26 +438,30 @@ hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
   return status;
 }
 
-// Allocate submission queue memory based on memory mode
+// Allocate queue memory based on memory mode
 // Returns hipSuccess on success, hipErrorMemoryAllocation on failure
-hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
-                                      void** ptr) {
-  bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
-
-  if (gpuWriteToDevice) {
+// @param size Size of queue in bytes
+// @param isDeviceMemory true to allocate device memory (hipMalloc), false for
+// host memory (hipHostMalloc/malloc)
+// @param queueName Name of queue type for error messages ("submission queue" or
+// "completion queue")
+// @param ptr Output parameter for allocated pointer
+hipError_t xioAllocateQueue(size_t size, bool isDeviceMemory,
+                            const char* queueName, void** ptr) {
+  if (isDeviceMemory) {
     // Allocate device memory using hipMalloc (exportable as DMA-BUF)
     // This matches VRAM buffer allocation and allows DMA-BUF export for
     // physical address resolution in nvme-ep
     hipError_t hipErr = hipMalloc(ptr, size);
     if (hipErr != hipSuccess) {
-      std::cerr << "Error: hipMalloc failed for submission queue: "
+      std::cerr << "Error: hipMalloc failed for " << queueName << ": "
                 << hipGetErrorString(hipErr) << std::endl;
       return hipErrorMemoryAllocation;
     }
     // Zero-initialize using hipMemset
     hipError_t memsetErr = hipMemset(*ptr, 0, size);
     if (memsetErr != hipSuccess) {
-      std::cerr << "Warning: hipMemset failed for submission queue: "
+      std::cerr << "Warning: hipMemset failed for " << queueName << ": "
                 << hipGetErrorString(memsetErr) << std::endl;
       // Continue anyway - memory might already be zeroed
     }
@@ -458,7 +474,7 @@ hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
       // HIP not available (e.g., emulate mode), fall back to malloc
       *ptr = malloc(size);
       if (*ptr == nullptr) {
-        std::cerr << "Error: malloc failed for submission queue" << std::endl;
+        std::cerr << "Error: malloc failed for " << queueName << std::endl;
         return hipErrorMemoryAllocation;
       }
     }
@@ -468,58 +484,18 @@ hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
   return hipSuccess;
 }
 
-// Allocate completion queue memory based on memory mode
-// Returns hipSuccess on success, hipErrorMemoryAllocation on failure
-hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
-                                      void** ptr) {
-  bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
-
-  if (cpuWriteToDevice) {
-    // Allocate device memory using hipMalloc (exportable as DMA-BUF)
-    // This matches VRAM buffer allocation and allows DMA-BUF export for
-    // physical address resolution in nvme-ep
-    hipError_t hipErr = hipMalloc(ptr, size);
-    if (hipErr != hipSuccess) {
-      std::cerr << "Error: hipMalloc failed for completion queue: "
-                << hipGetErrorString(hipErr) << std::endl;
-      return hipErrorMemoryAllocation;
-    }
-    // Zero-initialize using hipMemset
-    hipError_t memsetErr = hipMemset(*ptr, 0, size);
-    if (memsetErr != hipSuccess) {
-      std::cerr << "Warning: hipMemset failed for completion queue: "
-                << hipGetErrorString(memsetErr) << std::endl;
-      // Continue anyway - memory might already be zeroed
-    }
-  } else {
-    // Allocate host-accessible memory using HIP (GPU-accessible)
-    // Use hipHostMallocMapped to ensure GPU can access it (needed for test-ep)
-    // nvme-ep will reallocate with hipHostMallocCoherent if needed
-    hipError_t hipErr = hipHostMalloc(ptr, size, hipHostMallocMapped);
-    if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), fall back to malloc
-      *ptr = malloc(size);
-      if (*ptr == nullptr) {
-        std::cerr << "Error: malloc failed for completion queue" << std::endl;
-        return hipErrorMemoryAllocation;
-      }
-    }
-    memset(*ptr, 0, size);
-  }
-
-  return hipSuccess;
-}
-
-// Free submission queue memory based on memory mode
-void xioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
-  bool gpuWriteToDevice = (memoryMode & 0x1) != 0; // LSB
-
-  if (gpuWriteToDevice) {
+// Free queue memory based on memory mode
+// @param ptr Pointer to free
+// @param isDeviceMemory true if allocated with hipMalloc, false if
+// hipHostMalloc/malloc
+// @param queueName Name of queue type for error messages
+void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName) {
+  if (isDeviceMemory) {
     // Free HIP device memory
     if (ptr != nullptr) {
       hipError_t hipErr = hipFree(ptr);
       if (hipErr != hipSuccess) {
-        std::cerr << "Warning: hipFree failed for submission queue: "
+        std::cerr << "Warning: hipFree failed for " << queueName << ": "
                   << hipGetErrorString(hipErr) << std::endl;
       }
     }
@@ -535,28 +511,161 @@ void xioFreeSubmissionQueue(void* ptr, unsigned memoryMode) {
   }
 }
 
-// Free completion queue memory based on memory mode
-void xioFreeCompletionQueue(void* ptr, unsigned memoryMode) {
-  bool cpuWriteToDevice = (memoryMode & 0x2) != 0; // MSB
+// Reallocate host memory queue with hipHostMallocCoherent for GPU-PCIe
+// coherency This is critical for gfx900 (MI250) where GPU writes must be
+// immediately visible to PCIe devices like NVMe controllers.
+//
+// @param ptr Pointer to current allocation (updated to coherent memory on
+// success)
+// @param size Size of queue in bytes
+// @param queueName Name of queue type for error messages
+//
+// @return true if successfully reallocated to coherent memory, false otherwise
+//         (false means either allocation failed or ptr was nullptr)
+//
+// @note On success, the original allocation is freed and ptr is updated to
+// point
+//       to the new coherent allocation. On failure, ptr remains unchanged.
+__host__ bool xioReallocateQueue(void** ptr, size_t size,
+                                 const char* queueName) {
+  if (!ptr || !*ptr) {
+    return false;
+  }
 
-  if (cpuWriteToDevice) {
-    // Free HIP device memory
-    if (ptr != nullptr) {
-      hipError_t hipErr = hipFree(ptr);
-      if (hipErr != hipSuccess) {
-        std::cerr << "Warning: hipFree failed for completion queue: "
-                  << hipGetErrorString(hipErr) << std::endl;
-      }
+  void* coherent_ptr = nullptr;
+  hipError_t coherent_err = hipHostMalloc(&coherent_ptr, size,
+                                          hipHostMallocMapped |
+                                            hipHostMallocCoherent);
+  if (coherent_err != hipSuccess) {
+    fprintf(stdout, "Warning: hipHostMallocCoherent failed for %s: %s\n",
+            queueName, hipGetErrorString(coherent_err));
+    fprintf(stdout, "Falling back to regular allocation (may not work on "
+                    "gfx900)\n");
+    return false;
+  }
+
+  // Copy data from original allocation to coherent memory
+  memcpy(coherent_ptr, *ptr, size);
+
+  // Free original allocation (may be hipHostMalloc or malloc)
+  hipError_t freeErr = hipHostFree(*ptr);
+  if (freeErr != hipSuccess) {
+    // Not HIP-allocated, use regular free
+    free(*ptr);
+  }
+
+  // Update pointer to coherent allocation
+  *ptr = coherent_ptr;
+  return true;
+}
+
+// Register a queue with GPU via DRM GEM_USERPTR
+// Opens DRM device and registers a single queue for GPU access.
+//
+// @param queue_virt Queue virtual address
+// @param queue_size_aligned Queue size (page-aligned)
+// @param is_device True if queue is device memory (already GPU-accessible)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+// @param[out] userptr GEM_USERPTR struct (filled on success)
+//
+// @return Pointer to userptr on success, NULL on failure
+//
+// @note For device memory queues, registration is optional (queues are already
+//       GPU-accessible). The DRM file descriptor is opened and closed for each
+//       call. On success, returns the userptr parameter. On failure, returns
+//       NULL.
+__host__ struct drm_amdgpu_gem_userptr* xioRegQueueGpu(
+  void* queue_virt, size_t queue_size_aligned, bool is_device,
+  const char* queue_name, struct drm_amdgpu_gem_userptr* userptr) {
+  if (!userptr || !queue_name) {
+    return NULL;
+  }
+
+  // Open DRM device
+  int drm_fd = open("/dev/dri/renderD128", O_RDWR);
+  if (drm_fd < 0) {
+    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
+            strerror(errno));
+    fprintf(stdout, "Cannot register %s with GPU via GEM_USERPTR.\n",
+            queue_name);
+    // For device memory, this is not fatal - queue is already GPU-accessible
+    if (is_device) {
+      fprintf(stdout,
+              "Note: %s is device memory (already GPU-accessible), "
+              "continuing without GEM_USERPTR\n",
+              queue_name);
+      // Zero-initialize userptr for device memory case
+      memset(userptr, 0, sizeof(*userptr));
+      return userptr; // Success (not needed for device memory)
+    } else {
+      return NULL;
+    }
+  }
+
+  // Register queue with DRM GEM_USERPTR
+  userptr->addr = (uint64_t)queue_virt;
+  userptr->size = queue_size_aligned;
+  userptr->flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, userptr) < 0) {
+    fprintf(stdout,
+            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for %s: "
+            "%s\n",
+            queue_name, strerror(errno));
+    close(drm_fd);
+    // For device memory, this is not fatal
+    if (is_device) {
+      fprintf(stdout,
+              "Info: %s is device memory (already GPU-accessible), "
+              "continuing without GEM_USERPTR.\n",
+              queue_name);
+      // Zero-initialize userptr for device memory case
+      memset(userptr, 0, sizeof(*userptr));
+      return userptr; // Success (not needed for device memory)
+    } else {
+      fprintf(stderr, "Error: Cannot register %s with GPU.\n", queue_name);
+      return NULL;
     }
   } else {
-    // Free HIP host memory or malloc-allocated memory
-    if (ptr != nullptr) {
-      hipError_t hipErr = hipHostFree(ptr);
-      if (hipErr != hipSuccess) {
-        // Not HIP-allocated, use regular free
-        free(ptr);
-      }
+    fprintf(stdout, "Info: %s registered with DRM GEM_USERPTR (handle: %u).\n",
+            queue_name, userptr->handle);
+  }
+
+  close(drm_fd);
+  return userptr;
+}
+
+// Get GPU-accessible pointer for a queue
+// For device memory, returns the same pointer. For host memory, gets GPU
+// pointer via hipHostGetDevicePointer.
+//
+// @param host_ptr Host-accessible pointer to the queue
+// @param is_device True if queue is device memory (GPU pointer same as host)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+//
+// @return GPU-accessible pointer on success, NULL on failure
+//
+// @note For device memory, this simply returns the host_ptr. For host memory,
+//       this calls hipHostGetDevicePointer to get the GPU-accessible address.
+__host__ void* xioGetGpuPointer(void* host_ptr, bool is_device,
+                                const char* queue_name) {
+  if (!host_ptr || !queue_name) {
+    return NULL;
+  }
+
+  if (is_device) {
+    // Device memory - GPU pointer is same as host pointer
+    return host_ptr;
+  } else {
+    // Host memory - get GPU pointer via hipHostGetDevicePointer
+    void* gpu_ptr = nullptr;
+    hipError_t err = hipHostGetDevicePointer(&gpu_ptr, host_ptr, 0);
+    if (err != hipSuccess) {
+      fprintf(stdout, "Warning: hipHostGetDevicePointer failed for %s: %s\n",
+              queue_name, hipGetErrorString(err));
+      return NULL;
     }
+    return gpu_ptr;
   }
 }
 
@@ -1066,6 +1175,111 @@ __host__ uint64_t xioGetPhysAddr(void* virt_addr) {
   return phys_addr;
 }
 
+// Get physical address for a buffer (unified interface for device and host
+// memory) For device memory: exports as DMA-BUF and registers with kernel
+// module For host memory: uses /proc/self/pagemap to get physical address
+//
+// @param buffer_ptr Buffer virtual address
+// @param size Buffer size in bytes
+// @param is_device True if buffer is device memory (VRAM), false for host
+// memory
+// @param nvme_bdf NVMe controller BDF (required for device memory)
+// @param kernel_module_device Path to kernel module device (required for device
+// memory)
+// @param is_emulated True if NVMe controller is emulated (required for device
+// memory)
+// @param buffer_name Name of buffer for logging (e.g., "submission queue")
+//
+// @return Physical address on success, 0 on failure
+//
+// @note For device memory, this exports the buffer as DMA-BUF and registers it
+//       with the kernel module. For host memory, this uses pagemap lookup.
+//       On failure, returns 0. Caller should handle fallback to virtual address
+//       if needed.
+__host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
+                                 uint16_t nvme_bdf,
+                                 const char* kernel_module_device,
+                                 bool is_emulated, const char* buffer_name) {
+  if (!buffer_ptr || size == 0 || !buffer_name) {
+    return 0;
+  }
+
+  if (is_device) {
+    // Device memory (HSA) - export as DMA-BUF and get physical address
+    if (!kernel_module_device) {
+      fprintf(stderr,
+              "ERROR: kernel_module_device required for device memory "
+              "buffer %s\n",
+              buffer_name);
+      return 0;
+    }
+
+    uint64_t phys_addr = 0;
+    int ret = export_and_register_vram_buffer(buffer_ptr, size, nvme_bdf,
+                                              kernel_module_device, &phys_addr,
+                                              is_emulated);
+    if (ret < 0) {
+      fprintf(stderr, "ERROR: Failed to register %s device memory: %s\n",
+              buffer_name, strerror(-ret));
+      return 0;
+    }
+    fprintf(stdout,
+            "%s device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
+            buffer_name,
+            (unsigned long long)reinterpret_cast<uint64_t>(buffer_ptr),
+            (unsigned long long)phys_addr);
+    return phys_addr;
+  } else {
+    // Host memory - use pagemap to get physical address
+    uint64_t phys_addr = xioGetPhysAddr(buffer_ptr);
+    if (phys_addr == 0) {
+      fprintf(stdout,
+              "Warning: Failed to get %s physical address, using "
+              "virtual address\n",
+              buffer_name);
+      return reinterpret_cast<uint64_t>(buffer_ptr);
+    }
+    return phys_addr;
+  }
+}
+
+// Register a queue address with the kernel module for kprobe injection
+// Registers the virtual and physical addresses of a queue so the kernel module
+// can inject physical addresses into NVMe CREATE_SQ/CREATE_CQ commands.
+//
+// @param kmod_fd File descriptor for kernel module device
+// @param virt_addr Virtual address of the queue
+// @param phys_addr Physical address of the queue
+// @param size Size of the queue in bytes
+// @param queue_type Queue type: 0 for SQ (Submission Queue), 1 for CQ
+//                   (Completion Queue)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+//
+// @return 0 on success, negative error code on failure
+__host__ int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
+                             size_t size, uint8_t queue_type,
+                             const char* queue_name) {
+  if (kmod_fd < 0 || !virt_addr || size == 0 || !queue_name) {
+    return -EINVAL;
+  }
+
+  struct rocm_axiio_register_queue_addr_req reg_req;
+  memset(&reg_req, 0, sizeof(reg_req));
+  reg_req.virt_addr = reinterpret_cast<uint64_t>(virt_addr);
+  reg_req.phys_addr = phys_addr;
+  reg_req.size = size;
+  reg_req.queue_type = queue_type;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
+  if (ret < 0) {
+    fprintf(stdout, "Failed to register %s address: %s\n", queue_name,
+            strerror(errno));
+    return -errno;
+  }
+
+  return 0;
+}
+
 // Check if rocm-xio kernel module is loaded
 // Note: Linux converts hyphens to underscores in module names, so we check
 // for "rocm_xio" in /proc/modules
@@ -1097,6 +1311,302 @@ int xioLoadKernelModule() {
               << "is available." << std::endl;
     return -1;
   }
+  return 0;
+}
+
+// Map PCI MMIO bridge shadow buffer via kernel module
+// Returns 0 on success, negative error code on failure
+// The shadow buffer is mapped into the process address space and remains
+// valid until the process exits (kernel module keeps the file descriptor
+// open for the mapping)
+int xioMapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
+  int kmod_fd = -1;
+  int ret = 0;
+  struct rocm_axiio_mmio_bridge_shadow_req req;
+  void* mapped = MAP_FAILED;
+
+  if (!virt_addr) {
+    return -EINVAL;
+  }
+
+  // Open kernel module device
+  kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+  if (kmod_fd < 0) {
+    fprintf(stdout, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
+            strerror(errno));
+    fprintf(stdout, "Please ensure the rocm-xio kernel module is loaded\n");
+    return -errno;
+  }
+
+  // Get shadow buffer info from kernel module
+  memset(&req, 0, sizeof(req));
+  req.bridge_bdf = bridge_bdf;
+  ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
+  if (ret < 0) {
+    fprintf(stdout, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
+            strerror(errno));
+    close(kmod_fd);
+    return -errno;
+  }
+
+  if (req.shadow_gpa == 0) {
+    fprintf(stdout, "PCI MMIO bridge shadow GPA is 0 (not configured)\n");
+    close(kmod_fd);
+    return -EINVAL;
+  }
+
+  // Map shadow buffer via kernel module mmap
+  mapped = mmap(nullptr, req.shadow_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                kmod_fd, 0);
+  if (mapped == MAP_FAILED) {
+    fprintf(stdout, "Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
+            strerror(errno));
+    close(kmod_fd);
+    return -errno;
+  }
+
+  // Keep kmod_fd open for the mapping to remain valid
+  // Note: In a production system, you might want to track this fd
+  // and close it on cleanup, but for simplicity we'll leave it open
+  // The kernel will clean it up when the process exits
+
+  *virt_addr = mapped;
+  fprintf(stdout,
+          "PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
+          "size=%llu, vaddr=%p\n",
+          (unsigned long long)req.shadow_gpa,
+          (unsigned long long)req.shadow_size, mapped);
+
+  return 0;
+}
+
+// Register PCI MMIO bridge shadow buffer for GPU access
+// This function registers a shadow buffer (already mapped via
+// xioMapMmioBridgeShadowBuffer) with DRM GEM_USERPTR and HIP to make it
+// GPU-accessible.
+//
+// @param shadow_virt Host virtual address of shadow buffer (from mmap)
+// @param shadow_size Size of shadow buffer in bytes (typically 8192)
+// @param gpu_ptr_out Output parameter for GPU-accessible pointer
+//
+// @return 0 on success, negative error code on failure
+// @note On failure, the shadow buffer is unmapped and cleaned up
+// @note The DRM file descriptor is closed after registration (mapping persists)
+__host__ int xioRegisterMmioBridgeShadowBufferForGpu(void* shadow_virt,
+                                                     size_t shadow_size,
+                                                     void** gpu_ptr_out) {
+  if (!shadow_virt || !gpu_ptr_out) {
+    return -EINVAL;
+  }
+
+  // Step 1: Register with DRM GEM_USERPTR (required for GPU access)
+  int drm_fd = open("/dev/dri/renderD128", O_RDWR);
+  if (drm_fd < 0) {
+    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
+            strerror(errno));
+    fprintf(stdout,
+            "Cannot register shadow buffer with GPU via GEM_USERPTR.\n");
+    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
+                    "doorbell.\n");
+    munmap(shadow_virt, shadow_size);
+    *gpu_ptr_out = nullptr;
+    return -errno;
+  }
+
+  struct drm_amdgpu_gem_userptr gem_userptr = {};
+  gem_userptr.addr = (uint64_t)shadow_virt;
+  gem_userptr.size = shadow_size;
+  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
+    fprintf(stdout, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed: %s\n",
+            strerror(errno));
+    fprintf(stdout, "Cannot register shadow buffer with GPU.\n");
+    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
+                    "doorbell.\n");
+    close(drm_fd);
+    munmap(shadow_virt, shadow_size);
+    *gpu_ptr_out = nullptr;
+    return -errno;
+  }
+
+  fprintf(stdout,
+          "Shadow buffer registered with DRM GEM_USERPTR (handle: %u)\n",
+          gem_userptr.handle);
+
+  // Step 2: Register with HIP (matching QEMU guest code pattern)
+  hipError_t hip_err = hipHostRegister(shadow_virt, shadow_size,
+                                       hipHostRegisterMapped);
+  if (hip_err != hipSuccess) {
+    fprintf(stdout, "Warning: Failed to register shadow buffer with HIP: %s\n",
+            hipGetErrorString(hip_err));
+    fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
+                    "doorbell.\n");
+    close(drm_fd);
+    munmap(shadow_virt, shadow_size);
+    *gpu_ptr_out = nullptr;
+    return -1; // Return generic error (HIP error codes are positive)
+  }
+
+  fprintf(stdout, "Shadow buffer registered with HIP for GPU access\n");
+
+  // Step 3: Get GPU pointer (matching QEMU guest code pattern)
+  // After hipHostRegister, we need hipHostGetDevicePointer to get the
+  // GPU-accessible pointer
+  void* shadow_gpu_ptr = nullptr;
+  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt,
+                                                   0);
+  if (gpu_ptr_err != hipSuccess) {
+    fprintf(stdout, "Warning: hipHostGetDevicePointer failed: %s\n",
+            hipGetErrorString(gpu_ptr_err));
+    fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
+                    "doorbell.\n");
+    close(drm_fd);
+    munmap(shadow_virt, shadow_size);
+    *gpu_ptr_out = nullptr;
+    return -1; // Return generic error
+  }
+
+  fprintf(stdout, "Shadow buffer GPU pointer obtained: %p (host: %p)\n",
+          shadow_gpu_ptr, shadow_virt);
+
+  // Close DRM fd - the mapping persists even after close
+  // The kernel will clean it up when the process exits
+  close(drm_fd);
+
+  *gpu_ptr_out = shadow_gpu_ptr;
+  return 0;
+}
+
+// Map PCI BAR for GPU access
+// This function maps a PCI device's BAR (Base Address Register) to userspace
+// and registers it with DRM GEM_USERPTR and HIP for GPU access.
+//
+// @param pci_bdf PCI device BDF in 0xBBDD format
+// @param bar BAR number to map (0-5, typically 0 for BAR0)
+// @param bar_cpu Output parameter for CPU-accessible BAR pointer
+// @param bar_gpu Output parameter for GPU-accessible BAR pointer
+// @param bar_size Size to map in bytes (defaults to 8192 if 0)
+//
+// @return 0 on success, negative error code on failure
+// @note The file descriptors are kept open for the mapping to remain valid
+// @note The kernel will clean up mappings when the process exits
+__host__ int xioMapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
+                          void** bar_gpu, size_t bar_size) {
+  if (!bar_cpu || !bar_gpu) {
+    return -EINVAL;
+  }
+
+  if (bar > 5) {
+    fprintf(stderr, "Error: Invalid BAR number %u (must be 0-5)\n", bar);
+    return -EINVAL;
+  }
+
+  int bar_fd = -1;
+  int drm_fd = -1;
+  void* mapped = MAP_FAILED;
+  char resource_path[256];
+
+  // Default size if not specified
+  if (bar_size == 0) {
+    bar_size = 8192; // Default to 8KB
+  }
+
+  // Convert BDF to format: 00:BB:DD.F
+  uint8_t bus = (pci_bdf >> 8) & 0xFF;
+  uint8_t dev = (pci_bdf >> 3) & 0x1F;
+  uint8_t func = pci_bdf & 0x7;
+
+  // Build resource path: /sys/bus/pci/devices/0000:BB:DD.F/resource{bar}
+  snprintf(resource_path, sizeof(resource_path),
+           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource%u", bus, dev, func,
+           bar);
+
+  // Open BAR resource file
+  bar_fd = open(resource_path, O_RDWR);
+  if (bar_fd < 0) {
+    fprintf(stdout, "Failed to open PCI BAR%u resource %s: %s\n", bar,
+            resource_path, strerror(errno));
+    return -errno;
+  }
+
+  // Map BAR to userspace
+  mapped = mmap(nullptr, bar_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar_fd,
+                0);
+  if (mapped == MAP_FAILED) {
+    fprintf(stdout, "Failed to mmap PCI BAR%u: %s\n", bar, strerror(errno));
+    close(bar_fd);
+    return -errno;
+  }
+
+  fprintf(stdout, "PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
+
+  // Register with DRM GEM_USERPTR (required for GPU access to PCI MMIO)
+  drm_fd = open("/dev/dri/renderD128", O_RDWR);
+  if (drm_fd < 0) {
+    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
+            strerror(errno));
+    fprintf(stdout, "Cannot register BAR%u with GPU via GEM_USERPTR.\n", bar);
+    munmap(mapped, bar_size);
+    close(bar_fd);
+    return -errno;
+  }
+
+  struct drm_amdgpu_gem_userptr gem_userptr = {};
+  gem_userptr.addr = (uint64_t)mapped;
+  gem_userptr.size = bar_size;
+  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
+
+  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
+    fprintf(stdout,
+            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for BAR%u: "
+            "%s\n",
+            bar, strerror(errno));
+    fprintf(stdout, "Cannot register BAR%u with GPU.\n", bar);
+    close(drm_fd);
+    munmap(mapped, bar_size);
+    close(bar_fd);
+    return -errno;
+  }
+
+  fprintf(stdout, "PCI BAR%u registered with DRM GEM_USERPTR (handle: %u)\n",
+          bar, gem_userptr.handle);
+
+  // Register with HIP
+  hipError_t hip_err = hipHostRegister(mapped, bar_size, hipHostRegisterMapped);
+  if (hip_err != hipSuccess) {
+    fprintf(stdout, "Warning: Failed to register BAR%u with HIP: %s\n", bar,
+            hipGetErrorString(hip_err));
+    close(drm_fd);
+    munmap(mapped, bar_size);
+    close(bar_fd);
+    return -EINVAL;
+  }
+
+  fprintf(stdout, "PCI BAR%u registered with HIP for GPU access\n", bar);
+
+  // Get GPU pointer
+  void* gpu_ptr = nullptr;
+  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
+  if (gpu_ptr_err != hipSuccess) {
+    fprintf(stdout, "Warning: hipHostGetDevicePointer failed for BAR%u: %s\n",
+            bar, hipGetErrorString(gpu_ptr_err));
+    (void)hipHostUnregister(mapped);
+    close(drm_fd);
+    munmap(mapped, bar_size);
+    close(bar_fd);
+    return -EINVAL;
+  }
+
+  fprintf(stdout, "PCI BAR%u GPU pointer obtained: %p (host: %p)\n", bar,
+          gpu_ptr, mapped);
+
+  // Keep bar_fd and drm_fd open for the mapping to remain valid
+  // The kernel will clean them up when the process exits
+
+  *bar_cpu = mapped;
+  *bar_gpu = gpu_ptr;
+
   return 0;
 }
 
@@ -1152,4 +1662,324 @@ int xioEnsureDeviceNode() {
   }
 
   return 0;
+}
+
+// Export HSA-allocated VRAM as DMA-BUF and register with kernel module
+// Based on QEMU reference code: test-gpu-nvme-write.cpp
+// Returns 0 on success, negative error code on failure
+// is_emulated: true for emulated NVMe (returns GPU BAR GPA), false for
+// passthrough (returns P2PDMA IOVA)
+int export_and_register_vram_buffer(void* vram_ptr, size_t size,
+                                    uint16_t nvme_bdf,
+                                    const char* kernel_module_device,
+                                    uint64_t* phys_addr_out, bool is_emulated) {
+#ifndef __HIP_DEVICE_COMPILE__
+  hsa_status_t status;
+  hipDeviceptr_t aligned_ptr;
+  const size_t host_page_size = sysconf(_SC_PAGESIZE);
+  uint64_t dmabuf_offset = 0;
+  size_t aligned_size;
+  int dmabuf_fd = -1;
+  int kmod_fd = -1;
+  int ret = 0;
+
+  if (!vram_ptr || !phys_addr_out || size == 0) {
+    return -EINVAL;
+  }
+
+  // Round down to host page size for dmabuf alignment
+  aligned_ptr = (hipDeviceptr_t)((uintptr_t)vram_ptr & ~(host_page_size - 1));
+  dmabuf_offset = (uintptr_t)vram_ptr - (uintptr_t)aligned_ptr;
+  aligned_size = (size + dmabuf_offset + host_page_size - 1) &
+                 ~(host_page_size - 1);
+
+  fprintf(stdout,
+          "  Aligning VRAM buffer: ptr=%p -> aligned=%p, "
+          "size=%zu -> %zu, offset=%llu\n",
+          vram_ptr, (void*)aligned_ptr, size, aligned_size,
+          (unsigned long long)dmabuf_offset);
+
+  // Export as DMA-BUF using HSA runtime
+  dmabuf_fd = 0;
+  status = hsa_amd_portable_export_dmabuf((void*)aligned_ptr, aligned_size,
+                                          &dmabuf_fd, &dmabuf_offset);
+  if (status != HSA_STATUS_SUCCESS) {
+    fprintf(stdout,
+            "ERROR: hsa_amd_portable_export_dmabuf failed (status=%d)\n",
+            status);
+    fprintf(stdout, "  This requires:\n");
+    fprintf(stdout, "  - ROCm 5.3+ with dmabuf support\n");
+    fprintf(stdout, "  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
+    fprintf(stdout, "  - Kernel CONFIG_PCI_P2PDMA=y\n");
+    return -ENOTSUP;
+  }
+
+  fprintf(stdout, "  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
+          (unsigned long long)dmabuf_offset);
+
+  // Open kernel module device
+  kmod_fd = open(kernel_module_device, O_RDWR);
+  if (kmod_fd < 0) {
+    fprintf(stderr, "ERROR: Failed to open %s: %s\n", kernel_module_device,
+            strerror(errno));
+    close(dmabuf_fd);
+    return -errno;
+  }
+
+  // Register buffer with kernel module to get physical address
+  struct rocm_axiio_register_buffer_req req = {};
+  req.dmabuf_fd = dmabuf_fd;
+  req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
+  req.size = size;
+  req.nvme_bdf = nvme_bdf;
+  req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED : ROCM_XIO_FLAG_PASSTHROUGH;
+
+  ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &req);
+  if (ret < 0) {
+    fprintf(stderr, "ERROR: ROCM_XIO_REGISTER_BUFFER ioctl failed: %s\n",
+            strerror(errno));
+    close(dmabuf_fd);
+    close(kmod_fd);
+    return -errno;
+  }
+
+  // Physical address includes the offset within the dmabuf
+  *phys_addr_out = req.phys_addr + dmabuf_offset;
+
+  fprintf(stdout,
+          "  ✅ Registered buffer: virt=0x%016llx, phys=0x%016llx, "
+          "size=%zu\n",
+          (unsigned long long)req.virt_addr, (unsigned long long)*phys_addr_out,
+          size);
+
+  // Close dmabuf FD - kernel module has the mapping
+  close(dmabuf_fd);
+  close(kmod_fd);
+
+  return 0;
+#else
+  (void)vram_ptr;
+  (void)size;
+  (void)nvme_bdf;
+  (void)kernel_module_device;
+  (void)phys_addr_out;
+  (void)is_emulated;
+  return -ENOTSUP;
+#endif // __HIP_DEVICE_COMPILE__
+}
+
+// Generate and submit a PCI MMIO bridge command
+// This function handles the ring buffer management, command structure
+// population, and memory ordering for PCI MMIO bridge operations.
+//
+// @param shadowBufferVirt Shadow buffer pointer (must point to ring_meta)
+// @param targetBdf Target device BDF (0xBBDD format)
+// @param targetBar Target BAR number (typically 0)
+// @param offset Offset within BAR
+// @param value Value to write (or read result)
+// @param command Command type (PCI_MMIO_BRIDGE_CMD_WRITE or READ)
+// @param size Transfer size in bytes (1, 2, 4, or 8)
+//
+// @note This function is callable from both host and device code
+// @note Memory fences are executed to ensure proper ordering
+__host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
+                                             uint16_t targetBdf,
+                                             uint8_t targetBar, uint32_t offset,
+                                             uint64_t value, uint8_t command,
+                                             uint8_t size) {
+  volatile struct pci_mmio_bridge_ring_meta* meta =
+    static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
+  uint32_t slot = meta->producer_idx % meta->queue_depth;
+  volatile struct pci_mmio_bridge_command* cmd =
+    reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
+      static_cast<volatile uint8_t*>(shadowBufferVirt) +
+      sizeof(struct pci_mmio_bridge_ring_meta) +
+      (slot * sizeof(struct pci_mmio_bridge_command)));
+  cmd->target_bdf = targetBdf;
+  cmd->target_bar = targetBar;
+  cmd->reserved1 = 0;
+  cmd->offset = offset;
+  cmd->value = value;
+  cmd->command = command;
+  cmd->size = size;
+  cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
+  cmd->reserved2 = 0;
+  cmd->sequence = slot;
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+#endif
+  meta->producer_idx = meta->producer_idx + 1;
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+#endif
+}
+
+// Allocate GPU-accessible buffer for DMA operations
+__host__ hipError_t xioAllocateGpuAccessibleBuffer(
+  size_t size, unsigned memoryMode, uint16_t targetBdf, const char* devicePath,
+  struct xioBufferInfo* bufferInfo) {
+  if (!bufferInfo || size == 0) {
+    return hipErrorInvalidValue;
+  }
+
+  // Initialize output structure
+  bufferInfo->hostPtr = nullptr;
+  bufferInfo->gpuPtr = nullptr;
+  bufferInfo->dmaAddr = 0;
+  bufferInfo->isDeviceMemory = false;
+
+  bool dataBufferOnDevice = (memoryMode & 0x8) != 0; // Bit 3
+
+  if (dataBufferOnDevice) {
+    // Device memory - use hipMalloc for VRAM allocation
+    hipError_t buf_err = hipMalloc(&bufferInfo->hostPtr, size);
+    if (buf_err != hipSuccess) {
+      fprintf(stderr, "Error: hipMalloc failed: %s\n",
+              hipGetErrorString(buf_err));
+      return buf_err;
+    }
+
+    fprintf(stdout, "  VRAM buffer virtual: %p\n", bufferInfo->hostPtr);
+    fprintf(stdout, "  Exporting as DMA-BUF (HSA runtime)...\n");
+
+    // Detect if device is emulated (needed for buffer registration flags)
+    bool is_emulated = false;
+    if (devicePath != nullptr) {
+      (void)xioDetectEmulatedNvme(devicePath, &is_emulated);
+    }
+
+    // Export VRAM as dmabuf and register with kernel module
+    int ret = export_and_register_vram_buffer(bufferInfo->hostPtr, size,
+                                              targetBdf, ROCM_XIO_DEVICE_PATH,
+                                              &bufferInfo->dmaAddr,
+                                              is_emulated);
+    if (ret < 0) {
+      fprintf(stderr, "ERROR: DMA-BUF export failed for device memory: %s\n",
+              strerror(-ret));
+      fprintf(stderr, "  Device memory was requested but dmabuf export is "
+                      "not available\n");
+      (void)hipFree(bufferInfo->hostPtr);
+      bufferInfo->hostPtr = nullptr;
+      return hipErrorInvalidValue;
+    }
+
+    fprintf(stdout, "  Data buffer physical: 0x%016llx (VRAM)\n",
+            (unsigned long long)bufferInfo->dmaAddr);
+    fprintf(stdout, "  GPU writes directly to VRAM\n");
+    fprintf(stdout, "  NVMe DMAs from VRAM (P2P)\n");
+
+    // Device memory - GPU pointer is same as host pointer
+    bufferInfo->gpuPtr = bufferInfo->hostPtr;
+    bufferInfo->isDeviceMemory = true;
+  } else {
+    // Host memory - use hipHostMalloc (mapped for GPU access)
+    hipError_t buf_err = hipHostMalloc(&bufferInfo->hostPtr, size,
+                                       hipHostMallocMapped);
+    if (buf_err != hipSuccess) {
+      fprintf(stderr, "Error: hipHostMalloc failed: %s\n",
+              hipGetErrorString(buf_err));
+      return buf_err;
+    }
+
+    // Get physical address for host memory using /proc/self/pagemap
+    bufferInfo->dmaAddr = xioGetPhysAddr(bufferInfo->hostPtr);
+    if (!bufferInfo->dmaAddr) {
+      fprintf(stdout, "ERROR: Failed to get buffer physical address\n");
+      (void)hipHostFree(bufferInfo->hostPtr);
+      bufferInfo->hostPtr = nullptr;
+      return hipErrorInvalidValue;
+    }
+
+    fprintf(stdout, "  Data buffer virtual:  %p\n", bufferInfo->hostPtr);
+    fprintf(stdout, "  Data buffer physical: 0x%016llx\n",
+            (unsigned long long)bufferInfo->dmaAddr);
+    fprintf(stdout, "  GPU can write directly to this buffer\n");
+    fprintf(stdout, "  NVMe can DMA from this buffer\n");
+
+    // Verify buffer is GPU-accessible and get GPU pointer
+    hipPointerAttribute_t attr;
+    hipError_t attr_err = hipPointerGetAttributes(&attr, bufferInfo->hostPtr);
+    if (attr_err != hipSuccess) {
+      fprintf(stdout, "Warning: Buffer may not be GPU-accessible: %s\n",
+              hipGetErrorString(attr_err));
+      bufferInfo->gpuPtr = bufferInfo->hostPtr; // Fallback to host pointer
+    } else {
+      // Get explicit GPU pointer (may be same as host pointer for mapped
+      // memory)
+      void* gpu_ptr = nullptr;
+      hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr,
+                                                       bufferInfo->hostPtr, 0);
+      if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
+        bufferInfo->gpuPtr = gpu_ptr;
+        fprintf(stdout, "Buffer GPU pointer: %p (host: %p)\n",
+                bufferInfo->gpuPtr, bufferInfo->hostPtr);
+      } else {
+        // Fallback: use host pointer (should work for hipHostMallocMapped)
+        bufferInfo->gpuPtr = bufferInfo->hostPtr;
+      }
+    }
+    bufferInfo->isDeviceMemory = false;
+  }
+
+  fprintf(stdout, "Buffer allocated: virt=%p, gpu=%p, phys=0x%llx, size=%zu\n",
+          bufferInfo->hostPtr, bufferInfo->gpuPtr,
+          (unsigned long long)bufferInfo->dmaAddr, size);
+
+  return hipSuccess;
+}
+
+// Free GPU-accessible buffer allocated with xioAllocateGpuAccessibleBuffer
+__host__ void xioFreeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
+  if (!bufferInfo || !bufferInfo->hostPtr) {
+    return;
+  }
+
+  if (bufferInfo->isDeviceMemory) {
+    (void)hipFree(bufferInfo->hostPtr);
+  } else {
+    (void)hipHostFree(bufferInfo->hostPtr);
+  }
+
+  bufferInfo->hostPtr = nullptr;
+  bufferInfo->gpuPtr = nullptr;
+  bufferInfo->dmaAddr = 0;
+  bufferInfo->isDeviceMemory = false;
+}
+
+// Validate that a pointer is GPU-accessible
+// This function checks if a pointer can be accessed by GPU code using
+// hipPointerGetAttributes.
+//
+// @param ptr Pointer to validate (can be nullptr, in which case returns true)
+// @param name Descriptive name for the pointer (used in error messages)
+// @param disableOnFailure If true, prints error and returns false on failure.
+//                         If false, prints warning but still returns false.
+//
+// @return true if pointer is GPU-accessible (or nullptr), false otherwise
+__host__ bool xioValidateGpuPointer(void* ptr, const char* name,
+                                    bool disableOnFailure) {
+  if (ptr == nullptr) {
+    return true; // nullptr is considered valid (optional pointer)
+  }
+
+  hipPointerAttribute_t attr;
+  hipError_t attr_err = hipPointerGetAttributes(&attr, ptr);
+  if (attr_err != hipSuccess) {
+    if (disableOnFailure) {
+      fprintf(stderr,
+              "Error: Failed to get %s pointer attributes: %s (code: %d)\n",
+              name, hipGetErrorString(attr_err), attr_err);
+      fprintf(stderr, "%s may not be GPU-accessible\n", name);
+    } else {
+      fprintf(stdout,
+              "Warning: Failed to get %s pointer attributes: %s (code: %d)\n",
+              name, hipGetErrorString(attr_err), attr_err);
+      fprintf(stdout, "%s pointer may not be GPU-accessible\n", name);
+    }
+    return false;
+  }
+
+  fprintf(stdout, "%s GPU accessibility verified: type=%d, device=%d\n", name,
+          attr.type, attr.device);
+  return true;
 }

@@ -1,5 +1,10 @@
 #!/bin/bash
-# Test nvme-ep against an NVMe controller
+#!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Test nvme-ep against an NVMe device (real or emulated)
 # Verifies that written data matches expected LFSR pattern for given seed
 # The program auto-detects if the device is emulated or passthrough
 
@@ -26,7 +31,7 @@ MEMORY_MODE="${MEMORY_MODE:-0}"
 USE_PCI_MMIO_BRIDGE="${USE_PCI_MMIO_BRIDGE:-1}"  # Default: use PCI MMIO bridge
 
 # Paths
-XIO_TESTER="${XIO_TESTER:-./bin/xio-tester}"
+XIO_TESTER="${XIO_TESTER:-./build/xio-tester}"
 TEMP_DIR="${TEMP_DIR:-/tmp/nvme-ep-test}"
 NVME_CMD="${NVME_CMD:-nvme}"
 
@@ -318,6 +323,7 @@ test_device() {
     write_cmd="$write_cmd --queue-length $QUEUE_LENGTH"
     write_cmd="$write_cmd --lfsr-seed $LFSR_SEED"
     write_cmd="$write_cmd --base-lba $BASE_LBA"
+    write_cmd="$write_cmd --lbas-per-io $BLOCKS_PER_CMD"
     write_cmd="$write_cmd --access-pattern sequential"
     write_cmd="$write_cmd -m $MEMORY_MODE"
     

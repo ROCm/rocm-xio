@@ -7,7 +7,7 @@
 
 function(setup_code_generation)
   cmake_parse_arguments(GEN "" 
-    "ENDPOINTS_DIR;INCLUDE_DIR;EXTERNAL_HEADERS_DIR;RDMA_HEADERS_DIR;GENERATED_REGISTRY;GENERATED_INCLUDES;NVME_EP_GENERATED"
+    "ENDPOINTS_DIR;INCLUDE_DIR;EXTERNAL_HEADERS_DIR;RDMA_HEADERS_DIR;NVME_HEADERS_DIR;GENERATED_REGISTRY;GENERATED_INCLUDES;NVME_EP_GENERATED"
     "RDMA_VENDOR_HEADERS" ${ARGN})
 
   # Discover endpoints for generation
@@ -46,12 +46,12 @@ function(setup_code_generation)
   set(NVME_FETCH_SCRIPT
     ${CMAKE_SOURCE_DIR}/scripts/build/fetch-nvme-headers.sh)
   set(NVME_KERNEL_HEADERS
-    ${GEN_EXTERNAL_HEADERS_DIR}/linux-nvme.h
-    ${GEN_EXTERNAL_HEADERS_DIR}/linux-nvme_ioctl.h)
+    ${GEN_NVME_HEADERS_DIR}/linux-nvme.h
+    ${GEN_NVME_HEADERS_DIR}/linux-nvme_ioctl.h)
 
   add_custom_command(
     OUTPUT ${NVME_KERNEL_HEADERS}
-    COMMAND ${NVME_FETCH_SCRIPT} ${GEN_EXTERNAL_HEADERS_DIR}
+    COMMAND ${NVME_FETCH_SCRIPT} ${GEN_NVME_HEADERS_DIR}
     DEPENDS ${NVME_FETCH_SCRIPT}
     COMMENT "Fetching NVMe headers from Linux kernel repository"
   )
@@ -67,10 +67,10 @@ function(setup_code_generation)
   add_custom_command(
     OUTPUT ${GEN_NVME_EP_GENERATED}
     COMMAND ${NVME_EXTRACT_SCRIPT}
-      ${GEN_EXTERNAL_HEADERS_DIR}/linux-nvme.h
+      ${GEN_NVME_HEADERS_DIR}/linux-nvme.h
       ${GEN_NVME_EP_GENERATED}
     DEPENDS ${NVME_EXTRACT_SCRIPT}
-      ${GEN_EXTERNAL_HEADERS_DIR}/linux-nvme.h
+      ${GEN_NVME_HEADERS_DIR}/linux-nvme.h
     COMMENT "Extracting NVMe defines from kernel headers"
   )
 

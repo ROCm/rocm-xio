@@ -1,15 +1,49 @@
 #!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Run a series of tests against one real and one emulated NVMe device
 
 # Don't use set -e so all tests run even if one fails
+
+NVME_EMUL=${NVME_EMUL:-/dev/nvme0}
+NVME_REAL=${NVME_REAL:-/dev/nvme1}
+
+NVME_EMUL_SHORT=${NVME_EMUL#/dev/}
+NVME_REAL_SHORT=${NVME_REAL#/dev/}
+
+# Check if emulated NVMe tests should be skipped
+SKIP_EMULATED=false
+if [ "$NVME_EMUL" = "none" ] || [ "$NVME_EMUL" = "NONE" ]; then
+    SKIP_EMULATED=true
+fi
+
+# Check if passthrough NVMe tests should be skipped
+SKIP_PASSTHROUGH=false
+if [ "$NVME_REAL" = "none" ] || [ "$NVME_REAL" = "NONE" ]; then
+    SKIP_PASSTHROUGH=true
+fi
 
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Create temp directory for test logs
 TEMP_DIR="${TEMP_DIR:-/tmp/nvme-ep-test}"
 mkdir -p "$TEMP_DIR"
+
+# Print test configuration
+if [ "$SKIP_EMULATED" = "true" ]; then
+    echo -e "${YELLOW}Skipping emulated NVMe tests (NVME_EMUL=none)${NC}"
+    echo ""
+fi
+if [ "$SKIP_PASSTHROUGH" = "true" ]; then
+    echo -e "${YELLOW}Skipping passthrough NVMe tests (NVME_REAL=none)${NC}"
+    echo ""
+fi
 
 # Function to run a test and capture output
 run_test() {
@@ -50,113 +84,117 @@ TESTS_FAILED=0
 FAILED_TESTS=()
 
 # Test emulated NVMe with host queues and data buffers
-seed1=$(openssl rand -hex 2)
-if run_test "nvme0_host_mem" \
-    "nvme0 host-mem write=1 seed=0x${seed1} pci-mmio" \
-    bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed1} \
-      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme0"; then
-    ((TESTS_PASSED++))
-else
-    ((TESTS_FAILED++))
-    FAILED_TESTS+=("nvme0_host_mem")
+if [ "$SKIP_EMULATED" = "false" ]; then
+    seed1=$(openssl rand -hex 2)
+    if run_test "${NVME_EMUL_SHORT}_host_mem" \
+        "${NVME_EMUL_SHORT} host-mem write=1 seed=0x${seed1} pci-mmio" \
+        bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed1} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_EMUL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_EMUL_SHORT}_host_mem")
+    fi
+
+    # Test emulated NVMe with device memory
+    seed2=$(openssl rand -hex 2)
+    if run_test "${NVME_EMUL_SHORT}_device_mem" \
+        "${NVME_EMUL_SHORT} device-mem write=2 seed=0x${seed2} base_lba=1024 pci-mmio" \
+        bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed2} BASE_LBA=1024 \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_EMUL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_EMUL_SHORT}_device_mem")
+    fi
+
+    # Test emulated NVMe with device memory and queues
+    seed3=$(openssl rand -hex 2)
+    if run_test "${NVME_EMUL_SHORT}_device_mem_queues" \
+        "${NVME_EMUL_SHORT} device-mem-queues write=2 seed=0x${seed3} base_lba=1024 pci-mmio" \
+        bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed3} BASE_LBA=1024 \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_EMUL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_EMUL_SHORT}_device_mem_queues")
+    fi
 fi
 
-# Test emulated NVMe with device memory
-seed2=$(openssl rand -hex 2)
-if run_test "nvme0_device_mem" \
-    "nvme0 device-mem write=2 seed=0x${seed2} base_lba=1024 pci-mmio" \
-    bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed2} BASE_LBA=1024 \
-      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme0"; then
-    ((TESTS_PASSED++))
-else
-    ((TESTS_FAILED++))
-    FAILED_TESTS+=("nvme0_device_mem")
+# Test passthrough NVMe with host memory
+if [ "$SKIP_PASSTHROUGH" = "false" ]; then
+    seed4=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_host_mem" \
+        "${NVME_REAL_SHORT} host-mem write=1 seed=0x${seed4} base_lba=4096 pci-mmio" \
+        bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed4} BASE_LBA=4096 \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_host_mem")
+    fi
+
+    # Test passthrough NVMe with device memory
+    seed5=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_device_mem" \
+        "${NVME_REAL_SHORT} device-mem write=2 seed=0x${seed5} pci-mmio" \
+        bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed5} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_device_mem")
+    fi
+
+    # Test passthrough NVMe with device memory and queues
+    seed6=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_device_mem_queues" \
+        "${NVME_REAL_SHORT} device-mem-queues write=2 seed=0x${seed6} pci-mmio" \
+        bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed6} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_device_mem_queues")
+    fi
+
+    # Test passthrough NVMe with host memory (direct doorbell)
+    seed7=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_host_mem_direct" \
+        "${NVME_REAL_SHORT} host-mem write=1 seed=0x${seed7} direct" \
+        bash -c "WRITE_IO=1 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=0 \
+          LFSR_SEED=0x${seed7} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_host_mem_direct")
+    fi
+
+    # Test passthrough NVMe with device memory (direct doorbell)
+    seed8=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_device_mem_direct" \
+        "${NVME_REAL_SHORT} device-mem write=2 seed=0x${seed8} direct" \
+        bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=8 LFSR_SEED=0x${seed8} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_device_mem_direct")
+    fi
+
+    # Test passthrough NVMe with device memory and queues (direct doorbell)
+    seed9=$(openssl rand -hex 2)
+    if run_test "${NVME_REAL_SHORT}_device_mem_direct_queues" \
+        "${NVME_REAL_SHORT} device-mem-queues write=2 seed=0x${seed9} direct" \
+        bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=11 LFSR_SEED=0x${seed9} \
+          ./scripts/test/test-nvme-ep-data-verification.sh ${NVME_REAL}"; then
+        ((TESTS_PASSED++))
+    else
+        ((TESTS_FAILED++))
+        FAILED_TESTS+=("${NVME_REAL_SHORT}_device_mem_direct_queues")
+    fi
 fi
-
-# Test emulated NVMe with device memory and queues
-seed3=$(openssl rand -hex 2)
-if run_test "nvme0_device_mem_queues" \
-    "nvme0 device-mem-queues write=2 seed=0x${seed3} base_lba=1024 pci-mmio" \
-    bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed3} BASE_LBA=1024 \
-      ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme0"; then
-    ((TESTS_PASSED++))
-else
-    ((TESTS_FAILED++))
-    FAILED_TESTS+=("nvme0_device_mem_queues")
-fi
-
-# # Test passthrough NVMe with host memory
-# seed4=$(openssl rand -hex 2)
-# if run_test "nvme1_host_mem" \
-#     "nvme1 host-mem write=1 seed=0x${seed4} base_lba=4096 pci-mmio" \
-#     bash -c "WRITE_IO=1 MEMORY_MODE=0 LFSR_SEED=0x${seed4} BASE_LBA=4096 \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_host_mem")
-# fi
-
-# # Test passthrough NVMe with device memory
-# seed5=$(openssl rand -hex 2)
-# if run_test "nvme1_device_mem" \
-#     "nvme1 device-mem write=2 seed=0x${seed5} pci-mmio" \
-#     bash -c "WRITE_IO=2 MEMORY_MODE=8 LFSR_SEED=0x${seed5} \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_device_mem")
-# fi
-
-# # Test passthrough NVMe with device memory and queues
-# seed6=$(openssl rand -hex 2)
-# if run_test "nvme1_device_mem_queues" \
-#     "nvme1 device-mem-queues write=2 seed=0x${seed6} pci-mmio" \
-#     bash -c "WRITE_IO=2 MEMORY_MODE=11 LFSR_SEED=0x${seed6} \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_device_mem_queues")
-# fi 
-
-# # Test passthrough NVMe with host memory (direct doorbell)
-# seed7=$(openssl rand -hex 2)
-# if run_test "nvme1_host_mem_direct" \
-#     "nvme1 host-mem write=1 seed=0x${seed7} direct" \
-#     bash -c "WRITE_IO=1 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=0 \
-#       LFSR_SEED=0x${seed7} \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_host_mem_direct")
-# fi
-
-# # Test passthrough NVMe with device memory (direct doorbell)
-# seed8=$(openssl rand -hex 2)
-# if run_test "nvme1_device_mem_direct" \
-#     "nvme1 device-mem write=2 seed=0x${seed8} direct" \
-#     bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=8 LFSR_SEED=0x${seed8} \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_device_mem_direct")
-# fi
-
-# # Test passthrough NVMe with device memory and queues (direct doorbell)
-# seed9=$(openssl rand -hex 2)
-# if run_test "nvme1_device_mem_direct_queues" \
-#     "nvme1 device-mem-queues write=2 seed=0x${seed9} direct" \
-#     bash -c "WRITE_IO=2 USE_PCI_MMIO_BRIDGE=0 MEMORY_MODE=11 LFSR_SEED=0x${seed9} \
-#       ./scripts/test/test-nvme-ep-data-verification.sh /dev/nvme1"; then
-#     ((TESTS_PASSED++))
-# else
-#     ((TESTS_FAILED++))
-#     FAILED_TESTS+=("nvme1_device_mem_direct_queues")
-# fi
 
 # Print summary
 echo ""

@@ -171,6 +171,7 @@ set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
 set(TESTER_DIR ${CMAKE_SOURCE_DIR}/src/tester)
 set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
+set(NVME_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/nvme)
 
 # Include custom CMake modules
 include(XIOEndpointDiscovery)
@@ -185,6 +186,7 @@ setup_code_generation(
   INCLUDE_DIR ${INCLUDE_DIR}
   EXTERNAL_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}
   RDMA_HEADERS_DIR ${RDMA_HEADERS_DIR}
+  NVME_HEADERS_DIR ${NVME_HEADERS_DIR}
   GENERATED_REGISTRY ${INCLUDE_DIR}/xio-endpoint-registry-gen.h
   GENERATED_INCLUDES ${INCLUDE_DIR}/xio-endpoint-includes-gen.h
   NVME_EP_GENERATED ${INCLUDE_DIR}/nvme-ep-generated.h
@@ -229,6 +231,7 @@ target_include_directories(rocm-xio
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio>
   PRIVATE
     ${INCLUDE_DIR}
+    ${COMMON_DIR}
 )
 foreach(ep ${VALID_ENDPOINTS})
   target_include_directories(rocm-xio PRIVATE
