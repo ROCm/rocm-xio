@@ -20,7 +20,10 @@
 
 // Forward declarations for endpoint-specific run functions
 extern hipError_t test_ep_run(XioEndpointConfig* config);
-extern hipError_t nvme_ep_run(XioEndpointConfig* config);
+namespace nvme_ep {
+extern hipError_t run(XioEndpointConfig* config);
+std::string validateConfig(nvmeEpConfig* config);
+} // namespace nvme_ep
 extern hipError_t rdma_ep_run(XioEndpointConfig* config);
 extern hipError_t sdma_ep_run(XioEndpointConfig* config);
 
@@ -184,7 +187,7 @@ public:
 class NvmeEndpoint : public XioEndpoint {
 private:
   // Store NVMe config
-  nvme_ep::NvmeEpConfig nvmeConfig_;
+  nvme_ep::nvmeEpConfig nvmeConfig_;
 
 public:
   __host__ EndpointType getType() const override {
@@ -223,7 +226,7 @@ public:
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
-    return nvme_ep_run(config);
+    return nvme_ep::run(config);
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
@@ -237,15 +240,15 @@ public:
   __host__ void applyCommonConfig(
     void* endpointConfig, const XioEndpointConfig* baseConfig) override {
     if (endpointConfig && baseConfig) {
-      nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
+      nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
         endpointConfig);
-      nvmeConfig->usePciMmioBridge = baseConfig->pciMmioBridge;
+      nvmeConfig->doorbellParams.usePciMmioBridge = baseConfig->pciMmioBridge;
     }
   }
 
   __host__ std::string validateConfig(void* endpointConfig) override {
     if (endpointConfig) {
-      nvme_ep::NvmeEpConfig* nvmeConfig = static_cast<nvme_ep::NvmeEpConfig*>(
+      nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
         endpointConfig);
       return nvme_ep::validateConfig(nvmeConfig);
     }
@@ -254,7 +257,21 @@ public:
 
   __host__ unsigned getIterations(void* endpointConfig) const override {
     if (endpointConfig) {
-      return nvme_ep::getIterations(endpointConfig);
+      nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
+        endpointConfig);
+      if (nvmeConfig->ioParams.readIo < 0 && nvmeConfig->ioParams.writeIo < 0) {
+        // Sequential mode: both negative, return sum of absolute values
+        return -nvmeConfig->ioParams.readIo + -nvmeConfig->ioParams.writeIo;
+      }
+      if (nvmeConfig->ioParams.writeIo < 0) {
+        // Sequential mode: use absolute value of writeIo
+        return -nvmeConfig->ioParams.writeIo;
+      }
+      if (nvmeConfig->ioParams.readIo < 0) {
+        // Sequential mode: use absolute value of readIo
+        return -nvmeConfig->ioParams.readIo;
+      }
+      return nvmeConfig->ioParams.readIo + nvmeConfig->ioParams.writeIo;
     }
     return 0;
   }
