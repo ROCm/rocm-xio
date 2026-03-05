@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -1022,6 +1023,133 @@ __host__ int xioDetectEmulatedNvme(const char* device_path,
             << vendor_id << ", DID=0x" << std::setw(4) << device_id << std::dec
             << " -> " << (is_emulated ? "EMULATED" : "PASSTHROUGH")
             << std::endl;
+
+  return 0;
+}
+
+// Get physical address from virtual address using /proc/self/pagemap
+// Returns 0 on failure
+__host__ uint64_t xioGetPhysAddr(void* virt_addr) {
+  int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
+  if (pagemap_fd < 0) {
+    return 0;
+  }
+
+  uint64_t page = reinterpret_cast<uint64_t>(virt_addr) / sysconf(_SC_PAGESIZE);
+  uint64_t offset = page * sizeof(uint64_t);
+
+  if (lseek(pagemap_fd, offset, SEEK_SET) != static_cast<off_t>(offset)) {
+    close(pagemap_fd);
+    return 0;
+  }
+
+  uint64_t pagemap_entry = 0;
+  if (read(pagemap_fd, &pagemap_entry, sizeof(pagemap_entry)) !=
+      sizeof(pagemap_entry)) {
+    close(pagemap_fd);
+    return 0;
+  }
+
+  close(pagemap_fd);
+
+  // Check if page is present (bit 63)
+  if (!(pagemap_entry & (1ULL << 63))) {
+    return 0; // Page not present
+  }
+
+  // Extract physical page frame number (bits 0-54)
+  uint64_t pfn = pagemap_entry & 0x7FFFFFFFFFFFFFULL;
+  uint64_t phys_addr = (pfn * sysconf(_SC_PAGESIZE)) +
+                       (reinterpret_cast<uint64_t>(virt_addr) %
+                        sysconf(_SC_PAGESIZE));
+
+  return phys_addr;
+}
+
+// Check if rocm-xio kernel module is loaded
+// Note: Linux converts hyphens to underscores in module names, so we check
+// for "rocm_xio" in /proc/modules
+bool xioCheckKernelModuleLoaded() {
+  FILE* f = fopen("/proc/modules", "r");
+  if (!f) {
+    return false;
+  }
+
+  char line[256];
+  bool found = false;
+  while (fgets(line, sizeof(line), f)) {
+    if (strstr(line, "rocm_xio") != nullptr) {
+      found = true;
+      break;
+    }
+  }
+  fclose(f);
+  return found;
+}
+
+// Attempt to load rocm-xio kernel module
+int xioLoadKernelModule() {
+  int ret = system("modprobe rocm-xio");
+  if (ret != 0) {
+    std::cerr << "Warning: Failed to load kernel module 'rocm-xio'. "
+              << "Error: " << ret << std::endl;
+    std::cerr << "You may need to run with sudo or ensure the module "
+              << "is available." << std::endl;
+    return -1;
+  }
+  return 0;
+}
+
+// Ensure rocm-xio device node exists, create if missing
+int xioEnsureDeviceNode() {
+  // Check if device exists
+  if (access(ROCM_XIO_DEVICE_PATH, F_OK) == 0) {
+    return 0; // Device exists
+  }
+
+  // Try to get major number
+  FILE* f = fopen("/proc/devices", "r");
+  if (!f) {
+    std::cerr << "Failed to open /proc/devices" << std::endl;
+    return -1;
+  }
+
+  char line[256];
+  unsigned int major = 0;
+  bool found = false;
+  while (fgets(line, sizeof(line), f)) {
+    if (strstr(line, "rocm-xio") != nullptr) {
+      if (sscanf(line, "%u", &major) == 1) {
+        found = true;
+        break;
+      }
+    }
+  }
+  fclose(f);
+
+  if (!found || major == 0) {
+    std::cerr << "Failed to find rocm-xio major number in /proc/devices"
+              << std::endl;
+    return -1;
+  }
+
+  // Create device node (requires root)
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "mknod %s c %u 0", ROCM_XIO_DEVICE_PATH, major);
+  int ret = system(cmd);
+  if (ret != 0) {
+    std::cerr << "Failed to create device node " << ROCM_XIO_DEVICE_PATH
+              << ". You may need to run with sudo." << std::endl;
+    return -1;
+  }
+
+  // Set permissions
+  snprintf(cmd, sizeof(cmd), "chmod 666 %s", ROCM_XIO_DEVICE_PATH);
+  ret = system(cmd);
+  if (ret != 0) {
+    std::cerr << "Warning: Failed to set permissions on "
+              << ROCM_XIO_DEVICE_PATH << std::endl;
+  }
 
   return 0;
 }

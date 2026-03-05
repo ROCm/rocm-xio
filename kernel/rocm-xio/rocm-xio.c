@@ -24,6 +24,8 @@
  *      physical addresses into PRP1/PRP2 fields
  */
 
+#include "rocm-xio.h"
+
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
@@ -42,8 +44,6 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-
-#include "rocm-axiio.h"
 
 #define DEVICE_NAME ROCM_XIO_DEVICE_NAME
 #define CLASS_NAME "rocm_axiio"
