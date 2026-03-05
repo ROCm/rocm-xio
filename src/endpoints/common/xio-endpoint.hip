@@ -276,7 +276,7 @@ public:
 
   __host__ const char* getDescription() const override {
     return "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, "
-           "PVRDMA)";
+           "ROCM_ERNIC)";
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
