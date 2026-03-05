@@ -29,12 +29,6 @@ mkdir -p "$OUTPUT_DIR/ionic"
 curl -sL "$RDMA_CORE_REPO/providers/ionic/ionic.h" -o "$OUTPUT_DIR/ionic/ionic.h" || echo "    Warning: ionic.h not found"
 curl -sL "$RDMA_CORE_REPO/providers/ionic/ionic-abi.h" -o "$OUTPUT_DIR/ionic/ionic_abi.h" || echo "    Warning: ionic-abi.h not found"
 
-# VMware Paravirtualized RDMA provider
-echo "  - Downloading vmw_pvrdma headers..."
-mkdir -p "$OUTPUT_DIR/pvrdma"
-curl -sL "$RDMA_CORE_REPO/providers/vmw_pvrdma/pvrdma.h" -o "$OUTPUT_DIR/pvrdma/pvrdma.h" || echo "    Warning: pvrdma.h not found"
-curl -sL "$RDMA_CORE_REPO/providers/vmw_pvrdma/pvrdma-abi.h" -o "$OUTPUT_DIR/pvrdma/pvrdma_abi.h" || echo "    Warning: pvrdma-abi.h not found"
-
 # Common RDMA verbs header
 echo "  - Downloading common RDMA verbs header..."
 curl -sL "$RDMA_CORE_REPO/kernel-headers/rdma/ib_user_verbs.h" -o "$OUTPUT_DIR/ib_user_verbs.h" || echo "    Warning: ib_user_verbs.h not found"
@@ -53,9 +47,5 @@ echo "    - bnxt/bnxt_re_main.h (main structures)"
 echo "  IONIC (Pensando Ionic RDMA):"
 echo "    - ionic/ionic.h (main header)"
 echo "    - ionic/ionic_abi.h (ABI structures)"
-echo "  PVRDMA (VMware Paravirtualized RDMA):"
-echo "    - pvrdma/pvrdma.h (main header)"
-echo "    - pvrdma/pvrdma_abi.h (ABI structures)"
 echo "  Common:"
 echo "    - ib_user_verbs.h (InfiniBand user verbs)"
-

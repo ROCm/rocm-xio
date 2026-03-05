@@ -52,7 +52,7 @@ get_endpoint_description() {
       echo "nvme endpoint"
       ;;
     rdma-ep)
-      echo "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, PVRDMA)"
+      echo "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, ROCM_ERNIC)"
       ;;
     sdma-ep)
       echo "AMD SDMA Engine endpoint"

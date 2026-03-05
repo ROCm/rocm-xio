@@ -32,7 +32,7 @@ src/include/external/
 src/endpoints/rdma-ep/mlx/mlx5-rdma.h
 src/endpoints/rdma-ep/bnxt/bnxt-rdma.h
 src/endpoints/rdma-ep/ionic/ionic-rdma.h
-src/endpoints/rdma-ep/pvrdma/pvrdma-rdma.h
+src/endpoints/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
 
 # Editor and IDE files
 .vscode/
