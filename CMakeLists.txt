@@ -126,6 +126,11 @@ endif()
 # Include helper modules
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
+# Include build options modules early so options are available
+# This makes XIO_USE_SANITIZERS, XIO_USE_CODE_COVERAGE available as
+# cmake command-line options
+include(XIOCompilerOptions)
+
 # GPU architecture detection
 set(OFFLOAD_ARCH "" CACHE STRING
   "GPU architecture (e.g., gfx942:xnack+)")
@@ -168,8 +173,8 @@ set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
 
 # Include custom CMake modules
-include(EndpointDiscovery)
-include(CodeGeneration)
+include(XIOEndpointDiscovery)
+include(XIOCodeGeneration)
 
 # Discover endpoints
 discover_endpoints(${ENDPOINTS_DIR} VALID_ENDPOINTS)
@@ -394,4 +399,4 @@ if(BUILD_TESTING)
 endif()
 
 # Utility targets
-include(UtilityTargets)
+include(XIOUtilityTargets)

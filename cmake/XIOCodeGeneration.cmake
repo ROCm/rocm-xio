@@ -103,8 +103,7 @@ function(setup_code_generation)
     ${GEN_RDMA_HEADERS_DIR}/ib_user_verbs.h
     ${GEN_RDMA_HEADERS_DIR}/mlx/mlx5dv.h
     ${GEN_RDMA_HEADERS_DIR}/bnxt/bnxt_re_abi.h
-    ${GEN_RDMA_HEADERS_DIR}/ionic/ionic.h
-    ${GEN_RDMA_HEADERS_DIR}/pvrdma/pvrdma.h)
+    ${GEN_RDMA_HEADERS_DIR}/ionic/ionic.h)
 
   add_custom_command(
     OUTPUT ${RDMA_HEADERS}
