@@ -107,17 +107,19 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
   }
 }
 
-__host__ __device__ void ringDoorbell(
-  uint16_t sq_tail, const nvmeDoorbellParams& doorbellParams) {
+__host__ __device__ void ringDoorbell(uint16_t value,
+                                      const nvmeDoorbellParams& doorbellParams,
+                                      uint32_t offset_override) {
+  uint32_t offset = (offset_override != UINT32_MAX)
+                      ? offset_override
+                      : doorbellParams.doorbellOffset;
   if (doorbellParams.usePciMmioBridge &&
       doorbellParams.shadowBufferVirt != nullptr) {
     genPciMmioBridgeCmd(doorbellParams.shadowBufferVirt,
-                        doorbellParams.nvmeTargetBdf, 0,
-                        doorbellParams.doorbellOffset, sq_tail,
+                        doorbellParams.nvmeTargetBdf, 0, offset, value,
                         PCI_MMIO_BRIDGE_CMD_WRITE, 4);
   } else {
-    xio_ep::ringDoorbell(doorbellParams.nvmeBar0Gpu,
-                         doorbellParams.doorbellOffset, sq_tail);
+    xio_ep::ringDoorbell(doorbellParams.nvmeBar0Gpu, offset, value);
   }
 }
 
@@ -304,6 +306,11 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         config.endTimes[idx] = wall_clock64();
       }
       cq_head = (cq_head + 1) % ioParams.queueSize;
+      // Update CQ doorbell to notify controller we consumed the completion
+      // CQ doorbell is at SQ doorbell offset + doorBellStride (4 bytes)
+      nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                            doorbellParams.doorbellOffset +
+                              nvme_ep::doorBellStride);
       uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
       expected_phase = phase ^ 1;
       last_sq_head = new_sq_head;
@@ -415,6 +422,11 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         completed_count += new_completions;
         last_sq_head = new_sq_head;
         cq_head = (cq_head + 1) % ioParams.queueSize;
+        // Update CQ doorbell to notify controller we consumed the completion
+        // CQ doorbell is at SQ doorbell offset + doorBellStride (4 bytes)
+        nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                              doorbellParams.doorbellOffset +
+                                nvme_ep::doorBellStride);
         uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
         expected_phase = phase ^ 1;
         cqe_last = cqe_new;
