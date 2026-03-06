@@ -665,11 +665,15 @@ __host__ __device__ static inline bool dataPattern(bool isVerify,
  * Ring NVMe doorbell with support for both PCI MMIO bridge and direct BAR0
  * modes
  *
- * @param sq_tail Submission queue tail value
+ * @param value Doorbell value to write (sq_tail for SQ, cq_head for CQ)
  * @param doorbellParams Doorbell configuration parameters
+ * @param offset_override Optional offset override (defaults to
+ *                        doorbellParams.doorbellOffset). Use this for CQ
+ *                        doorbell which is at SQ offset + doorBellStride.
  */
-__host__ __device__ void ringDoorbell(uint16_t sq_tail,
-                                      const nvmeDoorbellParams& doorbellParams);
+__host__ __device__ void ringDoorbell(uint16_t value,
+                                      const nvmeDoorbellParams& doorbellParams,
+                                      uint32_t offset_override = UINT32_MAX);
 
 /**
  * GPU kernel entry point for NVMe endpoint operations
