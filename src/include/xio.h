@@ -14,6 +14,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <drm/amdgpu_drm.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 
@@ -182,13 +183,15 @@ void xioPrintHistogram(const std::vector<double>& durations,
 //                  Bit 1 = CPU write location (0=host, 1=device)
 //                  Bit 2 = Doorbell location (0=host, 1=device)
 //                  Bit 3 = Data buffer location (0=host, 1=device)
-hipError_t xioAllocateSubmissionQueue(size_t size, unsigned memoryMode,
-                                      void** ptr);
-hipError_t xioAllocateCompletionQueue(size_t size, unsigned memoryMode,
-                                      void** ptr);
+hipError_t xioAllocateQueue(size_t size, bool isDeviceMemory,
+                            const char* queueName, void** ptr);
+bool xioReallocateQueue(void** ptr, size_t size, const char* queueName);
+struct drm_amdgpu_gem_userptr* xioRegQueueGpu(
+  void* queue_virt, size_t queue_size_aligned, bool is_device,
+  const char* queue_name, struct drm_amdgpu_gem_userptr* userptr);
+void* xioGetGpuPointer(void* host_ptr, bool is_device, const char* queue_name);
 hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr);
-void xioFreeSubmissionQueue(void* ptr, unsigned memoryMode);
-void xioFreeCompletionQueue(void* ptr, unsigned memoryMode);
+void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName);
 void xioFreeDataBuffer(void* ptr, unsigned memoryMode);
 
 // HSA device memory allocation (for doorbell and other device memory needs)
@@ -234,6 +237,71 @@ __host__ int xioLoadKernelModule();
 // Note: Creating device node requires root permissions
 __host__ int xioEnsureDeviceNode();
 
+// Export HSA-allocated VRAM as DMA-BUF and register with kernel module
+// Returns 0 on success, negative error code on failure
+// is_emulated: true for emulated NVMe (returns GPU BAR GPA), false for
+// passthrough (returns P2PDMA IOVA)
+__host__ int export_and_register_vram_buffer(void* vram_ptr, size_t size,
+                                             uint16_t nvme_bdf,
+                                             const char* kernel_module_device,
+                                             uint64_t* phys_addr_out,
+                                             bool is_emulated);
+
+// Buffer allocation result structure
+struct xioBufferInfo {
+  void* hostPtr;    // Host-accessible pointer (from hipMalloc or hipHostMalloc)
+  void* gpuPtr;     // GPU-accessible pointer (may be same as hostPtr for device
+                    // memory)
+  uint64_t dmaAddr; // DMA/physical address for device access
+  bool isDeviceMemory; // true if allocated with hipMalloc, false if
+                       // hipHostMalloc
+};
+
+// Allocate GPU-accessible buffer for DMA operations
+// This function allocates a buffer (device or host memory based on memoryMode)
+// and sets it up for GPU access and DMA operations.
+//
+// For device memory (memoryMode bit 3 set):
+//   - Allocates with hipMalloc
+//   - Exports as DMA-BUF and registers with kernel module
+//   - Returns DMA address from DMA-BUF export
+//
+// For host memory:
+//   - Allocates with hipHostMalloc (mapped for GPU access)
+//   - Gets physical address via xioGetPhysAddr
+//   - Gets GPU pointer via hipHostGetDevicePointer
+//
+// @param size Buffer size in bytes
+// @param memoryMode Memory mode flags (bit 3 = device memory)
+// @param targetBdf Target device BDF for DMA-BUF registration (0 if not needed)
+// @param devicePath Device path for emulation detection (nullptr if not needed)
+// @param bufferInfo Output structure for buffer information
+//
+// @return hipSuccess on success, error code on failure
+// @note On failure, bufferInfo->hostPtr will be nullptr
+__host__ hipError_t xioAllocateGpuAccessibleBuffer(
+  size_t size, unsigned memoryMode, uint16_t targetBdf, const char* devicePath,
+  struct xioBufferInfo* bufferInfo);
+
+// Free GPU-accessible buffer allocated with xioAllocateGpuAccessibleBuffer
+// Uses the isDeviceMemory flag to determine correct free function
+//
+// @param bufferInfo Buffer info structure from xioAllocateGpuAccessibleBuffer
+__host__ void xioFreeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo);
+
+// Validate that a pointer is GPU-accessible
+// This function checks if a pointer can be accessed by GPU code using
+// hipPointerGetAttributes.
+//
+// @param ptr Pointer to validate (can be nullptr, in which case returns true)
+// @param name Descriptive name for the pointer (used in error messages)
+// @param disableOnFailure If true, prints error and returns false on failure.
+//                         If false, prints warning but still returns false.
+//
+// @return true if pointer is GPU-accessible (or nullptr), false otherwise
+__host__ bool xioValidateGpuPointer(void* ptr, const char* name,
+                                    bool disableOnFailure);
+
 // Physical address translation
 // Get physical address from virtual address using /proc/self/pagemap
 //
@@ -244,11 +312,40 @@ __host__ int xioEnsureDeviceNode();
 // Note: This method may not work reliably in all environments:
 // - Requires CAP_SYS_ADMIN or root privileges
 // - May not work correctly with IOMMU enabled
-// - For device memory (VRAM), use DMA-BUF export instead
+// - For device memory (VRAM), use the overloaded version with device memory
+//   parameters instead
 //
 // @param virt_addr Virtual address to translate
 // @return Physical address on success, 0 on failure
 __host__ uint64_t xioGetPhysAddr(void* virt_addr);
+
+// Get physical address for a buffer (unified interface for device and host
+// memory) For device memory: exports as DMA-BUF and registers with kernel
+// module For host memory: uses /proc/self/pagemap to get physical address
+//
+// @param buffer_ptr Buffer virtual address
+// @param size Buffer size in bytes
+// @param is_device True if buffer is device memory (VRAM), false for host
+// memory
+// @param nvme_bdf NVMe controller BDF (required for device memory)
+// @param kernel_module_device Path to kernel module device (required for device
+// memory)
+// @param is_emulated True if NVMe controller is emulated (required for device
+// memory)
+// @param buffer_name Name of buffer for logging (e.g., "submission queue")
+//
+// @return Physical address on success, 0 on failure
+//
+// @note For device memory, this exports the buffer as DMA-BUF and registers it
+//       with the kernel module. For host memory, this uses pagemap lookup.
+//       On failure, returns 0. Caller should handle fallback to virtual address
+//       if needed.
+__host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
+                                 uint16_t nvme_bdf,
+                                 const char* kernel_module_device,
+                                 bool is_emulated, const char* buffer_name);
+int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
+                    size_t size, uint8_t queue_type, const char* queue_name);
 
 //
 // Common endpoint utilities namespace
@@ -295,5 +392,105 @@ __host__ __device__ static inline void ringDoorbell(void* base_addr,
 }
 
 } // namespace xio_ep
+
+//
+// PCI MMIO Bridge structures and definitions
+//
+// These structures are used for PCI MMIO bridge doorbell routing, which
+// allows GPU-initiated MMIO writes to be routed through QEMU's PCI MMIO
+// bridge device. This is endpoint-agnostic and can be used by any endpoint
+// that needs to perform MMIO operations from GPU code.
+
+// PCI MMIO Bridge ring metadata structure (matching QEMU implementation)
+struct pci_mmio_bridge_ring_meta {
+  uint32_t producer_idx; // Guest/device write index (tail)
+  uint32_t consumer_idx; // QEMU read index (head)
+  uint32_t queue_depth;  // Total number of command slots
+  uint32_t reserved;
+} __attribute__((packed));
+
+// PCI MMIO Bridge command structure (matching QEMU implementation)
+struct pci_mmio_bridge_command {
+  uint16_t target_bdf; // Bus:Device:Function (bus|devfn)
+  uint8_t target_bar;  // Which BAR on target device (0-5)
+  uint8_t reserved1;
+  uint32_t offset; // Offset within BAR
+  uint64_t value;  // Value to write, or returned value for read
+  uint8_t command; // Command type (WRITE=1, READ=2)
+  uint8_t size;    // Transfer size: 1, 2, 4, or 8 bytes
+  uint8_t status;  // Status (PENDING=0, COMPLETE=1, ERROR=2)
+  uint8_t reserved2;
+  uint32_t sequence; // Sequence number for ordering
+} __attribute__((packed));
+
+// PCI MMIO Bridge command types
+#define PCI_MMIO_BRIDGE_CMD_NOP 0
+#define PCI_MMIO_BRIDGE_CMD_WRITE 1
+#define PCI_MMIO_BRIDGE_CMD_READ 2
+
+// PCI MMIO Bridge status codes
+#define PCI_MMIO_BRIDGE_STATUS_PENDING 0
+#define PCI_MMIO_BRIDGE_STATUS_COMPLETE 1
+#define PCI_MMIO_BRIDGE_STATUS_ERROR 2
+
+// Map PCI MMIO bridge shadow buffer via kernel module
+// Returns 0 on success, negative error code on failure
+// The shadow buffer is mapped into the process address space and remains
+// valid until the process exits (kernel module keeps the file descriptor
+// open for the mapping)
+__host__ int xioMapMmioBridgeShadowBuffer(uint16_t bridge_bdf,
+                                          void** virt_addr);
+
+// Register PCI MMIO bridge shadow buffer for GPU access
+// This function registers a shadow buffer (already mapped via
+// xioMapMmioBridgeShadowBuffer) with DRM GEM_USERPTR and HIP to make it
+// GPU-accessible.
+//
+// @param shadow_virt Host virtual address of shadow buffer (from mmap)
+// @param shadow_size Size of shadow buffer in bytes (typically 8192)
+// @param gpu_ptr_out Output parameter for GPU-accessible pointer
+//
+// @return 0 on success, negative error code on failure
+// @note On failure, the shadow buffer is unmapped and cleaned up
+// @note The DRM file descriptor is closed after registration (mapping persists)
+__host__ int xioRegisterMmioBridgeShadowBufferForGpu(void* shadow_virt,
+                                                     size_t shadow_size,
+                                                     void** gpu_ptr_out);
+
+// Map PCI BAR for GPU access
+// This function maps a PCI device's BAR (Base Address Register) to userspace
+// and registers it with DRM GEM_USERPTR and HIP for GPU access.
+//
+// @param pci_bdf PCI device BDF in 0xBBDD format
+// @param bar BAR number to map (0-5, typically 0 for BAR0)
+// @param bar_cpu Output parameter for CPU-accessible BAR pointer
+// @param bar_gpu Output parameter for GPU-accessible BAR pointer
+// @param bar_size Size to map in bytes (defaults to 8192 if 0)
+//
+// @return 0 on success, negative error code on failure
+// @note The file descriptors are kept open for the mapping to remain valid
+// @note The kernel will clean up mappings when the process exits
+__host__ int xioMapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
+                          void** bar_gpu, size_t bar_size);
+
+// Generate and submit a PCI MMIO bridge command
+// This function handles the ring buffer management, command structure
+// population, and memory ordering for PCI MMIO bridge operations.
+//
+// @param shadowBufferVirt Shadow buffer pointer (must point to ring_meta)
+// @param targetBdf Target device BDF (0xBBDD format)
+// @param targetBar Target BAR number (typically 0)
+// @param offset Offset within BAR
+// @param value Value to write (or read result)
+// @param command Command type (PCI_MMIO_BRIDGE_CMD_WRITE or READ)
+// @param size Transfer size in bytes (1, 2, 4, or 8)
+//
+// @note This function is callable from both host and device code
+// @note Memory fences are executed to ensure proper ordering
+__host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
+                                             uint16_t targetBdf,
+                                             uint8_t targetBar, uint32_t offset,
+                                             uint64_t value, uint8_t command,
+                                             uint8_t size);
 
 #endif // XIO_H

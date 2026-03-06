@@ -264,20 +264,23 @@ int main(int argc, char** argv) {
                            sizeof(unsigned long long int);
 
   // Allocate queues based on memory mode
-  hipError_t sqeErr = xioAllocateSubmissionQueue(totalSqeSize,
-                                                 baseConfig.memoryMode,
-                                                 &hostSqeAddr);
+  // Bit 0: GPU write location (SQE) - 0=host, 1=device
+  // Bit 1: CPU write location (CQE) - 0=host, 1=device
+  bool sqIsDevice = (baseConfig.memoryMode & 0x1) != 0;
+  bool cqIsDevice = (baseConfig.memoryMode & 0x2) != 0;
+
+  hipError_t sqeErr = xioAllocateQueue(totalSqeSize, sqIsDevice,
+                                       "submission queue", &hostSqeAddr);
   if (sqeErr != hipSuccess) {
     std::cerr << "Failed to allocate submission queue" << std::endl;
     return EXIT_FAILURE;
   }
 
-  hipError_t cqeErr = xioAllocateCompletionQueue(totalCqeSize,
-                                                 baseConfig.memoryMode,
-                                                 &hostCqeAddr);
+  hipError_t cqeErr = xioAllocateQueue(totalCqeSize, cqIsDevice,
+                                       "completion queue", &hostCqeAddr);
   if (cqeErr != hipSuccess) {
     std::cerr << "Failed to allocate completion queue" << std::endl;
-    xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
+    xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
     return EXIT_FAILURE;
   }
 
@@ -320,8 +323,8 @@ int main(int argc, char** argv) {
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
               << " (error code: " << err << ")" << std::endl;
-    xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
-    xioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
+    xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+    xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
     // Free host memory using HIP or regular free
     hipError_t hipErrFree1 = hipHostFree(hostStartTime);
     if (hipErrFree1 != hipSuccess) {
@@ -415,8 +418,8 @@ int main(int argc, char** argv) {
   std::cout << "\nTest completed successfully!" << std::endl;
 
   // Free memory
-  xioFreeSubmissionQueue(hostSqeAddr, baseConfig.memoryMode);
-  xioFreeCompletionQueue(hostCqeAddr, baseConfig.memoryMode);
+  xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+  xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
   // Free host memory using HIP or regular free
   hipError_t hipErrFree1 = hipHostFree(hostStartTime);
   if (hipErrFree1 != hipSuccess) {
