@@ -5,17 +5,23 @@
 #
 # usage: sbatch rocm-xio-tests.nvme-ep.sbatch
 #
-#SBATCH --output=%x.%j.out
-#SBATCH --error=%x.%j.err
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
 #SBATCH --gpus-per-node=1
 #   Ensure job only runs on nodes with spare NVMe devices
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
-#SBATCH --constraint=MARKHAM&NVME&ROCM7.2.0
+#   Also ensure a recent ROCm version since we need to run outside enroot.
+#SBATCH --constraint=MARKHAM&NVME&(ROCM7.2.0)
 
-set -e
+set -xe
+
+# Use timestamped logs directory if provided, otherwise use logs/
+LOGS_DIR="${ALOLA_LOGS_DIR:-logs}"
+# Create directory if it doesn't exist (suppress errors if read-only or exists)
+mkdir -p "${LOGS_DIR}" 2>/dev/null || true
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
 else
@@ -26,9 +32,12 @@ cleanup() {
   echo "Cleaning up..."
   unload_kernel_module_on_host
   rm -rf "${WORKING_DIR}"
-  ssh localhost "sudo rm -rf ${WORKING_DIR}"
+  ${SSH_LOCALHOST} "sudo rm -rf ${WORKING_DIR}"
 }
 trap cleanup EXIT
+
+# Initialize test tracking
+test_init
 
 echo "=========================================="
 echo "NVMe-EP Unit Test Script"
@@ -42,7 +51,8 @@ if [ -z "${ROOT_DEVICE}" ]; then
   exit 1
 fi
 
-echo "INFO: Constructing list of NVMe controllers, namespaces, and partitions..."
+echo "INFO: Constructing list of NVMe controllers, namespaces, and " \
+     "partitions..."
 CTRL_LIST=()
 NS_LIST=()
 PART_LIST=()
@@ -61,8 +71,26 @@ echo "  NS_LIST: ${NS_LIST[@]}"
 echo "  PART_LIST: ${PART_LIST[@]}"
 
 # Find a non-rootfs controller to use for the test.
-NON_ROOTFS_CTRL=$(find_non_rootfs_nvme_ctrl "${ROOT_DEVICE}" "${CTRL_LIST[@]}")
+NON_ROOTFS_CTRL=$(find_non_rootfs_nvme_ctrl "${ROOT_DEVICE}" \
+  "${CTRL_LIST[@]}")
 echo "  NON_ROOTFS_CTRL: ${NON_ROOTFS_CTRL}"
+
+# Find namespace corresponding to the controller
+# Extract controller number (e.g., /dev/nvme0 -> 0)
+if [[ "${NON_ROOTFS_CTRL}" =~ ^/dev/nvme([0-9]+)$ ]]; then
+  CTRL_NUM="${BASH_REMATCH[1]}"
+  # Find first namespace for this controller (typically n1)
+  for ns in "${NS_LIST[@]}"; do
+    if [[ "$ns" =~ ^/dev/nvme${CTRL_NUM}n[0-9]+$ ]]; then
+      NVME_NAMESPACE="$ns"
+      break
+    fi
+  done
+fi
+if [ -z "${NVME_NAMESPACE}" ]; then
+  echo "WARN: Could not determine namespace for controller " \
+       "${NON_ROOTFS_CTRL}"
+fi
 
 # Build rocm-xio
 cd "${PROJECT_DIR}"
@@ -72,8 +100,8 @@ echo "Building and loading kernel module on host..."
 build_and_load_kernel_module_on_host
 
 # Copy over test program
-ssh localhost "mkdir -p ${WORKING_DIR}/build/"
-scp ${WORKING_DIR}/build/xio-tester \
+${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/build/"
+${SCP_COMMAND} ${WORKING_DIR}/build/xio-tester \
   localhost:${WORKING_DIR}/build/xio-tester
 
 # Run tests
@@ -81,33 +109,44 @@ echo "=========================================="
 echo "Running NVMe-EP unit tests"
 echo "=========================================="
 echo "NVMe Controller: ${NON_ROOTFS_CTRL}"
+if [ -n "${NVME_NAMESPACE}" ]; then
+  echo "NVMe Namespace: ${NVME_NAMESPACE}"
+fi
 echo ""
 
-ssh localhost "export LD_LIBRARY_PATH=/opt/rocm/lib; \
-  export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-  sudo -E ${WORKING_DIR}/build/xio-tester \
-    nvme-ep --controller ${NON_ROOTFS_CTRL} \
-    --access-pattern random \
-    --lfsr-seed 0 \
-    --read-io -5 \
-    --queue-id 63 \
-    --queue-length 16 \
-    --verbose"
+test_run "NVMe-EP memory-mode 0" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
+--controller ${NON_ROOTFS_CTRL} --access-pattern random \
+--memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 --read-io -23 \
+--queue-length 128\""
 
 sleep 3
 
-ssh localhost "export LD_LIBRARY_PATH=/opt/rocm/lib; \
-  export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-  sudo -E ${WORKING_DIR}/build/xio-tester \
-    nvme-ep --controller ${NON_ROOTFS_CTRL} \
-    --access-pattern random \
-    --lfsr-seed 43 \
-    --write-io -5 \
-    --queue-id 63 \
-    --queue-length 16 \
-    --verbose"
+test_run "NVMe-EP memory-mode 3" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
+--controller ${NON_ROOTFS_CTRL} --access-pattern random \
+--memory-mode 3 --less-timing --lbas-per-io 1 --lfsr-seed 32 \
+--read-io -573 --queue-length 128\""
 
-echo ""
-echo "=========================================="
-echo "All tests passed!"
-echo "=========================================="
+sleep 3
+
+test_run "NVMe-EP memory-mode 11" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
+--controller ${NON_ROOTFS_CTRL} --access-pattern random \
+--memory-mode 11 --less-timing --lbas-per-io 1 --lfsr-seed 32 \
+--read-io -573 --queue-length 128\""
+
+# Disable NVMe duration capture
+CAPTURE_NVME_DURATION=0
+
+# Report results and exit with appropriate code
+test_report "${NVME_NAMESPACE}"
+EXIT_CODE=$?
+
+exit ${EXIT_CODE}
