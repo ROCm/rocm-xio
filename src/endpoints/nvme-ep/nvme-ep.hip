@@ -1697,25 +1697,10 @@ __host__ int createQueue(const char* nvme_device,
   int kmod_fd = -1;
   int nvme_fd = -1;
   int ret = 0;
-  hipError_t sqe_err = hipSuccess;
-  hipError_t cqe_err = hipSuccess;
-  hipError_t sq_hip_err = hipSuccess;
-  hipError_t cq_hip_err = hipSuccess;
-  void* sq_virt = nullptr;
-  void* cq_virt = nullptr;
-  void* sq_gpu = nullptr;
-  void* cq_gpu = nullptr;
-  bool sq_uses_coherent = false;
-  bool cq_uses_coherent = false;
-  bool sq_is_device = (memory_mode & 0x1) != 0;
-  bool cq_is_device = (memory_mode & 0x2) != 0;
-  uint64_t sq_phys = 0;
-  uint64_t cq_phys = 0;
-  struct drm_amdgpu_gem_userptr sq_userptr = {};
-  struct drm_amdgpu_gem_userptr cq_userptr = {};
-  size_t page_size = 0;
-  size_t sq_size_aligned = 0;
-  size_t cq_size_aligned = 0;
+  struct xioQueueSetup sq_setup = {};
+  struct xioQueueSetup cq_setup = {};
+  bool sq_is_device = (memory_mode & XIO_MEM_MODE_SQ_DEVICE) != 0;
+  bool cq_is_device = (memory_mode & XIO_MEM_MODE_CQ_DEVICE) != 0;
 
   if (!nvme_device || !kernel_module_device || !info) {
     return -EINVAL;
@@ -1729,11 +1714,6 @@ __host__ int createQueue(const char* nvme_device,
   // Calculate queue sizes in bytes
   const size_t sq_size_bytes = queue_size * NVME_EP_SQE_SIZE;
   const size_t cq_size_bytes = queue_size * NVME_EP_CQE_SIZE;
-
-  // Calculate page-aligned sizes for GEM_USERPTR
-  page_size = sysconf(_SC_PAGESIZE);
-  sq_size_aligned = ((sq_size_bytes + page_size - 1) / page_size) * page_size;
-  cq_size_aligned = ((cq_size_bytes + page_size - 1) / page_size) * page_size;
 
   // Zero-initialize output structure
   memset(info, 0, sizeof(*info));
@@ -1768,137 +1748,60 @@ __host__ int createQueue(const char* nvme_device,
     return -errno;
   }
 
-  // Allocate SQ buffer
-  sqe_err = xioAllocateQueue(sq_size_bytes, sq_is_device, "submission queue",
-                             &sq_virt);
-  if (sqe_err != hipSuccess) {
-    fprintf(stdout, "Failed to allocate SQ buffer: %s\n",
-            hipGetErrorString(sqe_err));
-    ret = -ENOMEM;
+  // Setup SQ using unified helper
+  ret = xioSetupQueueForGpu(sq_size_bytes, sq_is_device, nvme_bdf,
+                            kernel_module_device, is_emulated,
+                            "submission queue", &sq_setup);
+  if (ret < 0) {
     goto cleanup;
   }
 
-  // Allocate CQ buffer
-  cqe_err = xioAllocateQueue(cq_size_bytes, cq_is_device, "completion queue",
-                             &cq_virt);
-  if (cqe_err != hipSuccess) {
-    fprintf(stdout, "Failed to allocate CQ buffer: %s\n",
-            hipGetErrorString(cqe_err));
-    xioFreeQueue(sq_virt, sq_is_device, "submission queue");
-    ret = -ENOMEM;
-    goto cleanup;
-  }
-
-  // Zero-initialize queues
-  memset(sq_virt, 0, sq_size_bytes);
-  memset(cq_virt, 0, cq_size_bytes);
-
-  // Reallocate host memory queues with hipHostMallocCoherent for GPU-PCIe
-  // coherency This is critical for gfx900 (MI250) where GPU writes must be
-  // immediately visible to PCIe devices like NVMe controllers
-  if (!sq_is_device) {
-    sq_uses_coherent = xioReallocateQueue(&sq_virt, sq_size_bytes,
-                                          "submission queue");
-  }
-  if (!cq_is_device) {
-    cq_uses_coherent = xioReallocateQueue(&cq_virt, cq_size_bytes,
-                                          "completion queue");
-  }
-
-  // Register queues with GPU
-  if (!xioRegQueueGpu(sq_virt, sq_size_aligned, sq_is_device,
-                      "submission queue", &sq_userptr)) {
-    goto cleanup;
-  }
-  if (!xioRegQueueGpu(cq_virt, cq_size_aligned, cq_is_device,
-                      "completion queue", &cq_userptr)) {
-    goto cleanup;
-  }
-
-  // Step 2: Register with HIP
-  // Skip hipHostRegister if:
-  // 1. Memory was allocated with hipHostMallocCoherent (already registered)
-  // 2. Memory is device memory (allocated via HSA, already GPU-accessible)
-  if (!sq_uses_coherent && !sq_is_device) {
-    sq_hip_err = hipHostRegister(sq_virt, sq_size_bytes, hipHostRegisterMapped);
-    if (sq_hip_err != hipSuccess) {
-      fprintf(stdout, "Warning: Failed to register SQ with HIP: %s\n",
-              hipGetErrorString(sq_hip_err));
-      ret = -EIO;
-      goto cleanup;
+  // Setup CQ using unified helper
+  ret = xioSetupQueueForGpu(cq_size_bytes, cq_is_device, nvme_bdf,
+                            kernel_module_device, is_emulated,
+                            "completion queue", &cq_setup);
+  if (ret < 0) {
+    // Cleanup SQ setup
+    if (sq_setup.uses_coherent) {
+      (void)hipHostFree(sq_setup.virt);
+    } else {
+      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
-  }
-
-  if (!cq_uses_coherent && !cq_is_device) {
-    cq_hip_err = hipHostRegister(cq_virt, cq_size_bytes, hipHostRegisterMapped);
-    if (cq_hip_err != hipSuccess) {
-      fprintf(stdout, "Warning: Failed to register CQ with HIP: %s\n",
-              hipGetErrorString(cq_hip_err));
-      if (!sq_uses_coherent && !sq_is_device) {
-        (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-      }
-      ret = -EIO;
-      goto cleanup;
-    }
-  }
-
-  // Step 3: Get GPU pointers
-  sq_gpu = xioGetGpuPointer(sq_virt, sq_is_device, "submission queue");
-  if (!sq_gpu) {
-    if (!sq_uses_coherent) {
-      (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-    }
-    if (!cq_uses_coherent && !cq_is_device) {
-      (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-    }
-    ret = -EIO;
-    goto cleanup;
-  }
-
-  cq_gpu = xioGetGpuPointer(cq_virt, cq_is_device, "completion queue");
-  if (!cq_gpu) {
-    if (!sq_uses_coherent && !sq_is_device) {
-      (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-    }
-    if (!cq_uses_coherent) {
-      (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-    }
-    ret = -EIO;
-    goto cleanup;
-  }
-
-  fprintf(
-    stdout,
-    "Info: Queues registered with GPU: SQ=%p (host=%p), CQ=%p (host=%p)\n",
-    sq_gpu, sq_virt, cq_gpu, cq_virt);
-
-  // Get physical addresses for queues
-  sq_phys = xioGetPhysAddr(sq_virt, sq_size_bytes, sq_is_device, nvme_bdf,
-                           kernel_module_device, is_emulated,
-                           "submission queue");
-  if (sq_phys == 0 && sq_is_device) {
-    ret = -ENOTSUP;
-    goto cleanup;
-  }
-
-  cq_phys = xioGetPhysAddr(cq_virt, cq_size_bytes, cq_is_device, nvme_bdf,
-                           kernel_module_device, is_emulated,
-                           "completion queue");
-  if (cq_phys == 0 && cq_is_device) {
-    ret = -ENOTSUP;
     goto cleanup;
   }
 
   // Register queue addresses with kernel module for kprobe injection
-  ret = xioKmodRegQueue(kmod_fd, sq_virt, sq_phys, sq_size_bytes, 0, nvme_bdf,
-                        "submission queue");
+  ret = xioKmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
+                        nvme_bdf, "submission queue");
   if (ret < 0) {
+    // Cleanup both setups
+    if (sq_setup.uses_coherent) {
+      (void)hipHostFree(sq_setup.virt);
+    } else {
+      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+    }
+    if (cq_setup.uses_coherent) {
+      (void)hipHostFree(cq_setup.virt);
+    } else {
+      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+    }
     goto cleanup;
   }
 
-  ret = xioKmodRegQueue(kmod_fd, cq_virt, cq_phys, cq_size_bytes, 1, nvme_bdf,
-                        "completion queue");
+  ret = xioKmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
+                        nvme_bdf, "completion queue");
   if (ret < 0) {
+    // Cleanup both setups
+    if (sq_setup.uses_coherent) {
+      (void)hipHostFree(sq_setup.virt);
+    } else {
+      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+    }
+    if (cq_setup.uses_coherent) {
+      (void)hipHostFree(cq_setup.virt);
+    } else {
+      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+    }
     goto cleanup;
   }
 
@@ -1918,8 +1821,20 @@ __host__ int createQueue(const char* nvme_device,
   // Create queues via NVMe admin commands
   fprintf(stdout, "Creating NVMe queues (queue_id=%u, queue_size=%u)...\n",
           queue_id, queue_size);
-  ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_virt, cq_virt);
+  ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_setup.virt,
+                            cq_setup.virt);
   if (ret < 0) {
+    // Cleanup both setups
+    if (sq_setup.uses_coherent) {
+      (void)hipHostFree(sq_setup.virt);
+    } else {
+      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+    }
+    if (cq_setup.uses_coherent) {
+      (void)hipHostFree(cq_setup.virt);
+    } else {
+      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+    }
     goto cleanup;
   }
 
@@ -1930,12 +1845,12 @@ __host__ int createQueue(const char* nvme_device,
   info->doorbell = 0; // TODO: Get from device info
 
   // Fill output structure
-  info->sq_virt = sq_virt;
-  info->cq_virt = cq_virt;
-  info->sq_gpu = sq_gpu; // GPU-accessible pointer for kernel launch
-  info->cq_gpu = cq_gpu; // GPU-accessible pointer for kernel launch
-  info->sq_phys = sq_phys;
-  info->cq_phys = cq_phys;
+  info->sq_virt = sq_setup.virt;
+  info->cq_virt = cq_setup.virt;
+  info->sq_gpu = sq_setup.gpu; // GPU-accessible pointer for kernel launch
+  info->cq_gpu = cq_setup.gpu; // GPU-accessible pointer for kernel launch
+  info->sq_phys = sq_setup.phys;
+  info->cq_phys = cq_setup.phys;
   info->sq_dmabuf_fd = -1; // Not currently used
   info->cq_dmabuf_fd = -1; // Not currently used
 
@@ -1944,34 +1859,23 @@ __host__ int createQueue(const char* nvme_device,
   return 0;
 
 cleanup:
-  // Unregister from HIP if we registered (non-coherent, non-device
-  // allocations)
-  if (sq_virt && !sq_uses_coherent && !sq_is_device &&
-      sq_hip_err == hipSuccess) {
-    (void)hipHostUnregister(sq_virt); // Ignore return value in cleanup
-  }
-  if (cq_virt && !cq_uses_coherent && !cq_is_device &&
-      cq_hip_err == hipSuccess) {
-    (void)hipHostUnregister(cq_virt); // Ignore return value in cleanup
-  }
-
   // Free queues - handle coherent allocation separately
-  if (sq_virt) {
-    if (sq_uses_coherent) {
+  if (sq_setup.virt) {
+    if (sq_setup.uses_coherent) {
       // Free HIP coherent memory
-      (void)hipHostFree(sq_virt);
+      (void)hipHostFree(sq_setup.virt);
     } else {
       // Free using standard free function
-      xioFreeQueue(sq_virt, sq_is_device, "submission queue");
+      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
   }
-  if (cq_virt) {
-    if (cq_uses_coherent) {
+  if (cq_setup.virt) {
+    if (cq_setup.uses_coherent) {
       // Free HIP coherent memory
-      (void)hipHostFree(cq_virt);
+      (void)hipHostFree(cq_setup.virt);
     } else {
       // Free using standard free function
-      xioFreeQueue(cq_virt, cq_is_device, "completion queue");
+      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
     }
   }
   if (nvme_fd >= 0) {

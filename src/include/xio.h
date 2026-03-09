@@ -24,9 +24,8 @@ namespace CLI {
 class App;
 }
 
-#include "xio-endpoint-registry.h"
-// AUTO-GENERATED - DO NOT EDIT MANUALLY
 #include "xio-endpoint-includes-gen.h"
+#include "xio-endpoint-registry.h"
 
 // ROCm-XIO kernel module device path
 #define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
@@ -201,18 +200,88 @@ void xioPrintHistogram(const std::vector<double>& durations,
                        unsigned writeIterations = 0,
                        unsigned verifiedReadsCount = 0);
 
+// Memory mode flags (bits in memoryMode field)
+#define XIO_MEM_MODE_SQ_DEVICE 0x1       // Bit 0: SQ in device memory
+#define XIO_MEM_MODE_CQ_DEVICE 0x2       // Bit 1: CQ in device memory
+#define XIO_MEM_MODE_DOORBELL_DEVICE 0x4 // Bit 2: Doorbell in device memory
+#define XIO_MEM_MODE_DATA_DEVICE 0x8     // Bit 3: Data buffers in device memory
+
 // Queue memory allocation functions
 // memoryMode bits: Bit 0 (LSB) = GPU write location (0=host, 1=device)
 //                  Bit 1 = CPU write location (0=host, 1=device)
 //                  Bit 2 = Doorbell location (0=host, 1=device)
 //                  Bit 3 = Data buffer location (0=host, 1=device)
+
+// Allocate queue memory based on memory mode
+// Returns hipSuccess on success, hipErrorMemoryAllocation on failure
+//
+// @param size Size of queue in bytes
+// @param isDeviceMemory true to allocate device memory (hipMalloc), false for
+//                      host memory (hipHostMalloc/malloc)
+// @param queueName Name of queue type for error messages ("submission queue"
+//                 or "completion queue")
+// @param ptr Output parameter for allocated pointer
 hipError_t xioAllocateQueue(size_t size, bool isDeviceMemory,
                             const char* queueName, void** ptr);
+
+// Free queue memory based on memory mode
+//
+// @param ptr Pointer to free
+// @param isDeviceMemory true if allocated with hipMalloc, false if
+//                      hipHostMalloc/malloc
+// @param queueName Name of queue type for error messages
+void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName);
+
+// Reallocate host memory queue with hipHostMallocCoherent for GPU-PCIe
+// coherency. This is critical for gfx900 (MI250) where GPU writes must be
+// immediately visible to PCIe devices like NVMe controllers.
+//
+// @param ptr Pointer to current allocation (updated to coherent memory on
+//           success)
+// @param size Size of queue in bytes
+// @param queueName Name of queue type for error messages
+//
+// @return true if successfully reallocated to coherent memory, false otherwise
+//         (false means either allocation failed or ptr was nullptr)
+//
+// @note On success, the original allocation is freed and ptr is updated to
+// point
+//       to the new coherent allocation. On failure, ptr remains unchanged.
 bool xioReallocateQueue(void** ptr, size_t size, const char* queueName);
+
+// Register a queue with GPU via DRM GEM_USERPTR
+// Opens DRM device and registers a single queue for GPU access.
+//
+// @param queue_virt Queue virtual address
+// @param queue_size_aligned Queue size (page-aligned)
+// @param is_device True if queue is device memory (already GPU-accessible)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+// @param userptr GEM_USERPTR struct (filled on success)
+//
+// @return Pointer to userptr on success, NULL on failure
+//
+// @note For device memory queues, registration is optional (queues are already
+//       GPU-accessible). The DRM file descriptor is opened and closed for each
+//       call. On success, returns the userptr parameter. On failure, returns
+//       NULL.
 struct drm_amdgpu_gem_userptr* xioRegQueueGpu(
   void* queue_virt, size_t queue_size_aligned, bool is_device,
   const char* queue_name, struct drm_amdgpu_gem_userptr* userptr);
+
+// Get GPU-accessible pointer for a queue
+// For device memory, returns the same pointer. For host memory, gets GPU
+// pointer via hipHostGetDevicePointer.
+//
+// @param host_ptr Host-accessible pointer to the queue
+// @param is_device True if queue is device memory (GPU pointer same as host)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+//
+// @return GPU-accessible pointer on success, NULL on failure
+//
+// @note For device memory, this simply returns the host_ptr. For host memory,
+//       this calls hipHostGetDevicePointer to get the GPU-accessible address.
 void* xioGetGpuPointer(void* host_ptr, bool is_device, const char* queue_name);
+
 hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr);
 void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName);
 void xioFreeDataBuffer(void* ptr, unsigned memoryMode);
@@ -224,13 +293,13 @@ hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
 // Extract endpoint name from command line arguments
 // This allows endpoints to add their CLI options before full parsing
 // Returns empty string if endpoint name not found in arguments
-std::string xioExtractEndpointName(int argc, char** argv);
+__host__ std::string xioExtractEndpointName(int argc, char** argv);
 
 // Detect PCI MMIO bridge BDF by scanning PCI devices
 // Looks for Vendor ID 0x1b36 (Red Hat, Inc.) and Device ID 0x0015
 // Returns 0 on success with BDF in *bdf_out, negative error code on failure
 // Errors out if 0 or >1 PCI MMIO bridges are found
-int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out);
+__host__ int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out);
 
 // Detect PCI BDF from device file path
 // Takes a device path like /dev/nvme0 or /dev/nvme1
@@ -281,14 +350,32 @@ __host__ int xioOpenDeviceWithRetry(const char* device_path, int flags,
                                     int initial_delay_ms);
 
 // Export HSA-allocated VRAM as DMA-BUF and register with kernel module
-// Returns 0 on success, negative error code on failure
-// is_emulated: true for emulated NVMe (returns GPU BAR GPA), false for
-// passthrough (returns P2PDMA IOVA)
-__host__ int export_and_register_vram_buffer(void* vram_ptr, size_t size,
-                                             uint16_t nvme_bdf,
-                                             const char* kernel_module_device,
-                                             uint64_t* phys_addr_out,
-                                             bool is_emulated);
+// This function exports VRAM allocated via HSA/hipMalloc as a DMA-BUF and
+// registers it with the kernel module to obtain a physical address for DMA
+// operations.
+//
+// @param vram_ptr Pointer to VRAM buffer allocated via hipMalloc or HSA
+// @param size Size of buffer in bytes
+// @param nvme_bdf NVMe controller BDF (0xBBDD format) for P2PDMA mapping
+// @param kernel_module_device Path to kernel module device (e.g.,
+//                             "/dev/rocm-xio")
+// @param phys_addr_out Output parameter for physical/DMA address
+// @param is_emulated True for emulated NVMe (returns GPU BAR GPA), false for
+//                    passthrough (returns P2PDMA IOVA)
+//
+// @return 0 on success, negative error code on failure
+//
+// @note For emulated NVMe controllers, returns GPU BAR GPA. For passthrough
+//       NVMe controllers, returns P2PDMA IOVA address.
+// @note Requires ROCm 5.3+ with dmabuf support, kernel
+// CONFIG_DMABUF_MOVE_NOTIFY,
+//       and kernel CONFIG_PCI_P2PDMA.
+// @note The buffer is aligned to page boundaries for DMA-BUF export. The offset
+//       within the page-aligned region is added to the returned physical
+//       address.
+__host__ int xioExportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
+                                 const char* kernel_module_device,
+                                 uint64_t* phys_addr_out, bool is_emulated);
 
 // Buffer allocation result structure
 struct xioBufferInfo {
@@ -387,9 +474,65 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
                                  uint16_t nvme_bdf,
                                  const char* kernel_module_device,
                                  bool is_emulated, const char* buffer_name);
+// Register a queue address with the kernel module for kprobe injection
+// Registers the virtual and physical addresses of a queue so the kernel module
+// can inject physical addresses into NVMe CREATE_SQ/CREATE_CQ commands.
+//
+// @param kmod_fd File descriptor for kernel module device
+// @param virt_addr Virtual address of the queue
+// @param phys_addr Physical address of the queue
+// @param size Size of the queue in bytes
+// @param queue_type Queue type: 0 for SQ (Submission Queue), 1 for CQ
+//                   (Completion Queue)
+// @param nvme_bdf NVMe controller BDF (required for kernel module)
+// @param queue_name Name of queue for logging (e.g., "submission queue")
+//
+// @return 0 on success, negative error code on failure
 int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
                     size_t size, uint8_t queue_type, uint16_t nvme_bdf,
                     const char* queue_name);
+
+// Queue setup structure for unified queue initialization
+struct xioQueueSetup {
+  void* virt;                            // Virtual address (host-accessible)
+  void* gpu;                             // GPU-accessible pointer
+  uint64_t phys;                         // Physical/DMA address
+  bool uses_coherent;                    // True if coherent memory was used
+  struct drm_amdgpu_gem_userptr userptr; // DRM userptr handle
+};
+
+// Unified queue setup function
+// Sets up a queue for GPU and PCIe access with all necessary registrations
+//
+// @param size Queue size in bytes
+// @param is_device True for device memory, false for host memory
+// @param nvme_bdf NVMe controller BDF (required for device memory)
+// @param kernel_module_device Path to kernel module device (required for device
+//                             memory)
+// @param is_emulated True if NVMe controller is emulated
+// @param queue_name Name for logging
+// @param setup Output structure with all pointers and handles
+//
+// @return 0 on success, negative error code on failure
+// @note On failure, all resources are cleaned up automatically
+__host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
+                                 const char* kernel_module_device,
+                                 bool is_emulated, const char* queue_name,
+                                 struct xioQueueSetup* setup);
+
+// Unified GPU memory registration helper
+// Registers memory with DRM GEM_USERPTR and HIP, then gets GPU pointer
+//
+// @param host_ptr Host-accessible pointer
+// @param size Size in bytes
+// @param name Name for logging
+// @param gpu_ptr_out Output GPU-accessible pointer
+//
+// @return 0 on success, negative error code on failure
+// @note This consolidates the DRM + HIP + GPU pointer pattern used in queues,
+//       shadow buffers, and BARs
+__host__ int xioRegisterMemoryForGpu(void* host_ptr, size_t size,
+                                     const char* name, void** gpu_ptr_out);
 
 //
 // Common endpoint utilities namespace
