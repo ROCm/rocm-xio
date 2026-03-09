@@ -1664,6 +1664,53 @@ int xioEnsureDeviceNode() {
   return 0;
 }
 
+__host__ int xioOpenDeviceWithRetry(const char* device_path, int flags,
+                                    const char* device_name, int max_retries,
+                                    int initial_delay_ms) {
+  if (!device_path) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  // Default values if not specified
+  if (max_retries <= 0) {
+    max_retries = 5;
+  }
+  if (initial_delay_ms <= 0) {
+    initial_delay_ms = 100;
+  }
+
+  // Use device_path as name if device_name is not provided
+  const char* display_name = device_name ? device_name : device_path;
+
+  int fd = -1;
+  for (int retry = 0; retry < max_retries; retry++) {
+    fd = open(device_path, flags);
+    if (fd >= 0) {
+      return fd; // Success
+    }
+
+    // Only retry on temporary errors
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      // Not a temporary error, fail immediately
+      break;
+    }
+
+    // Wait before retrying (exponential backoff)
+    if (retry < max_retries - 1) {
+      int delay = initial_delay_ms * (1 << retry);
+      fprintf(stdout, "%s busy, retrying in %d ms (attempt %d/%d)...\n",
+              display_name, delay, retry + 1, max_retries);
+      usleep(delay * 1000);
+    }
+  }
+
+  // All retries exhausted or non-retryable error
+  fprintf(stdout, "Failed to open %s after %d retries: %s\n", display_name,
+          max_retries, strerror(errno));
+  return -1;
+}
+
 // Export HSA-allocated VRAM as DMA-BUF and register with kernel module
 // Based on QEMU reference code: test-gpu-nvme-write.cpp
 // Returns 0 on success, negative error code on failure

@@ -85,9 +85,29 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
 __host__ __device__ cqeType cqePoll(cqeType cqeLast,
                                     volatile cqeType* cqeAddress,
                                     uint16_t last_sq_head,
-                                    uint16_t* sq_head_out) {
+                                    uint16_t* sq_head_out,
+                                    const volatile bool* stopRequested) {
+  // Check stop flag before entering polling loop
+  if (stopRequested != nullptr && *stopRequested) {
+    if (sq_head_out != nullptr) {
+      *sq_head_out = last_sq_head;
+    }
+    return cqeLast;
+  }
+
   cqeType cqeNew;
+  unsigned poll_count = 0;
   while (true) {
+    // Check stop flag periodically (every 100 polls to balance responsiveness
+    // and overhead)
+    if (stopRequested != nullptr && poll_count % 100 == 0 && *stopRequested) {
+      // Stop requested - return last known CQE to exit gracefully
+      if (sq_head_out != nullptr) {
+        *sq_head_out = last_sq_head;
+      }
+      return cqeLast;
+    }
+
     cqeNew = cqeRead(cqeAddress);
     uint16_t sq_head = cqeNew.sq_head;
 
@@ -116,6 +136,16 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
         *sq_head_out = sq_head;
       }
       return cqeNew;
+    }
+
+    poll_count++;
+    // Safety: prevent infinite loop if max polls exceeded
+    if (poll_count >= NVME_EP_MAX_POLLS) {
+      // Max polls reached - return last known CQE
+      if (sq_head_out != nullptr) {
+        *sq_head_out = last_sq_head;
+      }
+      return cqeLast;
     }
   }
 }
@@ -396,7 +426,8 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       volatile cqeType* cqe_entry = &cqeAddr[cq_head];
       uint16_t new_sq_head = 0;
       nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(cqe_last, cqe_entry,
-                                                  last_sq_head, &new_sq_head);
+                                                  last_sq_head, &new_sq_head,
+                                                  config.stopRequested);
 
       // Check completion status
       if (!nvme_ep::cqeOk(&cqe_new)) {
@@ -526,11 +557,13 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
     uint16_t completed_count = 0;
     nvme_ep::cqeType cqe_last = initial_cqe_data;
 
-    while (completed_count < num_ops) {
+    while (completed_count < num_ops &&
+           (config.stopRequested == nullptr || !*config.stopRequested)) {
       volatile cqeType* cqe_entry = &cqeAddr[cq_head];
       uint16_t new_sq_head = 0;
       nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(cqe_last, cqe_entry,
-                                                  last_sq_head, &new_sq_head);
+                                                  last_sq_head, &new_sq_head,
+                                                  config.stopRequested);
 
       if (new_sq_head > last_sq_head && new_sq_head <= num_ops) {
         uint16_t new_completions = new_sq_head - last_sq_head;
@@ -659,8 +692,10 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
     ->group(nvme_group);
   app
     .add_option("--queue-id", config->queueId,
-                "NVMe queue ID to use (0=admin queue, 1+=IO queues).")
-    ->default_val(63)
+                "NVMe queue ID to use (0=admin queue, 1+=IO queues). "
+                "If not specified, auto-detects and uses the last available "
+                "I/O queue.")
+    ->default_val(0) // 0 means "auto-detect" - will be set in validateConfig
     ->check(CLI::Range(0, 65535))
     ->group(nvme_group);
   app
@@ -721,6 +756,22 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
  * @return Empty string if valid, error message otherwise
  */
 __host__ std::string validateConfig(nvmeEpConfig* config) {
+  // Auto-detect maximum queue ID if queueId is 0 (default/unset)
+  if (config->queueId == 0) {
+    if (config->controller.empty()) {
+      return "Cannot auto-detect queue ID: --controller not specified";
+    }
+    uint16_t max_queue_id = 0;
+    int ret = queryMaxQueueId(config->controller.c_str(), &max_queue_id);
+    if (ret != 0) {
+      return "Failed to detect maximum queue ID. Please specify --queue-id "
+             "manually.";
+    }
+    config->queueId = max_queue_id;
+    fprintf(stdout, "Auto-detected and using last available queue ID: %u\n",
+            config->queueId);
+  }
+
   // Validate that access pattern is valid
   if (config->ioParams.accessPattern != "sequential" &&
       config->ioParams.accessPattern != "random") {
@@ -840,6 +891,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
             "Queue creation failed - cannot proceed with kernel launch.\n");
     return hipErrorInvalidValue;
   }
+
+  // Mark queues as created for cleanup on SIGINT
+  nvmeConfig->queuesCreated = true;
 
   // Update config with created queue addresses
   // Use GPU pointers for kernel launch (obtained via hipHostGetDevicePointer)
@@ -1103,11 +1157,10 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
   }
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
-  // Open NVMe device
-  nvme_fd = open(nvme_device, O_RDONLY);
+  // Open NVMe device with retry (device may be temporarily busy)
+  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
+                                   100);
   if (nvme_fd < 0) {
-    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
-            strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -1188,11 +1241,10 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
   }
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
-  // Open NVMe device
-  nvme_fd = open(nvme_device, O_RDONLY);
+  // Open NVMe device with retry (device may be temporarily busy)
+  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
+                                   100);
   if (nvme_fd < 0) {
-    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
-            strerror(errno));
     ret = -errno;
     goto cleanup;
   }
@@ -1282,10 +1334,11 @@ __host__ int checkRootfs(const char* nvme_device) {
 
 __host__ int readSmartLog(const char* nvme_device,
                           struct nvme_smart_log* smart_log) {
-  int nvme_fd = open(nvme_device, O_RDONLY);
+  int nvme_fd = -1;
+  // Open NVMe device with retry (device may be temporarily busy)
+  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
+                                   100);
   if (nvme_fd < 0) {
-    fprintf(stdout, "Failed to open NVMe device %s: %s\n", nvme_device,
-            strerror(errno));
     return -errno;
   }
 
@@ -1336,9 +1389,80 @@ __host__ int readSmartLog(const char* nvme_device,
   return 0;
 }
 
+__host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id) {
+  if (!nvme_device || !max_queue_id) {
+    return -EINVAL;
+  }
+
+  // Extract device name from path (e.g., "/dev/nvme1" -> "nvme1")
+  const char* device_name = strrchr(nvme_device, '/');
+  if (!device_name) {
+    device_name = nvme_device;
+  } else {
+    device_name++; // Skip the '/'
+  }
+
+  // Build sysfs path: /sys/class/nvme/nvme1/queue_count
+  char sysfs_path[256];
+  snprintf(sysfs_path, sizeof(sysfs_path), "/sys/class/nvme/%s/queue_count",
+           device_name);
+
+  FILE* f = fopen(sysfs_path, "r");
+  if (!f) {
+    fprintf(stderr,
+            "Error: Failed to open %s: %s\n"
+            "Cannot determine maximum queue ID. Please specify --queue-id "
+            "manually.\n",
+            sysfs_path, strerror(errno));
+    return -errno;
+  }
+
+  unsigned int queue_count = 0;
+  if (fscanf(f, "%u", &queue_count) != 1) {
+    fprintf(stderr,
+            "Error: Failed to parse queue count from %s\n"
+            "Cannot determine maximum queue ID. Please specify --queue-id "
+            "manually.\n",
+            sysfs_path);
+    fclose(f);
+    return -EIO;
+  }
+  fclose(f);
+
+  if (queue_count == 0) {
+    fprintf(stderr,
+            "Error: Queue count is 0 in %s\n"
+            "Cannot determine maximum queue ID. Please specify --queue-id "
+            "manually.\n",
+            sysfs_path);
+    return -EINVAL;
+  }
+
+  // queue_count includes 1 admin queue (QID 0) + N I/O queues (QID 1-N)
+  // So the last I/O queue ID is queue_count - 1
+  // But we need at least 1 I/O queue, so queue_count must be >= 2
+  if (queue_count < 2) {
+    fprintf(stderr,
+            "Error: Only %u queue(s) available (need at least 2: 1 admin + 1 "
+            "I/O)\n"
+            "Cannot use any I/O queues. Please check device configuration.\n",
+            queue_count);
+    return -EINVAL;
+  }
+
+  *max_queue_id = static_cast<uint16_t>(queue_count - 1);
+  fprintf(stdout,
+          "Detected %u total queues (1 admin + %u I/O). Using last I/O queue "
+          "ID: %u\n",
+          queue_count, queue_count - 1, *max_queue_id);
+
+  return 0;
+}
+
 __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
   struct nvme_passthru_cmd cmd;
   int ret = 0;
+  bool controller_reset_detected = false;
 
   if (nvme_fd < 0) {
     return -EINVAL;
@@ -1349,36 +1473,71 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
   // while associated SQ exists)
 
   // Delete Submission Queue (DELETE_SQ)
+  // Note: DELETE_SQ may take time if the queue has pending commands - the
+  // controller waits for all commands to complete before deletion
+  // Also note: DELETE_SQ on a non-existent queue ID may hang - this is
+  // expected behavior per NVMe spec
+  fprintf(stdout,
+          "Sending DELETE_SQ command for queue_id=%u (this may take time if "
+          "queue has pending commands or doesn't exist)...\n",
+          queue_id);
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_delete_sq;
-  cmd.nsid = 0;         // Admin commands use NSID 0
-  cmd.cdw10 = queue_id; // QID
-  cmd.data_len = 0;     // No data transfer for DELETE_SQ
+  cmd.nsid = 0;           // Admin commands use NSID 0
+  cmd.cdw10 = queue_id;   // QID
+  cmd.data_len = 0;       // No data transfer for DELETE_SQ
+  cmd.timeout_ms = 30000; // 30 second timeout (DELETE_SQ can take time)
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
-  if (ret < 0) {
-    // Ignore errors - queue may not exist
-    fprintf(stdout, "Note: DELETE_SQ failed (queue may not exist): %s\n",
-            strerror(errno));
-  } else if (cmd.result & 0xFFFE) {
-    // Check status code, but don't fail - queue may not exist
-    uint16_t status_field = cmd.result & 0xFFFF;
-    uint8_t sc = NVME_CQE_STATUS_SC(status_field);
-    // Ignore errors - queue may not exist or may have already been deleted
-    fprintf(
-      stderr,
-      "Note: DELETE_SQ returned status code 0x%02x (queue may not exist)\n",
-      sc);
+  if (ret == 0) {
+    fprintf(stdout, "DELETE_SQ completed successfully.\n");
+    // Check status code even if ioctl succeeded
+    if (cmd.result & 0xFFFE) {
+      uint16_t status_field = cmd.result & 0xFFFF;
+      uint8_t sc = NVME_CQE_STATUS_SC(status_field);
+      fprintf(stdout,
+              "Note: DELETE_SQ returned status code 0x%02x (queue may not "
+              "exist)\n",
+              sc);
+    }
+  } else {
+    // ioctl failed - could be timeout or other error
+    if (errno == ETIMEDOUT) {
+      fprintf(stderr,
+              "Warning: DELETE_SQ timed out for queue_id=%u. This may "
+              "indicate the queue ID is invalid or the controller is busy. "
+              "The controller may have been reset.\n",
+              queue_id);
+      controller_reset_detected = true;
+    } else {
+      fprintf(stdout,
+              "Note: DELETE_SQ failed (queue may not exist): %s (errno=%d)\n",
+              strerror(errno), errno);
+    }
+  }
+
+  // If controller was reset, wait for it to stabilize before proceeding
+  if (controller_reset_detected) {
+    fprintf(stdout,
+            "Waiting 2 seconds for controller to stabilize after reset...\n");
+    sleep(2);
   }
 
   // Delete Completion Queue (DELETE_CQ)
+  fprintf(stdout, "Sending DELETE_CQ command for queue_id=%u...\n", queue_id);
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_delete_cq;
-  cmd.nsid = 0;         // Admin commands use NSID 0
-  cmd.cdw10 = queue_id; // QID
-  cmd.data_len = 0;     // No data transfer for DELETE_CQ
+  cmd.nsid = 0;           // Admin commands use NSID 0
+  cmd.cdw10 = queue_id;   // QID
+  cmd.data_len = 0;       // No data transfer for DELETE_CQ
+  cmd.timeout_ms = 30000; // 30 second timeout
 
   ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+  if (ret == 0) {
+    fprintf(stdout, "DELETE_CQ completed successfully.\n");
+  } else {
+    fprintf(stdout, "DELETE_CQ ioctl returned: %d\n", ret);
+  }
   if (ret < 0) {
     // Ignore errors - queue may not exist
     fprintf(stdout, "Note: DELETE_CQ failed (queue may not exist): %s\n",
@@ -1466,6 +1625,14 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   fprintf(stdout,
           "Successfully created completion queue (queue_id=%u, size=%u)\n",
           queue_id, queue_size);
+
+  // Re-zero completion queue after creation to clear any stale entries
+  // This is especially important after a controller reset
+  memset(cq_virt, 0, queue_size * NVME_EP_CQE_SIZE);
+  fprintf(stdout, "Re-zeroed completion queue to clear any stale entries.\n");
+
+  // Small delay to allow controller to stabilize after CQ creation
+  usleep(100000); // 100ms delay
 
   // Create Submission Queue (CREATE_SQ)
   memset(&cmd, 0, sizeof(cmd));
@@ -1592,7 +1759,8 @@ __host__ int createQueue(const char* nvme_device,
   fprintf(stdout, "NVMe device %s detected as: %s.\n", nvme_device,
           is_emulated ? "EMULATED" : "REAL");
 
-  nvme_fd = open(nvme_device, O_RDWR);
+  // Open NVMe device with retry (device may be temporarily busy)
+  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     fprintf(stderr, "Failed to open NVMe device %s: %s.\n", nvme_device,
             strerror(errno));
@@ -1735,9 +1903,21 @@ __host__ int createQueue(const char* nvme_device,
   }
 
   // Delete existing queues if they exist
+  fprintf(stdout, "Deleting existing queues (queue_id=%u) if they exist...\n",
+          queue_id);
   deleteQueue(nvme_fd, queue_id);
+  fprintf(stdout, "Queue deletion completed.\n");
+
+  // If controller was reset during deletion, wait a bit more before creating
+  // queues to ensure controller is fully ready
+  // Note: We can't easily detect reset from deleteQueue, but if DELETE_SQ
+  // timed out, we already waited. Add a small delay here as a safety measure.
+  fprintf(stdout, "Waiting 500ms before creating queues...\n");
+  usleep(500000); // 500ms delay
 
   // Create queues via NVMe admin commands
+  fprintf(stdout, "Creating NVMe queues (queue_id=%u, queue_size=%u)...\n",
+          queue_id, queue_size);
   ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_virt, cq_virt);
   if (ret < 0) {
     goto cleanup;
@@ -1800,6 +1980,55 @@ cleanup:
   if (kmod_fd >= 0) {
     close(kmod_fd);
   }
+  return ret;
+}
+
+// C-compatible cleanup function for signal handlers
+extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
+  if (!endpointConfig) {
+    return -EINVAL;
+  }
+
+  // Cast to nvmeEpConfig - we know this is safe if called for nvme-ep
+  nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
+    endpointConfig);
+
+  // Only attempt cleanup if queues were actually created
+  if (!nvmeConfig->queuesCreated) {
+    return 0; // No queues to clean up
+  }
+
+  // Check if controller path is valid
+  if (nvmeConfig->controller.empty()) {
+    return -EINVAL;
+  }
+
+  // Reopen device (device was closed after queue creation)
+  int nvme_fd = xioOpenDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
+                                       "NVMe device", 3, 50);
+  if (nvme_fd < 0) {
+    fprintf(stderr,
+            "Warning: Failed to reopen NVMe device for queue cleanup: %s\n",
+            strerror(errno));
+    return -errno;
+  }
+
+  // Attempt to delete queues
+  fprintf(stdout,
+          "\nSIGINT received: Attempting to delete NVMe queues "
+          "(queue_id=%u)...\n",
+          nvmeConfig->queueId);
+  int ret = deleteQueue(nvme_fd, nvmeConfig->queueId);
+  close(nvme_fd);
+
+  if (ret == 0) {
+    fprintf(stdout, "NVMe queues deleted successfully.\n");
+    nvmeConfig->queuesCreated = false;
+  } else {
+    fprintf(stderr, "Warning: Failed to delete NVMe queues: %s\n",
+            strerror(-ret));
+  }
+
   return ret;
 }
 
