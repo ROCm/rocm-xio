@@ -198,6 +198,22 @@ __host__ int readSmartLog(const char* nvme_device,
                           struct nvme_smart_log* smart_log);
 
 /**
+ * Query maximum number of queues supported by NVMe controller
+ *
+ * This function reads the queue count from sysfs to determine the maximum
+ * number of queues. The sysfs queue_count represents the total number of
+ * queues (1 admin queue + N I/O queues).
+ *
+ * @param nvme_device Path to NVMe device (e.g., "/dev/nvme1")
+ * @param max_queue_id Output parameter for maximum queue ID (last I/O queue)
+ * @return 0 on success, negative error code on failure
+ *
+ * @note Returns the last I/O queue ID (max_queue_id). Queue 0 is admin,
+ *       queues 1-N are I/O queues, so if queue_count=33, max_queue_id=32.
+ */
+__host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id);
+
+/**
  * Create NVMe IO queue pair via IOCTL interface using kernel module
  *
  * This function:
@@ -245,6 +261,20 @@ __host__ int createQueue(const char* nvme_device,
  *       descriptor) will cause a non-zero return value.
  */
 __host__ int deleteQueue(int nvme_fd, uint16_t queue_id);
+
+/**
+ * Cleanup NVMe queues from signal handler
+ *
+ * This function attempts to delete NVMe queues when called from a signal
+ * handler (e.g., SIGINT). It reopens the device and calls deleteQueue.
+ *
+ * @param endpointConfig Opaque pointer to nvmeEpConfig structure
+ * @return 0 on success, negative error code on failure
+ *
+ * @note This function is safe to call from signal handlers (async-signal-safe)
+ * @note Only attempts cleanup if queuesCreated flag is true
+ */
+extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig);
 
 /**
  * Send NVMe CREATE_CQ and CREATE_SQ commands to create queues
@@ -379,12 +409,15 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
  * @param last_sq_head Last known submission queue head value (for sq_head
  * tracking)
  * @param sq_head_out Output parameter for new sq_head value (can be nullptr)
- * @return New CQE when command ID changes or sq_head increases
+ * @param stopRequested Optional pointer to stop flag - if set to true, polling
+ *                      will exit early (can be nullptr)
+ * @return New CQE when command ID changes or sq_head increases, or last CQE
+ *         if stopRequested is true
  */
-__host__ __device__ cqeType cqePoll(cqeType cqeLast,
-                                    volatile cqeType* cqeAddress,
-                                    uint16_t last_sq_head = 0,
-                                    uint16_t* sq_head_out = nullptr);
+__host__ __device__ cqeType
+cqePoll(cqeType cqeLast, volatile cqeType* cqeAddress,
+        uint16_t last_sq_head = 0, uint16_t* sq_head_out = nullptr,
+        const volatile bool* stopRequested = nullptr);
 
 /**
  * Setup NVMe Submission Queue Entry (SQE) for Read or Write command
@@ -706,6 +739,7 @@ struct nvmeEpConfig {
   std::string controller; // NVMe controller device path
   uint16_t queueId;       // Queue ID to use (0=admin, 1+=IO queues)
   uint16_t queueLength;   // Queue length in entries (must be power of 2)
+  bool queuesCreated; // Flag indicating queues have been created (for cleanup)
 
   // Physical addresses (host-side only)
   uint64_t doorbellAddr; // Physical address of doorbell register
@@ -747,9 +781,11 @@ struct nvmeEpConfig {
   } doorbellParams;
 
   // Default constructor
+  // Note: queueId defaults to 0 (invalid) - will be auto-detected in
+  // validateConfig
   nvmeEpConfig()
-    : controller(""), queueId(63), queueLength(64), doorbellAddr(0),
-      sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0),
+    : controller(""), queueId(0), queueLength(64), queuesCreated(false),
+      doorbellAddr(0), sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0),
       ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false},
       bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {

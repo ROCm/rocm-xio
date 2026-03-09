@@ -23,13 +23,28 @@
 
 // Static pointer to config for signal handler access
 static XioEndpointConfig* g_configForSignalHandler = nullptr;
+// Static pointer to endpoint name for signal handler access
+static std::string* g_endpointNameForSignalHandler = nullptr;
 
-// SIGINT handler - sets stop flag to request graceful shutdown
+// Forward declaration for NVMe queue cleanup
+extern "C" {
+int nvme_ep_cleanup_queues(void* endpointConfig);
+}
+
+// SIGINT handler - sets stop flag and attempts to cleanup NVMe queues
 static void sigintHandler(int sig) {
   (void)sig; // Suppress unused parameter warning
   if (g_configForSignalHandler != nullptr &&
       g_configForSignalHandler->stopRequested != nullptr) {
     *g_configForSignalHandler->stopRequested = true;
+  }
+
+  // Attempt to delete NVMe queues if this is the NVMe endpoint
+  if (g_configForSignalHandler != nullptr &&
+      g_configForSignalHandler->endpointConfig != nullptr &&
+      g_endpointNameForSignalHandler != nullptr &&
+      *g_endpointNameForSignalHandler == "nvme-ep") {
+    nvme_ep_cleanup_queues(g_configForSignalHandler->endpointConfig);
   }
 }
 
@@ -413,8 +428,9 @@ int main(int argc, char** argv) {
               << strerror(errno) << std::endl;
   }
 
-  // Store config pointer for signal handler
+  // Store config pointer and endpoint name for signal handler
   g_configForSignalHandler = &baseConfig;
+  g_endpointNameForSignalHandler = &selectedEndpoint;
 
   // Run endpoint test
   hipError_t err = endpoint->run(&baseConfig);
@@ -449,8 +465,9 @@ int main(int argc, char** argv) {
         free(const_cast<bool*>(stopRequestedFlag));
       }
     }
-    // Clear signal handler pointer
+    // Clear signal handler pointers
     g_configForSignalHandler = nullptr;
+    g_endpointNameForSignalHandler = nullptr;
     return EXIT_FAILURE;
   }
 
@@ -632,8 +649,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Clear signal handler pointer
+  // Clear signal handler pointers
   g_configForSignalHandler = nullptr;
+  g_endpointNameForSignalHandler = nullptr;
 
   return EXIT_SUCCESS;
 }
