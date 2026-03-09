@@ -6,6 +6,7 @@
 #ifndef XIO_H
 #define XIO_H
 
+#include <climits>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -40,6 +41,18 @@ class App;
   }
 
 /**
+ * Timing statistics structure for less-timing mode
+ * Tracks min, max, sum, and count of IO completion times
+ */
+struct XioTimingStats {
+  unsigned long long int minDuration = ULLONG_MAX; // Minimum duration in GPU
+                                                   // ticks
+  unsigned long long int maxDuration = 0; // Maximum duration in GPU ticks
+  unsigned long long int sumDuration = 0; // Sum of durations in GPU ticks
+  unsigned long long int count = 0;       // Number of IO operations
+};
+
+/**
  * Base configuration structure for all endpoints
  *
  * Contains common testing parameters that apply to all endpoints.
@@ -65,12 +78,22 @@ struct XioEndpointConfig {
   bool pciMmioBridge = false; // Use PCI MMIO bridge for doorbell routing
 
   // Timing arrays (optional, can be nullptr)
+  // Used when full timing is enabled (default mode)
   unsigned long long int* startTimes = nullptr;
   unsigned long long int* endTimes = nullptr;
+
+  // Timing statistics (optional, can be nullptr)
+  // Used when less-timing mode is enabled
+  XioTimingStats* timingStats = nullptr;
 
   // Queue pointers (host-accessible buffers)
   void* submissionQueue = nullptr; // Host-accessible SQE buffer
   void* completionQueue = nullptr; // Host-accessible CQE buffer
+
+  // Stop flag for graceful shutdown (SIGINT handling)
+  // Allocated with hipHostMalloc to be GPU-accessible
+  // Set to true by signal handler to request kernel stop
+  volatile bool* stopRequested = nullptr;
 
   // Endpoint-specific configuration (opaque pointer)
   // Endpoints cast this to their specific config type
