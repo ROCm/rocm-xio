@@ -1257,7 +1257,7 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
 //
 // @return 0 on success, negative error code on failure
 __host__ int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
-                             size_t size, uint8_t queue_type,
+                             size_t size, uint8_t queue_type, uint16_t nvme_bdf,
                              const char* queue_name) {
   if (kmod_fd < 0 || !virt_addr || size == 0 || !queue_name) {
     return -EINVAL;
@@ -1269,6 +1269,7 @@ __host__ int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   reg_req.phys_addr = phys_addr;
   reg_req.size = size;
   reg_req.queue_type = queue_type;
+  reg_req.nvme_bdf = nvme_bdf;
 
   int ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {

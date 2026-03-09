@@ -1890,13 +1890,13 @@ __host__ int createQueue(const char* nvme_device,
   }
 
   // Register queue addresses with kernel module for kprobe injection
-  ret = xioKmodRegQueue(kmod_fd, sq_virt, sq_phys, sq_size_bytes, 0,
+  ret = xioKmodRegQueue(kmod_fd, sq_virt, sq_phys, sq_size_bytes, 0, nvme_bdf,
                         "submission queue");
   if (ret < 0) {
     goto cleanup;
   }
 
-  ret = xioKmodRegQueue(kmod_fd, cq_virt, cq_phys, cq_size_bytes, 1,
+  ret = xioKmodRegQueue(kmod_fd, cq_virt, cq_phys, cq_size_bytes, 1, nvme_bdf,
                         "completion queue");
   if (ret < 0) {
     goto cleanup;
