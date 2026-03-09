@@ -70,6 +70,7 @@ struct nvmeIoParams {
   uint16_t queueSize;    // Queue size in entries
   uint32_t nsid;         // Namespace ID (must be > 0)
   uint32_t lbasPerIo;    // Number of LBAs per I/O operation (default: 1)
+  bool infiniteMode;     // Infinite mode: run forever
 };
 
 /**
@@ -724,6 +725,7 @@ struct nvmeEpConfig {
     int writeIo;   // Number of write I/O operations (negative for sequential)
     uint32_t nsid; // Namespace ID (default: 1, must be > 0)
     uint32_t lbasPerIo; // Number of LBAs per I/O operation (default: 1)
+    bool infiniteMode;  // Infinite mode: run forever.
   } ioParams;
 
   // Data buffer configuration (mirrors nvmeBufferParams POD struct)
@@ -748,7 +750,8 @@ struct nvmeEpConfig {
   nvmeEpConfig()
     : controller(""), queueId(63), queueLength(64), doorbellAddr(0),
       sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0),
-      ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1}, bufferParams{1024 * 1024},
+      ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false},
+      bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
   }
 };

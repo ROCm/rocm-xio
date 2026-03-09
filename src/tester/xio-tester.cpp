@@ -4,7 +4,10 @@
  */
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
+#include <csignal>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -17,6 +20,18 @@
 #include <CLI/CLI.hpp>
 
 #include "xio.h"
+
+// Static pointer to config for signal handler access
+static XioEndpointConfig* g_configForSignalHandler = nullptr;
+
+// SIGINT handler - sets stop flag to request graceful shutdown
+static void sigintHandler(int sig) {
+  (void)sig; // Suppress unused parameter warning
+  if (g_configForSignalHandler != nullptr &&
+      g_configForSignalHandler->stopRequested != nullptr) {
+    *g_configForSignalHandler->stopRequested = true;
+  }
+}
 
 int main(int argc, char** argv) {
   CLI::App app{"xio-tester: A test harness for rocm-xio."};
@@ -64,6 +79,13 @@ int main(int argc, char** argv) {
 
   bool printHistogram = false;
   app.add_flag("--histogram", printHistogram, "Generate performance histogram")
+    ->group("Common Options");
+
+  bool lessTiming = false;
+  app
+    .add_flag("--less-timing", lessTiming,
+              "Use lightweight timing mode (track min/max/mean only, "
+              "useful for large iterations)")
     ->group("Common Options");
 
   app
@@ -260,8 +282,10 @@ int main(int argc, char** argv) {
     totalSqeSize = 1;
   if (totalCqeSize == 0)
     totalCqeSize = 1;
-  size_t totalTimingSize = baseConfig.iterations * baseConfig.numThreads *
-                           sizeof(unsigned long long int);
+  size_t totalTimingSize = lessTiming
+                             ? 0
+                             : (baseConfig.iterations * baseConfig.numThreads *
+                                sizeof(unsigned long long int));
 
   // Allocate queues based on memory mode
   // Bit 0: GPU write location (SQE) - 0=host, 1=device
@@ -285,38 +309,112 @@ int main(int argc, char** argv) {
   }
 
   // Timing buffers are always host-accessible
-  // Try HIP first, but fall back to malloc if HIP is not available (emulate
-  // mode)
-  hipError_t hipErr1 = hipHostMalloc((void**)&hostStartTime, totalTimingSize);
-  if (hipErr1 != hipSuccess) {
-    // HIP not available (e.g., emulate mode), use regular malloc
-    void* ptr = malloc(totalTimingSize);
-    if (ptr == nullptr) {
-      std::cerr << "Error: Failed to allocate start time buffer" << std::endl;
-      return EXIT_FAILURE;
+  // Allocate full timing arrays if timing is enabled (default mode)
+  // Allocate lightweight stats structure if less-timing mode is enabled
+  XioTimingStats* timingStats = nullptr;
+  if (!lessTiming && totalTimingSize > 0) {
+    // Try HIP first, but fall back to malloc if HIP is not available (emulate
+    // mode)
+    hipError_t hipErr1 = hipHostMalloc((void**)&hostStartTime, totalTimingSize);
+    if (hipErr1 != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      void* ptr = malloc(totalTimingSize);
+      if (ptr == nullptr) {
+        std::cerr << "Error: Failed to allocate start time buffer" << std::endl;
+        return EXIT_FAILURE;
+      }
+      hostStartTime = static_cast<unsigned long long int*>(ptr);
     }
-    hostStartTime = static_cast<unsigned long long int*>(ptr);
-  }
-  hipError_t hipErr2 = hipHostMalloc((void**)&hostEndTime, totalTimingSize);
-  if (hipErr2 != hipSuccess) {
-    // HIP not available (e.g., emulate mode), use regular malloc
-    void* ptr = malloc(totalTimingSize);
-    if (ptr == nullptr) {
-      std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
-      return EXIT_FAILURE;
+    hipError_t hipErr2 = hipHostMalloc((void**)&hostEndTime, totalTimingSize);
+    if (hipErr2 != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      void* ptr = malloc(totalTimingSize);
+      if (ptr == nullptr) {
+        std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
+        return EXIT_FAILURE;
+      }
+      hostEndTime = static_cast<unsigned long long int*>(ptr);
     }
-    hostEndTime = static_cast<unsigned long long int*>(ptr);
+
+    // Initialize timing buffers to zero
+    memset(hostStartTime, 0, totalTimingSize);
+    memset(hostEndTime, 0, totalTimingSize);
+  } else if (lessTiming) {
+    // Allocate lightweight timing stats structure for less-timing mode
+    hipError_t hipErr = hipHostMalloc((void**)&timingStats,
+                                      sizeof(XioTimingStats));
+    if (hipErr != hipSuccess) {
+      // HIP not available (e.g., emulate mode), use regular malloc
+      void* ptr = malloc(sizeof(XioTimingStats));
+      if (ptr == nullptr) {
+        std::cerr << "Error: Failed to allocate timing stats buffer"
+                  << std::endl;
+        return EXIT_FAILURE;
+      }
+      timingStats = static_cast<XioTimingStats*>(ptr);
+    }
+    // Initialize timing stats
+    timingStats->minDuration = ULLONG_MAX;
+    timingStats->maxDuration = 0;
+    timingStats->sumDuration = 0;
+    timingStats->count = 0;
   }
 
-  // Initialize timing buffers to zero
-  memset(hostStartTime, 0, totalTimingSize);
-  memset(hostEndTime, 0, totalTimingSize);
+  // Allocate stop flag for SIGINT handling (GPU-accessible)
+  volatile bool* stopRequestedFlag = nullptr;
+  hipError_t stopFlagErr = hipHostMalloc((void**)&stopRequestedFlag,
+                                         sizeof(bool), hipHostMallocMapped);
+  if (stopFlagErr != hipSuccess) {
+    // Fallback to regular malloc if HIP not available (emulate mode)
+    stopRequestedFlag = static_cast<volatile bool*>(malloc(sizeof(bool)));
+    if (stopRequestedFlag == nullptr) {
+      std::cerr << "Error: Failed to allocate stop flag" << std::endl;
+      // Cleanup and exit
+      if (!lessTiming && hostStartTime != nullptr) {
+        hipError_t hipErrFree1 = hipHostFree(hostStartTime);
+        if (hipErrFree1 != hipSuccess) {
+          free(hostStartTime);
+        }
+      }
+      if (!lessTiming && hostEndTime != nullptr) {
+        hipError_t hipErrFree2 = hipHostFree(hostEndTime);
+        if (hipErrFree2 != hipSuccess) {
+          free(hostEndTime);
+        }
+      }
+      if (lessTiming && timingStats != nullptr) {
+        hipError_t hipErrFree3 = hipHostFree(timingStats);
+        if (hipErrFree3 != hipSuccess) {
+          free(timingStats);
+        }
+      }
+      xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+      xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
+      return EXIT_FAILURE;
+    }
+  }
+  *stopRequestedFlag = false;
 
   // Assign buffers to our config structure
   baseConfig.startTimes = hostStartTime;
   baseConfig.endTimes = hostEndTime;
+  baseConfig.timingStats = timingStats;
   baseConfig.submissionQueue = hostSqeAddr;
   baseConfig.completionQueue = hostCqeAddr;
+  baseConfig.stopRequested = stopRequestedFlag;
+
+  // Install SIGINT handler for graceful shutdown
+  struct sigaction sa;
+  sa.sa_handler = sigintHandler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  if (sigaction(SIGINT, &sa, nullptr) != 0) {
+    std::cerr << "Warning: Failed to install SIGINT handler: "
+              << strerror(errno) << std::endl;
+  }
+
+  // Store config pointer for signal handler
+  g_configForSignalHandler = &baseConfig;
 
   // Run endpoint test
   hipError_t err = endpoint->run(&baseConfig);
@@ -325,20 +423,46 @@ int main(int argc, char** argv) {
               << " (error code: " << err << ")" << std::endl;
     xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
     xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-    // Free host memory using HIP or regular free
-    hipError_t hipErrFree1 = hipHostFree(hostStartTime);
-    if (hipErrFree1 != hipSuccess) {
-      free(hostStartTime);
+    // Free host memory using HIP or regular free (only if allocated)
+    if (!lessTiming && hostStartTime != nullptr) {
+      hipError_t hipErrFree1 = hipHostFree(hostStartTime);
+      if (hipErrFree1 != hipSuccess) {
+        free(hostStartTime);
+      }
     }
-    hipError_t hipErrFree2 = hipHostFree(hostEndTime);
-    if (hipErrFree2 != hipSuccess) {
-      free(hostEndTime);
+    if (!lessTiming && hostEndTime != nullptr) {
+      hipError_t hipErrFree2 = hipHostFree(hostEndTime);
+      if (hipErrFree2 != hipSuccess) {
+        free(hostEndTime);
+      }
     }
+    if (lessTiming && timingStats != nullptr) {
+      hipError_t hipErrFree3 = hipHostFree(timingStats);
+      if (hipErrFree3 != hipSuccess) {
+        free(timingStats);
+      }
+    }
+    // Free stop flag on error
+    if (stopRequestedFlag != nullptr) {
+      hipError_t hipErrFree = hipHostFree(const_cast<bool*>(stopRequestedFlag));
+      if (hipErrFree != hipSuccess) {
+        free(const_cast<bool*>(stopRequestedFlag));
+      }
+    }
+    // Clear signal handler pointer
+    g_configForSignalHandler = nullptr;
     return EXIT_FAILURE;
   }
 
-  // Print raw timing data if verbose
-  if (baseConfig.verbose) {
+  // Check if test was interrupted by SIGINT
+  bool wasInterrupted = false;
+  if (stopRequestedFlag != nullptr && *stopRequestedFlag) {
+    wasInterrupted = true;
+    std::cout << "\nTest interrupted by user (SIGINT)" << std::endl;
+  }
+
+  // Print raw timing data if verbose and full timing is enabled
+  if (baseConfig.verbose && !lessTiming) {
     if (baseConfig.numThreads == 1) {
       std::cout << "\nRaw timing data:" << std::endl;
       std::cout << "Index | Start Time      | End Time        | Duration"
@@ -385,50 +509,131 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Calculate durations (skip first iteration per thread, as it
-  // tends to be larger)
-  std::vector<double> durations;
-  for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
-    unsigned baseIdx = t * baseConfig.iterations;
-    for (unsigned i = 1; i < baseConfig.iterations; ++i) {
-      unsigned idx = baseIdx + i;
-      if (hostEndTime[idx] > hostStartTime[idx]) {
-        double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
-                            gpuClockPeriodNs;
-        durations.push_back(durationNs);
+  // Handle timing statistics based on mode
+  if (lessTiming && timingStats != nullptr) {
+    // Less-timing mode: use same xioPrintStatistics function as normal mode
+    if (timingStats->count > 0) {
+      // Convert timing stats to durations vector for xioPrintStatistics
+      double minDurationNs = static_cast<double>(timingStats->minDuration) *
+                             gpuClockPeriodNs;
+      double maxDurationNs = static_cast<double>(timingStats->maxDuration) *
+                             gpuClockPeriodNs;
+      double meanDurationNs = (static_cast<double>(timingStats->sumDuration) /
+                               static_cast<double>(timingStats->count)) *
+                              gpuClockPeriodNs;
+
+      // Create a synthetic durations vector with min, max, and mean values
+      // distributed to approximate the distribution (for stddev calculation)
+      std::vector<double> durations;
+      if (timingStats->count == 1) {
+        durations.push_back(meanDurationNs);
+      } else if (timingStats->count == 2) {
+        durations.push_back(minDurationNs);
+        durations.push_back(maxDurationNs);
+      } else {
+        // Distribute: 1 min, 1 max, rest mean (gives reasonable stddev)
+        durations.push_back(minDurationNs);
+        durations.push_back(maxDurationNs);
+        for (unsigned long long int i = 2; i < timingStats->count; ++i) {
+          durations.push_back(meanDurationNs);
+        }
+      }
+
+      // Print statistics using same function as normal mode
+      // Use actual count from timingStats instead of configured iterations
+      // Note: readIterations/writeIterations not available without
+      // endpoint-specific headers, so pass 0 to show "Iterations" instead of
+      // "Reads/Writes" Note: verifiedReadsCount not available in less-timing
+      // mode, use UINT_MAX
+      unsigned actualIterations = static_cast<unsigned>(timingStats->count);
+      if (printHistogram) {
+        xioPrintHistogram(durations, actualIterations, baseConfig.numThreads, 0,
+                          0, UINT_MAX);
+      } else {
+        xioPrintStatistics(durations, actualIterations, baseConfig.numThreads,
+                           0, 0, UINT_MAX);
+      }
+    } else {
+      std::cout << "Warning: No timing data collected in less-timing mode"
+                << std::endl;
+    }
+  } else if (!lessTiming) {
+    // Full timing mode: calculate durations from individual timestamps
+    // (skip first iteration per thread, as it tends to be larger)
+    std::vector<double> durations;
+    unsigned actualIterations = 0;
+    for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
+      unsigned baseIdx = t * baseConfig.iterations;
+      for (unsigned i = 0; i < baseConfig.iterations; ++i) {
+        unsigned idx = baseIdx + i;
+        if (hostEndTime[idx] > hostStartTime[idx]) {
+          actualIterations++; // Count all completed iterations
+          if (i > 0) {
+            // Skip first iteration per thread for statistics
+            double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
+                                gpuClockPeriodNs;
+            durations.push_back(durationNs);
+          }
+        }
       }
     }
-  }
 
-  // Print statistics (printHistogram is already set from common options)
-
-  if (durations.size() > 0) {
-    if (printHistogram) {
-      xioPrintHistogram(durations, baseConfig.iterations,
-                        baseConfig.numThreads);
+    // Print statistics (printHistogram is already set from common options)
+    // Use actual count of completed iterations instead of configured iterations
+    // Note: readIterations/writeIterations not available without
+    // endpoint-specific headers, so pass 0 to show "Iterations" instead of
+    // "Reads/Writes" Note: verifiedReadsCount not tracked in normal mode, use
+    // UINT_MAX
+    if (durations.size() > 0) {
+      if (printHistogram) {
+        xioPrintHistogram(durations, actualIterations, baseConfig.numThreads, 0,
+                          0, UINT_MAX);
+      } else {
+        xioPrintStatistics(durations, actualIterations, baseConfig.numThreads,
+                           0, 0, UINT_MAX);
+      }
     } else {
-      xioPrintStatistics(durations, baseConfig.iterations,
-                         baseConfig.numThreads);
+      std::cout << "Warning: No valid timing data collected" << std::endl;
     }
-  } else {
-    std::cout << "Warning: No valid timing data collected" << std::endl;
   }
 
-  // Print completion message (like simple-test)
-  std::cout << "\nTest completed successfully!" << std::endl;
+  // Print completion message
+  if (!wasInterrupted) {
+    std::cout << "\nTest completed successfully!" << std::endl;
+  }
 
   // Free memory
   xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
   xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-  // Free host memory using HIP or regular free
-  hipError_t hipErrFree1 = hipHostFree(hostStartTime);
-  if (hipErrFree1 != hipSuccess) {
-    free(hostStartTime);
+  // Free host memory using HIP or regular free (only if allocated)
+  if (!lessTiming && hostStartTime != nullptr) {
+    hipError_t hipErrFree1 = hipHostFree(hostStartTime);
+    if (hipErrFree1 != hipSuccess) {
+      free(hostStartTime);
+    }
   }
-  hipError_t hipErrFree2 = hipHostFree(hostEndTime);
-  if (hipErrFree2 != hipSuccess) {
-    free(hostEndTime);
+  if (!lessTiming && hostEndTime != nullptr) {
+    hipError_t hipErrFree2 = hipHostFree(hostEndTime);
+    if (hipErrFree2 != hipSuccess) {
+      free(hostEndTime);
+    }
   }
+  if (lessTiming && timingStats != nullptr) {
+    hipError_t hipErrFree3 = hipHostFree(timingStats);
+    if (hipErrFree3 != hipSuccess) {
+      free(timingStats);
+    }
+  }
+  // Free stop flag
+  if (stopRequestedFlag != nullptr) {
+    hipError_t hipErrFree = hipHostFree(const_cast<bool*>(stopRequestedFlag));
+    if (hipErrFree != hipSuccess) {
+      free(const_cast<bool*>(stopRequestedFlag));
+    }
+  }
+
+  // Clear signal handler pointer
+  g_configForSignalHandler = nullptr;
 
   return EXIT_SUCCESS;
 }
