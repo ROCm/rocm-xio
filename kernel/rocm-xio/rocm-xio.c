@@ -629,10 +629,22 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
 
   opcode = cmd->common.opcode;
 
+  /* Handle DELETE_SQ (0x00) and DELETE_CQ (0x04) */
+  if (opcode == 0x00 || opcode == 0x04) {
+    /* Queue ID is in cdw10 (lower 16 bits) */
+    __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
+    pr_info("rocm-axiio: Intercepted %s command\n",
+            opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
+    pr_info("  Queue ID: %u\n", queue_id);
+  }
+
   /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
   if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
+    /* Queue ID is in cdw10 (lower 16 bits) */
+    __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
     pr_info("rocm-axiio: Intercepted %s command\n",
             opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ");
+    pr_info("  Queue ID: %u\n", queue_id);
     pr_info("  Original PRP1: 0x%016llx\n",
             (unsigned long long)le64_to_cpu(cmd->common.dptr.prp1));
     pr_info("  ubuffer: 0x%016llx\n", (unsigned long long)ubuffer);
