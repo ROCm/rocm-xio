@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * ROCm AxIIO Kernel Module
+ * rocm-xio Kernel Module
  *
  * Provides a userspace interface for GPU-initiated I/O:
  * - VRAM physical address translation via dmabuf
@@ -74,6 +74,7 @@ struct queue_addr_entry {
   __u64 phys_addr;
   __u64 size;
   __u8 queue_type; /* 0=SQ, 1=CQ */
+  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format), 0 if unknown */
   struct list_head list;
 };
 
@@ -363,6 +364,32 @@ cleanup_no_attach:
  * Attaches dmabuf to NVMe device and returns P2PDMA IOVA
  * Returns attachment info via output parameters - caller must keep alive
  */
+/* Extract BDF from pci_dev structure */
+static __u16 pci_dev_to_bdf(struct pci_dev* pdev) {
+  if (!pdev)
+    return 0;
+  /* Encode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  return ((__u16)(pdev->bus->number) << 8) | (__u16)(pdev->devfn);
+}
+
+/* Format BDF as PCI address string (e.g., "0000:85:00.0") */
+static void format_bdf_as_pci_addr(__u16 bdf, char* buf, size_t buf_size) {
+  if (bdf == 0 || !buf || buf_size < 13) {
+    if (buf && buf_size > 0)
+      buf[0] = '\0';
+    return;
+  }
+
+  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  unsigned int bus = (bdf >> 8) & 0xFF;
+  unsigned int devfn = bdf & 0xFF;
+  unsigned int device = (devfn >> 3) & 0x1F;
+  unsigned int function = devfn & 0x7;
+
+  /* Format as DDDD:BB:DD.F (domain is always 0000 for now) */
+  snprintf(buf, buf_size, "0000:%02x:%02x.%x", bus, device, function);
+}
+
 static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
                                 __u64* size, struct dma_buf** dmabuf_out,
                                 struct dma_buf_attachment** attach_out,
@@ -385,13 +412,27 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
   /* Find the NVMe PCI device */
   pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
   if (!pdev) {
-    pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", nvme_bdf);
+    char pci_addr[16];
+    format_bdf_as_pci_addr(nvme_bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
+    } else {
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", nvme_bdf);
+    }
     return -ENODEV;
   }
   dev = &pdev->dev;
 
-  pr_info("rocm-axiio: Using NVMe device %s (BDF: 0x%04x) for P2PDMA\n",
-          pci_name(pdev), nvme_bdf);
+  {
+    char pci_addr[16];
+    format_bdf_as_pci_addr(nvme_bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Using NVMe device %s (%s) for P2PDMA\n",
+              pci_name(pdev), pci_addr);
+    } else {
+      pr_info("rocm-axiio: Using NVMe device %s for P2PDMA\n", pci_name(pdev));
+    }
+  }
 
   /* Get dmabuf from fd */
   dmabuf = dma_buf_get(dmabuf_fd);
@@ -465,7 +506,13 @@ static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
   /* Find the NVMe PCI device */
   nvme_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
   if (!nvme_dev) {
-    pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", bdf);
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
+    } else {
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", bdf);
+    }
     return -ENODEV;
   }
 
@@ -483,7 +530,15 @@ static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
   /* Maximum queues: typically 65535 for NVMe 1.4+ */
   info->max_queues = 65535;
 
-  pr_info("rocm-axiio: Device info for BDF 0x%04x:\n", bdf);
+  {
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Device info for %s:\n", pci_addr);
+    } else {
+      pr_info("rocm-axiio: Device info for BDF 0x%04x:\n", bdf);
+    }
+  }
   pr_info("  BAR0: 0x%llx (size: 0x%llx)\n", (u64)info->bar0_addr,
           (u64)info->bar0_size);
   pr_info("  Doorbell stride: %u bytes\n", info->doorbell_stride);
@@ -509,8 +564,14 @@ static int get_mmio_bridge_shadow_buffer(
   /* Find the PCI MMIO bridge device */
   bridge_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
   if (!bridge_dev) {
-    pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%04x)\n",
-           bridge_bdf);
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bridge_bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_err("rocm-axiio: PCI MMIO bridge device not found (%s)\n", pci_addr);
+    } else {
+      pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%04x)\n",
+             bridge_bdf);
+    }
     return -ENODEV;
   }
 
@@ -556,6 +617,27 @@ static __u64 lookup_queue_phys_addr(__u64 virt_addr) {
   spin_unlock(&queue_addrs_lock);
 
   return phys_addr;
+}
+
+/*
+ * Look up BDF for queue address.
+ * Returns BDF if found, 0 otherwise.
+ */
+static __u16 lookup_queue_bdf(__u64 virt_addr) {
+  struct queue_addr_entry* entry;
+  __u16 bdf = 0;
+
+  spin_lock(&queue_addrs_lock);
+  list_for_each_entry(entry, &queue_addrs, list) {
+    if (virt_addr >= entry->virt_addr &&
+        virt_addr < (entry->virt_addr + entry->size)) {
+      bdf = entry->nvme_bdf;
+      break;
+    }
+  }
+  spin_unlock(&queue_addrs_lock);
+
+  return bdf;
 }
 
 /*
@@ -633,8 +715,16 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if (opcode == 0x00 || opcode == 0x04) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    pr_info("rocm-axiio: Intercepted %s command\n",
-            opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
+    __u16 bdf = lookup_queue_bdf(ubuffer);
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Intercepted %s command (%s)\n",
+              opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ", pci_addr);
+    } else {
+      pr_info("rocm-axiio: Intercepted %s command\n",
+              opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
+    }
     pr_info("  Queue ID: %u\n", queue_id);
   }
 
@@ -642,8 +732,16 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    pr_info("rocm-axiio: Intercepted %s command\n",
-            opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ");
+    __u16 bdf = lookup_queue_bdf(ubuffer);
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Intercepted %s command (%s)\n",
+              opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ", pci_addr);
+    } else {
+      pr_info("rocm-axiio: Intercepted %s command\n",
+              opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ");
+    }
     pr_info("  Queue ID: %u\n", queue_id);
     pr_info("  Original PRP1: 0x%016llx\n",
             (unsigned long long)le64_to_cpu(cmd->common.dptr.prp1));
@@ -704,8 +802,18 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
 
-      pr_info("rocm-axiio: Getting VRAM physical address for NVMe BDF 0x%04x\n",
-              req.nvme_bdf);
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Getting VRAM physical address for NVMe %s\n",
+                  pci_addr);
+        } else {
+          pr_info("rocm-axiio: Getting VRAM physical address for NVMe BDF "
+                  "0x%04x\n",
+                  req.nvme_bdf);
+        }
+      }
 
       /*
        * Always return GPU BAR GPA (works for both emulated and passthrough
@@ -756,7 +864,16 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -EFAULT;
 
       /* Device binding is optional - just log it for now */
-      pr_info("rocm-axiio: Device binding requested for BDF 0x%04x\n", req.bdf);
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.bdf, pci_addr, sizeof(pci_addr));
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Device binding requested for %s\n", pci_addr);
+        } else {
+          pr_info("rocm-axiio: Device binding requested for BDF 0x%04x\n",
+                  req.bdf);
+        }
+      }
       return 0;
     }
 
@@ -776,16 +893,29 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->phys_addr = req.phys_addr;
       entry->size = req.size;
       entry->queue_type = req.queue_type;
+      entry->nvme_bdf = req.nvme_bdf;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
       spin_unlock(&queue_addrs_lock);
 
-      pr_info("rocm-axiio: Registered queue address: virt=0x%016llx "
-              "phys=0x%016llx size=0x%llx type=%u\n",
-              (unsigned long long)req.virt_addr,
-              (unsigned long long)req.phys_addr, (unsigned long long)req.size,
-              req.queue_type);
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Registered queue address: virt=0x%016llx "
+                  "phys=0x%016llx size=0x%llx type=%u (%s)\n",
+                  (unsigned long long)req.virt_addr,
+                  (unsigned long long)req.phys_addr,
+                  (unsigned long long)req.size, req.queue_type, pci_addr);
+        } else {
+          pr_info("rocm-axiio: Registered queue address: virt=0x%016llx "
+                  "phys=0x%016llx size=0x%llx type=%u\n",
+                  (unsigned long long)req.virt_addr,
+                  (unsigned long long)req.phys_addr,
+                  (unsigned long long)req.size, req.queue_type);
+        }
+      }
 
       return 0;
     }
@@ -815,8 +945,18 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -ENOENT;
       }
 
-      pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx\n",
-              (unsigned long long)req.virt_addr);
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(entry->nvme_bdf, pci_addr, sizeof(pci_addr));
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx "
+                  "(%s)\n",
+                  (unsigned long long)req.virt_addr, pci_addr);
+        } else {
+          pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx\n",
+                  (unsigned long long)req.virt_addr);
+        }
+      }
       return 0;
     }
 
@@ -844,16 +984,31 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       /* Get physical address from dmabuf - choose method based on NVMe type */
       if (is_emulated) {
         /* Emulated NVMe: Return GPU BAR GPA */
-        pr_info("rocm-axiio: Emulated NVMe (BDF 0x%04x) - using GPU BAR GPA\n",
-                req.nvme_bdf);
+        {
+          char pci_addr[16];
+          format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+          if (pci_addr[0] != '\0') {
+            pr_info("rocm-axiio: Emulated NVMe (%s) - using GPU BAR GPA\n",
+                    pci_addr);
+          } else {
+            pr_info("rocm-axiio: Emulated NVMe - using GPU BAR GPA\n");
+          }
+        }
         ret = get_dmabuf_bar_gpa(req.dmabuf_fd, &phys_addr, &req.size);
         if (ret < 0)
           return ret;
       } else {
         /* Passthrough NVMe: Return P2PDMA IOVA - keep attachment alive */
-        pr_info(
-          "rocm-axiio: Passthrough NVMe (BDF 0x%04x) - using P2PDMA IOVA\n",
-          req.nvme_bdf);
+        {
+          char pci_addr[16];
+          format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+          if (pci_addr[0] != '\0') {
+            pr_info("rocm-axiio: Passthrough NVMe (%s) - using P2PDMA IOVA\n",
+                    pci_addr);
+          } else {
+            pr_info("rocm-axiio: Passthrough NVMe - using P2PDMA IOVA\n");
+          }
+        }
         ret = get_dmabuf_phys_addr(req.dmabuf_fd, req.nvme_bdf, &phys_addr,
                                    &req.size, &dmabuf, &attach, &sgt,
                                    &nvme_pdev);
@@ -900,11 +1055,32 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       req.phys_addr = phys_addr;
 
-      pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
-              "phys=0x%016llx size=0x%llx%s\n",
-              (unsigned long long)entry->virt_addr,
-              (unsigned long long)phys_addr, (unsigned long long)req.size,
-              entry->is_passthrough ? " (P2PDMA attachment kept alive)" : "");
+      /* Extract BDF for logging */
+      __u16 bdf = req.nvme_bdf;
+      if (bdf == 0 && entry->nvme_pdev) {
+        bdf = pci_dev_to_bdf(entry->nvme_pdev);
+      }
+
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
+                  "phys=0x%016llx size=0x%llx (%s)%s\n",
+                  (unsigned long long)entry->virt_addr,
+                  (unsigned long long)phys_addr, (unsigned long long)req.size,
+                  pci_addr,
+                  entry->is_passthrough ? " (P2PDMA attachment kept alive)"
+                                        : "");
+        } else {
+          pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
+                  "phys=0x%016llx size=0x%llx%s\n",
+                  (unsigned long long)entry->virt_addr,
+                  (unsigned long long)phys_addr, (unsigned long long)req.size,
+                  entry->is_passthrough ? " (P2PDMA attachment kept alive)"
+                                        : "");
+        }
+      }
 
       if (copy_to_user((void __user*)arg, &req, sizeof(req))) {
         /* Unregister on copy failure */
@@ -952,21 +1128,45 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -ENOENT;
       }
 
-      /* Cleanup passthrough attachment if needed */
-      if (entry->is_passthrough && entry->sgt && entry->attach &&
-          entry->dmabuf) {
-        pr_info(
-          "rocm-axiio: Cleaning up P2PDMA attachment for buffer 0x%016llx\n",
-          (unsigned long long)entry->virt_addr);
-        dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
-        dma_buf_detach(entry->dmabuf, entry->attach);
-        dma_buf_put(entry->dmabuf);
-        if (entry->nvme_pdev)
-          pci_dev_put(entry->nvme_pdev);
+      /* Extract BDF for logging */
+      __u16 bdf = 0;
+      if (entry->nvme_pdev) {
+        bdf = pci_dev_to_bdf(entry->nvme_pdev);
       }
 
-      pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx\n",
-              (unsigned long long)req.virt_addr);
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+
+        /* Cleanup passthrough attachment if needed */
+        if (entry->is_passthrough && entry->sgt && entry->attach &&
+            entry->dmabuf) {
+          if (pci_addr[0] != '\0') {
+            pr_info(
+              "rocm-axiio: Cleaning up P2PDMA attachment for buffer 0x%016llx "
+              "(%s)\n",
+              (unsigned long long)entry->virt_addr, pci_addr);
+          } else {
+            pr_info("rocm-axiio: Cleaning up P2PDMA attachment for buffer "
+                    "0x%016llx\n",
+                    (unsigned long long)entry->virt_addr);
+          }
+          dma_buf_unmap_attachment(entry->attach, entry->sgt,
+                                   DMA_BIDIRECTIONAL);
+          dma_buf_detach(entry->dmabuf, entry->attach);
+          dma_buf_put(entry->dmabuf);
+          if (entry->nvme_pdev)
+            pci_dev_put(entry->nvme_pdev);
+        }
+
+        if (pci_addr[0] != '\0') {
+          pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx (%s)\n",
+                  (unsigned long long)req.virt_addr, pci_addr);
+        } else {
+          pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx\n",
+                  (unsigned long long)req.virt_addr);
+        }
+      }
       kfree(entry);
       return 0;
     }

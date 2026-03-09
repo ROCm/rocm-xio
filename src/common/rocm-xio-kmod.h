@@ -32,6 +32,7 @@ struct rocm_axiio_register_queue_addr_req {
   uint64_t phys_addr;
   uint64_t size;
   uint8_t queue_type;
+  uint16_t nvme_bdf; // NVMe device BDF (0xBBDD format), 0 if unknown
 };
 
 struct rocm_axiio_register_buffer_req {
