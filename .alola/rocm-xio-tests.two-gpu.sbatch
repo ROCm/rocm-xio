@@ -10,21 +10,24 @@
 # each test to compare expected transfer size with counter deltas when
 # parseable.
 #
-#SBATCH --array=1
-#SBATCH --output=%x.%A.%a.out
-#SBATCH --error=%x.%A.%a.err
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gres=gpu:2
 
-set -e
+set -xe
+
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
 else
   . "$(dirname "${BASH_SOURCE[0]}")/rocm-xio-tests.common"
 fi
+
+# Initialize test tracking
+test_init
 
 ITERATIONS="${ITERATIONS:-128}"
 TRANSFER_SIZE="${TRANSFER_SIZE:-1048576}"
@@ -114,8 +117,49 @@ run_p2p_test() {
 }
 
 label="p2p_n${ITERATIONS}_s${TRANSFER_SIZE}"
-run_p2p_test "${ITERATIONS}" "${TRANSFER_SIZE}" "${label}"
+
+# Run the P2P test and track result
+TOTAL_TESTS=$((TOTAL_TESTS + 1))
+test_name="sdma-ep P2P (GPU 0 -> GPU 1)"
+echo ""
+echo "Running test ${TOTAL_TESTS}: ${test_name}"
+echo "----------------------------------------"
+
+# Get node name
+node_name=$(get_node_name)
+
+# Run test and capture output while also displaying it
+temp_output_file=$(mktemp)
+run_p2p_test "${ITERATIONS}" "${TRANSFER_SIZE}" "${label}" 2>&1 | tee "${temp_output_file}"
+EXIT_CODE=${PIPESTATUS[0]}
+output=$(cat "${temp_output_file}")
+rm -f "${temp_output_file}"
+
+# Extract GPU device info (model and ID) from output
+gpu_device=$(extract_gpu_device_info "${output}")
+
+# Store test information
+TEST_NAMES+=("${test_name}")
+TEST_NODES+=("${node_name}")
+TEST_GPU_DEVICES+=("${gpu_device}")
+
+if [ ${EXIT_CODE} -eq 0 ]; then
+  PASSED_TESTS=$((PASSED_TESTS + 1))
+  TEST_RESULTS+=("PASS")
+  echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
+  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
+else
+  FAILED_TESTS=$((FAILED_TESTS + 1))
+  TEST_RESULTS+=("FAIL")
+  echo "✗ Test ${TOTAL_TESTS} FAILED: ${test_name} (exit code: ${EXIT_CODE})"
+  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
+fi
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
-echo "Done."
+
+# Report results and exit with appropriate code
+test_report
+FINAL_EXIT_CODE=$?
+
+exit ${FINAL_EXIT_CODE}
