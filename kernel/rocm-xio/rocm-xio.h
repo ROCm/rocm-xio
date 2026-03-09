@@ -2,8 +2,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Userspace header for rocm-xio kernel module
- * Shared between kernel module and userspace code
  */
 
 #ifndef ROCM_XIO_H
@@ -93,6 +91,7 @@ struct rocm_xio_register_queue_addr_req {
   __u64 phys_addr; /* Input: Physical address (from GET_VRAM_PHYS_ADDR) */
   __u64 size;      /* Input: Queue size in bytes */
   __u8 queue_type; /* Input: 0=SQ, 1=CQ, 2=both */
+  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD format), 0 if unknown */
 };
 
 /* Unregister queue address */

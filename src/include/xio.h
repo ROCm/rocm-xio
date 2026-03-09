@@ -388,7 +388,8 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
                                  const char* kernel_module_device,
                                  bool is_emulated, const char* buffer_name);
 int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
-                    size_t size, uint8_t queue_type, const char* queue_name);
+                    size_t size, uint8_t queue_type, uint16_t nvme_bdf,
+                    const char* queue_name);
 
 //
 // Common endpoint utilities namespace
