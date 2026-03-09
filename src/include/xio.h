@@ -260,6 +260,26 @@ __host__ int xioLoadKernelModule();
 // Note: Creating device node requires root permissions
 __host__ int xioEnsureDeviceNode();
 
+// Open a device file with retry logic for temporary busy conditions
+// Handles EAGAIN/EWOULDBLOCK errors by retrying with exponential backoff
+//
+// @param device_path Path to the device file to open
+// @param flags Open flags (e.g., O_RDONLY, O_RDWR)
+// @param device_name Human-readable device name for error messages (can be
+// NULL)
+// @param max_retries Maximum number of retry attempts (default: 5)
+// @param initial_delay_ms Initial delay in milliseconds before first retry
+//                         (default: 100ms, doubles with each retry)
+//
+// @return File descriptor on success, -1 on failure (errno is set)
+//
+// @note Only retries on EAGAIN/EWOULDBLOCK errors. Other errors fail
+//       immediately. Uses exponential backoff: delay = initial_delay_ms *
+//       (2^retry)
+__host__ int xioOpenDeviceWithRetry(const char* device_path, int flags,
+                                    const char* device_name, int max_retries,
+                                    int initial_delay_ms);
+
 // Export HSA-allocated VRAM as DMA-BUF and register with kernel module
 // Returns 0 on success, negative error code on failure
 // is_emulated: true for emulated NVMe (returns GPU BAR GPA), false for
