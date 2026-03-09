@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <iostream>
@@ -328,10 +330,80 @@ std::vector<std::thread> launchCpuThreads(void* hostSqeAddr, void* hostCqeAddr,
   return cpuThreadHandles;
 }
 
+// Helper function to update timing stats (shared between GPU and CPU code)
+__device__ __host__ void updateTimingStats(XioTimingStats* stats,
+                                           unsigned long long int duration) {
+  if (stats == nullptr) {
+    return;
+  }
+
+#ifdef __HIP_DEVICE_COMPILE__
+  // GPU version: use atomics
+  atomicAdd((unsigned long long int*)&stats->count, 1ULL);
+  atomicAdd((unsigned long long int*)&stats->sumDuration, duration);
+
+  // Atomically update min
+  unsigned long long int oldMin = stats->minDuration;
+  while (duration < oldMin) {
+    unsigned long long int expected = oldMin;
+    unsigned long long int desired = duration;
+    unsigned long long int* addr = (unsigned long long int*)&stats->minDuration;
+    unsigned long long int result = atomicCAS(addr, expected, desired);
+    if (result == expected) {
+      break;
+    }
+    oldMin = result;
+  }
+
+  // Atomically update max
+  unsigned long long int oldMax = stats->maxDuration;
+  while (duration > oldMax) {
+    unsigned long long int expected = oldMax;
+    unsigned long long int desired = duration;
+    unsigned long long int* addr = (unsigned long long int*)&stats->maxDuration;
+    unsigned long long int result = atomicCAS(addr, expected, desired);
+    if (result == expected) {
+      break;
+    }
+    oldMax = result;
+  }
+#else
+  // CPU version: use std::atomic_ullong (atomic<unsigned long long>)
+  // Note: atomic header is included later in the file, but we need it here
+  // Use reinterpret_cast to treat the memory as atomic
+  std::atomic_ullong* countPtr = reinterpret_cast<std::atomic_ullong*>(
+    &stats->count);
+  std::atomic_ullong* sumPtr = reinterpret_cast<std::atomic_ullong*>(
+    &stats->sumDuration);
+  std::atomic_ullong* minPtr = reinterpret_cast<std::atomic_ullong*>(
+    &stats->minDuration);
+  std::atomic_ullong* maxPtr = reinterpret_cast<std::atomic_ullong*>(
+    &stats->maxDuration);
+
+  countPtr->fetch_add(1);
+  sumPtr->fetch_add(duration);
+
+  // Update min
+  unsigned long long int oldMin = minPtr->load();
+  while (duration < oldMin &&
+         !minPtr->compare_exchange_weak(oldMin, duration)) {
+    // Retry
+  }
+
+  // Update max
+  unsigned long long int oldMax = maxPtr->load();
+  while (duration > oldMax &&
+         !maxPtr->compare_exchange_weak(oldMax, duration)) {
+    // Retry
+  }
+#endif
+}
+
 // Endpoint kernel - receives pointers directly like simple-test
 __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
                                 unsigned long long int* startTimes,
                                 unsigned long long int* endTimes,
+                                XioTimingStats* timingStats,
                                 unsigned iterations, unsigned numThreads,
                                 long long delayNs, unsigned doorbell,
                                 uint32_t* doorbellAddr, unsigned queueSize) {
@@ -375,8 +447,11 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     for (unsigned i = 0; i < iterations; ++i) {
       // Record start time for this iteration (when SQE is posted)
       unsigned long long pollStartTime = wall_clock64();
+      unsigned long long startTime = 0;
       if (myStartTimes != nullptr) {
         myStartTimes[i] = pollStartTime;
+      } else if (timingStats != nullptr) {
+        startTime = pollStartTime;
       }
 
       // Prepare message to CPU
@@ -447,8 +522,13 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
                 (cqeCpuTime != (lastCpuTime & 0xFFFFFFFFULL) ||
                  lastCpuTime == 0)) {
               // Record GPU time immediately when valid CQE is detected
+              unsigned long long endTime = wall_clock64();
               if (myEndTimes != nullptr) {
-                myEndTimes[i] = wall_clock64();
+                myEndTimes[i] = endTime;
+              } else if (timingStats != nullptr && startTime > 0 &&
+                         endTime > startTime) {
+                unsigned long long int duration = endTime - startTime;
+                updateTimingStats(timingStats, duration);
               }
               break;
             }
@@ -465,8 +545,11 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     for (unsigned i = 0; i < iterations; ++i) {
       // Record start time for this iteration
       unsigned long long pollStartTime = wall_clock64();
+      unsigned long long startTime = 0;
       if (myStartTimes != nullptr) {
         myStartTimes[i] = pollStartTime;
+      } else if (timingStats != nullptr) {
+        startTime = pollStartTime;
       }
 
       // Prepare message to CPU (matches simple-test)
@@ -525,8 +608,13 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
 
       // Record GPU time when CPU response is received (use GPU time for both
       // start and end)
+      unsigned long long endTime = wall_clock64();
       if (myEndTimes != nullptr) {
-        myEndTimes[i] = wall_clock64();
+        myEndTimes[i] = endTime;
+      } else if (timingStats != nullptr && startTime > 0 &&
+                 endTime > startTime) {
+        unsigned long long int duration = endTime - startTime;
+        updateTimingStats(timingStats, duration);
       }
     }
   }
@@ -537,16 +625,16 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
   }
 }
 
-#include <atomic>
 #include <iostream>
 
 // CPU emulation of endpoint kernel - runs kernel logic on CPU threads
 // This allows testing without a GPU
 static void endpoint_kernel_cpu_emulate(
   sqeType* sqePtr, cqeType* cqePtr, unsigned long long int* startTimes,
-  unsigned long long int* endTimes, unsigned iterations, unsigned numThreads,
-  long long delayNs, unsigned doorbell, uint32_t* doorbellAddr,
-  unsigned queueSize, unsigned threadId) {
+  unsigned long long int* endTimes, XioTimingStats* timingStats,
+  unsigned iterations, unsigned numThreads, long long delayNs,
+  unsigned doorbell, uint32_t* doorbellAddr, unsigned queueSize,
+  unsigned threadId) {
   // Use per-thread buffers if multi-threaded (non-doorbell mode)
   bool doorbellMode = (doorbell > 0);
   sqeType* mySqe = (numThreads > 1 && !doorbellMode) ? &sqePtr[threadId]
@@ -589,8 +677,11 @@ static void endpoint_kernel_cpu_emulate(
       // Record start time for this iteration (when SQE is posted)
       // Use CPU time instead of GPU wall clock in emulation mode
       uint64_t pollStartTime = getCpuTime();
+      uint64_t startTime = 0;
       if (myStartTimes != nullptr) {
         myStartTimes[i] = pollStartTime;
+      } else if (timingStats != nullptr) {
+        startTime = pollStartTime;
       }
 
       // Prepare message to CPU
@@ -684,8 +775,13 @@ static void endpoint_kernel_cpu_emulate(
                 (cqeCpuTime != (lastCpuTime & 0xFFFFFFFFULL) ||
                  lastCpuTime == 0)) {
               // Record time immediately when valid CQE is detected
+              uint64_t endTime = getCpuTime();
               if (myEndTimes != nullptr) {
-                myEndTimes[i] = getCpuTime();
+                myEndTimes[i] = endTime;
+              } else if (timingStats != nullptr && startTime > 0 &&
+                         endTime > startTime) {
+                unsigned long long int duration = endTime - startTime;
+                updateTimingStats(timingStats, duration);
               }
               break;
             }
@@ -707,8 +803,11 @@ static void endpoint_kernel_cpu_emulate(
     for (unsigned i = 0; i < iterations; ++i) {
       // Record start time for this iteration
       uint64_t pollStartTime = getCpuTime();
+      uint64_t startTime = 0;
       if (myStartTimes != nullptr) {
         myStartTimes[i] = pollStartTime;
+      } else if (timingStats != nullptr) {
+        startTime = pollStartTime;
       }
 
       // Prepare message to CPU
@@ -756,8 +855,13 @@ static void endpoint_kernel_cpu_emulate(
       lastCpuTime = currentResponse.cpuTime;
 
       // Record time when CPU response is received
+      uint64_t endTime = getCpuTime();
       if (myEndTimes != nullptr) {
-        myEndTimes[i] = getCpuTime();
+        myEndTimes[i] = endTime;
+      } else if (timingStats != nullptr && startTime > 0 &&
+                 endTime > startTime) {
+        unsigned long long int duration = endTime - startTime;
+        updateTimingStats(timingStats, duration);
       }
     }
   }
@@ -854,9 +958,10 @@ hipError_t test_ep_run(XioEndpointConfig* config) {
     for (unsigned t = 0; t < config->numThreads; ++t) {
       gpuEmulationThreads.emplace_back(endpoint_kernel_cpu_emulate, sqePtr,
                                        cqePtr, config->startTimes,
-                                       config->endTimes, config->iterations,
-                                       config->numThreads, config->delayNs,
-                                       doorbell, doorbellPtr, queueSize, t);
+                                       config->endTimes, config->timingStats,
+                                       config->iterations, config->numThreads,
+                                       config->delayNs, doorbell, doorbellPtr,
+                                       queueSize, t);
     }
 
     // Wait for all emulation threads to complete
@@ -868,8 +973,9 @@ hipError_t test_ep_run(XioEndpointConfig* config) {
     uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
     hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
                        sqePtr, cqePtr, config->startTimes, config->endTimes,
-                       config->iterations, config->numThreads, config->delayNs,
-                       doorbell, doorbellPtr, queueSize);
+                       config->timingStats, config->iterations,
+                       config->numThreads, config->delayNs, doorbell,
+                       doorbellPtr, queueSize);
 
     // Check for kernel launch errors
     err = hipGetLastError();

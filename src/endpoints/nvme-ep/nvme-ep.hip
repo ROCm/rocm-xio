@@ -49,8 +49,21 @@ __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   return result;
 }
 
-__host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress) {
-  *sqeAddress = sqeData;
+__host__ __device__ void sqeWrite(sqeType sqeData,
+                                  volatile sqeType* sqeAddress) {
+  //*sqeAddress = sqeData;
+
+  // Write byte-by-byte to volatile pointer to ensure all writes are visible
+  // This matches sqeRead's approach and ensures proper volatile semantics
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(&sqeData);
+  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(sqeAddress);
+  for (size_t i = 0; i < sizeof(sqeType); i++) {
+    dst[i] = src[i];
+  }
+
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+#endif // __HIP_DEVICE_COMPILE__
 }
 
 __host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress) {
@@ -156,6 +169,47 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
   }
 }
 
+/**
+ * Update timing statistics atomically for less-timing mode
+ * Thread-safe function to track min, max, sum, and count
+ */
+__device__ void updateTimingStats(XioTimingStats* stats,
+                                  unsigned long long int duration) {
+  if (stats == nullptr) {
+    return;
+  }
+
+  // Atomically update count and sum
+  atomicAdd((unsigned long long int*)&stats->count, 1ULL);
+  atomicAdd((unsigned long long int*)&stats->sumDuration, duration);
+
+  // Atomically update min (compare-and-swap loop)
+  unsigned long long int oldMin = stats->minDuration;
+  while (duration < oldMin) {
+    unsigned long long int expected = oldMin;
+    unsigned long long int desired = duration;
+    unsigned long long int* addr = (unsigned long long int*)&stats->minDuration;
+    unsigned long long int result = atomicCAS(addr, expected, desired);
+    if (result == expected) {
+      break; // Successfully updated min
+    }
+    oldMin = result; // Retry with new value
+  }
+
+  // Atomically update max (compare-and-swap loop)
+  unsigned long long int oldMax = stats->maxDuration;
+  while (duration > oldMax) {
+    unsigned long long int expected = oldMax;
+    unsigned long long int desired = duration;
+    unsigned long long int* addr = (unsigned long long int*)&stats->maxDuration;
+    unsigned long long int result = atomicCAS(addr, expected, desired);
+    if (result == expected) {
+      break; // Successfully updated max
+    }
+    oldMax = result; // Retry with new value
+  }
+}
+
 __device__ void driveEndpoint(const XioEndpointConfig& config,
                               const nvmeIoParams& ioParams,
                               const nvmeDoorbellParams& doorbellParams,
@@ -164,13 +218,27 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
   sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
   cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
 
-  const bool sequential_mode = (ioParams.readIo < 0 || ioParams.writeIo < 0);
+  const bool sequential_mode = (ioParams.readIo < 0 || ioParams.writeIo < 0 ||
+                                ioParams.infiniteMode);
   bool sequential_is_read = false;
   unsigned num_ops;
   unsigned num_read_ops = 0;
   unsigned num_write_ops = 0;
   if (sequential_mode) {
-    if (ioParams.readIo < 0 && ioParams.writeIo < 0) {
+    if (ioParams.infiniteMode) {
+      // Infinite mode: determine operation type from which is negative
+      if (ioParams.readIo < 0) {
+        sequential_is_read = true;
+        num_read_ops = 0;
+        num_write_ops = 0;
+        num_ops = 0;
+      } else {
+        sequential_is_read = false;
+        num_read_ops = 0;
+        num_write_ops = 0;
+        num_ops = 0;
+      }
+    } else if (ioParams.readIo < 0 && ioParams.writeIo < 0) {
       num_read_ops = -ioParams.readIo;
       num_write_ops = -ioParams.writeIo;
       num_ops = num_read_ops + num_write_ops;
@@ -221,24 +289,28 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
   // Track submission queue tail
   uint16_t sq_tail = 0;
   uint16_t last_sq_head = 0;
+  // Track last CQE for polling (update after each completion)
+  nvme_ep::cqeType cqe_last = initial_cqe_data;
 
   if (sequential_mode) {
-    for (unsigned i = 0; i < num_ops; i++) {
-      uint16_t cmd_id = (uint16_t)(i + 1);
+    unsigned i = 0;
+    while ((ioParams.infiniteMode || i < num_ops) &&
+           (config.stopRequested == nullptr || !*config.stopRequested)) {
+      // Wrap command ID to avoid overflow (NVMe command IDs are 16-bit)
+      // Use modulo 65535 + 1 to avoid cmd_id = 0
+      uint16_t cmd_id = (uint16_t)((i % 65535) + 1);
 
       bool is_read_op;
-      unsigned op_index;
-      if (num_read_ops > 0 && num_write_ops > 0) {
+      if (ioParams.infiniteMode) {
+        is_read_op = sequential_is_read;
+      } else if (num_read_ops > 0 && num_write_ops > 0) {
         if (i < num_write_ops) {
           is_read_op = false;
-          op_index = i;
         } else {
           is_read_op = true;
-          op_index = i - num_write_ops;
         }
       } else {
         is_read_op = sequential_is_read;
-        op_index = i;
       }
 
       // Calculate LBA
@@ -257,20 +329,24 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         // For sequential reads, reuse the same buffer for every I/O
         uint64_t buffer_offset = 0;
         if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          uint64_t buffer_addr =
-            bufferParams.readBufferDma
-              ? (bufferParams.readBufferDma + buffer_offset)
-              : (uint64_t)(bufferParams.readBuffer + buffer_offset);
+          // Must use DMA address - virtual address won't work for NVMe
+          if (bufferParams.readBufferDma == 0) {
+            __builtin_trap(); // DMA address must be set
+          }
+          uint64_t buffer_addr = bufferParams.readBufferDma + buffer_offset;
           calculatePrps(buffer_addr, transfer_size, sqe);
           prp_valid = true;
         }
       } else if (!is_read_op && has_write_buffer) {
-        uint64_t buffer_offset = op_index * transfer_size;
+        // For sequential writes, reuse the same buffer for every I/O
+        // (same as reads) to support infinite mode
+        uint64_t buffer_offset = 0;
         if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          uint64_t buffer_addr =
-            bufferParams.writeBufferDma
-              ? (bufferParams.writeBufferDma + buffer_offset)
-              : (uint64_t)(bufferParams.writeBuffer + buffer_offset);
+          // Must use DMA address - virtual address won't work for NVMe
+          if (bufferParams.writeBufferDma == 0) {
+            __builtin_trap(); // DMA address must be set
+          }
+          uint64_t buffer_addr = bufferParams.writeBufferDma + buffer_offset;
           calculatePrps(buffer_addr, transfer_size, sqe);
           prp_valid = true;
         }
@@ -282,13 +358,35 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       }
       sqeSetup(sqe, lba, blocks);
 
-      // Record start time
-      if (config.startTimes != nullptr) {
+      // Record start time (full timing mode) or start tracking (less-timing)
+      // Note: In infinite mode, we only use timingStats (not startTimes array)
+      unsigned long long int startTime = 0;
+      if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[i] = wall_clock64();
+      } else if (config.timingStats != nullptr) {
+        startTime = wall_clock64();
       }
 
-      // Write SQE and increment sq_tail
-      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+      // Write SQE to queue slot
+      // sqeWrite includes memory fence for device code to ensure write
+      // completes
+      volatile sqeType* sqe_slot = &sqeAddr[sq_tail];
+      nvme_ep::sqeWrite(sqeLocal, sqe_slot);
+
+      // Additional memory fence after write to ensure SQE is fully visible
+      // before incrementing tail and ringing doorbell
+      __threadfence_system();
+
+      // Verify critical fields were written correctly (read-back check)
+      // This helps catch cases where the write didn't complete or was corrupted
+      volatile sqeType* verify_slot = sqe_slot;
+      if (verify_slot->opcode != sqeLocal.opcode ||
+          verify_slot->command_id != sqeLocal.command_id) {
+        // SQE write verification failed - trap to prevent corrupted command
+        __builtin_trap();
+      }
+
+      // Increment sq_tail after SQE is fully written and visible
       sq_tail = (sq_tail + 1) % ioParams.queueSize;
 
       // Ring doorbell
@@ -297,13 +395,28 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       // Wait for completion using cqePoll
       volatile cqeType* cqe_entry = &cqeAddr[cq_head];
       uint16_t new_sq_head = 0;
-      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(initial_cqe_data, cqe_entry,
+      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(cqe_last, cqe_entry,
                                                   last_sq_head, &new_sq_head);
 
+      // Check completion status
+      if (!nvme_ep::cqeOk(&cqe_new)) {
+        __builtin_trap();
+      }
+
+      // Update last CQE for next iteration
+      cqe_last = cqe_new;
+
       // Update tracking variables
-      if (config.endTimes != nullptr && cmd_id >= 1 && cmd_id <= num_ops) {
+      if (!ioParams.infiniteMode && config.endTimes != nullptr && cmd_id >= 1 &&
+          cmd_id <= num_ops) {
         unsigned idx = cmd_id - 1;
         config.endTimes[idx] = wall_clock64();
+      } else if (config.timingStats != nullptr && startTime > 0) {
+        unsigned long long int endTime = wall_clock64();
+        if (endTime > startTime) {
+          unsigned long long int duration = endTime - startTime;
+          updateTimingStats(config.timingStats, duration);
+        }
       }
       cq_head = (cq_head + 1) % ioParams.queueSize;
       // Update CQ doorbell to notify controller we consumed the completion
@@ -314,6 +427,7 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
       expected_phase = phase ^ 1;
       last_sq_head = new_sq_head;
+      i++; // Increment loop counter
     }
   } else {
     // Batch mode: enqueue some number of SQEs, then ring doorbell,
@@ -322,9 +436,16 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
     sqeType sqeLocal = {};
     sqeType* sqe = &sqeLocal;
 
+    // For less-timing mode in batch, we need to store start times locally
+    // Allocate on stack (batch size is typically small, max iterations)
+    unsigned long long int batchStartTimes[256]; // Max 256 ops per batch
+    bool useBatchTiming = (config.timingStats != nullptr);
+
     // Issue a batch of commands
     for (unsigned i = 0; i < num_ops; i++) {
-      uint16_t cmd_id = (uint16_t)(i + 1);
+      // Wrap command ID to avoid overflow (NVMe command IDs are 16-bit)
+      // Use modulo 65535 + 1 to avoid cmd_id = 0 (which may be reserved)
+      uint16_t cmd_id = (uint16_t)((i % 65535) + 1);
 
       // Calculate LBA
       uint64_t lba = getRandomLba(i, cmd_id, blocks, ioParams);
@@ -381,9 +502,13 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
 
       sqeSetup(sqe, lba, blocks);
 
-      // Record start time
+      // Record start time (full timing mode) or start tracking (less-timing)
+      unsigned long long int startTime = 0;
       if (config.startTimes != nullptr) {
         config.startTimes[i] = wall_clock64();
+      } else if (useBatchTiming && i < 256) {
+        startTime = wall_clock64();
+        batchStartTimes[i] = startTime;
       }
 
       // Write SQE
@@ -409,13 +534,27 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
 
       if (new_sq_head > last_sq_head && new_sq_head <= num_ops) {
         uint16_t new_completions = new_sq_head - last_sq_head;
+        uint64_t end_time = wall_clock64();
         if (config.endTimes != nullptr) {
-          uint64_t end_time = wall_clock64();
           for (uint16_t i = 0; i < new_completions; i++) {
             uint16_t completed_cmd_id = last_sq_head + 1 + i;
             if (completed_cmd_id >= 1 && completed_cmd_id <= num_ops) {
               unsigned idx = completed_cmd_id - 1;
               config.endTimes[idx] = end_time;
+            }
+          }
+        } else if (useBatchTiming) {
+          // Update timing stats for each completed command
+          for (uint16_t i = 0; i < new_completions; i++) {
+            uint16_t completed_cmd_id = last_sq_head + 1 + i;
+            if (completed_cmd_id >= 1 && completed_cmd_id <= num_ops) {
+              unsigned idx = completed_cmd_id - 1;
+              if (idx < 256 && batchStartTimes[idx] > 0 &&
+                  end_time > batchStartTimes[idx]) {
+                unsigned long long int duration = end_time -
+                                                  batchStartTimes[idx];
+                updateTimingStats(config.timingStats, duration);
+              }
             }
           }
         }
@@ -564,6 +703,12 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
       "time waiting for completion before issuing the next.")
     ->default_val(0)
     ->group(nvme_group);
+  app
+    .add_flag("--infinite", config->ioParams.infiniteMode,
+              "Infinite mode: run forever in sequential mode. Requires "
+              "exactly one of --read-io or --write-io to be negative, "
+              "the other must be 0.")
+    ->group(nvme_group);
 }
 
 /**
@@ -582,10 +727,29 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     return "Access pattern must be 'sequential' or 'random'";
   }
 
-  // Validate that at least one I/O count is != 0)
-  if (config->ioParams.readIo == 0 && config->ioParams.writeIo == 0) {
-    return "At least one of --read-io or --write-io must be specified with "
-           "value != 0 (use negative values for sequential mode)";
+  // Validate infinite mode requirements
+  if (config->ioParams.infiniteMode) {
+    bool read_negative = (config->ioParams.readIo < 0);
+    bool write_negative = (config->ioParams.writeIo < 0);
+    if (read_negative && write_negative) {
+      return "--infinite mode requires exactly one of --read-io or "
+             "--write-io to be negative, not both";
+    }
+    if (!read_negative && !write_negative) {
+      return "--infinite mode requires exactly one of --read-io or "
+             "--write-io to be negative";
+    }
+    if ((read_negative && config->ioParams.writeIo != 0) ||
+        (write_negative && config->ioParams.readIo != 0)) {
+      return "--infinite mode requires the non-negative --read-io or "
+             "--write-io to be exactly 0";
+    }
+  } else {
+    // Validate that at least one I/O count is != 0)
+    if (config->ioParams.readIo == 0 && config->ioParams.writeIo == 0) {
+      return "At least one of --read-io or --write-io must be specified with "
+             "value != 0 (use negative values for sequential mode)";
+    }
   }
 
   // Validate that --controller is specified
@@ -869,6 +1033,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.nsid = nvmeConfig->ioParams.nsid;
   ioParams.lbasPerIo = nvmeConfig->ioParams.lbasPerIo;
   ioParams.queueSize = queue_size;
+  ioParams.infiniteMode = nvmeConfig->ioParams.infiniteMode;
 
   nvme_ep::nvmeDoorbellParams doorbellParams;
   doorbellParams.doorbellOffset = doorbell_offset;
