@@ -8,7 +8,6 @@
 
 #include <CLI/CLI.hpp>
 
-#include "test-ep.h"
 #include "xio-endpoint-registry.h"
 #include "xio.h"
 
@@ -19,7 +18,9 @@
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
-extern hipError_t test_ep_run(xio::XioEndpointConfig* config);
+namespace xio::test_ep {
+extern hipError_t run(XioEndpointConfig* config);
+} // namespace xio::test_ep
 namespace xio::nvme_ep {
 extern hipError_t run(XioEndpointConfig* config);
 std::string validateConfig(nvmeEpConfig* config);
@@ -99,11 +100,11 @@ public:
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
-    return TEST_EP_SQE_SIZE;
+    return test_ep::sqeSize;
   }
 
   __host__ size_t getCompletionQueueEntrySize() const override {
-    return TEST_EP_CQE_SIZE;
+    return test_ep::cqeSize;
   }
 
   __host__ size_t
@@ -141,7 +142,7 @@ public:
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
-    return test_ep_run(config);
+    return test_ep::run(config);
   }
 
   __host__ void configureCliOptions(CLI::App& app) override {
