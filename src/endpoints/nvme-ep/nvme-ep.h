@@ -20,7 +20,7 @@
  */
 #include "nvme-ep-generated.h"
 
-namespace nvme_ep {
+namespace xio::nvme_ep {
 
 /**
  * Polling limits for completion queue operations
@@ -828,6 +828,6 @@ __host__ std::string validateConfig(nvmeEpConfig* config);
  */
 __host__ hipError_t run(XioEndpointConfig* config);
 
-} // namespace nvme_ep
+} // namespace xio::nvme_ep
 
 #endif // NVME_EP_H
