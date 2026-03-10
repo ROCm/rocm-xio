@@ -30,7 +30,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "rocm-xio-kmod.h"
 #include "xio.h"
 
 #ifndef __HIP_DEVICE_COMPILE__
@@ -40,7 +39,9 @@
 #include <hsa/hsa_ext_amd.h>
 #endif // __HIP_DEVICE_COMPILE__
 
-void xioPrintDeviceInfo() {
+namespace xio {
+
+void printDeviceInfo() {
   int deviceCount;
   HIP_CHECK(hipGetDeviceCount(&deviceCount));
   std::cout << "Number of devices: " << deviceCount << std::endl;
@@ -82,7 +83,7 @@ void xioPrintDeviceInfo() {
 }
 
 // Print GPU arch, UUID, and PCIe bus address.
-void xioPrintGpuDeviceDetails(int deviceId) {
+void printGpuDeviceDetails(int deviceId) {
   hipDeviceProp_t prop;
   hipError_t err = hipGetDeviceProperties(&prop, deviceId);
   if (err != hipSuccess) {
@@ -124,10 +125,10 @@ void xioPrintGpuDeviceDetails(int deviceId) {
   }
 }
 
-void xioPrintStatistics(const std::vector<double>& durations,
-                        unsigned totalIterations, unsigned numThreads,
-                        unsigned readIterations, unsigned writeIterations,
-                        unsigned verifiedReadsCount) {
+void printStatistics(const std::vector<double>& durations,
+                     unsigned totalIterations, unsigned numThreads,
+                     unsigned readIterations, unsigned writeIterations,
+                     unsigned verifiedReadsCount) {
   if (durations.empty()) {
     return;
   }
@@ -211,10 +212,9 @@ void xioPrintStatistics(const std::vector<double>& durations,
             << std::setprecision(2) << stddev_display << time_unit << std::endl;
 }
 
-void xioPrintHistogram(const std::vector<double>& durations,
-                       unsigned nIterations, unsigned numThreads,
-                       unsigned readIterations, unsigned writeIterations,
-                       unsigned verifiedReadsCount) {
+void printHistogram(const std::vector<double>& durations, unsigned nIterations,
+                    unsigned numThreads, unsigned readIterations,
+                    unsigned writeIterations, unsigned verifiedReadsCount) {
   if (durations.empty() || nIterations == 0) {
     return;
   }
@@ -321,13 +321,12 @@ void xioPrintHistogram(const std::vector<double>& durations,
   }
 
   // Print statistics after histogram
-  xioPrintStatistics(durations, nIterations, numThreads, readIterations,
-                     writeIterations, verifiedReadsCount);
+  printStatistics(durations, nIterations, numThreads, readIterations,
+                  writeIterations, verifiedReadsCount);
 }
 
 // Helper function to allocate HSA device memory
-hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
-                                  const char* direction) {
+hsa_status_t allocDeviceMemory(size_t size, void** ptr, const char* direction) {
   hsa_status_t status;
 
   // Initialize HSA runtime (safe to call multiple times)
@@ -438,8 +437,8 @@ hsa_status_t xioAllocDeviceMemory(size_t size, void** ptr,
   return status;
 }
 
-hipError_t xioAllocateQueue(size_t size, bool isDeviceMemory,
-                            const char* queueName, void** ptr) {
+hipError_t allocateQueue(size_t size, bool isDeviceMemory,
+                         const char* queueName, void** ptr) {
   if (isDeviceMemory) {
     // Allocate device memory using hipMalloc (exportable as DMA-BUF)
     // This matches VRAM buffer allocation and allows DMA-BUF export for
@@ -476,7 +475,7 @@ hipError_t xioAllocateQueue(size_t size, bool isDeviceMemory,
   return hipSuccess;
 }
 
-void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName) {
+void freeQueue(void* ptr, bool isDeviceMemory, const char* queueName) {
   if (isDeviceMemory) {
     // Free HIP device memory
     if (ptr != nullptr) {
@@ -498,8 +497,7 @@ void xioFreeQueue(void* ptr, bool isDeviceMemory, const char* queueName) {
   }
 }
 
-__host__ bool xioReallocateQueue(void** ptr, size_t size,
-                                 const char* queueName) {
+__host__ bool reallocateQueue(void** ptr, size_t size, const char* queueName) {
   if (!ptr || !*ptr) {
     return false;
   }
@@ -531,7 +529,7 @@ __host__ bool xioReallocateQueue(void** ptr, size_t size,
   return true;
 }
 
-__host__ struct drm_amdgpu_gem_userptr* xioRegQueueGpu(
+__host__ struct drm_amdgpu_gem_userptr* regQueueGpu(
   void* queue_virt, size_t queue_size_aligned, bool is_device,
   const char* queue_name, struct drm_amdgpu_gem_userptr* userptr) {
   if (!userptr || !queue_name) {
@@ -592,8 +590,8 @@ __host__ struct drm_amdgpu_gem_userptr* xioRegQueueGpu(
   return userptr;
 }
 
-__host__ void* xioGetGpuPointer(void* host_ptr, bool is_device,
-                                const char* queue_name) {
+__host__ void* getGpuPointer(void* host_ptr, bool is_device,
+                             const char* queue_name) {
   if (!host_ptr || !queue_name) {
     return NULL;
   }
@@ -614,7 +612,7 @@ __host__ void* xioGetGpuPointer(void* host_ptr, bool is_device,
   }
 }
 
-hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
+hipError_t allocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
@@ -623,8 +621,8 @@ hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
     size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
                          host_page_size;
 
-    hsa_status_t hsa_status = xioAllocDeviceMemory(alignedSize, ptr,
-                                                   "Data Buffer");
+    hsa_status_t hsa_status = allocDeviceMemory(alignedSize, ptr,
+                                                "Data Buffer");
     if (hsa_status != HSA_STATUS_SUCCESS) {
       std::cerr << "Error: HSA memory allocation failed for data buffer: "
                 << hsa_status << std::endl;
@@ -651,7 +649,7 @@ hipError_t xioAllocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
 }
 
 // Free data buffer memory based on memory mode
-void xioFreeDataBuffer(void* ptr, unsigned memoryMode) {
+void freeDataBuffer(void* ptr, unsigned memoryMode) {
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
@@ -671,7 +669,7 @@ void xioFreeDataBuffer(void* ptr, unsigned memoryMode) {
   }
 }
 
-std::string xioExtractEndpointName(int argc, char** argv) {
+std::string extractEndpointName(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-e" || arg == "--endpoint") {
@@ -688,7 +686,7 @@ std::string xioExtractEndpointName(int argc, char** argv) {
   return std::string();
 }
 
-int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
+int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
   if (!bdf_out) {
     return -1;
   }
@@ -853,8 +851,7 @@ int xioDetectPciMmioBridgeBdf(uint16_t* bdf_out) {
   return 0;
 }
 
-__host__ int xioDetectBdfFromDevice(const char* device_path,
-                                    uint16_t* bdf_out) {
+__host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
   if (!device_path || !bdf_out) {
     return -EINVAL;
   }
@@ -937,8 +934,8 @@ __host__ int xioDetectBdfFromDevice(const char* device_path,
   return 0;
 }
 
-__host__ int xioDetectEmulatedNvme(const char* device_path,
-                                   bool* is_emulated_out) {
+__host__ int detectEmulatedNvme(const char* device_path,
+                                bool* is_emulated_out) {
   if (!device_path || !is_emulated_out) {
     return -EINVAL;
   }
@@ -1056,7 +1053,7 @@ __host__ int xioDetectEmulatedNvme(const char* device_path,
 }
 
 // Get physical address from virtual address
-__host__ uint64_t xioGetPhysAddr(void* virt_addr) {
+__host__ uint64_t getPhysAddr(void* virt_addr) {
   int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
   if (pagemap_fd < 0) {
     return 0;
@@ -1093,10 +1090,10 @@ __host__ uint64_t xioGetPhysAddr(void* virt_addr) {
   return phys_addr;
 }
 
-__host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
-                                 uint16_t nvme_bdf,
-                                 const char* kernel_module_device,
-                                 bool is_emulated, const char* buffer_name) {
+__host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
+                              uint16_t nvme_bdf,
+                              const char* kernel_module_device,
+                              bool is_emulated, const char* buffer_name) {
   if (!buffer_ptr || size == 0 || !buffer_name) {
     return 0;
   }
@@ -1112,9 +1109,8 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
     }
 
     uint64_t phys_addr = 0;
-    int ret = xioExportRegVramBuf(buffer_ptr, size, nvme_bdf,
-                                  kernel_module_device, &phys_addr,
-                                  is_emulated);
+    int ret = exportRegVramBuf(buffer_ptr, size, nvme_bdf, kernel_module_device,
+                               &phys_addr, is_emulated);
     if (ret < 0) {
       fprintf(stderr, "ERROR: Failed to register %s device memory: %s\n",
               buffer_name, strerror(-ret));
@@ -1128,7 +1124,7 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
     return phys_addr;
   } else {
     // Host memory - use pagemap to get physical address
-    uint64_t phys_addr = xioGetPhysAddr(buffer_ptr);
+    uint64_t phys_addr = getPhysAddr(buffer_ptr);
     if (phys_addr == 0) {
       fprintf(stdout,
               "Warning: Failed to get %s physical address, using "
@@ -1140,9 +1136,9 @@ __host__ uint64_t xioGetPhysAddr(void* buffer_ptr, size_t size, bool is_device,
   }
 }
 
-__host__ int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
-                             size_t size, uint8_t queue_type, uint16_t nvme_bdf,
-                             const char* queue_name) {
+__host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
+                          size_t size, uint8_t queue_type, uint16_t nvme_bdf,
+                          const char* queue_name) {
   if (kmod_fd < 0 || !virt_addr || size == 0 || !queue_name) {
     return -EINVAL;
   }
@@ -1165,8 +1161,8 @@ __host__ int xioKmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   return 0;
 }
 
-__host__ int xioRegisterMemoryForGpu(void* host_ptr, size_t size,
-                                     const char* name, void** gpu_ptr_out) {
+__host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
+                                  void** gpu_ptr_out) {
   if (!host_ptr || size == 0 || !name || !gpu_ptr_out) {
     return -EINVAL;
   }
@@ -1229,10 +1225,10 @@ __host__ int xioRegisterMemoryForGpu(void* host_ptr, size_t size,
   return 0;
 }
 
-__host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
-                                 const char* kernel_module_device,
-                                 bool is_emulated, const char* queue_name,
-                                 struct xioQueueSetup* setup) {
+__host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
+                              const char* kernel_module_device,
+                              bool is_emulated, const char* queue_name,
+                              struct xioQueueSetup* setup) {
   if (!setup || size == 0 || !queue_name) {
     return -EINVAL;
   }
@@ -1250,7 +1246,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
   size_t size_aligned = ((size + page_size - 1) / page_size) * page_size;
 
   // Step 1: Allocate queue memory
-  alloc_err = xioAllocateQueue(size, is_device, queue_name, &setup->virt);
+  alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
   if (alloc_err != hipSuccess) {
     fprintf(stdout, "Failed to allocate %s: %s\n", queue_name,
             hipGetErrorString(alloc_err));
@@ -1262,17 +1258,17 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
 
   // Step 2: Reallocate with coherent memory if host memory
   if (!is_device) {
-    setup->uses_coherent = xioReallocateQueue(&setup->virt, size, queue_name);
+    setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
   }
 
   // Step 3: Register with DRM GEM_USERPTR
-  if (!xioRegQueueGpu(setup->virt, size_aligned, is_device, queue_name,
-                      &setup->userptr)) {
+  if (!regQueueGpu(setup->virt, size_aligned, is_device, queue_name,
+                   &setup->userptr)) {
     // Cleanup allocation
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
-      xioFreeQueue(setup->virt, is_device, queue_name);
+      freeQueue(setup->virt, is_device, queue_name);
     }
     setup->virt = nullptr;
     return -EIO;
@@ -1289,7 +1285,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
       if (setup->uses_coherent) {
         (void)hipHostFree(setup->virt);
       } else {
-        xioFreeQueue(setup->virt, is_device, queue_name);
+        freeQueue(setup->virt, is_device, queue_name);
       }
       setup->virt = nullptr;
       return -EIO;
@@ -1298,7 +1294,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
   }
 
   // Step 5: Get GPU pointer
-  setup->gpu = xioGetGpuPointer(setup->virt, is_device, queue_name);
+  setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
   if (!setup->gpu) {
     // Cleanup
     if (hip_registered) {
@@ -1307,7 +1303,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
-      xioFreeQueue(setup->virt, is_device, queue_name);
+      freeQueue(setup->virt, is_device, queue_name);
     }
     setup->virt = nullptr;
     return -EIO;
@@ -1324,15 +1320,15 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
-      xioFreeQueue(setup->virt, is_device, queue_name);
+      freeQueue(setup->virt, is_device, queue_name);
     }
     setup->virt = nullptr;
     setup->gpu = nullptr;
     return -EINVAL;
   }
 
-  setup->phys = xioGetPhysAddr(setup->virt, size, is_device, nvme_bdf,
-                               kernel_module_device, is_emulated, queue_name);
+  setup->phys = getPhysAddr(setup->virt, size, is_device, nvme_bdf,
+                            kernel_module_device, is_emulated, queue_name);
   if (setup->phys == 0 && is_device) {
     // Device memory requires physical address
     fprintf(stderr,
@@ -1346,7 +1342,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
-      xioFreeQueue(setup->virt, is_device, queue_name);
+      freeQueue(setup->virt, is_device, queue_name);
     }
     setup->virt = nullptr;
     setup->gpu = nullptr;
@@ -1365,7 +1361,7 @@ __host__ int xioSetupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
 // Check if rocm-xio kernel module is loaded
 // Note: Linux converts hyphens to underscores in module names, so we check
 // for "rocm_xio" in /proc/modules
-bool xioCheckKernelModuleLoaded() {
+bool checkKernelModuleLoaded() {
   FILE* f = fopen("/proc/modules", "r");
   if (!f) {
     return false;
@@ -1384,7 +1380,7 @@ bool xioCheckKernelModuleLoaded() {
 }
 
 // Attempt to load rocm-xio kernel module
-int xioLoadKernelModule() {
+int loadKernelModule() {
   int ret = system("modprobe rocm-xio");
   if (ret != 0) {
     std::cerr << "Warning: Failed to load kernel module 'rocm-xio'. "
@@ -1396,7 +1392,7 @@ int xioLoadKernelModule() {
   return 0;
 }
 
-int xioMapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
+int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   int kmod_fd = -1;
   int ret = 0;
   struct rocm_axiio_mmio_bridge_shadow_req req;
@@ -1457,9 +1453,9 @@ int xioMapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   return 0;
 }
 
-__host__ int xioRegisterMmioBridgeShadowBufferForGpu(void* shadow_virt,
-                                                     size_t shadow_size,
-                                                     void** gpu_ptr_out) {
+__host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
+                                                  size_t shadow_size,
+                                                  void** gpu_ptr_out) {
   if (!shadow_virt || !gpu_ptr_out) {
     return -EINVAL;
   }
@@ -1543,8 +1539,8 @@ __host__ int xioRegisterMmioBridgeShadowBufferForGpu(void* shadow_virt,
   return 0;
 }
 
-__host__ int xioMapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
-                          void** bar_gpu, size_t bar_size) {
+__host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
+                       void** bar_gpu, size_t bar_size) {
   if (!bar_cpu || !bar_gpu) {
     return -EINVAL;
   }
@@ -1662,7 +1658,7 @@ __host__ int xioMapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   return 0;
 }
 
-int xioEnsureDeviceNode() {
+int ensureDeviceNode() {
   // Check if device exists
   if (access(ROCM_XIO_DEVICE_PATH, F_OK) == 0) {
     return 0; // Device exists
@@ -1715,9 +1711,9 @@ int xioEnsureDeviceNode() {
   return 0;
 }
 
-__host__ int xioOpenDeviceWithRetry(const char* device_path, int flags,
-                                    const char* device_name, int max_retries,
-                                    int initial_delay_ms) {
+__host__ int openDeviceWithRetry(const char* device_path, int flags,
+                                 const char* device_name, int max_retries,
+                                 int initial_delay_ms) {
   if (!device_path) {
     errno = EINVAL;
     return -1;
@@ -1762,9 +1758,9 @@ __host__ int xioOpenDeviceWithRetry(const char* device_path, int flags,
   return -1;
 }
 
-__host__ int xioExportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
-                                 const char* kernel_module_device,
-                                 uint64_t* phys_addr_out, bool is_emulated) {
+__host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
+                              const char* kernel_module_device,
+                              uint64_t* phys_addr_out, bool is_emulated) {
   hsa_status_t status;
   hipDeviceptr_t aligned_ptr;
   const size_t host_page_size = sysconf(_SC_PAGESIZE);
@@ -1883,7 +1879,7 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
 }
 
 // Allocate GPU-accessible buffer for DMA operations
-__host__ hipError_t xioAllocateGpuAccessibleBuffer(
+__host__ hipError_t allocateGpuAccessibleBuffer(
   size_t size, unsigned memoryMode, uint16_t targetBdf, const char* devicePath,
   struct xioBufferInfo* bufferInfo) {
   if (!bufferInfo || size == 0) {
@@ -1913,13 +1909,13 @@ __host__ hipError_t xioAllocateGpuAccessibleBuffer(
     // Detect if device is emulated (needed for buffer registration flags)
     bool is_emulated = false;
     if (devicePath != nullptr) {
-      (void)xioDetectEmulatedNvme(devicePath, &is_emulated);
+      (void)detectEmulatedNvme(devicePath, &is_emulated);
     }
 
     // Export VRAM as dmabuf and register with kernel module
-    int ret = xioExportRegVramBuf(bufferInfo->hostPtr, size, targetBdf,
-                                  ROCM_XIO_DEVICE_PATH, &bufferInfo->dmaAddr,
-                                  is_emulated);
+    int ret = exportRegVramBuf(bufferInfo->hostPtr, size, targetBdf,
+                               ROCM_XIO_DEVICE_PATH, &bufferInfo->dmaAddr,
+                               is_emulated);
     if (ret < 0) {
       fprintf(stderr, "ERROR: DMA-BUF export failed for device memory: %s\n",
               strerror(-ret));
@@ -1949,7 +1945,7 @@ __host__ hipError_t xioAllocateGpuAccessibleBuffer(
     }
 
     // Get physical address for host memory using /proc/self/pagemap
-    bufferInfo->dmaAddr = xioGetPhysAddr(bufferInfo->hostPtr);
+    bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
     if (!bufferInfo->dmaAddr) {
       fprintf(stdout, "ERROR: Failed to get buffer physical address\n");
       (void)hipHostFree(bufferInfo->hostPtr);
@@ -1995,8 +1991,8 @@ __host__ hipError_t xioAllocateGpuAccessibleBuffer(
   return hipSuccess;
 }
 
-// Free GPU-accessible buffer allocated with xioAllocateGpuAccessibleBuffer
-__host__ void xioFreeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
+// Free GPU-accessible buffer allocated with allocateGpuAccessibleBuffer
+__host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   if (!bufferInfo || !bufferInfo->hostPtr) {
     return;
   }
@@ -2013,8 +2009,8 @@ __host__ void xioFreeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   bufferInfo->isDeviceMemory = false;
 }
 
-__host__ bool xioValidateGpuPointer(void* ptr, const char* name,
-                                    bool disableOnFailure) {
+__host__ bool validateGpuPointer(void* ptr, const char* name,
+                                 bool disableOnFailure) {
   if (ptr == nullptr) {
     return true; // nullptr is considered valid (optional pointer)
   }
@@ -2040,3 +2036,5 @@ __host__ bool xioValidateGpuPointer(void* ptr, const char* name,
           attr.type, attr.device);
   return true;
 }
+
+} // namespace xio

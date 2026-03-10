@@ -17,6 +17,8 @@
 #include "sdma-ep.h"
 #include "xio.h"
 
+using namespace xio;
+
 // Discard HIP return values in cleanup paths to satisfy nodiscard
 static void ignoreHip(hipError_t e) {
   (void)e;
@@ -431,10 +433,10 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
 
   // Print GPU arch, UUID, and PCIe address for the GPU(s) used
   std::cout << "SDMA source GPU:" << std::endl;
-  xioPrintGpuDeviceDetails(srcGpu);
+  printGpuDeviceDetails(srcGpu);
   if (!useHostDst) {
     std::cout << "SDMA destination GPU:" << std::endl;
-    xioPrintGpuDeviceDetails(dstGpu);
+    printGpuDeviceDetails(dstGpu);
   }
   std::cout << "Transfer size: " << transferSize << " bytes x "
             << config->iterations << " iterations" << std::endl;
