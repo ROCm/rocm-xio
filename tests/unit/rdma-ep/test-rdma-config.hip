@@ -12,6 +12,8 @@
 #include "rdma-ep.hip" // Include implementation for __device__ functions
 #include "xio.h"       // For HIP_CHECK macro
 
+using namespace xio;
+
 // Simple assertion macros
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(x) assert(x)

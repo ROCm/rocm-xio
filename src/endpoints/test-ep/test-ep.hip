@@ -17,6 +17,8 @@
 #include "test-ep.h"
 #include "xio.h"
 
+using namespace xio;
+
 // Get CPU wall clock time in nanoseconds (host-only)
 static inline uint64_t getCpuTime() {
   struct timespec ts;
@@ -894,8 +896,8 @@ hipError_t test_ep_run(XioEndpointConfig* config) {
       size_t alignedSize = ((sizeof(uint32_t) + host_page_size - 1) /
                             host_page_size) *
                            host_page_size;
-      hsa_status_t hsa_status = xioAllocDeviceMemory(alignedSize, &doorbellAddr,
-                                                     "Doorbell");
+      hsa_status_t hsa_status = allocDeviceMemory(alignedSize, &doorbellAddr,
+                                                  "Doorbell");
       if (hsa_status != HSA_STATUS_SUCCESS) {
         std::cerr << "Error: Failed to allocate doorbell in device memory"
                   << std::endl;

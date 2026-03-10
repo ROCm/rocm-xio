@@ -15,6 +15,8 @@
 #include "rdma-ep.h"
 #include "xio.h"
 
+using namespace xio;
+
 // Include vendor-specific headers
 #include "bnxt/bnxt-rdma.h"
 #include "ionic/ionic-rdma.h"

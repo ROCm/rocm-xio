@@ -19,13 +19,13 @@
 #include "test-ep.h"
 
 // Forward declarations for endpoint-specific run functions
-extern hipError_t test_ep_run(XioEndpointConfig* config);
-namespace nvme_ep {
+extern hipError_t test_ep_run(xio::XioEndpointConfig* config);
+namespace xio::nvme_ep {
 extern hipError_t run(XioEndpointConfig* config);
 std::string validateConfig(nvmeEpConfig* config);
-} // namespace nvme_ep
-extern hipError_t rdma_ep_run(XioEndpointConfig* config);
-extern hipError_t sdma_ep_run(XioEndpointConfig* config);
+} // namespace xio::nvme_ep
+extern hipError_t rdma_ep_run(xio::XioEndpointConfig* config);
+extern hipError_t sdma_ep_run(xio::XioEndpointConfig* config);
 
 // Transform human-readable size (e.g. "4k", "1M") to bytes for CLI options.
 // Suffixes use power-of-2 (binary): k=1024, M=1024², G=1024³ (KiB/MiB/GiB).
@@ -73,6 +73,8 @@ static std::string transferSizeTransform(std::string& s) {
 // ============================================================================
 // Derived Endpoint Classes
 // ============================================================================
+
+namespace xio {
 
 class TestEndpoint : public XioEndpoint {
 private:
@@ -588,3 +590,5 @@ __host__ std::unique_ptr<XioEndpoint> createEndpoint(
   EndpointType type = getEndpointType(endpointName);
   return createEndpoint(type);
 }
+
+} // namespace xio
