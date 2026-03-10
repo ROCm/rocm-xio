@@ -13,7 +13,7 @@
 #SBATCH --gpus-per-node=1
 #   Ensure job only runs on nodes with spare NVMe devices
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
-#SBATCH --constraint=MARKHAM&NVME
+#SBATCH --constraint=MARKHAM&NVME&ROCM7.2.0
 
 set -e
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then

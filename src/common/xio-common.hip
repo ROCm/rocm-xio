@@ -21,8 +21,6 @@
 #include <hip/hip_runtime.h>
 
 #include <dirent.h>
-#include <drm/amdgpu_drm.h>
-#include <drm/drm.h>
 #include <fcntl.h>
 #include <linux/ioctl.h>
 #include <sys/ioctl.h>
@@ -527,67 +525,6 @@ __host__ bool reallocateQueue(void** ptr, size_t size, const char* queueName) {
   // Update pointer to coherent allocation
   *ptr = coherent_ptr;
   return true;
-}
-
-__host__ struct drm_amdgpu_gem_userptr* regQueueGpu(
-  void* queue_virt, size_t queue_size_aligned, bool is_device,
-  const char* queue_name, struct drm_amdgpu_gem_userptr* userptr) {
-  if (!userptr || !queue_name) {
-    return NULL;
-  }
-
-  // Open DRM device
-  int drm_fd = open("/dev/dri/renderD128", O_RDWR);
-  if (drm_fd < 0) {
-    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
-            strerror(errno));
-    fprintf(stdout, "Cannot register %s with GPU via GEM_USERPTR.\n",
-            queue_name);
-    // For device memory, this is not fatal - queue is already GPU-accessible
-    if (is_device) {
-      fprintf(stdout,
-              "Note: %s is device memory (already GPU-accessible), "
-              "continuing without GEM_USERPTR\n",
-              queue_name);
-      // Zero-initialize userptr for device memory case
-      memset(userptr, 0, sizeof(*userptr));
-      return userptr; // Success (not needed for device memory)
-    } else {
-      return NULL;
-    }
-  }
-
-  // Register queue with DRM GEM_USERPTR
-  userptr->addr = (uint64_t)queue_virt;
-  userptr->size = queue_size_aligned;
-  userptr->flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, userptr) < 0) {
-    fprintf(stdout,
-            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for %s: "
-            "%s\n",
-            queue_name, strerror(errno));
-    close(drm_fd);
-    // For device memory, this is not fatal
-    if (is_device) {
-      fprintf(stdout,
-              "Info: %s is device memory (already GPU-accessible), "
-              "continuing without GEM_USERPTR.\n",
-              queue_name);
-      // Zero-initialize userptr for device memory case
-      memset(userptr, 0, sizeof(*userptr));
-      return userptr; // Success (not needed for device memory)
-    } else {
-      fprintf(stderr, "Error: Cannot register %s with GPU.\n", queue_name);
-      return NULL;
-    }
-  } else {
-    fprintf(stdout, "Info: %s registered with DRM GEM_USERPTR (handle: %u).\n",
-            queue_name, userptr->handle);
-  }
-
-  close(drm_fd);
-  return userptr;
 }
 
 __host__ void* getGpuPointer(void* host_ptr, bool is_device,
@@ -1167,60 +1104,34 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
     return -EINVAL;
   }
 
-  int drm_fd = -1;
-  hipError_t hip_err = hipSuccess;
-  bool hip_registered = false;
-
   // Initialize output
   *gpu_ptr_out = nullptr;
 
-  // Step 1: Register with DRM GEM_USERPTR
-  drm_fd = open("/dev/dri/renderD128", O_RDWR);
-  if (drm_fd < 0) {
-    fprintf(stdout, "Warning: Failed to open DRM device for %s: %s\n", name,
-            strerror(errno));
-    return -errno;
-  }
-
-  struct drm_amdgpu_gem_userptr gem_userptr = {};
-  gem_userptr.addr = (uint64_t)host_ptr;
-  gem_userptr.size = size;
-  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-    fprintf(stdout, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for %s: %s\n",
-            name, strerror(errno));
-    close(drm_fd);
-    return -errno;
-  }
-
-  close(drm_fd); // DRM fd can be closed after registration
-
-  // Step 2: Register with HIP
-  hip_err = hipHostRegister(host_ptr, size, hipHostRegisterMapped);
+  // Step 1: Register with HIP
+  hipError_t hip_err = hipHostRegister(host_ptr, size, hipHostRegisterMapped);
   if (hip_err != hipSuccess) {
     fprintf(stdout, "Warning: Failed to register %s with HIP: %s\n", name,
             hipGetErrorString(hip_err));
-    // Note: DRM registration persists, but HIP registration failed
-    return -1; // Return generic error
+    return -1;
   }
-  hip_registered = true;
 
-  // Step 3: Get GPU pointer
+  // Step 2: Get GPU pointer
   void* gpu_ptr = nullptr;
   hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, host_ptr, 0);
   if (gpu_ptr_err != hipSuccess) {
-    fprintf(stdout, "Warning: hipHostGetDevicePointer failed for %s: %s\n",
+    fprintf(stdout,
+            "Warning: hipHostGetDevicePointer failed for "
+            "%s: %s\n",
             name, hipGetErrorString(gpu_ptr_err));
-    if (hip_registered) {
-      (void)hipHostUnregister(host_ptr);
-    }
-    return -1; // Return generic error
+    (void)hipHostUnregister(host_ptr);
+    return -1;
   }
 
   *gpu_ptr_out = gpu_ptr;
-  fprintf(stdout, "Info: %s registered for GPU access: host=%p, gpu=%p\n", name,
-          host_ptr, gpu_ptr);
+  fprintf(stdout,
+          "Info: %s registered for GPU access: "
+          "host=%p, gpu=%p\n",
+          name, host_ptr, gpu_ptr);
 
   return 0;
 }
@@ -1242,8 +1153,6 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
 
   hipError_t alloc_err = hipSuccess;
   bool hip_registered = false;
-  size_t page_size = sysconf(_SC_PAGESIZE);
-  size_t size_aligned = ((size + page_size - 1) / page_size) * page_size;
 
   // Step 1: Allocate queue memory
   alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
@@ -1261,20 +1170,7 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
   }
 
-  // Step 3: Register with DRM GEM_USERPTR
-  if (!regQueueGpu(setup->virt, size_aligned, is_device, queue_name,
-                   &setup->userptr)) {
-    // Cleanup allocation
-    if (setup->uses_coherent) {
-      (void)hipHostFree(setup->virt);
-    } else {
-      freeQueue(setup->virt, is_device, queue_name);
-    }
-    setup->virt = nullptr;
-    return -EIO;
-  }
-
-  // Step 4: Register with HIP (skip if coherent or device memory)
+  // Step 3: Register with HIP (skip if coherent or device memory)
   if (!setup->uses_coherent && !is_device) {
     hipError_t hip_err = hipHostRegister(setup->virt, size,
                                          hipHostRegisterMapped);
@@ -1293,7 +1189,7 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     hip_registered = true;
   }
 
-  // Step 5: Get GPU pointer
+  // Step 4: Get GPU pointer
   setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
   if (!setup->gpu) {
     // Cleanup
@@ -1309,7 +1205,7 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     return -EIO;
   }
 
-  // Step 6: Get physical address
+  // Step 5: Get physical address
   if (!kernel_module_device) {
     fprintf(stderr, "ERROR: kernel_module_device required for %s\n",
             queue_name);
@@ -1460,80 +1356,45 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
     return -EINVAL;
   }
 
-  // Step 1: Register with DRM GEM_USERPTR (required for GPU access)
-  int drm_fd = open("/dev/dri/renderD128", O_RDWR);
-  if (drm_fd < 0) {
-    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
-            strerror(errno));
-    fprintf(stdout,
-            "Cannot register shadow buffer with GPU via GEM_USERPTR.\n");
-    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
-                    "doorbell.\n");
-    munmap(shadow_virt, shadow_size);
-    *gpu_ptr_out = nullptr;
-    return -errno;
-  }
-
-  struct drm_amdgpu_gem_userptr gem_userptr = {};
-  gem_userptr.addr = (uint64_t)shadow_virt;
-  gem_userptr.size = shadow_size;
-  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-    fprintf(stdout, "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed: %s\n",
-            strerror(errno));
-    fprintf(stdout, "Cannot register shadow buffer with GPU.\n");
-    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
-                    "doorbell.\n");
-    close(drm_fd);
-    munmap(shadow_virt, shadow_size);
-    *gpu_ptr_out = nullptr;
-    return -errno;
-  }
-
-  fprintf(stdout,
-          "Shadow buffer registered with DRM GEM_USERPTR (handle: %u)\n",
-          gem_userptr.handle);
-
-  // Step 2: Register with HIP (matching QEMU guest code pattern)
+  // Step 1: Register with HIP for GPU access
   hipError_t hip_err = hipHostRegister(shadow_virt, shadow_size,
                                        hipHostRegisterMapped);
   if (hip_err != hipSuccess) {
-    fprintf(stdout, "Warning: Failed to register shadow buffer with HIP: %s\n",
+    fprintf(stdout,
+            "Warning: Failed to register shadow buffer "
+            "with HIP: %s\n",
             hipGetErrorString(hip_err));
-    fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
-                    "doorbell.\n");
-    close(drm_fd);
+    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel "
+                    "will skip doorbell.\n");
     munmap(shadow_virt, shadow_size);
     *gpu_ptr_out = nullptr;
-    return -1; // Return generic error (HIP error codes are positive)
+    return -1;
   }
 
-  fprintf(stdout, "Shadow buffer registered with HIP for GPU access\n");
+  fprintf(stdout, "Shadow buffer registered with HIP for GPU "
+                  "access\n");
 
-  // Step 3: Get GPU pointer (matching QEMU guest code pattern)
-  // After hipHostRegister, we need hipHostGetDevicePointer to get the
-  // GPU-accessible pointer
+  // Step 2: Get GPU pointer
   void* shadow_gpu_ptr = nullptr;
   hipError_t gpu_ptr_err = hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt,
                                                    0);
   if (gpu_ptr_err != hipSuccess) {
-    fprintf(stdout, "Warning: hipHostGetDevicePointer failed: %s\n",
+    fprintf(stdout,
+            "Warning: hipHostGetDevicePointer failed: "
+            "%s\n",
             hipGetErrorString(gpu_ptr_err));
-    fprintf(stdout, "Disabling PCI MMIO bridge mode - GPU kernel will skip "
-                    "doorbell.\n");
-    close(drm_fd);
+    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel "
+                    "will skip doorbell.\n");
+    (void)hipHostUnregister(shadow_virt);
     munmap(shadow_virt, shadow_size);
     *gpu_ptr_out = nullptr;
-    return -1; // Return generic error
+    return -1;
   }
 
-  fprintf(stdout, "Shadow buffer GPU pointer obtained: %p (host: %p)\n",
+  fprintf(stdout,
+          "Shadow buffer GPU pointer obtained: %p "
+          "(host: %p)\n",
           shadow_gpu_ptr, shadow_virt);
-
-  // Close DRM fd - the mapping persists even after close
-  // The kernel will clean it up when the process exits
-  close(drm_fd);
 
   *gpu_ptr_out = shadow_gpu_ptr;
   return 0;
@@ -1551,26 +1412,22 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   }
 
   int bar_fd = -1;
-  int drm_fd = -1;
   void* mapped = MAP_FAILED;
   char resource_path[256];
 
-  // Default size if not specified
   if (bar_size == 0) {
-    bar_size = 8192; // Default to 8KB
+    bar_size = 8192;
   }
 
-  // Convert BDF to format: 00:BB:DD.F
   uint8_t bus = (pci_bdf >> 8) & 0xFF;
   uint8_t dev = (pci_bdf >> 3) & 0x1F;
   uint8_t func = pci_bdf & 0x7;
 
-  // Build resource path: /sys/bus/pci/devices/0000:BB:DD.F/resource{bar}
   snprintf(resource_path, sizeof(resource_path),
-           "/sys/bus/pci/devices/0000:%02x:%02x.%x/resource%u", bus, dev, func,
-           bar);
+           "/sys/bus/pci/devices/0000:%02x:%02x.%x/"
+           "resource%u",
+           bus, dev, func, bar);
 
-  // Open BAR resource file
   bar_fd = open(resource_path, O_RDWR);
   if (bar_fd < 0) {
     fprintf(stdout, "Failed to open PCI BAR%u resource %s: %s\n", bar,
@@ -1578,7 +1435,6 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
     return -errno;
   }
 
-  // Map BAR to userspace
   mapped = mmap(nullptr, bar_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar_fd,
                 0);
   if (mapped == MAP_FAILED) {
@@ -1589,68 +1445,84 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
   fprintf(stdout, "PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
 
-  // Register with DRM GEM_USERPTR (required for GPU access to PCI MMIO)
-  drm_fd = open("/dev/dri/renderD128", O_RDWR);
-  if (drm_fd < 0) {
-    fprintf(stdout, "Warning: Failed to open DRM device: %s\n",
-            strerror(errno));
-    fprintf(stdout, "Cannot register BAR%u with GPU via GEM_USERPTR.\n", bar);
-    munmap(mapped, bar_size);
-    close(bar_fd);
-    return -errno;
-  }
-
-  struct drm_amdgpu_gem_userptr gem_userptr = {};
-  gem_userptr.addr = (uint64_t)mapped;
-  gem_userptr.size = bar_size;
-  gem_userptr.flags = AMDGPU_GEM_USERPTR_REGISTER;
-
-  if (ioctl(drm_fd, DRM_IOCTL_AMDGPU_GEM_USERPTR, &gem_userptr) < 0) {
-    fprintf(stdout,
-            "Warning: DRM_IOCTL_AMDGPU_GEM_USERPTR failed for BAR%u: "
-            "%s\n",
-            bar, strerror(errno));
-    fprintf(stdout, "Cannot register BAR%u with GPU.\n", bar);
-    close(drm_fd);
-    munmap(mapped, bar_size);
-    close(bar_fd);
-    return -errno;
-  }
-
-  fprintf(stdout, "PCI BAR%u registered with DRM GEM_USERPTR (handle: %u)\n",
-          bar, gem_userptr.handle);
-
-  // Register with HIP
-  hipError_t hip_err = hipHostRegister(mapped, bar_size, hipHostRegisterMapped);
-  if (hip_err != hipSuccess) {
-    fprintf(stdout, "Warning: Failed to register BAR%u with HIP: %s\n", bar,
-            hipGetErrorString(hip_err));
-    close(drm_fd);
-    munmap(mapped, bar_size);
-    close(bar_fd);
-    return -EINVAL;
-  }
-
-  fprintf(stdout, "PCI BAR%u registered with HIP for GPU access\n", bar);
-
-  // Get GPU pointer
+  // Register with HIP for GPU access
   void* gpu_ptr = nullptr;
-  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
-  if (gpu_ptr_err != hipSuccess) {
-    fprintf(stdout, "Warning: hipHostGetDevicePointer failed for BAR%u: %s\n",
-            bar, hipGetErrorString(gpu_ptr_err));
-    (void)hipHostUnregister(mapped);
-    close(drm_fd);
-    munmap(mapped, bar_size);
-    close(bar_fd);
-    return -EINVAL;
+  hipError_t hip_err = hipHostRegister(mapped, bar_size, hipHostRegisterMapped);
+  if (hip_err == hipSuccess) {
+    fprintf(stdout,
+            "PCI BAR%u registered with HIP for GPU "
+            "access\n",
+            bar);
+
+    hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
+    if (gpu_ptr_err != hipSuccess) {
+      fprintf(stdout,
+              "Warning: hipHostGetDevicePointer failed "
+              "for BAR%u: %s\n",
+              bar, hipGetErrorString(gpu_ptr_err));
+      (void)hipHostUnregister(mapped);
+      gpu_ptr = nullptr;
+    }
+  } else {
+    fprintf(stdout,
+            "Info: hipHostRegister failed for BAR%u "
+            "(%s), trying hsa_amd_memory_lock\n",
+            bar, hipGetErrorString(hip_err));
   }
 
-  fprintf(stdout, "PCI BAR%u GPU pointer obtained: %p (host: %p)\n", bar,
-          gpu_ptr, mapped);
+  // Fallback: use hsa_amd_memory_lock for MMIO pages
+  // that hipHostRegister cannot handle
+  if (!gpu_ptr) {
+    hsa_status_t status = hsa_init();
+    if (status != HSA_STATUS_SUCCESS && status != (hsa_status_t)0x1001) {
+      fprintf(stderr, "Error: hsa_init failed for BAR%u: %d\n", bar, status);
+      munmap(mapped, bar_size);
+      close(bar_fd);
+      return -EIO;
+    }
 
-  // Keep bar_fd and drm_fd open for the mapping to remain valid
-  // The kernel will clean them up when the process exits
+    hsa_agent_t gpu_agent = {0};
+    hsa_iterate_agents(
+      [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        hsa_device_type_t dev_type;
+        if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dev_type) ==
+              HSA_STATUS_SUCCESS &&
+            dev_type == HSA_DEVICE_TYPE_GPU) {
+          *(hsa_agent_t*)data = agent;
+          return HSA_STATUS_INFO_BREAK;
+        }
+        return HSA_STATUS_SUCCESS;
+      },
+      &gpu_agent);
+
+    if (gpu_agent.handle == 0) {
+      fprintf(stderr, "Error: No GPU agent found for BAR%u\n", bar);
+      munmap(mapped, bar_size);
+      close(bar_fd);
+      return -ENODEV;
+    }
+
+    status = hsa_amd_memory_lock(mapped, bar_size, &gpu_agent, 1, &gpu_ptr);
+    if (status != HSA_STATUS_SUCCESS) {
+      fprintf(stderr,
+              "Error: hsa_amd_memory_lock failed for "
+              "BAR%u: %d\n",
+              bar, status);
+      munmap(mapped, bar_size);
+      close(bar_fd);
+      return -EIO;
+    }
+
+    fprintf(stdout,
+            "PCI BAR%u registered via "
+            "hsa_amd_memory_lock\n",
+            bar);
+  }
+
+  fprintf(stdout,
+          "PCI BAR%u GPU pointer obtained: %p "
+          "(host: %p)\n",
+          bar, gpu_ptr, mapped);
 
   *bar_cpu = mapped;
   *bar_gpu = gpu_ptr;
