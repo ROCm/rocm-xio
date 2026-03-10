@@ -21,6 +21,8 @@
 
 #include "xio.h"
 
+using namespace xio;
+
 // Static pointer to config for signal handler access
 static XioEndpointConfig* g_configForSignalHandler = nullptr;
 // Static pointer to endpoint name for signal handler access
@@ -92,8 +94,8 @@ int main(int argc, char** argv) {
   app.add_flag("-v,--verbose", commonConfig.verbose, "Enable detailed output")
     ->group("Common Options");
 
-  bool printHistogram = false;
-  app.add_flag("--histogram", printHistogram, "Generate performance histogram")
+  bool showHistogram = false;
+  app.add_flag("--histogram", showHistogram, "Generate performance histogram")
     ->group("Common Options");
 
   bool lessTiming = false;
@@ -148,7 +150,7 @@ int main(int argc, char** argv) {
   }
 
   if (printInfo) {
-    xioPrintDeviceInfo();
+    printDeviceInfo();
     return EXIT_SUCCESS;
   }
 
@@ -308,18 +310,18 @@ int main(int argc, char** argv) {
   bool sqIsDevice = (baseConfig.memoryMode & 0x1) != 0;
   bool cqIsDevice = (baseConfig.memoryMode & 0x2) != 0;
 
-  hipError_t sqeErr = xioAllocateQueue(totalSqeSize, sqIsDevice,
-                                       "submission queue", &hostSqeAddr);
+  hipError_t sqeErr = allocateQueue(totalSqeSize, sqIsDevice,
+                                    "submission queue", &hostSqeAddr);
   if (sqeErr != hipSuccess) {
     std::cerr << "Failed to allocate submission queue" << std::endl;
     return EXIT_FAILURE;
   }
 
-  hipError_t cqeErr = xioAllocateQueue(totalCqeSize, cqIsDevice,
-                                       "completion queue", &hostCqeAddr);
+  hipError_t cqeErr = allocateQueue(totalCqeSize, cqIsDevice,
+                                    "completion queue", &hostCqeAddr);
   if (cqeErr != hipSuccess) {
     std::cerr << "Failed to allocate completion queue" << std::endl;
-    xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+    freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
     return EXIT_FAILURE;
   }
 
@@ -403,8 +405,8 @@ int main(int argc, char** argv) {
           free(timingStats);
         }
       }
-      xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
-      xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
+      freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+      freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
       return EXIT_FAILURE;
     }
   }
@@ -437,8 +439,8 @@ int main(int argc, char** argv) {
   if (err != hipSuccess) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
               << " (error code: " << err << ")" << std::endl;
-    xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
-    xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
+    freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+    freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
     // Free host memory using HIP or regular free (only if allocated)
     if (!lessTiming && hostStartTime != nullptr) {
       hipError_t hipErrFree1 = hipHostFree(hostStartTime);
@@ -528,9 +530,9 @@ int main(int argc, char** argv) {
 
   // Handle timing statistics based on mode
   if (lessTiming && timingStats != nullptr) {
-    // Less-timing mode: use same xioPrintStatistics function as normal mode
+    // Less-timing mode: use same printStatistics function as normal mode
     if (timingStats->count > 0) {
-      // Convert timing stats to durations vector for xioPrintStatistics
+      // Convert timing stats to durations vector for printStatistics
       double minDurationNs = static_cast<double>(timingStats->minDuration) *
                              gpuClockPeriodNs;
       double maxDurationNs = static_cast<double>(timingStats->maxDuration) *
@@ -563,12 +565,12 @@ int main(int argc, char** argv) {
       // "Reads/Writes" Note: verifiedReadsCount not available in less-timing
       // mode, use UINT_MAX
       unsigned actualIterations = static_cast<unsigned>(timingStats->count);
-      if (printHistogram) {
-        xioPrintHistogram(durations, actualIterations, baseConfig.numThreads, 0,
-                          0, UINT_MAX);
+      if (showHistogram) {
+        printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
+                       UINT_MAX);
       } else {
-        xioPrintStatistics(durations, actualIterations, baseConfig.numThreads,
-                           0, 0, UINT_MAX);
+        printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
+                        0, UINT_MAX);
       }
     } else {
       std::cout << "Warning: No timing data collected in less-timing mode"
@@ -595,19 +597,19 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Print statistics (printHistogram is already set from common options)
+    // Print statistics (showHistogram flag is already set from common options)
     // Use actual count of completed iterations instead of configured iterations
     // Note: readIterations/writeIterations not available without
     // endpoint-specific headers, so pass 0 to show "Iterations" instead of
     // "Reads/Writes" Note: verifiedReadsCount not tracked in normal mode, use
     // UINT_MAX
     if (durations.size() > 0) {
-      if (printHistogram) {
-        xioPrintHistogram(durations, actualIterations, baseConfig.numThreads, 0,
-                          0, UINT_MAX);
+      if (showHistogram) {
+        printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
+                       UINT_MAX);
       } else {
-        xioPrintStatistics(durations, actualIterations, baseConfig.numThreads,
-                           0, 0, UINT_MAX);
+        printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
+                        0, UINT_MAX);
       }
     } else {
       std::cout << "Warning: No valid timing data collected" << std::endl;
@@ -620,8 +622,8 @@ int main(int argc, char** argv) {
   }
 
   // Free memory
-  xioFreeQueue(hostSqeAddr, sqIsDevice, "submission queue");
-  xioFreeQueue(hostCqeAddr, cqIsDevice, "completion queue");
+  freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+  freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
   // Free host memory using HIP or regular free (only if allocated)
   if (!lessTiming && hostStartTime != nullptr) {
     hipError_t hipErrFree1 = hipHostFree(hostStartTime);

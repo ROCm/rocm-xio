@@ -4,7 +4,6 @@
  */
 
 #include "nvme-ep.h"
-#include "rocm-xio-kmod.h"
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
@@ -23,7 +22,7 @@
 #include <unistd.h>
 #endif // __HIP_DEVICE_COMPILE__
 
-namespace nvme_ep {
+namespace xio::nvme_ep {
 
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
   sqeType result;
@@ -162,7 +161,7 @@ __host__ __device__ void ringDoorbell(uint16_t value,
                         doorbellParams.nvmeTargetBdf, 0, offset, value,
                         PCI_MMIO_BRIDGE_CMD_WRITE, 4);
   } else {
-    xio_ep::ringDoorbell(doorbellParams.nvmeBar0Gpu, offset, value);
+    xio::ringDoorbell(doorbellParams.nvmeBar0Gpu, offset, value);
   }
 }
 
@@ -630,13 +629,13 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
   driveEndpoint(config, ioParams, doorbellParams, bufferParams);
 }
 
-} // namespace nvme_ep
+} // namespace xio::nvme_ep
 
 #ifndef __HIP_DEVICE_COMPILE__
 
 #include <fcntl.h>
 
-namespace nvme_ep {
+namespace xio::nvme_ep {
 
 //
 // NVMe Endpoint CLI Options
@@ -821,7 +820,7 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
   // Detect PCI MMIO bridge BDF if --pci-mmio-bridge is set
   if (config->doorbellParams.usePciMmioBridge) {
     uint16_t detected_bdf = 0;
-    int bdf_ret = xioDetectPciMmioBridgeBdf(&detected_bdf);
+    int bdf_ret = detectPciMmioBridgeBdf(&detected_bdf);
     if (bdf_ret != 0) {
       return "Failed to detect PCI MMIO bridge BDF";
     }
@@ -830,8 +829,8 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
 
   // Detect NVMe target BDF from controller device path
   uint16_t detected_nvme_bdf = 0;
-  int nvme_bdf_ret = xioDetectBdfFromDevice(config->controller.c_str(),
-                                            &detected_nvme_bdf);
+  int nvme_bdf_ret = detectBdfFromDevice(config->controller.c_str(),
+                                         &detected_nvme_bdf);
   if (nvme_bdf_ret != 0) {
     return std::string("Failed to detect NVMe target BDF: ") +
            std::string(strerror(-nvme_bdf_ret));
@@ -923,7 +922,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // Set up PCI MMIO bridge shadow buffer if enabled
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
     void* shadow_virt = nullptr;
-    int ret_shadow = xioMapMmioBridgeShadowBuffer(
+    int ret_shadow = mapMmioBridgeShadowBuffer(
       nvmeConfig->doorbellParams.mmioBridgeBdf, &shadow_virt);
     if (ret_shadow < 0) {
       fprintf(stderr, "Failed to map PCI MMIO bridge shadow buffer.\n");
@@ -935,9 +934,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     // Register shadow buffer for GPU access
     const size_t shadow_size = 8192;
     void* shadow_gpu_ptr = nullptr;
-    int ret_register = xioRegisterMmioBridgeShadowBufferForGpu(shadow_virt,
-                                                               shadow_size,
-                                                               &shadow_gpu_ptr);
+    int ret_register = registerMmioBridgeShadowBufferForGpu(shadow_virt,
+                                                            shadow_size,
+                                                            &shadow_gpu_ptr);
     if (ret_register < 0) {
       fprintf(stderr, "Failed to register PCI MMIO bridge shadow buffer.\n");
       return hipErrorInvalidValue;
@@ -948,8 +947,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     // PCI MMIO bridge is disabled - set up direct doorbell via BAR0
     void* bar0_cpu = nullptr;
     void* bar0_gpu = nullptr;
-    int ret_bar0 = xioMapPciBar(nvmeConfig->doorbellParams.nvmeTargetBdf, 0,
-                                &bar0_cpu, &bar0_gpu, 8192);
+    int ret_bar0 = mapPciBar(nvmeConfig->doorbellParams.nvmeTargetBdf, 0,
+                             &bar0_cpu, &bar0_gpu, 8192);
     if (ret_bar0 < 0) {
       fprintf(stderr,
               "Warning: Failed to map NVMe BAR0 for direct doorbell: %s\n",
@@ -994,7 +993,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // Allocate read buffer if read I/O is requested
   if (nvmeConfig->ioParams.readIo != 0) {
-    hipError_t buf_err = xioAllocateGpuAccessibleBuffer(
+    hipError_t buf_err = allocateGpuAccessibleBuffer(
       nvmeConfig->bufferParams.bufferSize, config->memoryMode,
       nvmeConfig->doorbellParams.nvmeTargetBdf, nvmeConfig->controller.c_str(),
       &readBufferInfo);
@@ -1007,7 +1006,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // Allocate write buffer if write I/O is requested
   if (nvmeConfig->ioParams.writeIo != 0) {
-    hipError_t buf_err = xioAllocateGpuAccessibleBuffer(
+    hipError_t buf_err = allocateGpuAccessibleBuffer(
       nvmeConfig->bufferParams.bufferSize, config->memoryMode,
       nvmeConfig->doorbellParams.nvmeTargetBdf, nvmeConfig->controller.c_str(),
       &writeBufferInfo);
@@ -1026,18 +1025,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // Verify queue pointers are GPU-accessible
-  if (!xioValidateGpuPointer(config->submissionQueue, "SQ", false)) {
+  if (!validateGpuPointer(config->submissionQueue, "SQ", false)) {
     fprintf(stderr, "Error: Submission queue is not GPU-accessible.\n");
     return hipErrorInvalidValue;
   }
-  if (!xioValidateGpuPointer(config->completionQueue, "CQ", false)) {
+  if (!validateGpuPointer(config->completionQueue, "CQ", false)) {
     fprintf(stderr, "Error: Completion queue is not GPU-accessible.\n");
     return hipErrorInvalidValue;
   }
 
   // Verify shadowBufferVirt is GPU-accessible if it's non-null
   if (shadowBufferVirt != nullptr) {
-    if (!xioValidateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
+    if (!validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
       fprintf(stderr, "Error: Shadow buffer is not GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
@@ -1045,7 +1044,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // Verify nvmeBar0Gpu is GPU-accessible if it's non-null
   if (nvmeBar0Gpu != nullptr) {
-    if (!xioValidateGpuPointer(nvmeBar0Gpu, "BAR0", false)) {
+    if (!validateGpuPointer(nvmeBar0Gpu, "BAR0", false)) {
       fprintf(stderr, "Error: NVMeBAR0 is not GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
@@ -1126,8 +1125,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // Free data buffers
-  xioFreeGpuAccessibleBuffer(&readBufferInfo);
-  xioFreeGpuAccessibleBuffer(&writeBufferInfo);
+  freeGpuAccessibleBuffer(&readBufferInfo);
+  freeGpuAccessibleBuffer(&writeBufferInfo);
 
   return err;
 }
@@ -1158,8 +1157,7 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
   // Open NVMe device with retry (device may be temporarily busy)
-  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
-                                   100);
+  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
@@ -1242,8 +1240,7 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
   // Open NVMe device with retry (device may be temporarily busy)
-  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
-                                   100);
+  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
@@ -1336,8 +1333,7 @@ __host__ int readSmartLog(const char* nvme_device,
                           struct nvme_smart_log* smart_log) {
   int nvme_fd = -1;
   // Open NVMe device with retry (device may be temporarily busy)
-  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5,
-                                   100);
+  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     return -errno;
   }
@@ -1730,7 +1726,7 @@ __host__ int createQueue(const char* nvme_device,
 
   // Detect if NVMe device is emulated (QEMU) or a real
   bool is_emulated = false;
-  int detect_ret = xioDetectEmulatedNvme(nvme_device, &is_emulated);
+  int detect_ret = detectEmulatedNvme(nvme_device, &is_emulated);
   if (detect_ret != 0) {
     fprintf(stderr, "Error: Failed to detect NVMe type for %s: %s.\n",
             nvme_device, strerror(-detect_ret));
@@ -1740,7 +1736,7 @@ __host__ int createQueue(const char* nvme_device,
           is_emulated ? "EMULATED" : "REAL");
 
   // Open NVMe device with retry (device may be temporarily busy)
-  nvme_fd = xioOpenDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
+  nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     fprintf(stderr, "Failed to open NVMe device %s: %s.\n", nvme_device,
             strerror(errno));
@@ -1749,58 +1745,58 @@ __host__ int createQueue(const char* nvme_device,
   }
 
   // Setup SQ using unified helper
-  ret = xioSetupQueueForGpu(sq_size_bytes, sq_is_device, nvme_bdf,
-                            kernel_module_device, is_emulated,
-                            "submission queue", &sq_setup);
+  ret = setupQueueForGpu(sq_size_bytes, sq_is_device, nvme_bdf,
+                         kernel_module_device, is_emulated, "submission queue",
+                         &sq_setup);
   if (ret < 0) {
     goto cleanup;
   }
 
   // Setup CQ using unified helper
-  ret = xioSetupQueueForGpu(cq_size_bytes, cq_is_device, nvme_bdf,
-                            kernel_module_device, is_emulated,
-                            "completion queue", &cq_setup);
+  ret = setupQueueForGpu(cq_size_bytes, cq_is_device, nvme_bdf,
+                         kernel_module_device, is_emulated, "completion queue",
+                         &cq_setup);
   if (ret < 0) {
     // Cleanup SQ setup
     if (sq_setup.uses_coherent) {
       (void)hipHostFree(sq_setup.virt);
     } else {
-      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
     goto cleanup;
   }
 
   // Register queue addresses with kernel module for kprobe injection
-  ret = xioKmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
-                        nvme_bdf, "submission queue");
+  ret = kmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
+                     nvme_bdf, "submission queue");
   if (ret < 0) {
     // Cleanup both setups
     if (sq_setup.uses_coherent) {
       (void)hipHostFree(sq_setup.virt);
     } else {
-      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
     if (cq_setup.uses_coherent) {
       (void)hipHostFree(cq_setup.virt);
     } else {
-      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
     }
     goto cleanup;
   }
 
-  ret = xioKmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
-                        nvme_bdf, "completion queue");
+  ret = kmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
+                     nvme_bdf, "completion queue");
   if (ret < 0) {
     // Cleanup both setups
     if (sq_setup.uses_coherent) {
       (void)hipHostFree(sq_setup.virt);
     } else {
-      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
     if (cq_setup.uses_coherent) {
       (void)hipHostFree(cq_setup.virt);
     } else {
-      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
     }
     goto cleanup;
   }
@@ -1828,12 +1824,12 @@ __host__ int createQueue(const char* nvme_device,
     if (sq_setup.uses_coherent) {
       (void)hipHostFree(sq_setup.virt);
     } else {
-      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
     if (cq_setup.uses_coherent) {
       (void)hipHostFree(cq_setup.virt);
     } else {
-      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
     }
     goto cleanup;
   }
@@ -1866,7 +1862,7 @@ cleanup:
       (void)hipHostFree(sq_setup.virt);
     } else {
       // Free using standard free function
-      xioFreeQueue(sq_setup.virt, sq_is_device, "submission queue");
+      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
     }
   }
   if (cq_setup.virt) {
@@ -1875,7 +1871,7 @@ cleanup:
       (void)hipHostFree(cq_setup.virt);
     } else {
       // Free using standard free function
-      xioFreeQueue(cq_setup.virt, cq_is_device, "completion queue");
+      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
     }
   }
   if (nvme_fd >= 0) {
@@ -1908,8 +1904,8 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
   }
 
   // Reopen device (device was closed after queue creation)
-  int nvme_fd = xioOpenDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
-                                       "NVMe device", 3, 50);
+  int nvme_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
+                                    "NVMe device", 3, 50);
   if (nvme_fd < 0) {
     fprintf(stderr,
             "Warning: Failed to reopen NVMe device for queue cleanup: %s\n",
@@ -1936,6 +1932,6 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
   return ret;
 }
 
-} // namespace nvme_ep
+} // namespace xio::nvme_ep
 
 #endif // __HIP_DEVICE_COMPILE__

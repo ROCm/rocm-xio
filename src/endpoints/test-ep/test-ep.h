@@ -13,7 +13,9 @@
 #include <hip/hip_runtime.h>
 
 // Forward declaration - full definition in xio.h
+namespace xio {
 struct XioEndpointConfig;
+} // namespace xio
 
 namespace test_ep {
 
@@ -101,6 +103,6 @@ std::vector<std::thread> launchCpuThreads(
 //   config: Endpoint configuration (includes submissionQueue and
 //   completionQueue)
 // Returns: HIP error code
-hipError_t test_ep_run(XioEndpointConfig* config);
+hipError_t test_ep_run(xio::XioEndpointConfig* config);
 
 #endif // TEST_EP_H
