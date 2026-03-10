@@ -15,7 +15,6 @@
 
 #include <hip/hip_runtime.h>
 
-#include <drm/amdgpu_drm.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 #include <linux/ioctl.h>
@@ -341,19 +340,6 @@ void freeQueue(void* ptr, bool isDeviceMemory, const char* queueName);
 bool reallocateQueue(void** ptr, size_t size, const char* queueName);
 
 /**
- * @brief Register a queue with GPU via DRM GEM_USERPTR.
- * @param queue_virt Queue virtual address.
- * @param queue_size_aligned Queue size (page-aligned).
- * @param is_device true if device memory.
- * @param queue_name Name for logging.
- * @param userptr GEM_USERPTR struct (filled on success).
- * @return Pointer to userptr on success, NULL on failure.
- */
-struct drm_amdgpu_gem_userptr* regQueueGpu(
-  void* queue_virt, size_t queue_size_aligned, bool is_device,
-  const char* queue_name, struct drm_amdgpu_gem_userptr* userptr);
-
-/**
  * @brief Get GPU-accessible pointer for a queue.
  * @param host_ptr Host-accessible pointer.
  * @param is_device true if device memory.
@@ -583,15 +569,14 @@ struct xioQueueSetup {
   void* gpu;
   uint64_t phys;
   bool uses_coherent;
-  struct drm_amdgpu_gem_userptr userptr;
 };
 
 /**
  * @brief Set up a queue for GPU and PCIe access.
  *
- * Performs allocation, coherent reallocation, DRM
- * registration, HIP registration, GPU pointer acquisition,
- * and physical address resolution.
+ * Performs allocation, coherent reallocation, HIP
+ * registration, GPU pointer acquisition, and physical
+ * address resolution.
  *
  * @param size Queue size in bytes.
  * @param is_device true for device memory.
@@ -608,7 +593,7 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
                               struct xioQueueSetup* setup);
 
 /**
- * @brief Register memory with DRM and HIP for GPU access.
+ * @brief Register memory with HIP for GPU access.
  * @param host_ptr Host-accessible pointer.
  * @param size Size in bytes.
  * @param name Name for logging.
