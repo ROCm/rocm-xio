@@ -13,8 +13,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <drm/amdgpu_drm.h>
-#include <drm/drm.h>
 #include <fcntl.h>
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
