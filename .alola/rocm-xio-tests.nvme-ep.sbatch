@@ -15,7 +15,7 @@
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
 #SBATCH --constraint=MARKHAM&NVME&ROCM7.2.0
 
-set -e
+set -xe
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
 else
@@ -26,7 +26,7 @@ cleanup() {
   echo "Cleaning up..."
   unload_kernel_module_on_host
   rm -rf "${WORKING_DIR}"
-  ssh localhost "sudo rm -rf ${WORKING_DIR}"
+  ${SSH_LOCALHOST} "sudo rm -rf ${WORKING_DIR}"
 }
 trap cleanup EXIT
 
@@ -72,8 +72,8 @@ echo "Building and loading kernel module on host..."
 build_and_load_kernel_module_on_host
 
 # Copy over test program
-ssh localhost "mkdir -p ${WORKING_DIR}/build/"
-scp ${WORKING_DIR}/build/xio-tester \
+${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/build/"
+${SCP_COMMAND} ${WORKING_DIR}/build/xio-tester \
   localhost:${WORKING_DIR}/build/xio-tester
 
 # Run tests
@@ -83,7 +83,7 @@ echo "=========================================="
 echo "NVMe Controller: ${NON_ROOTFS_CTRL}"
 echo ""
 
-ssh localhost "export LD_LIBRARY_PATH=/opt/rocm/lib; \
+${SSH_LOCALHOST} "export LD_LIBRARY_PATH=/opt/rocm/lib; \
   export HSA_FORCE_FINE_GRAIN_PCIE=1; \
   sudo -E ${WORKING_DIR}/build/xio-tester \
     nvme-ep --controller ${NON_ROOTFS_CTRL} \

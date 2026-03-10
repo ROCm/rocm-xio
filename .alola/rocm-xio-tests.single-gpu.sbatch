@@ -14,7 +14,7 @@
 #SBATCH --constraint=MARKHAM
 #SBATCH --gpus-per-node=1
 
-set -e
+set -xe
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
 else

@@ -19,7 +19,7 @@
 #SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gres=gpu:2
 
-set -e
+set -xe
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   . "${SLURM_SUBMIT_DIR}/rocm-xio-tests.common"
 else

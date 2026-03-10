@@ -5,6 +5,11 @@
 #
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
 
+SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_LOCALHOST="${SSH_COMMAND} localhost"
+
+SCP_COMMAND="scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
 # Project directory (repo root). When submitted from .alola, use its parent.
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   case "${SLURM_SUBMIT_DIR}" in
@@ -41,18 +46,18 @@ setup_and_build_workdir() {
 
 build_and_load_kernel_module_on_host() {
   echo "Building and loading kernel module on host via ssh localhost ..."
-  ssh localhost "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
-  scp -r ${WORKING_DIR}/kernel/rocm-xio/* localhost:${WORKING_DIR}/kernel/rocm-xio
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && ls -la"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
-  ssh localhost "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
+  ${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
+  ${SCP_COMMAND} -r ${WORKING_DIR}/kernel/rocm-xio/* localhost:${WORKING_DIR}/kernel/rocm-xio
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && ls -la"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
+  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
 }
 
 unload_kernel_module_on_host() {
   echo "Unloading kernel module on host via ssh localhost ..."
-  ssh localhost "sudo modprobe -r rocm-xio"
+  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio"
 }
 
 function find_root_device() {
