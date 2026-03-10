@@ -17,22 +17,13 @@
 #include "test-ep.h"
 #include "xio.h"
 
-using namespace xio;
+namespace xio::test_ep {
 
-// Get CPU wall clock time in nanoseconds (host-only)
 static inline uint64_t getCpuTime() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
-
-// Use types from test-ep.h
-typedef struct test_sqe sqeType;
-typedef struct test_cqe cqeType;
-
-// Verify that the queue entry sizes match test-ep expectations
-static_assert(sizeof(sqeType) == TEST_EP_SQE_SIZE, "test-ep SQE size mismatch");
-static_assert(sizeof(cqeType) == TEST_EP_CQE_SIZE, "test-ep CQE size mismatch");
 
 // Helper function to compare sqeType structs
 __host__ __device__ bool sqeEqual(const sqeType* a, const sqeType* b) {
@@ -82,7 +73,7 @@ __host__ __device__ sqeType sqePoll(sqeType sqeLast,
   sqeType sqeNew;
   while (true) {
     sqeNew = sqeRead(sqeAddress);
-    if (sqeNew.magic == TEST_EP_MAGIC_ID && !sqeEqual(&sqeNew, &sqeLast))
+    if (sqeNew.magic == magicId && !sqeEqual(&sqeNew, &sqeLast))
       return sqeNew;
   }
 }
@@ -92,7 +83,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
   cqeType cqeNew;
   while (true) {
     cqeNew = cqeRead(cqeAddress);
-    if (cqeNew.magic == TEST_EP_CQE_MAGIC_ID && !cqeEqual(&cqeNew, &cqeLast))
+    if (cqeNew.magic == cqeMagicId && !cqeEqual(&cqeNew, &cqeLast))
       return cqeNew;
   }
 }
@@ -101,7 +92,7 @@ __host__ __device__ cqeType cqePoll(cqeType cqeLast,
 __host__ cqeType cqeGenFromSqe(const sqeType* sqeData) {
   (void)sqeData; // Not used, but kept for API compatibility
   cqeType result;
-  result.magic = TEST_EP_CQE_MAGIC_ID;
+  result.magic = cqeMagicId;
   result.cpuTime = getCpuTime(); // Use CPU time for CQE
   return result;
 }
@@ -130,7 +121,7 @@ static void cpuThreadDoorbell(volatile sqeType* sqeQueue,
       currentMsg.magic = sqe->magic;
 
       // If magic is not set, SQE hasn't been written yet - wait for it
-      if (currentMsg.magic != TEST_EP_MAGIC_ID) {
+      if (currentMsg.magic != magicId) {
         std::this_thread::yield();
         continue;
       }
@@ -178,7 +169,7 @@ static void cpuThreadDoorbell(volatile sqeType* sqeQueue,
       // Store sequence number in upper 32 bits, CPU time in lower 32 bits
       // This allows GPU to verify CQE corresponds to its SQE
       volatile cqeType* cqe = &cqeQueue[cqeIndex];
-      cqe->magic = TEST_EP_CQE_MAGIC_ID;
+      cqe->magic = cqeMagicId;
       cqe->cpuTime = ((uint64_t)sqeSeq << 32) | (cpuTime & 0xFFFFFFFFULL);
 
       head++;
@@ -222,7 +213,7 @@ static void cpuThread(volatile sqeType* hostSqeAddr,
       // Check if this is a new message for this thread and iteration
       // Match simple-test logic exactly: check magic, thread index, iteration
       // number, and that gpuTime has changed (new message)
-      if (currentMsg.magic == TEST_EP_MAGIC_ID && msgThreadIdx == threadIdx &&
+      if (currentMsg.magic == magicId && msgThreadIdx == threadIdx &&
           iter == i && currentMsg.gpuTime != lastGpuTimeSeen) {
         break;
       }
@@ -260,7 +251,7 @@ static void cpuThread(volatile sqeType* hostSqeAddr,
 
     // Generate response message (matches simple-test)
     cqeType response = {};
-    response.magic = TEST_EP_CQE_MAGIC_ID;
+    response.magic = cqeMagicId;
     response.cpuTime = cpuTime;
 
     // Write response to memory (matches simple-test)
@@ -276,16 +267,16 @@ static void cpuThread(volatile sqeType* hostSqeAddr,
 // Export test-ep functions
 __host__ __device__ void test_ep_emulateEndpoint(unsigned sqeIterations,
                                                  void* sqeAddr, void* cqeAddr) {
-  sqeType sqeNew = {TEST_EP_MAGIC_ID, 0, 0, {0}};
-  sqeType sqeOld = {TEST_EP_MAGIC_ID, 0, 0, {0}};
-  sqeType sqeStop = {TEST_EP_MAGIC_ID, 0xFFFFFFFFFFFFFFFFULL, 0, {0}};
-  cqeType cqeLocal = {TEST_EP_CQE_MAGIC_ID, 0};
+  sqeType sqeNew = {magicId, 0, 0, {0}};
+  sqeType sqeOld = {magicId, 0, 0, {0}};
+  sqeType sqeStop = {magicId, 0xFFFFFFFFFFFFFFFFULL, 0, {0}};
+  cqeType cqeLocal = {cqeMagicId, 0};
 
   while (!sqeEqual(&sqeNew, &sqeStop)) {
     sqeNew = sqePoll(sqeOld, (volatile sqeType*)sqeAddr);
 #ifdef __HIP_DEVICE_COMPILE__
     // Device code - can't call getCpuTime, just use a dummy value
-    cqeLocal.magic = TEST_EP_CQE_MAGIC_ID;
+    cqeLocal.magic = cqeMagicId;
     cqeLocal.cpuTime = 0;
 #else
     // Host code - can call getCpuTime
@@ -458,7 +449,7 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
 
       // Prepare message to CPU
       sqeType msg = {};
-      msg.magic = TEST_EP_MAGIC_ID;
+      msg.magic = magicId;
       msg.iteration = ((uint64_t)tid << 32) | i;
       uint64_t sqeGpuTime = wall_clock64();
       msg.gpuTime = sqeGpuTime;
@@ -514,7 +505,7 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
         uint64_t cqeValue = myCqe->cpuTime;
         currentResponse.magic = magic;
         currentResponse.cpuTime = cqeValue;
-        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+        if (currentResponse.magic == cqeMagicId) {
           if (cqeValue != 0) {
             // Verify CQE corresponds to our SQE by checking sequence number
             // matches
@@ -557,7 +548,7 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
       // Prepare message to CPU (matches simple-test)
       // Encode thread index in upper 32 bits, iteration in lower 32 bits
       sqeType msg = {};
-      msg.magic = TEST_EP_MAGIC_ID;
+      msg.magic = magicId;
       msg.iteration = ((uint64_t)tid << 32) | i;
       msg.gpuTime = wall_clock64();
 
@@ -595,7 +586,7 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
         currentResponse.magic = magic;
         currentResponse.cpuTime = cpuTime;
         // Check if this is a new response
-        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+        if (currentResponse.magic == cqeMagicId) {
           if (currentResponse.cpuTime != 0) {
             // Accept if this is a new response (cpuTime changed)
             // Or if this is the first valid response (lastCpuTime was 0)
@@ -627,10 +618,7 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
   }
 }
 
-#include <iostream>
-
 // CPU emulation of endpoint kernel - runs kernel logic on CPU threads
-// This allows testing without a GPU
 static void endpoint_kernel_cpu_emulate(
   sqeType* sqePtr, cqeType* cqePtr, unsigned long long int* startTimes,
   unsigned long long int* endTimes, XioTimingStats* timingStats,
@@ -688,7 +676,7 @@ static void endpoint_kernel_cpu_emulate(
 
       // Prepare message to CPU
       sqeType msg = {};
-      msg.magic = TEST_EP_MAGIC_ID;
+      msg.magic = magicId;
       msg.iteration = ((uint64_t)threadId << 32) | i;
       uint64_t sqeGpuTime = getCpuTime(); // Use CPU time in emulation
       msg.gpuTime = sqeGpuTime;
@@ -767,7 +755,7 @@ static void endpoint_kernel_cpu_emulate(
         uint64_t cqeValue = myCqePtr->cpuTime;
         currentResponse.magic = magic;
         currentResponse.cpuTime = cqeValue;
-        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+        if (currentResponse.magic == cqeMagicId) {
           if (cqeValue != 0) {
             // Verify CQE corresponds to our SQE by checking sequence number
             // matches
@@ -814,7 +802,7 @@ static void endpoint_kernel_cpu_emulate(
 
       // Prepare message to CPU
       sqeType msg = {};
-      msg.magic = TEST_EP_MAGIC_ID;
+      msg.magic = magicId;
       msg.iteration = ((uint64_t)threadId << 32) | i;
       msg.gpuTime = getCpuTime(); // Use CPU time in emulation
 
@@ -845,7 +833,7 @@ static void endpoint_kernel_cpu_emulate(
         uint64_t cpuTime = volatileCqe->cpuTime;
         currentResponse.magic = magic;
         currentResponse.cpuTime = cpuTime;
-        if (currentResponse.magic == TEST_EP_CQE_MAGIC_ID) {
+        if (currentResponse.magic == cqeMagicId) {
           if (currentResponse.cpuTime != 0) {
             if (currentResponse.cpuTime != lastCpuTime || lastCpuTime == 0) {
               break;
@@ -869,13 +857,11 @@ static void endpoint_kernel_cpu_emulate(
   }
 }
 
-// Run method implementation for test-ep - launches GPU kernel and waits for
-// completion
-hipError_t test_ep_run(XioEndpointConfig* config) {
+hipError_t run(XioEndpointConfig* config) {
   std::vector<std::thread> cpuThreadHandles;
 
   // Get test-ep specific config
-  test_ep::TestEpConfig* testEpConfig = static_cast<test_ep::TestEpConfig*>(
+  TestEpConfig* testEpConfig = static_cast<TestEpConfig*>(
     config->endpointConfig);
   unsigned doorbell = (testEpConfig != nullptr) ? testEpConfig->doorbell : 0;
   bool emulate = (testEpConfig != nullptr) ? testEpConfig->emulate : false;
@@ -1022,3 +1008,5 @@ hipError_t test_ep_run(XioEndpointConfig* config) {
 
   return hipSuccess;
 }
+
+} // namespace xio::test_ep
