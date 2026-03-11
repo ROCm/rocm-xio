@@ -169,8 +169,12 @@ __host__ __device__ void ringDoorbell(uint16_t value,
  * @param op_index Operation index (0-based)
  * @param cmd_id Command ID for random seed generation
  * @param blocks Number of blocks per I/O operation
- * @param ioParams I/O parameters containing baseLba, lbaRangeLbas, and
- * useRandomAccess
+ * @param ioParams I/O parameters containing baseLba,
+ *                 lbaRangeLbas, useRandomAccess, and
+ *                 lfsrSeed. When lfsrSeed is non-zero it
+ *                 is mixed into the hash so that different
+ *                 seed values produce different LBA
+ *                 sequences across runs.
  * @return Calculated LBA address
  */
 static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
@@ -178,8 +182,8 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
                                                  uint32_t blocks,
                                                  const nvmeIoParams& ioParams) {
   if (ioParams.useRandomAccess && ioParams.lbaRangeLbas > 0) {
-    // Random access mode: generate pseudo-random LBA within range
-    uint64_t seed = (uint64_t)op_index * 0x9e3779b9 + cmd_id * 0x85ebca6b;
+    uint64_t seed = (uint64_t)op_index * 0x9e3779b9 + cmd_id * 0x85ebca6b +
+                    ioParams.lfsrSeed;
     seed ^= seed >> 16;
     seed *= 0xc2b2ae35;
     seed ^= seed >> 13;
