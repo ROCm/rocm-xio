@@ -99,10 +99,17 @@ setup_and_build_workdir "nvme-ep"
 echo "Building and loading kernel module on host..."
 build_and_load_kernel_module_on_host
 
-# Copy over test program
+# Copy over test program and verification script
 ${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/build/"
 ${SCP_COMMAND} ${WORKING_DIR}/build/xio-tester \
   localhost:${WORKING_DIR}/build/xio-tester
+${SSH_LOCALHOST} \
+  "mkdir -p ${WORKING_DIR}/scripts/test/"
+VERIFY_SCRIPT="scripts/test"
+VERIFY_SCRIPT="${VERIFY_SCRIPT}/test-nvme-ep-random-write-verify.sh"
+${SCP_COMMAND} \
+  ${WORKING_DIR}/${VERIFY_SCRIPT} \
+  localhost:${WORKING_DIR}/${VERIFY_SCRIPT}
 
 # Run tests
 echo "=========================================="
@@ -144,6 +151,67 @@ sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
 
 # Disable NVMe duration capture
 CAPTURE_NVME_DURATION=0
+
+sleep 3
+
+# Write-and-verify tests: write random LBAs via xio-tester,
+# then read each back with dd and verify the data pattern.
+echo ""
+echo "=========================================="
+echo "Running NVMe-EP write-verify tests"
+echo "=========================================="
+echo ""
+
+VERIFY_CMD="${WORKING_DIR}/${VERIFY_SCRIPT}"
+
+HAVE_VERIFY_DEPS=true
+if ! ${SSH_LOCALHOST} "command -v python3" \
+     > /dev/null 2>&1; then
+  echo "WARN: python3 not found on host;" \
+       "skipping write-verify tests"
+  HAVE_VERIFY_DEPS=false
+fi
+
+if [ "${HAVE_VERIFY_DEPS}" = "true" ]; then
+
+test_run "NVMe-EP write-verify memory-mode 0" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
+export NUM_WRITES=64; \
+export MEMORY_MODE=0; \
+export LFSR_SEED=0xDEAD; \
+export BASE_LBA=0; \
+export TEMP_DIR=${WORKING_DIR}/verify-m0; \
+sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+
+sleep 3
+
+test_run "NVMe-EP write-verify memory-mode 3" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
+export NUM_WRITES=64; \
+export MEMORY_MODE=3; \
+export LFSR_SEED=0xBEEF; \
+export BASE_LBA=0; \
+export TEMP_DIR=${WORKING_DIR}/verify-m3; \
+sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+
+sleep 3
+
+test_run "NVMe-EP write-verify memory-mode 11" \
+  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
+export HSA_FORCE_FINE_GRAIN_PCIE=1; \
+export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
+export NUM_WRITES=64; \
+export MEMORY_MODE=11; \
+export LFSR_SEED=0xCAFE; \
+export BASE_LBA=0; \
+export TEMP_DIR=${WORKING_DIR}/verify-m11; \
+sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+
+fi # HAVE_VERIFY_DEPS
 
 # Report results and exit with appropriate code
 test_report "${NVME_NAMESPACE}"
