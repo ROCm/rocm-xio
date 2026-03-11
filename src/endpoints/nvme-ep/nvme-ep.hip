@@ -635,6 +635,14 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
 
 namespace xio::nvme_ep {
 
+static int ioctlEintrSafe(int fd, unsigned long request, void* arg) {
+  int ret;
+  do {
+    ret = ioctl(fd, request, arg);
+  } while (ret < 0 && errno == EINTR);
+  return ret;
+}
+
 //
 // NVMe Endpoint CLI Options
 //
@@ -1161,28 +1169,45 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace command
-  memset(&cmd, 0, sizeof(cmd));
-  cmd.opcode = nvme_admin_identify;
-  cmd.nsid = nsid;
-  cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
-  cmd.addr = reinterpret_cast<uint64_t>(id_ns);
-  cmd.data_len = nvme_ep::nvmeAdminRespSize;
-  cmd.timeout_ms = 0; // Use default timeout
+  // Send Identify Namespace command (with retry for transient
+  // controller errors, e.g. after VRAM-backed queue teardown)
+  for (int attempt = 0; attempt < 5; attempt++) {
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = nvme_admin_identify;
+    cmd.nsid = nsid;
+    cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
+    cmd.addr = reinterpret_cast<uint64_t>(id_ns);
+    cmd.data_len = nvme_ep::nvmeAdminRespSize;
+    cmd.timeout_ms = 0; // Use default timeout
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
-  if (ret < 0) {
-    fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
-    ret = -errno;
-    goto cleanup;
-  }
+    ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+    if (ret < 0) {
+      fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
+      ret = -errno;
+      goto cleanup;
+    }
 
-  // Check completion status
-  if (cmd.result & 0xFFFE) {
+    if (!(cmd.result & 0xFFFE)) {
+      break; // Success
+    }
+
     status = (cmd.result >> 1) & 0xFF;
-    fprintf(stdout, "Identify Namespace failed with status 0x%02x\n", status);
-    ret = -EIO;
-    goto cleanup;
+    if (attempt < 4) {
+      int delay_ms = 100 * (1 << attempt);
+      fprintf(stdout,
+              "Identify Namespace returned status 0x%02x, "
+              "retrying in %d ms (attempt %d/5)...\n",
+              status, delay_ms, attempt + 1);
+      usleep(delay_ms * 1000);
+      memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+    } else {
+      fprintf(stdout,
+              "Identify Namespace failed with status "
+              "0x%02x after 5 attempts\n",
+              status);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
   // Extract FLBAS (Formatted LBA and Metadata Size)
@@ -1244,28 +1269,45 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace command
-  memset(&cmd, 0, sizeof(cmd));
-  cmd.opcode = nvme_admin_identify;
-  cmd.nsid = nsid;
-  cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
-  cmd.addr = reinterpret_cast<uint64_t>(id_ns);
-  cmd.data_len = nvme_ep::nvmeAdminRespSize;
-  cmd.timeout_ms = 0; // Use default timeout
+  // Send Identify Namespace command (with retry for transient
+  // controller errors, e.g. after VRAM-backed queue teardown)
+  for (int attempt = 0; attempt < 5; attempt++) {
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = nvme_admin_identify;
+    cmd.nsid = nsid;
+    cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
+    cmd.addr = reinterpret_cast<uint64_t>(id_ns);
+    cmd.data_len = nvme_ep::nvmeAdminRespSize;
+    cmd.timeout_ms = 0; // Use default timeout
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
-  if (ret < 0) {
-    fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
-    ret = -errno;
-    goto cleanup;
-  }
+    ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+    if (ret < 0) {
+      fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
+      ret = -errno;
+      goto cleanup;
+    }
 
-  // Check completion status
-  if (cmd.result & 0xFFFE) {
+    if (!(cmd.result & 0xFFFE)) {
+      break; // Success
+    }
+
     status = (cmd.result >> 1) & 0xFF;
-    fprintf(stdout, "Identify Namespace failed with status 0x%02x\n", status);
-    ret = -EIO;
-    goto cleanup;
+    if (attempt < 4) {
+      int delay_ms = 100 * (1 << attempt);
+      fprintf(stdout,
+              "Identify Namespace returned status 0x%02x, "
+              "retrying in %d ms (attempt %d/5)...\n",
+              status, delay_ms, attempt + 1);
+      usleep(delay_ms * 1000);
+      memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+    } else {
+      fprintf(stdout,
+              "Identify Namespace failed with status "
+              "0x%02x after 5 attempts\n",
+              status);
+      ret = -EIO;
+      goto cleanup;
+    }
   }
 
   // Extract NSZE (Namespace Size) - capacity in LBAs
@@ -1358,7 +1400,7 @@ __host__ int readSmartLog(const char* nvme_device,
   cmd.data_len = nvme_ep::nvmeLogPageSize;
   cmd.timeout_ms = 0;
 
-  int ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
+  int ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
   if (ret < 0) {
     fprintf(stdout, "Failed to read SMART log: %s\n", strerror(errno));
     free(buffer);
@@ -1482,7 +1524,7 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
   cmd.data_len = 0;       // No data transfer for DELETE_SQ
   cmd.timeout_ms = 30000; // 30 second timeout (DELETE_SQ can take time)
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+  ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret == 0) {
     fprintf(stdout, "DELETE_SQ completed successfully.\n");
     // Check status code even if ioctl succeeded
@@ -1526,7 +1568,7 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
   cmd.data_len = 0;       // No data transfer for DELETE_CQ
   cmd.timeout_ms = 30000; // 30 second timeout
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+  ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret == 0) {
     fprintf(stdout, "DELETE_CQ completed successfully.\n");
   } else {
@@ -1576,7 +1618,7 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
           "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+  ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     if (errno == EACCES || errno == EPERM) {
       fprintf(stderr, "ERROR: Failed to create completion queue: %s\n",
@@ -1646,7 +1688,7 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
           queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
           cmd.cdw11, queue_id);
 
-  ret = ioctl(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+  ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     fprintf(stderr, "ERROR: Failed to create submission queue: %s\n",
             strerror(errno));
