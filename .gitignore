@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 # Exception: scripts/build/ contains build scripts that should be tracked
 !scripts/build/
 bin/
@@ -63,6 +64,9 @@ src/tester/dump-queue-test
 # Reference materials (external)
 src/reference/
 gda-experiments/rocSHMEM/
+
+# Spell-check artifacts
+wordlist.dic
 
 # Python cache
 __pycache__/
