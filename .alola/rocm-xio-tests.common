@@ -5,6 +5,11 @@
 #
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
 
+SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_LOCALHOST="${SSH_COMMAND} localhost"
+
+SCP_COMMAND="scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
 # Project directory (repo root). When submitted from .alola, use its parent.
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
   case "${SLURM_SUBMIT_DIR}" in
@@ -41,18 +46,18 @@ setup_and_build_workdir() {
 
 build_and_load_kernel_module_on_host() {
   echo "Building and loading kernel module on host via ssh localhost ..."
-  ssh localhost "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
-  scp -r ${WORKING_DIR}/kernel/rocm-xio/* localhost:${WORKING_DIR}/kernel/rocm-xio
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && ls -la"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
-  ssh localhost "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
-  ssh localhost "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
+  ${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
+  ${SCP_COMMAND} -r ${WORKING_DIR}/kernel/rocm-xio/* localhost:${WORKING_DIR}/kernel/rocm-xio
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && ls -la"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
+  ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
+  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
 }
 
 unload_kernel_module_on_host() {
   echo "Unloading kernel module on host via ssh localhost ..."
-  ssh localhost "sudo modprobe -r rocm-xio"
+  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio"
 }
 
 function find_root_device() {
@@ -86,4 +91,179 @@ find_non_rootfs_nvme_ctrl() {
   
   echo "ERROR: No non-rootfs controller found" >&2
   return 1
+}
+
+# Test tracking functions for PASS/FAIL reporting
+test_init() {
+  TOTAL_TESTS=0
+  PASSED_TESTS=0
+  FAILED_TESTS=0
+  NVME_NAMESPACE=""
+  NVME_AVG_DURATIONS=()
+  TEST_NODES=()
+  TEST_GPU_DEVICES=()
+  TEST_NAMES=()
+  TEST_RESULTS=()
+}
+
+# Get current node name
+get_node_name() {
+  if [ -n "${SLURM_NODELIST}" ]; then
+    echo "${SLURM_NODELIST}"
+  elif [ -n "${SLURM_JOB_NODELIST}" ]; then
+    echo "${SLURM_JOB_NODELIST}"
+  else
+    hostname
+  fi
+}
+
+# Extract GPU model and device ID from test output
+# Looks for lines like:
+#   "Model: AMD Instinct MI300X"
+#   "GPU Device ID: 0"
+# Returns format: "Model (ID: X)" or "Model" if no ID
+extract_gpu_device_info() {
+  local output="$1"
+  
+  # Extract model (line like "Model: AMD Instinct MI300X" or "Model: [Emulation Mode - CPU]")
+  local gpu_model=$(echo "${output}" | grep -E "^Model:" | \
+    sed -E 's/^Model:[[:space:]]+(.*)$/\1/' | head -1)
+  
+  # Extract GPU device ID (line like "GPU Device ID: 0" or "GPU Device ID: N/A (emulation)")
+  local gpu_id=$(echo "${output}" | grep -E "^GPU Device ID:" | \
+    sed -E 's/^GPU Device ID:[[:space:]]+([0-9]+|N\/A.*)/\1/' | head -1)
+  
+  # Format output
+  if [ -z "${gpu_model}" ] && [ -z "${gpu_id}" ]; then
+    echo "unknown"
+  elif [ -z "${gpu_model}" ]; then
+    echo "ID: ${gpu_id}"
+  elif [ -z "${gpu_id}" ] || [ "${gpu_id}" = "unknown" ]; then
+    echo "${gpu_model}"
+  elif [[ "${gpu_id}" =~ ^N/A ]]; then
+    # For emulation mode, just show the model
+    echo "${gpu_model}"
+  else
+    echo "${gpu_model} (ID: ${gpu_id})"
+  fi
+}
+
+# Extract average duration from test output
+# Looks for line like "Average: 0000086.25 us"
+extract_average_duration() {
+  local output="$1"
+  echo "${output}" | grep -E "^[[:space:]]*Average:[[:space:]]+[0-9]+\.[0-9]+[[:space:]]+us" | \
+    sed -E 's/^[[:space:]]*Average:[[:space:]]+([0-9]+\.[0-9]+)[[:space:]]+us/\1/'
+}
+
+# Run a test command and track its result
+# Usage: test_run "test_name" "command_string"
+# For NVMe tests, set CAPTURE_NVME_DURATION=1 before calling
+test_run() {
+  local test_name="$1"
+  local cmd="$2"
+  
+  TOTAL_TESTS=$((TOTAL_TESTS + 1))
+  echo ""
+  echo "Running test ${TOTAL_TESTS}: ${test_name}"
+  echo "----------------------------------------"
+  
+  # Get node name
+  local node_name=$(get_node_name)
+  
+  local output=""
+  local exit_code=0
+  
+  # Capture output and exit code, always display output
+  # Use a temporary file to capture output while displaying it
+  local temp_output_file=$(mktemp)
+  eval "${cmd}" 2>&1 | tee "${temp_output_file}"
+  exit_code=${PIPESTATUS[0]}
+  output=$(cat "${temp_output_file}")
+  rm -f "${temp_output_file}"
+  
+  # Extract GPU device info (model and ID) from output
+  local gpu_device=$(extract_gpu_device_info "${output}")
+  
+  # Store test information
+  TEST_NAMES+=("${test_name}")
+  TEST_NODES+=("${node_name}")
+  TEST_GPU_DEVICES+=("${gpu_device}")
+  
+  if [ ${exit_code} -eq 0 ]; then
+    PASSED_TESTS=$((PASSED_TESTS + 1))
+    TEST_RESULTS+=("PASS")
+    echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
+    echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
+    
+    # Capture average duration for NVMe tests
+    if [ "${CAPTURE_NVME_DURATION}" = "1" ] && [ -n "${output}" ]; then
+      local avg_duration=$(extract_average_duration "${output}")
+      if [ -n "${avg_duration}" ]; then
+        NVME_AVG_DURATIONS+=("${avg_duration}")
+        echo "  Average IO Duration: ${avg_duration} us"
+      fi
+    fi
+  else
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+    TEST_RESULTS+=("FAIL")
+    echo "✗ Test ${TOTAL_TESTS} FAILED: ${test_name} (exit code: ${exit_code})"
+    echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
+  fi
+  
+  return 0
+}
+
+# Print final test report and return appropriate exit code
+# Usage: test_report [nvme_namespace]
+test_report() {
+  local nvme_namespace="${1:-}"
+  
+  echo ""
+  echo "=========================================="
+  echo "Test Summary"
+  echo "=========================================="
+  echo "Total tests: ${TOTAL_TESTS}"
+  echo "Passed: ${PASSED_TESTS}"
+  echo "Failed: ${FAILED_TESTS}"
+  
+  if [ ${FAILED_TESTS} -eq 0 ]; then
+    echo "Status: PASS (${PASSED_TESTS} of ${TOTAL_TESTS})"
+  else
+    echo "Status: FAIL (${FAILED_TESTS} of ${TOTAL_TESTS} failed)"
+  fi
+  
+  echo ""
+  echo "Test Details:"
+  echo "----------------------------------------"
+  local i=0
+  while [ ${i} -lt ${TOTAL_TESTS} ]; do
+    local test_idx=$((i + 1))
+    echo "Test ${test_idx}: ${TEST_NAMES[${i}]}"
+    echo "  Result: ${TEST_RESULTS[${i}]}"
+    echo "  Node: ${TEST_NODES[${i}]}"
+    echo "  GPU Device: ${TEST_GPU_DEVICES[${i}]}"
+    i=$((i + 1))
+  done
+  
+  # Add NVMe-specific details if provided
+  if [ -n "${nvme_namespace}" ] && [ ${#NVME_AVG_DURATIONS[@]} -gt 0 ]; then
+    echo ""
+    echo "NVMe Namespace: ${nvme_namespace}"
+    echo "Average IO Duration:"
+    local i=1
+    for duration in "${NVME_AVG_DURATIONS[@]}"; do
+      echo "  Test ${i}: ${duration} us"
+      i=$((i + 1))
+    done
+  fi
+  
+  echo "=========================================="
+  
+  # Return exit code: 0 for PASS, 1 for FAIL
+  if [ ${FAILED_TESTS} -eq 0 ]; then
+    return 0
+  else
+    return 1
+  fi
 }
