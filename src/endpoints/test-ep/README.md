@@ -2,4 +2,8 @@
 
 ## Introduction
 
-llvm-objdump-18 -st ../build/CMakeFiles/rocm-axiio-objects.dir/test-ep/test-ep.hip.o
+```bash
+llvm-objdump-18 -st \
+  ../build/CMakeFiles/rocm-xio-objects.dir/\
+test-ep/test-ep.hip.o
+```

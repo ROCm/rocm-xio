@@ -182,12 +182,19 @@ wH
 
 # ===== Commands and Tools =====
 alola
+amdclang
 aspell
 bashrc
+bugfix
+bugfixes
+bugfixing
 CMake
 CMAKE
 cmake
 CMakeFiles
+CMakeLists
+ctest
+CXX
 DoozyX
 gcc
 github
@@ -199,6 +206,8 @@ Makefile
 pty
 pyspelling
 rojopolis
+shellcheck
+ShellCheck
 srun
 sqsh
 sudo
@@ -207,6 +216,10 @@ wordlist
 
 # ===== Miscellaneous =====
 api
+automatable
+CamelCase
+Changelog
+CPUs
 datacenter
 ar
 atlassian
@@ -320,6 +333,7 @@ objdump
 offload
 pageable
 pageable
+PascalCase
 passthrough
 passthrough
 perf
@@ -398,8 +412,19 @@ libdrm
 mknod
 
 # ===== Additional Terms =====
+codespellrc
+dkms
+instantiation
+MERCHANTABILITY
+NONINFRINGEMENT
+param
+pragma
+PRs
+STYLEGUIDE
 Subdirectory
 subdirectory
+sublicense
+vX
 
 # ===== Common Documentation Terms =====
 OAM
@@ -463,11 +488,14 @@ pageBase
 pageSize
 
 # ===== HTML and Markdown Terms =====
+blockquote
 br
 href
 li
+lightgrey
 lt
 ol
+svg
 ul
 
 # ===== Code Constants and Types =====
@@ -729,3 +757,56 @@ writerows
 xargs
 xticks
 ylabel
+
+# ===== API Identifiers (Doxygen/Breathe) =====
+allocateGpuAccessibleBuffer
+allocateQueue
+checkKernelModuleLoaded
+const
+createEndpoint
+dataPatternParams
+detectBdfFromDevice
+EndpointInfo
+EndpointType
+endpointName
+freeGpuAccessibleBuffer
+freeQueue
+genPciMmioBridgeCmd
+loadKernelModule
+mapPciBar
+nvmeBufferParams
+nvmeDoorbellParams
+nvmeEpConfig
+nvmeIoParams
+printDeviceInfo
+RdmaEpConfig
+registerMemoryForGpu
+SdmaEpConfig
+setupQueueForGpu
+TestEpConfig
+vram
+XioEndpoint
+XioEndpointConfig
+xioBufferInfo
+xioQueueSetup
+XioTimingStats
+
+# ===== Documentation Infrastructure Terms =====
+Breathe
+breathe
+codespell
+conf
+Doxygen
+doxygen
+Doxyfile
+doxygenclass
+doxygenfunction
+doxygenstruct
+doxygenunion
+DXIO
+intra
+maxdepth
+rst
+Sphinx
+toctree
+undoc

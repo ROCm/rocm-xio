@@ -41,7 +41,7 @@ get_endpoint_define() {
 }
 
 # Helper function to get endpoint description (matches hardcoded values
-# in src/endpoints/common/axiio-endpoint.hip)
+# in src/endpoints/common/xio-endpoint.hip)
 get_endpoint_description() {
   local ep="$1"
   case "$ep" in

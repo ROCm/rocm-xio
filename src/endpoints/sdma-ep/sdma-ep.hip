@@ -238,9 +238,9 @@ __global__ void sdma_ping_pong_kernel(anvil::SdmaQueueDeviceHandle* handle,
 }
 
 // Kernel that sends data from rank0 to rank1
-// rank0 is re-using the same buffer for `transfers_per_iteration` iterations
+// rank0 is reusing the same buffer for `transfers_per_iteration` iterations
 // This kernel tests the different variations to determine that the source
-// buffer can be re-used
+// buffer can be reused
 __global__ void sdma_buffer_reuse_kernel(
   anvil::SdmaQueueDeviceHandle* handle, void* dstBuf, void* srcBuf,
   size_t nElem, unsigned iterations, uint64_t** signals, int rank,
@@ -311,7 +311,7 @@ __global__ void sdma_buffer_reuse_kernel(
             }
           }
         }
-        // Wait for buffer re-use
+        // Wait for buffer reuse
         if (threadIdx.x == 0) {
           if (use_counter) {
             anvil::waitCounter(counter, (i * transfers_per_iteration) + t + 1);
