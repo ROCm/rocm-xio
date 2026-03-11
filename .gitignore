@@ -72,4 +72,6 @@ __pycache__/
 # Alola slurm-based output files.
 .alola/*.err
 .alola/*.out
+.alola/logs/
 .alola/xgmi-captures/
+.alola/.alola-job-ids
