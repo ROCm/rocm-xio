@@ -204,12 +204,12 @@ setup_code_generation(
   GENERATED_REGISTRY ${INCLUDE_DIR}/xio-endpoint-registry-gen.h
   GENERATED_INCLUDES ${INCLUDE_DIR}/xio-endpoint-includes-gen.h
   NVME_EP_GENERATED ${INCLUDE_DIR}/nvme-ep-generated.h
-  RDMA_VENDOR_HEADERS
-    ${ENDPOINTS_DIR}/rdma-ep/mlx/mlx5-rdma.h
-    ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-rdma.h
-    ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-rdma.h
-    ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
 )
+
+# GDA provider options for RDMA endpoint
+option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
+option(GDA_MLX5 "Build MLX5 (Mellanox ConnectX) RDMA provider" OFF)
+option(GDA_IONIC "Build IONIC (Pensando) RDMA provider" OFF)
 
 # Discover source files
 file(GLOB_RECURSE LIB_SOURCES
@@ -222,7 +222,42 @@ file(GLOB_RECURSE ENDPOINT_SOURCES
 # Filter out common directory from endpoint sources
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_COMMON_DIR}/.*")
+# Filter out vendor queue-pair device code files (they are #included from queue-pair.hip)
+list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+  "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic)/.*-queue-pair\\.hip")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
+
+# Add new GDA shared infrastructure (C++ sources, not HIP)
+list(APPEND LIB_SOURCES
+  ${COMMON_DIR}/ibv-wrapper.cpp
+  ${COMMON_DIR}/rdma-topology.cpp
+  ${COMMON_DIR}/rdma-numa-wrapper.cpp
+)
+
+# Add GDA backend for rdma-ep
+list(APPEND LIB_SOURCES
+  ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
+)
+
+# Add BNXT vendor backend (always compiled, conditionally active via GDA_BNXT)
+if(GDA_BNXT)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-backend.cpp
+  )
+  set_source_files_properties(
+    ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-backend.cpp
+    PROPERTIES LANGUAGE HIP
+  )
+endif()
+
+# Mark C++ sources as HIP language for hipcc compilation
+set_source_files_properties(
+  ${COMMON_DIR}/ibv-wrapper.cpp
+  ${COMMON_DIR}/rdma-topology.cpp
+  ${COMMON_DIR}/rdma-numa-wrapper.cpp
+  ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
+  PROPERTIES LANGUAGE HIP
+)
 
 # Create static library
 add_library(rocm-xio STATIC ${LIB_SOURCES})
@@ -252,6 +287,17 @@ foreach(ep ${VALID_ENDPOINTS})
     ${ENDPOINTS_DIR}/${ep})
 endforeach()
 
+# GDA provider compile definitions
+if(GDA_BNXT)
+  target_compile_definitions(rocm-xio PRIVATE GDA_BNXT)
+endif()
+if(GDA_MLX5)
+  target_compile_definitions(rocm-xio PRIVATE GDA_MLX5)
+endif()
+if(GDA_IONIC)
+  target_compile_definitions(rocm-xio PRIVATE GDA_IONIC)
+endif()
+
 # Link dependencies that consumers will need
 # These are INTERFACE so consumers get them automatically
 target_link_libraries(rocm-xio
@@ -261,25 +307,15 @@ target_link_libraries(rocm-xio
     hsakmt::hsakmt
 )
 
+# dlopen support for IBV wrapper and vendor DV libs
+target_link_libraries(rocm-xio PRIVATE dl)
+
 # Apply endpoint defines per source file
 apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
 
 # Dependencies on generated files
 add_dependencies(rocm-xio endpoint-registry-generated)
 add_dependencies(rocm-xio nvme-ep-generated)
-add_dependencies(rocm-xio rdma-vendor-headers-generated)
-
-# Specific file dependencies
-set(RDMA_VENDOR_HEADER_DEPS
-  ${ENDPOINTS_DIR}/rdma-ep/mlx/mlx5-rdma.h
-  ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-rdma.h
-  ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-rdma.h
-  ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
-)
-set_source_files_properties(
-  ${ENDPOINTS_DIR}/rdma-ep/rdma-ep.hip
-  PROPERTIES OBJECT_DEPENDS "${RDMA_VENDOR_HEADER_DEPS}"
-)
 
 set_source_files_properties(
   ${ENDPOINTS_DIR}/nvme-ep/nvme-ep.hip

@@ -116,19 +116,24 @@ function(setup_code_generation)
     DEPENDS ${RDMA_HEADERS}
     COMMENT "Download RDMA headers")
 
-  # RDMA vendor header generation
-  add_custom_command(
-    OUTPUT ${GEN_RDMA_VENDOR_HEADERS}
-    COMMAND ${RDMA_GEN_SCRIPT}
-      ${GEN_RDMA_HEADERS_DIR}
-      ${GEN_ENDPOINTS_DIR}/rdma-ep
-    DEPENDS ${RDMA_GEN_SCRIPT} ${RDMA_HEADERS}
-    COMMENT "Generating vendor-specific RDMA headers"
-  )
+  # RDMA vendor header generation (only if headers are specified)
+  if(GEN_RDMA_VENDOR_HEADERS)
+    add_custom_command(
+      OUTPUT ${GEN_RDMA_VENDOR_HEADERS}
+      COMMAND ${RDMA_GEN_SCRIPT}
+        ${GEN_RDMA_HEADERS_DIR}
+        ${GEN_ENDPOINTS_DIR}/rdma-ep
+      DEPENDS ${RDMA_GEN_SCRIPT} ${RDMA_HEADERS}
+      COMMENT "Generating vendor-specific RDMA headers"
+    )
 
-  add_custom_target(rdma-vendor-headers-generated
-    DEPENDS ${GEN_RDMA_VENDOR_HEADERS}
-    COMMENT "Generate RDMA vendor headers")
+    add_custom_target(rdma-vendor-headers-generated
+      DEPENDS ${GEN_RDMA_VENDOR_HEADERS}
+      COMMENT "Generate RDMA vendor headers")
+  else()
+    add_custom_target(rdma-vendor-headers-generated
+      COMMENT "RDMA vendor headers: using GDA code (no generation needed)")
+  endif()
 
   # Combined external headers target
   add_custom_target(fetch-external-headers
