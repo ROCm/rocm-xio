@@ -211,6 +211,11 @@ option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
 option(GDA_MLX5 "Build MLX5 (Mellanox ConnectX) RDMA provider" OFF)
 option(GDA_IONIC "Build IONIC (Pensando) RDMA provider" OFF)
 
+# Build rdma-core with bnxt Direct Verbs patches
+if(GDA_BNXT)
+  include(XIOBnxtDirectVerbs)
+endif()
+
 # Discover source files
 file(GLOB_RECURSE LIB_SOURCES
   ${COMMON_DIR}/*.hip

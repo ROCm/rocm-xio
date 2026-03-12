@@ -1,15 +1,24 @@
-/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc.
+ * All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Derived from ROCm/rocSHMEM src/gda/bnxt/backend_gda_bnxt.cpp, adapted for rocm-xio.
- * Simplified from array-based (num_pes) to single-endpoint (1 SCQ, 1 RCQ, 1 QP).
- * Implements dmabuf-based QP creation for Broadcom Thor 2 NICs.
+ * Derived from ROCm/rocSHMEM
+ *   src/gda/bnxt/backend_gda_bnxt.cpp,
+ * adapted for rocm-xio.
+ * Simplified from array-based (num_pes) to
+ * single-endpoint (1 SCQ, 1 RCQ, 1 QP).
+ * Implements dmabuf-based QP creation for Broadcom
+ * Thor 2 NICs.
+ *
+ * Updated for the v11 Direct Verbs API from the
+ * sbasavapatna/rdma-core dv-upstream fork.
  */
 
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
 #include "bnxt/bnxt-provider.hpp"
+#include "bnxt/bnxt-dv-sizing.hpp"
 #include "ibv-wrapper.hpp"
 
 #include <cmath>
@@ -24,33 +33,42 @@
 
 namespace rdma_ep {
 
-#define XIO_CHECK_ZERO(expr, msg)                                              \
-  do {                                                                         \
-    int _err = (expr);                                                         \
-    if (_err != 0) {                                                           \
-      fprintf(stderr, "rdma_ep::bnxt: %s failed: %d at %s:%d\n", (msg),       \
-              _err, __FILE__, __LINE__);                                       \
-      return;                                                                  \
-    }                                                                          \
+#define XIO_CHECK_ZERO(expr, msg)              \
+  do {                                         \
+    int _err = (expr);                         \
+    if (_err != 0) {                           \
+      fprintf(stderr,                          \
+              "rdma_ep::bnxt: %s failed: "     \
+              "%d at %s:%d\n",                 \
+              (msg), _err,                     \
+              __FILE__, __LINE__);             \
+      return;                                  \
+    }                                          \
   } while (0)
 
-#define XIO_CHECK_NNULL(expr, msg)                                             \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      fprintf(stderr, "rdma_ep::bnxt: %s returned null at %s:%d\n", (msg),     \
-              __FILE__, __LINE__);                                             \
-      return;                                                                  \
-    }                                                                          \
+#define XIO_CHECK_NNULL(expr, msg)             \
+  do {                                         \
+    if (!(expr)) {                             \
+      fprintf(stderr,                          \
+              "rdma_ep::bnxt: %s returned "    \
+              "null at %s:%d\n",               \
+              (msg), __FILE__, __LINE__);      \
+      return;                                  \
+    }                                          \
   } while (0)
 
 namespace {
 
 template <typename FuncPtr>
-int dlsym_load(FuncPtr &out, void *handle, const char *name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
+int dlsym_load(FuncPtr &out, void *handle,
+               const char *name) {
+  out = reinterpret_cast<FuncPtr>(
+      dlsym(handle, name));
   if (!out) {
-    fprintf(stderr, "rdma_ep::bnxt: dlsym failed for %s: %s\n", name,
-            dlerror());
+    fprintf(stderr,
+            "rdma_ep::bnxt: dlsym failed for "
+            "%s: %s\n",
+            name, dlerror());
     return -1;
   }
   return 0;
@@ -64,13 +82,16 @@ void *bnxtdv_handle_ = nullptr;
 #if defined(GDA_BNXT)
 
 void *Backend::bnxt_dv_dlopen() {
-  void *handle = dlopen("libbnxt_re-rdmav34.so", RTLD_LAZY);
+  void *handle =
+      dlopen("libbnxt_re.so", RTLD_LAZY);
   if (!handle)
-    handle = dlopen("libbnxt_re.so", RTLD_LAZY);
+    handle = dlopen(
+        "/usr/local/lib/libbnxt_re.so",
+        RTLD_LAZY);
   if (!handle)
-    handle = dlopen("/usr/local/lib/libbnxt_re.so", RTLD_LAZY);
-  if (!handle)
-    fprintf(stderr, "rdma_ep::bnxt: Could not open libbnxt_re.so\n");
+    fprintf(stderr,
+            "rdma_ep::bnxt: Could not open "
+            "libbnxt_re.so\n");
   return handle;
 }
 
@@ -79,348 +100,395 @@ int Backend::bnxt_dv_dl_init() {
   if (!bnxtdv_handle_)
     return -1;
 
-#define LOAD(field, name)                                                      \
-  if (dlsym_load(bnxt_re_dv.field, bnxtdv_handle_, name) != 0)                \
+#define LOAD(field, name)                      \
+  if (dlsym_load(bnxt_re_dv.field,             \
+                 bnxtdv_handle_, name) != 0)   \
     return -1;
 
-  LOAD(init_obj, "bnxt_re_dv_init_obj");
   LOAD(create_qp, "bnxt_re_dv_create_qp");
   LOAD(destroy_qp, "bnxt_re_dv_destroy_qp");
   LOAD(modify_qp, "bnxt_re_dv_modify_qp");
-  LOAD(qp_mem_alloc, "bnxt_re_dv_qp_mem_alloc");
   LOAD(create_cq, "bnxt_re_dv_create_cq");
   LOAD(destroy_cq, "bnxt_re_dv_destroy_cq");
-  LOAD(cq_mem_alloc, "bnxt_re_dv_cq_mem_alloc");
   LOAD(umem_reg, "bnxt_re_dv_umem_reg");
   LOAD(umem_dereg, "bnxt_re_dv_umem_dereg");
-  LOAD(alloc_db_region, "bnxt_re_dv_alloc_db_region");
-  LOAD(free_db_region, "bnxt_re_dv_free_db_region");
+  LOAD(alloc_db_region,
+       "bnxt_re_dv_alloc_db_region");
+  LOAD(free_db_region,
+       "bnxt_re_dv_free_db_region");
+  LOAD(get_default_db_region,
+       "bnxt_re_dv_get_default_db_region");
+  LOAD(get_cq_id,
+       "bnxt_re_dv_get_cq_id");
 
 #undef LOAD
   return 0;
 }
 
+/*
+ * Helper: allocate a CQ buffer on GPU, register
+ * it as a UMEM, and create a DV CQ.
+ */
+static void create_one_cq(
+    bnxt_host_cq *hcq,
+    struct ibv_context *ctx,
+    bnxtdv_funcs_t &dv,
+    int ncqe,
+    int dmabuf_enabled,
+    const char *label)
+{
+  hcq->cqe_size = bnxt_sizing::cqe_size();
+  hcq->depth    = static_cast<uint32_t>(ncqe);
+  hcq->length   = hcq->depth * hcq->cqe_size;
+
+  hipError_t herr = hipExtMallocWithFlags(
+      &hcq->buf, hcq->length,
+      hipDeviceMallocUncached);
+  if (herr != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "hipExtMallocWithFlags %s "
+            "failed: %s\n",
+            label, hipGetErrorString(herr));
+    return;
+  }
+  (void)hipMemset(hcq->buf, 0, hcq->length);
+
+  if (dmabuf_enabled) {
+    hsa_amd_portable_export_dmabuf(
+        hcq->buf, hcq->length,
+        &hcq->dmabuf_fd,
+        &hcq->dmabuf_offset);
+  }
+
+  struct bnxt_re_dv_umem_reg_attr ua{};
+  ua.size         = hcq->length;
+  ua.access_flags = IBV_ACCESS_LOCAL_WRITE;
+  if (dmabuf_enabled) {
+    ua.addr      = reinterpret_cast<void *>(
+        static_cast<uintptr_t>(
+            hcq->dmabuf_offset));
+    ua.comp_mask = BNXT_RE_DV_UMEM_FLAGS_DMABUF;
+    ua.dmabuf_fd = hcq->dmabuf_fd;
+  } else {
+    ua.addr      = hcq->buf;
+  }
+
+  hcq->umem = dv.umem_reg(ctx, &ua);
+  if (!hcq->umem) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: umem_reg %s "
+            "failed\n",
+            label);
+    return;
+  }
+
+  struct bnxt_re_dv_cq_init_attr ca{};
+  ca.umem_handle    = hcq->umem;
+  ca.cq_umem_offset = 0;
+  ca.ncqe           = hcq->depth;
+
+  hcq->cq = dv.create_cq(ctx, &ca);
+  if (!hcq->cq) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: create_cq %s "
+            "failed\n",
+            label);
+  }
+}
+
 void Backend::bnxt_create_cqs(int cqe) {
-  struct bnxt_re_dv_cq_attr cq_attr;
-  struct bnxt_re_dv_cq_init_attr cq_init_attr;
-  struct bnxt_re_dv_umem_reg_attr umem_attr;
+  int dmabuf = ibv.is_dmabuf_supported();
 
-  int dmabuf_enabled = ibv.is_dmabuf_supported();
+  cqe = 1; // CQE compression: 1 entry
 
-  cqe = 1; // CQE compression: only need 1 entry
+  bnxt_scq_ = static_cast<bnxt_host_cq *>(
+      calloc(1, sizeof(bnxt_host_cq)));
+  bnxt_rcq_ = static_cast<bnxt_host_cq *>(
+      calloc(1, sizeof(bnxt_host_cq)));
 
-  // Allocate host structures
-  bnxt_scq_ = static_cast<bnxt_host_cq *>(calloc(1, sizeof(bnxt_host_cq)));
-  bnxt_rcq_ = static_cast<bnxt_host_cq *>(calloc(1, sizeof(bnxt_host_cq)));
+  create_one_cq(bnxt_scq_, context_,
+                bnxt_re_dv, cqe, dmabuf, "SCQ");
+  XIO_CHECK_NNULL(bnxt_scq_->cq,
+                  "bnxt_re_dv_create_cq (SCQ)");
 
-  // --- Create SCQ ---
-  memset(&cq_attr, 0, sizeof(cq_attr));
-  bnxt_scq_->handle = bnxt_re_dv.cq_mem_alloc(context_, cqe, &cq_attr);
-  XIO_CHECK_NNULL(bnxt_scq_->handle, "bnxt_re_dv_cq_mem_alloc (SCQ)");
+  create_one_cq(bnxt_rcq_, context_,
+                bnxt_re_dv, cqe, dmabuf, "RCQ");
+  XIO_CHECK_NNULL(bnxt_rcq_->cq,
+                  "bnxt_re_dv_create_cq (RCQ)");
 
-  cq_attr.ncqe = cqe;
-  bnxt_scq_->length = cq_attr.ncqe * cq_attr.cqe_size;
-  bnxt_scq_->depth = cq_attr.ncqe;
-
-  hipError_t herr =
-    hipExtMallocWithFlags(&bnxt_scq_->buf, bnxt_scq_->length,
-                          hipDeviceMallocUncached);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipExtMallocWithFlags SCQ failed: %s\n",
-            hipGetErrorString(herr));
-    return;
-  }
-  (void)hipMemset(bnxt_scq_->buf, 0, bnxt_scq_->length);
-
-  if (dmabuf_enabled) {
-    hsa_amd_portable_export_dmabuf(bnxt_scq_->buf, bnxt_scq_->length,
-                                   &bnxt_scq_->dmabuf_fd,
-                                   &bnxt_scq_->dmabuf_offset);
-  }
-
-  memset(&umem_attr, 0, sizeof(umem_attr));
-  umem_attr.addr = bnxt_scq_->buf;
-  umem_attr.size = bnxt_scq_->length;
-  umem_attr.access_flags = IBV_ACCESS_LOCAL_WRITE;
-  umem_attr.dmabuf_fd = dmabuf_enabled ? bnxt_scq_->dmabuf_fd : 0;
-
-  bnxt_scq_->umem_handle = bnxt_re_dv.umem_reg(context_, &umem_attr);
-  XIO_CHECK_NNULL(bnxt_scq_->umem_handle, "bnxt_re_dv_umem_reg (SCQ)");
-
-  memset(&cq_init_attr, 0, sizeof(cq_init_attr));
-  cq_init_attr.cq_handle = (uint64_t)bnxt_scq_->handle;
-  cq_init_attr.umem_handle = bnxt_scq_->umem_handle;
-  cq_init_attr.ncqe = cq_attr.ncqe;
-
-  bnxt_scq_->cq = bnxt_re_dv.create_cq(context_, &cq_init_attr);
-  XIO_CHECK_NNULL(bnxt_scq_->cq, "bnxt_re_dv_create_cq (SCQ)");
-
-  // --- Create RCQ ---
-  memset(&cq_attr, 0, sizeof(cq_attr));
-  bnxt_rcq_->handle = bnxt_re_dv.cq_mem_alloc(context_, cqe, &cq_attr);
-  XIO_CHECK_NNULL(bnxt_rcq_->handle, "bnxt_re_dv_cq_mem_alloc (RCQ)");
-
-  bnxt_rcq_->length = cq_attr.ncqe * cq_attr.cqe_size;
-  bnxt_rcq_->depth = cq_attr.ncqe;
-
-  herr = hipExtMallocWithFlags(&bnxt_rcq_->buf, bnxt_rcq_->length,
-                               hipDeviceMallocUncached);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipExtMallocWithFlags RCQ failed: %s\n",
-            hipGetErrorString(herr));
-    return;
-  }
-  (void)hipMemset(bnxt_rcq_->buf, 0, bnxt_rcq_->length);
-
-  if (dmabuf_enabled) {
-    hsa_amd_portable_export_dmabuf(bnxt_rcq_->buf, bnxt_rcq_->length,
-                                   &bnxt_rcq_->dmabuf_fd,
-                                   &bnxt_rcq_->dmabuf_offset);
-  }
-
-  memset(&umem_attr, 0, sizeof(umem_attr));
-  umem_attr.addr = bnxt_rcq_->buf;
-  umem_attr.size = bnxt_rcq_->length;
-  umem_attr.access_flags = IBV_ACCESS_LOCAL_WRITE;
-  umem_attr.dmabuf_fd = dmabuf_enabled ? bnxt_rcq_->dmabuf_fd : 0;
-
-  bnxt_rcq_->umem_handle = bnxt_re_dv.umem_reg(context_, &umem_attr);
-  XIO_CHECK_NNULL(bnxt_rcq_->umem_handle, "bnxt_re_dv_umem_reg (RCQ)");
-
-  memset(&cq_init_attr, 0, sizeof(cq_init_attr));
-  cq_init_attr.cq_handle = (uint64_t)bnxt_rcq_->handle;
-  cq_init_attr.umem_handle = bnxt_rcq_->umem_handle;
-  cq_init_attr.ncqe = cq_attr.ncqe;
-
-  bnxt_rcq_->cq = bnxt_re_dv.create_cq(context_, &cq_init_attr);
-  XIO_CHECK_NNULL(bnxt_rcq_->cq, "bnxt_re_dv_create_cq (RCQ)");
-
-  // Override the cq_ in backend with the SCQ
   if (cq_) {
     ibv.destroy_cq(cq_);
     cq_ = nullptr;
   }
   cq_ = bnxt_scq_->cq;
 
-  fprintf(stderr, "rdma_ep::bnxt: Created CQs (SCQ depth=%u, RCQ depth=%u)\n",
+  fprintf(stderr,
+          "rdma_ep::bnxt: Created CQs "
+          "(SCQ depth=%u, RCQ depth=%u)\n",
           bnxt_scq_->depth, bnxt_rcq_->depth);
 }
 
 void Backend::bnxt_create_qps(int sq_length) {
-  struct ibv_qp_init_attr ib_qp_attr;
   struct bnxt_re_dv_umem_reg_attr umem_attr;
-  int dmabuf_enabled = ibv.is_dmabuf_supported();
+  int dmabuf = ibv.is_dmabuf_supported();
 
-  bnxt_qp_ = static_cast<bnxt_host_qp *>(calloc(1, sizeof(bnxt_host_qp)));
+  bnxt_qp_ = static_cast<bnxt_host_qp *>(
+      calloc(1, sizeof(bnxt_host_qp)));
 
-  // IB QP Init Attr
-  memset(&ib_qp_attr, 0, sizeof(ib_qp_attr));
-  ib_qp_attr.send_cq = bnxt_scq_->cq;
-  ib_qp_attr.recv_cq = bnxt_rcq_->cq;
-  ib_qp_attr.cap.max_send_wr = sq_length;
-  ib_qp_attr.cap.max_recv_wr = 0;
-  ib_qp_attr.cap.max_send_sge = 1;
-  ib_qp_attr.cap.max_recv_sge = 0;
-  ib_qp_attr.cap.max_inline_data = config_.inline_threshold;
-  ib_qp_attr.qp_type = IBV_QPT_RC;
-  ib_qp_attr.sq_sig_all = 0;
+  uint32_t max_swr = static_cast<uint32_t>(
+      sq_length);
+  uint32_t max_ssge = 1;
+  uint32_t max_ils  = config_.inline_threshold;
+  uint32_t max_rwr  = 0;
+  uint32_t max_rsge = 0;
 
-  // Alloc qp_mem_info
-  memset(&bnxt_qp_->mem_info, 0, sizeof(bnxt_re_dv_qp_mem_info));
-  int err =
-    bnxt_re_dv.qp_mem_alloc(pd_, &ib_qp_attr, &bnxt_qp_->mem_info);
-  XIO_CHECK_ZERO(err, "bnxt_re_dv_qp_mem_alloc");
+  auto sq = bnxt_sizing::compute_sq(
+      max_swr, max_ssge, max_ils);
+  auto rq = bnxt_sizing::compute_rq(
+      max_rwr, max_rsge);
 
-  // Alloc SQ buffer on GPU
+  bnxt_qp_->sq_len    = sq.len;
+  bnxt_qp_->sq_slots  = sq.slots;
+  bnxt_qp_->sq_wqe_sz = sq.wqe_sz;
+  bnxt_qp_->sq_psn_sz = sq.psn_sz;
+  bnxt_qp_->sq_npsn   = sq.npsn;
+  bnxt_qp_->rq_len    = rq.len;
+  bnxt_qp_->rq_slots  = rq.slots;
+  bnxt_qp_->rq_wqe_sz = rq.wqe_sz;
+
+  // --- SQ buffer: CPU-pinnable + GPU-accessible.
+  //     Kernel QP path uses ib_umem_get which
+  //     needs regular CPU pages (no VM_PFNMAP).
+  //     hipHostMalloc uses device-file mmap which
+  //     ib_umem_get can't pin.  Use posix_memalign
+  //     + hipHostRegister instead. ---
   void *sq_ptr = nullptr;
-  hipError_t herr = hipExtMallocWithFlags(&sq_ptr,
-                                          bnxt_qp_->mem_info.sq_len,
-                                          hipDeviceMallocUncached);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipExtMallocWithFlags SQ failed: %s\n",
-            hipGetErrorString(herr));
+  size_t pgsz = static_cast<size_t>(
+      sysconf(_SC_PAGESIZE));
+  if (posix_memalign(&sq_ptr, pgsz,
+                     bnxt_qp_->sq_len)) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "posix_memalign SQ failed\n");
     return;
   }
-  (void)hipMemset(sq_ptr, 0, bnxt_qp_->mem_info.sq_len);
-  bnxt_qp_->mem_info.sq_va = (uint64_t)sq_ptr;
+  memset(sq_ptr, 0, bnxt_qp_->sq_len);
+  hipError_t herr = hipHostRegister(
+      sq_ptr, bnxt_qp_->sq_len,
+      hipHostRegisterDefault);
+  if (herr != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "hipHostRegister SQ "
+            "failed: %s\n",
+            hipGetErrorString(herr));
+  }
   bnxt_qp_->sq_buf = sq_ptr;
 
-  if (dmabuf_enabled) {
-    hsa_amd_portable_export_dmabuf(sq_ptr, bnxt_qp_->mem_info.sq_len,
-                                   &bnxt_qp_->sq_dmabuf_fd,
-                                   &bnxt_qp_->sq_dmabuf_offset);
+  // MSN table at end of SQ buffer
+  uint64_t msn_bytes =
+      (uint64_t)bnxt_qp_->sq_psn_sz
+      * bnxt_qp_->sq_npsn;
+  uint64_t msn_off =
+      bnxt_qp_->sq_len - msn_bytes;
+  bnxt_qp_->msntbl =
+      (void *)((char *)sq_ptr + msn_off);
+  bnxt_qp_->msn_tbl_sz = bnxt_qp_->sq_npsn;
+
+  // Register SQ UMEM -- use GPU VA (not dmabuf)
+  // because the kernel's QP creation path uses
+  // the traditional VA-based ib_umem_get.
+  memset(&umem_attr, 0, sizeof(umem_attr));
+  umem_attr.addr  = sq_ptr;
+  umem_attr.size  = bnxt_qp_->sq_len;
+  umem_attr.access_flags =
+      IBV_ACCESS_LOCAL_WRITE;
+
+  auto *sq_umem =
+      bnxt_re_dv.umem_reg(context_, &umem_attr);
+  XIO_CHECK_NNULL(sq_umem,
+                  "bnxt_re_dv_umem_reg (SQ)");
+
+  // --- RQ buffer: same approach as SQ. ---
+  uint32_t rq_alloc = bnxt_qp_->rq_len;
+  if (rq_alloc == 0) {
+    rq_alloc = static_cast<uint32_t>(pgsz);
+    bnxt_qp_->rq_len = rq_alloc;
   }
 
-  // MSN Table pointer (at end of SQ buffer)
-  uint64_t msntbl_len =
-    bnxt_qp_->mem_info.sq_psn_sz * bnxt_qp_->mem_info.sq_npsn;
-  uint64_t msntbl_offset = bnxt_qp_->mem_info.sq_len - msntbl_len;
-  bnxt_qp_->msntbl = (void *)((char *)bnxt_qp_->sq_buf + msntbl_offset);
-  bnxt_qp_->msn_tbl_sz = bnxt_qp_->mem_info.sq_npsn;
-
-  // Register SQ UMEM
-  memset(&umem_attr, 0, sizeof(umem_attr));
-  umem_attr.addr = (void *)bnxt_qp_->mem_info.sq_va;
-  umem_attr.size = bnxt_qp_->mem_info.sq_len;
-  umem_attr.access_flags = IBV_ACCESS_LOCAL_WRITE;
-  umem_attr.dmabuf_fd = dmabuf_enabled ? bnxt_qp_->sq_dmabuf_fd : 0;
-
-  void *sq_umem = bnxt_re_dv.umem_reg(context_, &umem_attr);
-  XIO_CHECK_NNULL(sq_umem, "bnxt_re_dv_umem_reg (SQ)");
-
-  // Alloc RQ buffer on GPU
   void *rq_ptr = nullptr;
-  herr = hipExtMallocWithFlags(&rq_ptr, bnxt_qp_->mem_info.rq_len,
-                               hipDeviceMallocUncached);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipExtMallocWithFlags RQ failed: %s\n",
-            hipGetErrorString(herr));
+  if (posix_memalign(&rq_ptr, pgsz, rq_alloc)) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "posix_memalign RQ failed\n");
     return;
   }
-  (void)hipMemset(rq_ptr, 0, bnxt_qp_->mem_info.rq_len);
-  bnxt_qp_->mem_info.rq_va = (uint64_t)rq_ptr;
+  memset(rq_ptr, 0, rq_alloc);
+  herr = hipHostRegister(
+      rq_ptr, rq_alloc,
+      hipHostRegisterDefault);
+  if (herr != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "hipHostRegister RQ "
+            "failed: %s\n",
+            hipGetErrorString(herr));
+  }
   bnxt_qp_->rq_buf = rq_ptr;
 
-  if (dmabuf_enabled) {
-    hsa_amd_portable_export_dmabuf(rq_ptr, bnxt_qp_->mem_info.rq_len,
-                                   &bnxt_qp_->rq_dmabuf_fd,
-                                   &bnxt_qp_->rq_dmabuf_offset);
+  // Register RQ UMEM -- same VA approach as SQ.
+  memset(&umem_attr, 0, sizeof(umem_attr));
+  umem_attr.addr  = rq_ptr;
+  umem_attr.size  = rq_alloc;
+  umem_attr.access_flags =
+      IBV_ACCESS_LOCAL_WRITE;
+
+  auto *rq_umem =
+      bnxt_re_dv.umem_reg(context_, &umem_attr);
+  XIO_CHECK_NNULL(rq_umem,
+                  "bnxt_re_dv_umem_reg (RQ)");
+
+  // Doorbell region -- try default first, then alloc
+  bnxt_qp_->db_region_attr =
+      static_cast<bnxt_re_dv_db_region_attr *>(
+          calloc(1, sizeof(bnxt_re_dv_db_region_attr)));
+  XIO_CHECK_NNULL(bnxt_qp_->db_region_attr,
+                  "calloc db_region_attr");
+  int dbr_rc = bnxt_re_dv.get_default_db_region(
+      context_, bnxt_qp_->db_region_attr);
+  if (dbr_rc != 0) {
+    free(bnxt_qp_->db_region_attr);
+    bnxt_qp_->db_region_attr =
+        bnxt_re_dv.alloc_db_region(context_);
+    XIO_CHECK_NNULL(bnxt_qp_->db_region_attr,
+                    "bnxt_re_dv_alloc_db_region");
   }
 
-  // Register RQ UMEM
-  memset(&umem_attr, 0, sizeof(umem_attr));
-  umem_attr.addr = (void *)bnxt_qp_->mem_info.rq_va;
-  umem_attr.size = bnxt_qp_->mem_info.rq_len;
-  umem_attr.access_flags = IBV_ACCESS_LOCAL_WRITE;
-  umem_attr.dmabuf_fd = dmabuf_enabled ? bnxt_qp_->rq_dmabuf_fd : 0;
-
-  void *rq_umem = bnxt_re_dv.umem_reg(context_, &umem_attr);
-  XIO_CHECK_NNULL(rq_umem, "bnxt_re_dv_umem_reg (RQ)");
-
-  // Alloc doorbell region
-  bnxt_qp_->db_region_attr = bnxt_re_dv.alloc_db_region(context_);
-  XIO_CHECK_NNULL(bnxt_qp_->db_region_attr, "bnxt_re_dv_alloc_db_region");
-
   // Fill DV QP init attr
-  memset(&bnxt_qp_->attr, 0, sizeof(bnxt_re_dv_qp_init_attr));
-  bnxt_qp_->attr.send_cq = ib_qp_attr.send_cq;
-  bnxt_qp_->attr.recv_cq = ib_qp_attr.recv_cq;
-  bnxt_qp_->attr.max_send_wr = ib_qp_attr.cap.max_send_wr;
-  bnxt_qp_->attr.max_recv_wr = ib_qp_attr.cap.max_recv_wr;
-  bnxt_qp_->attr.max_send_sge = ib_qp_attr.cap.max_send_sge;
-  bnxt_qp_->attr.max_recv_sge = ib_qp_attr.cap.max_recv_sge;
-  bnxt_qp_->attr.max_inline_data = ib_qp_attr.cap.max_inline_data;
-  bnxt_qp_->attr.qp_type = ib_qp_attr.qp_type;
-  bnxt_qp_->attr.qp_handle = bnxt_qp_->mem_info.qp_handle;
-  bnxt_qp_->attr.dbr_handle = bnxt_qp_->db_region_attr;
-  bnxt_qp_->attr.sq_umem_handle = sq_umem;
-  bnxt_qp_->attr.sq_len = bnxt_qp_->mem_info.sq_len;
-  bnxt_qp_->attr.sq_slots = bnxt_qp_->mem_info.sq_slots;
-  bnxt_qp_->attr.sq_wqe_sz = bnxt_qp_->mem_info.sq_wqe_sz;
-  bnxt_qp_->attr.sq_psn_sz = bnxt_qp_->mem_info.sq_psn_sz;
-  bnxt_qp_->attr.sq_npsn = bnxt_qp_->mem_info.sq_npsn;
-  bnxt_qp_->attr.rq_umem_handle = rq_umem;
-  bnxt_qp_->attr.rq_len = bnxt_qp_->mem_info.rq_len;
-  bnxt_qp_->attr.rq_slots = bnxt_qp_->mem_info.rq_slots;
-  bnxt_qp_->attr.rq_wqe_sz = bnxt_qp_->mem_info.rq_wqe_sz;
-  bnxt_qp_->attr.comp_mask = bnxt_qp_->mem_info.comp_mask;
+  memset(&bnxt_qp_->attr, 0,
+         sizeof(bnxt_re_dv_qp_init_attr));
+  bnxt_qp_->attr.send_cq  = bnxt_scq_->cq;
+  bnxt_qp_->attr.recv_cq  = bnxt_rcq_->cq;
+  bnxt_qp_->attr.max_send_wr  = max_swr;
+  bnxt_qp_->attr.max_recv_wr  = max_rwr;
+  bnxt_qp_->attr.max_send_sge = max_ssge;
+  bnxt_qp_->attr.max_recv_sge = max_rsge;
+  bnxt_qp_->attr.max_inline_data = max_ils;
+  bnxt_qp_->attr.qp_type = IBV_QPT_RC;
 
-  // Create QP via BNXT DV
+  bnxt_qp_->attr.dbr_handle =
+      bnxt_qp_->db_region_attr;
+  bnxt_qp_->attr.sq_umem_handle  = sq_umem;
+  bnxt_qp_->attr.sq_umem_offset  = 0;
+  bnxt_qp_->attr.sq_len    = bnxt_qp_->sq_len;
+  bnxt_qp_->attr.sq_slots  = bnxt_qp_->sq_slots;
+  bnxt_qp_->attr.sq_wqe_sz =
+      bnxt_qp_->sq_wqe_sz;
+  bnxt_qp_->attr.sq_psn_sz =
+      bnxt_qp_->sq_psn_sz;
+  bnxt_qp_->attr.sq_npsn   = bnxt_qp_->sq_npsn;
+  bnxt_qp_->attr.rq_umem_handle  = rq_umem;
+  bnxt_qp_->attr.rq_umem_offset  = 0;
+  bnxt_qp_->attr.rq_len    = bnxt_qp_->rq_len;
+  bnxt_qp_->attr.rq_slots  = bnxt_qp_->rq_slots;
+  bnxt_qp_->attr.rq_wqe_sz =
+      bnxt_qp_->rq_wqe_sz;
+
   if (qp_) {
     ibv.destroy_qp(qp_);
     qp_ = nullptr;
   }
-  qp_ = bnxt_re_dv.create_qp(pd_, &bnxt_qp_->attr);
+  qp_ = bnxt_re_dv.create_qp(
+      pd_, &bnxt_qp_->attr);
   XIO_CHECK_NNULL(qp_, "bnxt_re_dv_create_qp");
 
   fprintf(stderr,
-          "rdma_ep::bnxt: Created QP via DV (QPN=%u, SQ slots=%u, "
-          "SQ len=%u, MSN tbl sz=%u)\n",
-          qp_->qp_num, bnxt_qp_->mem_info.sq_slots,
-          bnxt_qp_->mem_info.sq_len, bnxt_qp_->msn_tbl_sz);
+          "rdma_ep::bnxt: Created QP via DV "
+          "(QPN=%u, SQ slots=%u, SQ len=%u, "
+          "MSN tbl sz=%u)\n",
+          qp_->qp_num, bnxt_qp_->sq_slots,
+          bnxt_qp_->sq_len,
+          bnxt_qp_->msn_tbl_sz);
 }
 
 void Backend::bnxt_initialize_gpu_qp() {
   if (!host_qp_ || !bnxt_qp_ || !bnxt_scq_)
     return;
 
-  struct bnxt_re_dv_obj dv_obj;
-  struct bnxt_re_dv_cq dv_cq;
-  int err;
+  uint32_t scq_id =
+      bnxt_re_dv.get_cq_id(bnxt_scq_->cq);
 
-  // Export SCQ via DV
-  memset(&dv_obj, 0, sizeof(dv_obj));
-  dv_obj.cq.in = bnxt_scq_->cq;
-  dv_obj.cq.out = &dv_cq;
-  err = bnxt_re_dv.init_obj(&dv_obj, BNXT_RE_DV_OBJ_CQ);
-  if (err != 0) {
-    fprintf(stderr, "rdma_ep::bnxt: init_obj(CQ) failed: %d\n", err);
-    return;
-  }
-
-  memset(&host_qp_->bnxt_cq_, 0, sizeof(bnxt_device_cq));
-  host_qp_->bnxt_cq_.buf = bnxt_scq_->buf;
+  memset(&host_qp_->bnxt_cq_, 0,
+         sizeof(bnxt_device_cq));
+  host_qp_->bnxt_cq_.buf   = bnxt_scq_->buf;
   host_qp_->bnxt_cq_.depth = bnxt_scq_->depth;
-  host_qp_->bnxt_cq_.id = dv_cq.cqn;
+  host_qp_->bnxt_cq_.id    = scq_id;
 
-  // Export QP via DV
-  struct bnxt_re_dv_qp dv_qp;
-  memset(&dv_obj, 0, sizeof(dv_obj));
-  dv_obj.qp.in = qp_;
-  dv_obj.qp.out = &dv_qp;
-  err = bnxt_re_dv.init_obj(&dv_obj, BNXT_RE_DV_OBJ_QP);
-  if (err != 0) {
-    fprintf(stderr, "rdma_ep::bnxt: init_obj(QP) failed: %d\n", err);
-    return;
-  }
-
-  memset(&host_qp_->bnxt_sq_, 0, sizeof(bnxt_device_sq));
-  host_qp_->bnxt_sq_.buf = bnxt_qp_->sq_buf;
-  host_qp_->bnxt_sq_.depth = bnxt_qp_->mem_info.sq_slots;
-  host_qp_->bnxt_sq_.id = qp_->qp_num;
-  host_qp_->bnxt_sq_.msntbl = bnxt_qp_->msntbl;
-  host_qp_->bnxt_sq_.msn_tbl_sz = bnxt_qp_->msn_tbl_sz;
+  memset(&host_qp_->bnxt_sq_, 0,
+         sizeof(bnxt_device_sq));
+  host_qp_->bnxt_sq_.buf   = bnxt_qp_->sq_buf;
+  host_qp_->bnxt_sq_.depth = bnxt_qp_->sq_slots;
+  host_qp_->bnxt_sq_.id    = qp_->qp_num;
+  host_qp_->bnxt_sq_.msntbl     =
+      bnxt_qp_->msntbl;
+  host_qp_->bnxt_sq_.msn_tbl_sz =
+      bnxt_qp_->msn_tbl_sz;
   host_qp_->bnxt_sq_.psn_sz_log2 =
-    static_cast<uint32_t>(std::log2(bnxt_qp_->mem_info.sq_psn_sz));
-  host_qp_->bnxt_sq_.mtu = ibv_mtu_to_int(port_attr_.active_mtu);
+      static_cast<uint32_t>(
+          std::log2(bnxt_qp_->sq_psn_sz));
+  host_qp_->bnxt_sq_.mtu =
+      ibv_mtu_to_int(port_attr_.active_mtu);
 
-  // Export doorbell register for GPU access
-  hipError_t herr = hipHostRegister(bnxt_qp_->db_region_attr->dbr,
-                                    getpagesize(), hipHostRegisterDefault);
+  hipError_t herr = hipHostRegister(
+      bnxt_qp_->db_region_attr->dbr,
+      getpagesize(), hipHostRegisterDefault);
   if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipHostRegister(dbr) failed: %s\n",
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "hipHostRegister(dbr) failed: "
+            "%s\n",
             hipGetErrorString(herr));
     return;
   }
-  herr = hipHostGetDevicePointer((void **)&host_qp_->bnxt_dbr_,
-                                 bnxt_qp_->db_region_attr->dbr, 0);
+  herr = hipHostGetDevicePointer(
+      (void **)&host_qp_->bnxt_dbr_,
+      bnxt_qp_->db_region_attr->dbr, 0);
   if (herr != hipSuccess) {
-    fprintf(stderr, "rdma_ep::bnxt: hipHostGetDevicePointer(dbr) failed: %s\n",
+    fprintf(stderr,
+            "rdma_ep::bnxt: "
+            "hipHostGetDevicePointer(dbr) "
+            "failed: %s\n",
             hipGetErrorString(herr));
     return;
   }
 
-  // Set memory keys and inline threshold
-  host_qp_->lkey_ = 0;  // Will be set when heap MR is registered
-  host_qp_->rkey_ = 0;  // Will be set for remote peer
+  host_qp_->lkey_ = 0;
+  host_qp_->rkey_ = 0;
   host_qp_->qp_num_ = qp_->qp_num;
-  host_qp_->inline_threshold_ = config_.inline_threshold;
+  host_qp_->inline_threshold_ =
+      config_.inline_threshold;
 
   fprintf(stderr,
-          "rdma_ep::bnxt: GPU QP initialized (CQ id=%u, SQ depth=%u, "
+          "rdma_ep::bnxt: GPU QP initialized "
+          "(CQ id=%u, SQ depth=%u, "
           "SQ buf=%p, DB=%p, MTU=%lu)\n",
-          host_qp_->bnxt_cq_.id, host_qp_->bnxt_sq_.depth,
-          host_qp_->bnxt_sq_.buf, (void *)host_qp_->bnxt_dbr_,
+          host_qp_->bnxt_cq_.id,
+          host_qp_->bnxt_sq_.depth,
+          host_qp_->bnxt_sq_.buf,
+          (void *)host_qp_->bnxt_dbr_,
           host_qp_->bnxt_sq_.mtu);
 }
 
 #endif // defined(GDA_BNXT)
 
-int bnxt_dv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
+int bnxt_dv_modify_qp(struct ibv_qp *qp,
+                      struct ibv_qp_attr *attr,
                       int attr_mask) {
   if (!bnxt_re_dv.modify_qp)
     return -1;
-  return bnxt_re_dv.modify_qp(qp, attr, attr_mask, 0, 0);
+  return bnxt_re_dv.modify_qp(
+      qp, attr, attr_mask);
 }
 
 #undef XIO_CHECK_ZERO

@@ -294,6 +294,8 @@ int main(int argc, char **argv) {
     else { print_usage(argv[0]); return 1; }
   }
 
+  (void)gid_index; // TODO: plumb into BackendConfig
+
   if (pp_size < 8) { fprintf(stderr, "Pingpong size must be >= 8 bytes\n"); return 1; }
 
   if (!is_server && !is_client) { print_usage(argv[0]); return 1; }

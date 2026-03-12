@@ -1,0 +1,89 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v11 4/6] RDMA/bnxt_re: Refactor bnxt_re_create_cq()
+From: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Date: Tue, 10 Feb 2026 22:29:37 +0530
+Message-Id: <20260210165939.41625-5-sriharsha.basavapatna@broadcom.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Some applications may allocate dmabuf based memory for CQs. To support
+this, update the existing code to use SZ_4K to specify supported HW
+page size for CQs, as we support only 4K pages for now.
+Call ib_umem_find_best_pgsz() to ensure umem supports this requested
+page size. A helper function includes these changes.
+
+Signed-off-by: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Reviewed-by: Selvin Xavier <selvin.xavier@broadcom.com>
+---
+ drivers/infiniband/hw/bnxt_re/ib_verbs.c | 33 +++++++++++++++++++++---
+ 1 file changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.c b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+index feb364e45e14..fb30b3831d49 100644
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.c
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+@@ -3348,6 +3348,30 @@ int bnxt_re_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
+ 	return 0;
+ }
+ 
++static int bnxt_re_setup_sginfo(struct bnxt_re_dev *rdev,
++				struct ib_umem *umem,
++				struct bnxt_qplib_sg_info *sginfo)
++{
++	unsigned long page_size;
++
++	if (!umem)
++		return -EINVAL;
++
++	page_size = ib_umem_find_best_pgsz(umem, SZ_4K, 0);
++	if (!page_size || page_size != SZ_4K)
++		return -EINVAL;
++
++	sginfo->umem = umem;
++	sginfo->npages = ib_umem_num_dma_blocks(umem, page_size);
++	sginfo->pgsize = page_size;
++	sginfo->pgshft = __builtin_ctz(page_size);
++	ibdev_dbg(&rdev->ibdev,
++		  "umem: 0x%llx npages: %d page_size: %d page_shift: %d\n",
++		  (u64)umem, sginfo->npages, sginfo->pgsize, sginfo->pgshft);
++
++	return 0;
++}
++
+ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 		      struct uverbs_attr_bundle *attrs)
+ {
+@@ -3379,8 +3403,6 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 	if (entries > dev_attr->max_cq_wqes + 1)
+ 		entries = dev_attr->max_cq_wqes + 1;
+ 
+-	cq->qplib_cq.sg_info.pgsize = PAGE_SIZE;
+-	cq->qplib_cq.sg_info.pgshft = PAGE_SHIFT;
+ 	if (udata) {
+ 		struct bnxt_re_cq_req req;
+ 
+@@ -3395,7 +3417,10 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 			rc = PTR_ERR(cq->umem);
+ 			goto fail;
+ 		}
+-		cq->qplib_cq.sg_info.umem = cq->umem;
++		rc = bnxt_re_setup_sginfo(rdev, cq->umem, &cq->qplib_cq.sg_info);
++		if (rc)
++			goto fail;
++
+ 		cq->qplib_cq.dpi = &uctx->dpi;
+ 	} else {
+ 		cq->max_cql = min_t(u32, entries, MAX_CQL_PER_POLL);
+@@ -3406,6 +3431,8 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 			goto fail;
+ 		}
+ 
++		cq->qplib_cq.sg_info.pgsize = SZ_4K;
++		cq->qplib_cq.sg_info.pgshft = __builtin_ctz(SZ_4K);
+ 		cq->qplib_cq.dpi = &rdev->dpi_privileged;
+ 	}
+ 	cq->qplib_cq.max_wqe = entries;
+-- 
+2.51.2.636.ga99f379adf
+
