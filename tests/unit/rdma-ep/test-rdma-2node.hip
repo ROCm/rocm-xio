@@ -30,6 +30,7 @@
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
 #include "vendor-ops.hpp"
+#include "xio-data-pattern.hpp"
 
 #if !defined(GDA_BNXT)
 int main() {
@@ -43,8 +44,6 @@ using namespace rdma_ep;
 static constexpr uint16_t TCP_PORT = 18515;
 static constexpr uint32_t WRITE_SIZE = 4096;
 static constexpr uint8_t DATA_PATTERN = 0xA5;
-static constexpr int PINGPONG_ITERS = 100;
-static constexpr uint32_t PINGPONG_SIZE = 8;
 
 // --- Wire protocol for TCP exchange ---
 
@@ -155,70 +154,107 @@ __global__ void rdma_write_kernel(QueuePair *qp, void *dst, void *src,
   qp->quiet_single();
 }
 
-// Ping-pong protocol:
-// Each side has two flags in its registered buffer:
-//   send_flag: local staging area for the value we RDMA WRITE to remote
-//   recv_flag: written by remote RDMA WRITE, polled locally
+// Ping-pong protocol with LFSR data verification:
+//
+// Buffer layout per side:
+//   send_buf: [seq (8 bytes) | payload (pp_size - 8 bytes)]
+//   recv_buf: [seq (8 bytes) | payload (pp_size - 8 bytes)]
+//
+// The seq counter at the start of each buffer is used for arrival polling.
+// The payload is filled with LFSR pattern (keyed by iteration) for verification.
 //
 // Client iteration i:
-//   1. Write i+1 to send_flag
-//   2. RDMA WRITE send_flag -> server's recv_flag
-//   3. quiet (wait for CQE)
-//   4. Poll recv_flag until it reaches i+1 (server wrote back)
+//   1. Fill send_buf payload with LFSR (seed=i+1), set seq=i+1
+//   2. RDMA WRITE send_buf -> server's recv_buf (entire pp_size)
+//   3. quiet
+//   4. Poll recv_buf.seq until it reaches i+1
+//   5. Verify recv_buf payload with LFSR (seed=i+1)
 //
 // Server iteration i:
-//   1. Poll recv_flag until it reaches i+1 (client wrote)
-//   2. Write i+1 to send_flag
-//   3. RDMA WRITE send_flag -> client's recv_flag
-//   4. quiet
+//   1. Poll recv_buf.seq until it reaches i+1
+//   2. Verify recv_buf payload with LFSR (seed=i+1)
+//   3. Fill send_buf payload with LFSR (seed=i+1), set seq=i+1
+//   4. RDMA WRITE send_buf -> client's recv_buf
+//   5. quiet
+
+struct PingPongBuf {
+  uint64_t seq;
+  uint8_t payload[];
+};
+
+__device__ static void pp_fill(PingPongBuf *buf, uint32_t pp_size,
+                               uint32_t iter) {
+  uint32_t payload_size = pp_size - sizeof(uint64_t);
+  xio::DataPatternParams p{buf->payload, payload_size, 0, payload_size,
+                           iter, nullptr};
+  xio::dataPattern(false, p);
+  __threadfence_system();
+  buf->seq = iter;
+  __threadfence_system();
+}
+
+__device__ static bool pp_verify(volatile PingPongBuf *buf, uint32_t pp_size,
+                                 uint32_t iter) {
+  uint32_t payload_size = pp_size - sizeof(uint64_t);
+  xio::DataPatternParams p{(uint8_t *)buf->payload, payload_size, 0,
+                           payload_size, iter, nullptr};
+  return xio::dataPattern(true, p);
+}
 
 __global__ void pingpong_client_kernel(QueuePair *qp,
-                                       volatile uint64_t *send_flag,
-                                       volatile uint64_t *recv_flag,
-                                       void *remote_recv_flag_addr,
+                                       PingPongBuf *send_buf,
+                                       volatile PingPongBuf *recv_buf,
+                                       void *remote_recv_addr,
+                                       uint32_t pp_size,
                                        uint32_t iters,
+                                       uint32_t *errors,
                                        unsigned long long *elapsed) {
   if (threadIdx.x != 0) return;
 
+  *errors = 0;
   unsigned long long start = wall_clock64();
 
   for (uint32_t i = 0; i < iters; i++) {
-    uint64_t val = i + 1;
+    uint32_t iter = i + 1;
 
-    *send_flag = val;
-    __threadfence_system();
+    pp_fill(send_buf, pp_size, iter);
 
-    qp->put_nbi_single(remote_recv_flag_addr, (void *)send_flag,
-                        sizeof(uint64_t), true);
+    qp->put_nbi_single(remote_recv_addr, send_buf, pp_size, true);
     qp->quiet_single();
 
-    while (*recv_flag != val) {
+    while (recv_buf->seq != iter)
       __builtin_amdgcn_s_sleep(1);
-    }
+
+    if (!pp_verify(recv_buf, pp_size, iter))
+      (*errors)++;
   }
 
   *elapsed = wall_clock64() - start;
 }
 
 __global__ void pingpong_server_kernel(QueuePair *qp,
-                                       volatile uint64_t *send_flag,
-                                       volatile uint64_t *recv_flag,
-                                       void *remote_recv_flag_addr,
-                                       uint32_t iters) {
+                                       PingPongBuf *send_buf,
+                                       volatile PingPongBuf *recv_buf,
+                                       void *remote_recv_addr,
+                                       uint32_t pp_size,
+                                       uint32_t iters,
+                                       uint32_t *errors) {
   if (threadIdx.x != 0) return;
 
+  *errors = 0;
+
   for (uint32_t i = 0; i < iters; i++) {
-    uint64_t expected = i + 1;
+    uint32_t iter = i + 1;
 
-    while (*recv_flag != expected) {
+    while (recv_buf->seq != iter)
       __builtin_amdgcn_s_sleep(1);
-    }
 
-    *send_flag = expected;
-    __threadfence_system();
+    if (!pp_verify(recv_buf, pp_size, iter))
+      (*errors)++;
 
-    qp->put_nbi_single(remote_recv_flag_addr, (void *)send_flag,
-                        sizeof(uint64_t), true);
+    pp_fill(send_buf, pp_size, iter);
+
+    qp->put_nbi_single(remote_recv_addr, send_buf, pp_size, true);
     qp->quiet_single();
   }
 }
@@ -228,8 +264,13 @@ __global__ void pingpong_server_kernel(QueuePair *qp,
 static void print_usage(const char *prog) {
   fprintf(stderr,
     "Usage:\n"
-    "  %s --server [--device DEV] [--gid-index N]\n"
-    "  %s --client --server-host HOST [--device DEV] [--gid-index N]\n",
+    "  %s --server [options]\n"
+    "  %s --client --server-host HOST [options]\n"
+    "\nOptions:\n"
+    "  --device DEV          RDMA device name (default: auto-detect)\n"
+    "  --gid-index N         GID index (default: 3, RoCEv2 IPv4-mapped)\n"
+    "  --pingpong-size N     Ping-pong payload in bytes (default: 64)\n"
+    "  --pingpong-iters N    Ping-pong iterations (default: 100)\n",
     prog, prog);
 }
 
@@ -239,6 +280,8 @@ int main(int argc, char **argv) {
   const char *server_host = nullptr;
   const char *device_name = nullptr;
   int gid_index = 3;
+  uint32_t pp_size = 64;
+  uint32_t pp_iters = 100;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--server") == 0) is_server = true;
@@ -246,8 +289,12 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[i], "--server-host") == 0 && i + 1 < argc) server_host = argv[++i];
     else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) device_name = argv[++i];
     else if (strcmp(argv[i], "--gid-index") == 0 && i + 1 < argc) gid_index = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--pingpong-size") == 0 && i + 1 < argc) pp_size = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--pingpong-iters") == 0 && i + 1 < argc) pp_iters = atoi(argv[++i]);
     else { print_usage(argv[0]); return 1; }
   }
+
+  if (pp_size < 8) { fprintf(stderr, "Pingpong size must be >= 8 bytes\n"); return 1; }
 
   if (!is_server && !is_client) { print_usage(argv[0]); return 1; }
   if (is_client && !server_host) { fprintf(stderr, "Client needs --server-host\n"); return 1; }
@@ -277,11 +324,11 @@ int main(int argc, char **argv) {
   printf("[%s] Backend initialized.\n", role);
 
   // --- Allocate registered region ---
-  // Layout: [data (WRITE_SIZE) | send_flag (8) | recv_flag (8) | padding]
+  // Layout: [data (WRITE_SIZE) | pp_send (pp_size) | pp_recv (pp_size) | pad]
   // Uses hipHostMallocCoherent so GPU sees RDMA writes from remote NIC.
-  static constexpr size_t FLAG_OFFSET_SEND = WRITE_SIZE;
-  static constexpr size_t FLAG_OFFSET_RECV = WRITE_SIZE + sizeof(uint64_t);
-  size_t total_reg_size = WRITE_SIZE + 4096;
+  size_t pp_send_offset = WRITE_SIZE;
+  size_t pp_recv_offset = WRITE_SIZE + pp_size;
+  size_t total_reg_size = WRITE_SIZE + pp_size * 2 + 4096;
   void *reg_buf = nullptr;
   herr = hipHostMalloc(&reg_buf, total_reg_size,
                        hipHostMallocMapped | hipHostMallocCoherent);
@@ -293,18 +340,16 @@ int main(int argc, char **argv) {
   memset(reg_buf, 0, total_reg_size);
 
   uint8_t *data_region = static_cast<uint8_t *>(reg_buf);
-  volatile uint64_t *send_flag =
-    reinterpret_cast<volatile uint64_t *>(data_region + FLAG_OFFSET_SEND);
-  volatile uint64_t *recv_flag =
-    reinterpret_cast<volatile uint64_t *>(data_region + FLAG_OFFSET_RECV);
+  uint8_t *pp_send_buf = data_region + pp_send_offset;
+  uint8_t *pp_recv_buf = data_region + pp_recv_offset;
 
   if (is_client)
     memset(data_region, DATA_PATTERN, WRITE_SIZE);
   else
     memset(data_region, 0, WRITE_SIZE);
 
-  *send_flag = 0;
-  *recv_flag = 0;
+  memset(pp_send_buf, 0, pp_size);
+  memset(pp_recv_buf, 0, pp_size);
 
   ret = backend.register_data_buffer(reg_buf, total_reg_size);
   if (ret != 0) { fprintf(stderr, "register_data_buffer failed.\n"); return 1; }
@@ -400,29 +445,35 @@ int main(int argc, char **argv) {
   tcp_sync(tcp_fd);
 
   // ============================================================
-  // Test 2: Ping-pong latency
+  // Test 2: Ping-pong with LFSR data verification
   // ============================================================
-  printf("\n--- Test 2: Ping-Pong Latency (%d iters) ---\n", PINGPONG_ITERS);
+  printf("\n--- Test 2: Ping-Pong LFSR (%u iters, %u bytes) ---\n",
+         pp_iters, pp_size);
 
-  *send_flag = 0;
-  *recv_flag = 0;
+  memset(pp_send_buf, 0, pp_size);
+  memset(pp_recv_buf, 0, pp_size);
 
-  // Remote recv_flag address: remote's buffer + FLAG_OFFSET_RECV
-  void *remote_recv_flag_addr =
-    reinterpret_cast<void *>(remote_msg.remote_addr + FLAG_OFFSET_RECV);
+  void *remote_recv_addr =
+    reinterpret_cast<void *>(remote_msg.remote_addr + pp_recv_offset);
+
+  // Allocate device-side error counter and elapsed timer
+  uint32_t *d_errors = nullptr;
+  unsigned long long *d_elapsed = nullptr;
+  (void)hipMalloc(&d_errors, sizeof(uint32_t));
+  (void)hipMalloc(&d_elapsed, sizeof(unsigned long long));
+  uint32_t h_errors = 0;
+  unsigned long long h_elapsed = 0;
+  (void)hipMemcpy(d_errors, &h_errors, sizeof(h_errors), hipMemcpyHostToDevice);
+  (void)hipMemcpy(d_elapsed, &h_elapsed, sizeof(h_elapsed), hipMemcpyHostToDevice);
 
   tcp_sync(tcp_fd);
 
   if (is_client) {
-    unsigned long long *d_elapsed = nullptr;
-    (void)hipMalloc(&d_elapsed, sizeof(unsigned long long));
-    unsigned long long h_elapsed = 0;
-    (void)hipMemcpy(d_elapsed, &h_elapsed, sizeof(h_elapsed),
-                    hipMemcpyHostToDevice);
-
     hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0, 0,
-                       gpu_qp, send_flag, recv_flag,
-                       remote_recv_flag_addr, PINGPONG_ITERS, d_elapsed);
+                       gpu_qp, reinterpret_cast<PingPongBuf *>(pp_send_buf),
+                       reinterpret_cast<volatile PingPongBuf *>(pp_recv_buf),
+                       remote_recv_addr, pp_size, pp_iters,
+                       d_errors, d_elapsed);
     herr = hipDeviceSynchronize();
     if (herr != hipSuccess) {
       fprintf(stderr, "Pingpong client kernel failed: %s\n",
@@ -431,23 +482,32 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    (void)hipMemcpy(&h_elapsed, d_elapsed, sizeof(h_elapsed),
-                    hipMemcpyDeviceToHost);
-    (void)hipFree(d_elapsed);
+    (void)hipMemcpy(&h_errors, d_errors, sizeof(h_errors), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(&h_elapsed, d_elapsed, sizeof(h_elapsed), hipMemcpyDeviceToHost);
 
     int wallClkRate;
     (void)hipDeviceGetAttribute(&wallClkRate,
                                 hipDeviceAttributeWallClockRate, 0);
     double freq_khz = static_cast<double>(wallClkRate);
     double total_us = (static_cast<double>(h_elapsed) / freq_khz) * 1000.0;
-    double per_iter_us = total_us / PINGPONG_ITERS;
+    double per_iter_us = total_us / pp_iters;
 
-    printf("[CLIENT] %d round-trips in %.1f us = %.2f us/iter\n",
-           PINGPONG_ITERS, total_us, per_iter_us);
+    printf("[CLIENT] %u round-trips, %u bytes: %.1f us total = %.2f us/iter\n",
+           pp_iters, pp_size, total_us, per_iter_us);
+    if (h_errors > 0) {
+      fprintf(stderr, "[CLIENT] FAILED: %u LFSR verification errors\n", h_errors);
+      (void)hipFree(d_errors);
+      (void)hipFree(d_elapsed);
+      close(tcp_fd);
+      return 1;
+    }
+    printf("[CLIENT] LFSR verification: all %u iterations correct.\n", pp_iters);
   } else {
     hipLaunchKernelGGL(pingpong_server_kernel, dim3(1), dim3(1), 0, 0,
-                       gpu_qp, send_flag, recv_flag,
-                       remote_recv_flag_addr, PINGPONG_ITERS);
+                       gpu_qp, reinterpret_cast<PingPongBuf *>(pp_send_buf),
+                       reinterpret_cast<volatile PingPongBuf *>(pp_recv_buf),
+                       remote_recv_addr, pp_size, pp_iters,
+                       d_errors);
     herr = hipDeviceSynchronize();
     if (herr != hipSuccess) {
       fprintf(stderr, "Pingpong server kernel failed: %s\n",
@@ -455,8 +515,20 @@ int main(int argc, char **argv) {
       close(tcp_fd);
       return 1;
     }
-    printf("[SERVER] Ping-pong complete.\n");
+
+    (void)hipMemcpy(&h_errors, d_errors, sizeof(h_errors), hipMemcpyDeviceToHost);
+    if (h_errors > 0) {
+      fprintf(stderr, "[SERVER] FAILED: %u LFSR verification errors\n", h_errors);
+      (void)hipFree(d_errors);
+      (void)hipFree(d_elapsed);
+      close(tcp_fd);
+      return 1;
+    }
+    printf("[SERVER] Ping-pong complete, LFSR verified %u iterations.\n", pp_iters);
   }
+
+  (void)hipFree(d_errors);
+  (void)hipFree(d_elapsed);
 
   tcp_sync(tcp_fd);
 
