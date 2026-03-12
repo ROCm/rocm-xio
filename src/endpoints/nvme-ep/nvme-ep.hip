@@ -1148,33 +1148,26 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
   int ret = 0;
   struct nvme_passthru_cmd cmd;
   struct nvme_id_ns* id_ns = nullptr;
-  uint8_t flbas = 0;
-  uint8_t lba_format_idx = 0;
-  uint8_t* lbaf_ptr = nullptr;
-  uint8_t lbads = 0;
-  uint16_t status = 0;
-  uint8_t* response_base = nullptr;
 
   if (!nvme_device || !lba_size) {
     return -EINVAL;
   }
 
-  // Allocate buffer for Identify Namespace response
   id_ns = static_cast<struct nvme_id_ns*>(malloc(nvme_ep::nvmeAdminRespSize));
   if (!id_ns) {
     return -ENOMEM;
   }
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
-  // Open NVMe device with retry (device may be temporarily busy)
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
   }
 
-  // Send Identify Namespace command (with retry for transient
-  // controller errors, e.g. after VRAM-backed queue teardown)
+  // Send Identify Namespace with retry for both status
+  // errors and invalid response data (e.g. lbads=0 from
+  // transient controller state after VRAM queue teardown)
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -1182,7 +1175,7 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
     cmd.addr = reinterpret_cast<uint64_t>(id_ns);
     cmd.data_len = nvme_ep::nvmeAdminRespSize;
-    cmd.timeout_ms = 0; // Use default timeout
+    cmd.timeout_ms = 0;
 
     ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
     if (ret < 0) {
@@ -1191,20 +1184,19 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
       goto cleanup;
     }
 
-    if (!(cmd.result & 0xFFFE)) {
-      break; // Success
-    }
-
-    status = (cmd.result >> 1) & 0xFF;
-    if (attempt < 4) {
-      int delay_ms = 100 * (1 << attempt);
-      fprintf(stdout,
-              "Identify Namespace returned status 0x%02x, "
-              "retrying in %d ms (attempt %d/5)...\n",
-              status, delay_ms, attempt + 1);
-      usleep(delay_ms * 1000);
-      memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
-    } else {
+    if (cmd.result & 0xFFFE) {
+      uint16_t status = (cmd.result >> 1) & 0xFF;
+      if (attempt < 4) {
+        int delay_ms = 100 * (1 << attempt);
+        fprintf(stdout,
+                "Identify Namespace returned status "
+                "0x%02x, retrying in %d ms "
+                "(attempt %d/5)...\n",
+                status, delay_ms, attempt + 1);
+        usleep(delay_ms * 1000);
+        memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+        continue;
+      }
       fprintf(stdout,
               "Identify Namespace failed with status "
               "0x%02x after 5 attempts\n",
@@ -1212,30 +1204,64 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
       ret = -EIO;
       goto cleanup;
     }
-  }
 
-  // Extract FLBAS (Formatted LBA and Metadata Size)
-  flbas = id_ns->flbas;
-  lba_format_idx = flbas & 0x0F;
+    // Command succeeded -- validate response data
+    uint8_t flbas = id_ns->flbas;
+    uint8_t lba_format_idx = flbas & 0x0F;
 
-  // Validate LBA format index
-  if (lba_format_idx > id_ns->nlbaf) {
-    fprintf(stdout, "Invalid LBA format index %u (max supported: %u)\n",
-            lba_format_idx, id_ns->nlbaf);
-    ret = -EINVAL;
+    if (lba_format_idx > id_ns->nlbaf) {
+      if (attempt < 4) {
+        int delay_ms = 100 * (1 << attempt);
+        fprintf(stdout,
+                "Invalid LBA format index %u "
+                "(max %u), retrying in %d ms "
+                "(attempt %d/5)...\n",
+                lba_format_idx, id_ns->nlbaf, delay_ms, attempt + 1);
+        usleep(delay_ms * 1000);
+        memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+        continue;
+      }
+      fprintf(stdout,
+              "Invalid LBA format index %u "
+              "(max supported: %u) after "
+              "5 attempts\n",
+              lba_format_idx, id_ns->nlbaf);
+      ret = -EINVAL;
+      goto cleanup;
+    }
+
+    uint8_t lbads = id_ns->lbaf[lba_format_idx].ds;
+
+    // NVMe spec mandates lbads >= 9 (512-byte minimum)
+    if (lbads < 9) {
+      if (attempt < 4) {
+        int delay_ms = 100 * (1 << attempt);
+        fprintf(stdout,
+                "Identify Namespace returned "
+                "lbads=%u (expected >= 9), "
+                "retrying in %d ms "
+                "(attempt %d/5)...\n",
+                lbads, delay_ms, attempt + 1);
+        usleep(delay_ms * 1000);
+        memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+        continue;
+      }
+      fprintf(stdout,
+              "Identify Namespace returned invalid "
+              "lbads=%u after 5 attempts\n",
+              lbads);
+      ret = -EIO;
+      goto cleanup;
+    }
+
+    *lba_size = 1U << lbads;
+    fprintf(stdout, "Selected LBA size: %u bytes (lbads=%u)\n", *lba_size,
+            lbads);
+    ret = 0;
     goto cleanup;
   }
 
-  // Extract LBADS (LBA Data Size) from LBA Format structure
-  response_base = reinterpret_cast<uint8_t*>(id_ns);
-  lbaf_ptr = response_base + 128 + (lba_format_idx * 4);
-  lbads = lbaf_ptr[2] & 0xFF;
-
-  // LBA size = 2^LBADS bytes
-  *lba_size = 1U << lbads;
-  fprintf(stdout, "Selected LBA size: %u bytes (lbads=%u)\n", *lba_size, lbads);
-
-  ret = 0;
+  ret = -EIO;
 
 cleanup:
   if (nvme_fd >= 0) {
@@ -1253,28 +1279,26 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
   int ret = 0;
   struct nvme_passthru_cmd cmd;
   struct nvme_id_ns* id_ns = nullptr;
-  uint16_t status = 0;
 
   if (!nvme_device || !capacity_lbas) {
     return -EINVAL;
   }
 
-  // Allocate buffer for Identify Namespace response
   id_ns = static_cast<struct nvme_id_ns*>(malloc(nvme_ep::nvmeAdminRespSize));
   if (!id_ns) {
     return -ENOMEM;
   }
   memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
-  // Open NVMe device with retry (device may be temporarily busy)
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
   }
 
-  // Send Identify Namespace command (with retry for transient
-  // controller errors, e.g. after VRAM-backed queue teardown)
+  // Send Identify Namespace with retry for both status
+  // errors and invalid response data (nsze=0 from
+  // transient controller state after VRAM queue teardown)
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -1282,7 +1306,7 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     cmd.cdw10 = 0; // CNS=0 (Identify Namespace)
     cmd.addr = reinterpret_cast<uint64_t>(id_ns);
     cmd.data_len = nvme_ep::nvmeAdminRespSize;
-    cmd.timeout_ms = 0; // Use default timeout
+    cmd.timeout_ms = 0;
 
     ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
     if (ret < 0) {
@@ -1291,20 +1315,19 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
       goto cleanup;
     }
 
-    if (!(cmd.result & 0xFFFE)) {
-      break; // Success
-    }
-
-    status = (cmd.result >> 1) & 0xFF;
-    if (attempt < 4) {
-      int delay_ms = 100 * (1 << attempt);
-      fprintf(stdout,
-              "Identify Namespace returned status 0x%02x, "
-              "retrying in %d ms (attempt %d/5)...\n",
-              status, delay_ms, attempt + 1);
-      usleep(delay_ms * 1000);
-      memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
-    } else {
+    if (cmd.result & 0xFFFE) {
+      uint16_t status = (cmd.result >> 1) & 0xFF;
+      if (attempt < 4) {
+        int delay_ms = 100 * (1 << attempt);
+        fprintf(stdout,
+                "Identify Namespace returned status "
+                "0x%02x, retrying in %d ms "
+                "(attempt %d/5)...\n",
+                status, delay_ms, attempt + 1);
+        usleep(delay_ms * 1000);
+        memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+        continue;
+      }
       fprintf(stdout,
               "Identify Namespace failed with status "
               "0x%02x after 5 attempts\n",
@@ -1312,14 +1335,34 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
       ret = -EIO;
       goto cleanup;
     }
+
+    // Command succeeded -- validate response data
+    if (id_ns->nsze == 0) {
+      if (attempt < 4) {
+        int delay_ms = 100 * (1 << attempt);
+        fprintf(stdout,
+                "Identify Namespace returned "
+                "nsze=0, retrying in %d ms "
+                "(attempt %d/5)...\n",
+                delay_ms, attempt + 1);
+        usleep(delay_ms * 1000);
+        memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
+        continue;
+      }
+      fprintf(stdout, "Identify Namespace returned "
+                      "nsze=0 after 5 attempts\n");
+      ret = -EIO;
+      goto cleanup;
+    }
+
+    *capacity_lbas = id_ns->nsze;
+    fprintf(stdout, "Namespace capacity: %llu LBAs\n",
+            (unsigned long long)*capacity_lbas);
+    ret = 0;
+    goto cleanup;
   }
 
-  // Extract NSZE (Namespace Size) - capacity in LBAs
-  *capacity_lbas = id_ns->nsze;
-  fprintf(stdout, "Namespace capacity: %llu LBAs\n",
-          (unsigned long long)*capacity_lbas);
-
-  ret = 0;
+  ret = -EIO;
 
 cleanup:
   if (nvme_fd >= 0) {
