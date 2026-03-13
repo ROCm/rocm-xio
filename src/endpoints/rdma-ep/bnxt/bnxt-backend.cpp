@@ -141,8 +141,9 @@ static void create_one_cq(
   hcq->depth    = static_cast<uint32_t>(ncqe);
   hcq->length   = hcq->depth * hcq->cqe_size;
 
+  void *buf_ptr = nullptr;
   hipError_t herr = hipExtMallocWithFlags(
-      &hcq->buf, hcq->length,
+      &buf_ptr, hcq->length,
       hipDeviceMallocUncached);
   if (herr != hipSuccess) {
     fprintf(stderr,
@@ -152,13 +153,17 @@ static void create_one_cq(
             label, hipGetErrorString(herr));
     return;
   }
+  hcq->buf = buf_ptr;
   (void)hipMemset(hcq->buf, 0, hcq->length);
 
   if (dmabuf_enabled) {
+    int fd = -1;
+    uint64_t offset = 0;
     hsa_amd_portable_export_dmabuf(
         hcq->buf, hcq->length,
-        &hcq->dmabuf_fd,
-        &hcq->dmabuf_offset);
+        &fd, &offset);
+    hcq->dmabuf_fd = fd;
+    hcq->dmabuf_offset = offset;
   }
 
   struct bnxt_re_dv_umem_reg_attr ua{};
@@ -231,7 +236,6 @@ void Backend::bnxt_create_cqs(int cqe) {
 
 void Backend::bnxt_create_qps(int sq_length) {
   struct bnxt_re_dv_umem_reg_attr umem_attr;
-  int dmabuf = ibv.is_dmabuf_supported();
 
   bnxt_qp_ = static_cast<bnxt_host_qp *>(
       calloc(1, sizeof(bnxt_host_qp)));

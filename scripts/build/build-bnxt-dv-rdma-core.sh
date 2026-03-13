@@ -243,68 +243,105 @@ PATCH_EOF
     echo "  patched: ${map_file}"
   fi
 
-  # 6. QP creation: use traditional qpsva/qprva
-  #    fields instead of ioctl buffer attributes.
-  #    The kernel's uverbs QP creation does not
-  #    support the CREATE_QP_CMD_FLAGS_WITH_*
-  #    ioctl attrs yet.
-  if grep -q 'CREATE_QP_CMD_FLAGS_WITH_SQ_MEM' \
+  # 6. QP creation: rewrite bnxt_re_dv_create_qp_cmd
+  #    to use the write-based ibv_cmd_create_qp_ex2
+  #    with qpsva/qprva instead of the ioctl-based
+  #    ibv_cmd_create_qp_ex3 with buffer attributes.
+  if grep -q 'ibv_cmd_create_qp_ex3' \
       "$dv_file"; then
-    echo "Patching create_qp_cmd for VA udata..."
-    perl -i -0pe '
-      s{/\* Setup SQ buffer attributes \*/.*?
-\treq\.rq_wqe_sz = dv_qp_attr->rq_wqe_sz;\n\t\}}{/* Pass SQ/RQ buffer VAs through the traditional
-\t * udata path (qpsva/qprva).  The ioctl buffer
-\t * attributes (CREATE_QP_CMD_FLAGS_WITH_*) are
-\t * not yet supported by all kernels. */
+    echo "Rewriting create_qp_cmd for write path..."
+    python3 - "$dv_file" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+m = re.search(
+    r'(static\s+int\s*\n'
+    r'bnxt_re_dv_create_qp_cmd\([^)]*\)\s*\{)'
+    r'.*?'
+    r'(\nstruct ibv_qp \*bnxt_re_dv_create_qp)',
+    src, re.DOTALL)
+if not m:
+    print("  WARN: function not found",
+          file=sys.stderr)
+    sys.exit(0)
+
+new_fn = m.group(1) + """
+\tstruct bnxt_re_context *cntx = to_bnxt_re_context(ibvctx);
+\tstruct bnxt_re_dv_db_region_attr *db_attr = NULL;
+\tstruct bnxt_re_dv_umem *sq_umem = NULL;
+\tstruct bnxt_re_dv_umem *rq_umem = NULL;
+\tstruct ubnxt_re_qp req = {};
+\tuint64_t offset;
+\tuint32_t size;
+\tint ret;
+
+\treq.qp_handle = dv_qp_attr->qp_handle;
+
+\t/* SQ buffer VA through udata (qpsva). */
 \tsq_umem = dv_qp_attr->sq_umem_handle;
 \toffset = dv_qp_attr->sq_umem_offset;
 \tsize = dv_qp_attr->sq_len;
-\tif (!bnxt_re_dv_is_valid_umem(cntx->rdev, sq_umem, offset, size)) \{
+\tif (!bnxt_re_dv_is_valid_umem(cntx->rdev, sq_umem, offset, size)) {
 \t\tfprintf(stderr,
 \t\t\t"Invalid sq_umem: %" PRIuPTR " offset: %" PRIx64 " size: 0x%x\\n",
 \t\t\t(uintptr_t)sq_umem, offset, size);
 \t\treturn -EINVAL;
-\t\}
+\t}
 \treq.qpsva = (uintptr_t)(sq_umem->addr) + offset;
 \treq.sq_slots = dv_qp_attr->sq_slots;
 \treq.sq_wqe_sz = dv_qp_attr->sq_wqe_sz;
 \treq.sq_psn_sz = dv_qp_attr->sq_psn_sz;
 \treq.sq_npsn = dv_qp_attr->sq_npsn;
 
-\tif (!dv_qp_attr->srq) \{
+\t/* RQ buffer VA through udata (qprva).
+\t * Skip when rq_slots==0 (no RQ needed) to avoid
+\t * kernel ib_umem_get(size=0) returning -EINVAL.
+\t */
+\tif (!dv_qp_attr->srq && dv_qp_attr->rq_slots > 0) {
 \t\trq_umem = dv_qp_attr->rq_umem_handle;
 \t\toffset = dv_qp_attr->rq_umem_offset;
 \t\tsize = dv_qp_attr->rq_len;
-\t\tif (!bnxt_re_dv_is_valid_umem(cntx->rdev, rq_umem, offset, size)) \{
+\t\tif (!bnxt_re_dv_is_valid_umem(cntx->rdev, rq_umem, offset, size)) {
 \t\t\tfprintf(stderr,
 \t\t\t\t"Invalid rq_umem: %" PRIuPTR "  offset: %" PRIx64 " size: 0x%x\\n",
 \t\t\t\t(uintptr_t)rq_umem, offset, size);
 \t\t\treturn -EINVAL;
-\t\t\}
+\t\t}
 \t\treq.qprva = (uintptr_t)(rq_umem->addr) + offset;
 \t\treq.rq_slots = dv_qp_attr->rq_slots;
 \t\treq.rq_wqe_sz = dv_qp_attr->rq_wqe_sz;
-\t\}}s' "$dv_file"
-    echo "  patched: ${dv_file}"
-  fi
+\t}
 
-  # 7. QP creation: skip DBR handle ioctl attr.
-  #    The bnxt_re DKMS module does not define
-  #    a QP create ioctl method that accepts it.
-  if grep -q 'fill_attr_in_obj(driver_attrs' \
-      "$dv_file"; then
-    echo "Skipping DBR ioctl attr in create_qp..."
-    sed -i \
-      's|fill_attr_in_obj(driver_attrs, BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE,|/* DBR ioctl attr skipped; kernel QP create does not define it. */\n\t\t/* fill_attr_in_obj(driver_attrs, BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE,|' \
-      "$dv_file"
-    sed -i \
-      's|db_attr->handle);|db_attr->handle); */|' \
-      "$dv_file"
-    sed -i \
-      's|sizeof(\*resp), cmd_flags, driver_attrs);|sizeof(*resp), cmd_flags, NULL);|' \
-      "$dv_file"
-    echo "  patched: ${dv_file}"
+\treq.comp_mask = BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE;
+\tif (dv_qp_attr->dbr_handle) {
+\t\tdb_attr = dv_qp_attr->dbr_handle;
+\t\tqp->dv_dpi.dbpage = db_attr->dbr;
+\t\tqp->dv_dpi.dpindx = db_attr->dpi;
+\t\tqp->udpi = &qp->dv_dpi;
+\t} else {
+\t\tqp->udpi = &cntx->udpi;
+\t}
+\tret = ibv_cmd_create_qp_ex2(ibvctx, &qp->vqp, attr_ex,
+\t\t\t\t    &req.ibv_cmd, sizeof(req),
+\t\t\t\t    &resp->ibv_resp, sizeof(*resp));
+\tif (ret) {
+\t\tfprintf(stderr,
+\t\t\t"%s: ibv_cmd_create_qp_ex2() failed: %d\\n",
+\t\t\t__func__, ret);
+\t\treturn ret;
+\t}
+\treturn 0;
+}
+
+""" + m.group(2)
+
+out = src[:m.start()] + new_fn + src[m.end():]
+with open(path, 'w') as f:
+    f.write(out)
+print("  patched: " + path)
+PYEOF
   fi
 }
 
@@ -333,6 +370,7 @@ mkdir -p "${BUILD_DIR}"
 cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
   -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DIOCTL_MODE=both \
   -DNO_PYVERBS=1 \
   -DNO_MAN_PAGES=1 \
   -DENABLE_STATIC=0

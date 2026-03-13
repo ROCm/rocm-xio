@@ -1,6 +1,5 @@
 # Build artifacts
-build/
-build-*/
+build*/
 # Exception: scripts/build/ contains build scripts that should be tracked
 !scripts/build/
 bin/

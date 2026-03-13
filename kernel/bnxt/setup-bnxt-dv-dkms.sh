@@ -1,18 +1,19 @@
 #!/bin/bash
-# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc.
+# All rights reserved.
 #
 # SPDX-License-Identifier: MIT
 #
 # Setup DKMS tree for bnxt_re with uapi extensions
 # (Direct Verbs v11 patches).
 #
-# 1. Downloads the bnxt_re driver source from kernel.org
-#    at a tag matching the running kernel (via curl).
-# 2. Applies the vendored v11 uapi-extension patches
-#    (with fuzz for offset drift).
-# 4. Copies the patched source + our Makefile/dkms.conf
+# 1. Downloads the bnxt_re driver source from
+#    kernel.org (cached across runs).
+# 2. Extracts a fresh copy and applies the vendored
+#    v11 uapi-extension patches unconditionally.
+# 3. Copies the patched source + our Makefile/dkms.conf
 #    into /usr/src/bnxt-re-dv-<ver>/.
-# 5. Registers and builds with DKMS.
+# 4. Registers and builds with DKMS.
 #
 # Usage:
 #   setup-bnxt-dv-dkms.sh [--kernel-tag vX.Y] \
@@ -23,8 +24,9 @@
 #                     (default: auto-detect from uname)
 #   --work-dir DIR    Working directory for downloads
 #                     (default: /tmp/bnxt-re-dv-build)
-#   --version VER     DKMS package version (default: 0.1)
-#   --build-only      Build but do not install the module
+#   --version VER     DKMS package version
+#                     (default: 0.1)
+#   --build-only      Build but do not install
 #   --uninstall       Remove the DKMS module and exit
 
 set -euo pipefail
@@ -43,11 +45,9 @@ GS_REPO="${GS_BASE}/pub/scm/linux/kernel/git"
 GS_REPO="${GS_REPO}/torvalds/linux/+archive"
 
 # git.kernel.org provides raw files
-GK_BASE="https://git.kernel.org/pub/scm/linux/kernel/git"
-GK_REPO="${GK_BASE}/torvalds/linux.git/plain"
+GK_BASE="https://git.kernel.org/pub/scm/linux/kernel"
+GK_REPO="${GK_BASE}/git/torvalds/linux.git/plain"
 
-# Vendored v11 patch series (Feb 10, 2026)
-# "RDMA/bnxt_re: Support uapi extensions"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 
 # Kernel tree paths
@@ -171,68 +171,84 @@ if ! $BUILD_ONLY && \
 fi
 
 # -----------------------------------------------------------
-# Download kernel source files (curl, no git clone)
+# Download kernel source (cached in download/)
 # -----------------------------------------------------------
 
+DL_DIR="${WORK_DIR}/download"
 SRC_DIR="${WORK_DIR}/src"
 DRV_DIR="${SRC_DIR}/${DRIVER_PATH}"
 UAPI_DIR="${SRC_DIR}/$(dirname "${UAPI_FILE}")"
 BNXT_HDR_DIR="${SRC_DIR}/include/bnxt"
 
 download_source() {
-  if [ -f "${DRV_DIR}/main.c" ]; then
-    echo "Source already downloaded, reusing."
+  local drv_tgz="${DL_DIR}/bnxt_re.tar.gz"
+  local uapi_dl="${DL_DIR}/bnxt_re-abi.h"
+  local eth_tgz="${DL_DIR}/bnxt_eth.tar.gz"
+
+  mkdir -p "${DL_DIR}"
+
+  if [ -f "${drv_tgz}" ]; then
+    echo "Using cached downloads."
     return 0
   fi
 
-  mkdir -p "${DRV_DIR}" "${UAPI_DIR}" "${BNXT_HDR_DIR}"
-
-  # 1. bnxt_re driver directory (tarball)
-  local drv_tgz="${GS_REPO}/${KERNEL_TAG}"
-  drv_tgz="${drv_tgz}/${DRIVER_PATH}.tar.gz"
-
-  echo "Downloading bnxt_re source (${KERNEL_TAG})..."
-  if ! curl -sL -f "${drv_tgz}" \
-      | tar xz -C "${DRV_DIR}"; then
+  echo "Downloading bnxt_re source" \
+    "(${KERNEL_TAG})..."
+  local url="${GS_REPO}/${KERNEL_TAG}"
+  url="${url}/${DRIVER_PATH}.tar.gz"
+  if ! curl -sL -f "${url}" -o "${drv_tgz}"; then
     echo "ERROR: Failed to download bnxt_re source."
-    echo "  URL: ${drv_tgz}"
+    echo "  URL: ${url}"
     echo "  Tag ${KERNEL_TAG} may not exist."
+    rm -f "${drv_tgz}"
     exit 1
   fi
-
-  # 2. UAPI header (single file)
-  local uapi_url
-  uapi_url="${GK_REPO}/${UAPI_FILE}?h=${KERNEL_TAG}"
 
   echo "Downloading bnxt_re-abi.h..."
+  local uapi_url
+  uapi_url="${GK_REPO}/${UAPI_FILE}?h=${KERNEL_TAG}"
   if ! curl -sL -f "${uapi_url}" \
-      -o "${SRC_DIR}/${UAPI_FILE}"; then
+      -o "${uapi_dl}"; then
     echo "ERROR: Failed to download bnxt_re-abi.h"
+    rm -f "${drv_tgz}"
     exit 1
   fi
 
-  # 3. bnxt ethernet headers (tarball, .h only)
-  local eth_tgz="${GS_REPO}/${KERNEL_TAG}"
-  eth_tgz="${eth_tgz}/${BNXT_ETH_PATH}.tar.gz"
-
   echo "Downloading bnxt ethernet headers..."
-  if ! curl -sL -f "${eth_tgz}" \
-      | tar xz -C "${BNXT_HDR_DIR}" \
-        --wildcards '*.h' 2>/dev/null; then
+  url="${GS_REPO}/${KERNEL_TAG}"
+  url="${url}/${BNXT_ETH_PATH}.tar.gz"
+  if ! curl -sL -f "${url}" -o "${eth_tgz}"; then
     echo "WARN: Could not download bnxt ethernet" \
       "headers. Build may fail."
   fi
 
-  # Verify
+  echo "Download complete."
+}
+
+extract_fresh() {
+  echo "Extracting fresh source tree..."
+  rm -rf "${SRC_DIR}" 2>/dev/null \
+    || sudo rm -rf "${SRC_DIR}"
+  mkdir -p "${DRV_DIR}" "${UAPI_DIR}" "${BNXT_HDR_DIR}"
+
+  tar xzf "${DL_DIR}/bnxt_re.tar.gz" -C "${DRV_DIR}"
+  cp "${DL_DIR}/bnxt_re-abi.h" \
+    "${SRC_DIR}/${UAPI_FILE}"
+
+  if [ -f "${DL_DIR}/bnxt_eth.tar.gz" ]; then
+    tar xzf "${DL_DIR}/bnxt_eth.tar.gz" \
+      -C "${BNXT_HDR_DIR}" \
+      --wildcards '*.h' 2>/dev/null || true
+  fi
+
   if [ ! -f "${DRV_DIR}/main.c" ]; then
     echo "ERROR: bnxt_re source incomplete."
     exit 1
   fi
-
-  echo "Source download complete."
 }
 
 download_source
+extract_fresh
 
 # -----------------------------------------------------------
 # Apply vendored patches
@@ -241,33 +257,15 @@ download_source
 apply_patches() {
   cd "${SRC_DIR}"
 
-  # Initialize git repo if not already done
-  if [ ! -d ".git" ]; then
-    git init -q
-    git add -A
-    git commit -q --no-gpg-sign \
-      -m "bnxt_re ${KERNEL_TAG} baseline"
-  fi
-
-  # Skip if already applied
-  if git log --oneline | grep -q "uapi"; then
-    echo "Patches already applied, skipping."
-    return 0
-  fi
-
   echo "Applying v11 uapi extension patches..."
-
   local applied=0
   local failed=0
   for p in "${PATCHES_DIR}"/*.patch; do
     local name
     name=$(basename "${p}")
     echo "  ${name}..."
-    git mailinfo /tmp/_msg.txt /tmp/_patch.txt \
-      < "${p}" > /tmp/_info.txt 2>/dev/null
-
     if patch -p1 --fuzz=3 --force \
-        < /tmp/_patch.txt >/dev/null 2>&1; then
+        < "${p}" >/dev/null 2>&1; then
       applied=$((applied + 1))
     else
       applied=$((applied + 1))
@@ -275,7 +273,7 @@ apply_patches() {
     fi
   done
 
-  # Handle any remaining reject files
+  # Handle reject files from context drift
   local rej_count
   rej_count=$(find . -name '*.rej' | wc -l)
   if [ "${rej_count}" -gt 0 ]; then
@@ -285,12 +283,14 @@ apply_patches() {
     fixup_rejects
   fi
 
+  # Always inject DV QP handling (patch 0007's
+  # ib_verbs.c hunk is always rejected due to
+  # context drift from patches 0001-0006).
+  inject_dv_qp "${DRV_DIR}/ib_verbs.c"
+
   # Clean up reject/orig files
   find . \( -name '*.rej' -o -name '*.orig' \) \
     -delete 2>/dev/null || true
-  git add -A
-  git commit -q --no-gpg-sign \
-    -m "RDMA/bnxt_re: uapi extensions (DV v11)"
 
   echo "All patches applied (${applied} total," \
     "${failed} needed fixup)."
@@ -332,6 +332,83 @@ fixup_rejects() {
   fi
 }
 
+inject_dv_qp() {
+  local iv="$1"
+  if grep -q 'BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE' \
+      "${iv}"; then
+    return 0
+  fi
+  echo "  Injecting DV QP handling into ib_verbs.c"
+
+  python3 - "${iv}" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+DV_BLOCK = r'''
+	if (ureq->comp_mask & BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE) {
+		bytes = (int)ureq->sq_slots * (int)ureq->sq_wqe_sz;
+		if (qplib_qp->type == CMDQ_CREATE_QP_TYPE_RC)
+			bytes += (int)ureq->sq_npsn * (int)ureq->sq_psn_sz;
+		bytes = PAGE_ALIGN(bytes);
+		umem = ib_umem_get(&rdev->ibdev, ureq->qpsva,
+				   bytes, IB_ACCESS_LOCAL_WRITE);
+		if (IS_ERR(umem))
+			return PTR_ERR(umem);
+		qp->sumem = umem;
+		qplib_qp->sq.sg_info.umem = umem;
+		qplib_qp->sq.sg_info.pgsize = PAGE_SIZE;
+		qplib_qp->sq.sg_info.pgshft = PAGE_SHIFT;
+		qplib_qp->qp_handle = ureq->qp_handle;
+		/* No RQ umem: zero RQ depth so
+		 * setup_qp_hwqs skips it */
+		if (!qplib_qp->srq && !ureq->qprva) {
+			qplib_qp->rq.max_wqe = 0;
+			qplib_qp->rq.max_sw_wqe = 0;
+		}
+		if (!qplib_qp->srq && ureq->qprva) {
+			bytes = (int)ureq->rq_slots *
+				(int)ureq->rq_wqe_sz;
+			bytes = PAGE_ALIGN(bytes);
+			umem = ib_umem_get(&rdev->ibdev, ureq->qprva,
+					   bytes,
+					   IB_ACCESS_LOCAL_WRITE);
+			if (IS_ERR(umem))
+				goto rqfail;
+			qp->rumem = umem;
+			qplib_qp->rq.sg_info.umem = umem;
+			qplib_qp->rq.sg_info.pgsize = PAGE_SIZE;
+			qplib_qp->rq.sg_info.pgshft = PAGE_SHIFT;
+		}
+		qplib_qp->dpi = &cntx->dpi;
+		qplib_qp->is_user = true;
+		return 0;
+	}
+
+'''
+
+anchor = 'qplib_qp = &qp->qplib_qp;\n'
+fn_start = src.find('bnxt_re_init_user_qp')
+pos = src.find(anchor, fn_start)
+if pos < 0:
+    print("  WARN: cannot find anchor in "
+          "bnxt_re_init_user_qp", file=sys.stderr)
+    sys.exit(0)
+ins = pos + len(anchor)
+src = src[:ins] + DV_BLOCK + src[ins:]
+
+src = src.replace(
+    'struct bnxt_re_qp_req ureq;',
+    'struct bnxt_re_qp_req ureq = {};')
+
+with open(path, 'w') as f:
+    f.write(src)
+print("  DV QP handling injected.")
+PYEOF
+}
+
 apply_patches
 
 # -----------------------------------------------------------
@@ -344,24 +421,18 @@ populate_dkms() {
   sudo mkdir -p "${DKMS_SRC}/include/bnxt" \
     "${DKMS_SRC}/include/rdma"
 
-  # Driver source (.c and .h from patched tree)
   sudo cp -a "${DRV_DIR}/"*.c "${DKMS_SRC}/"
   sudo cp -a "${DRV_DIR}/"*.h "${DKMS_SRC}/"
 
-  # Patched UAPI header at include/rdma/ so that
-  # -I $(PWD)/include finds it before the kernel's
-  # stock <rdma/bnxt_re-abi.h>.
   sudo cp -a \
     "${SRC_DIR}/${UAPI_FILE}" \
     "${DKMS_SRC}/include/rdma/"
 
-  # bnxt ethernet headers
   if ls "${BNXT_HDR_DIR}/"*.h &>/dev/null; then
     sudo cp -a "${BNXT_HDR_DIR}/"*.h \
       "${DKMS_SRC}/include/bnxt/"
   fi
 
-  # Our Makefile and dkms.conf
   sudo cp "${SCRIPT_DIR}/Makefile" "${DKMS_SRC}/"
   sudo cp "${SCRIPT_DIR}/dkms.conf" "${DKMS_SRC}/"
 
@@ -377,7 +448,6 @@ populate_dkms
 build_dkms() {
   echo ""
 
-  # Remove stale registration if present
   if dkms status "${PKG_NAME}/${PKG_VERSION}" \
       2>/dev/null | grep -q .; then
     echo "Removing stale DKMS registration..."
@@ -393,7 +463,8 @@ build_dkms() {
 
   echo "Building bnxt_re.ko for ${kver}..."
   if ! sudo dkms build \
-      "${PKG_NAME}/${PKG_VERSION}" -k "${kver}"; then
+      "${PKG_NAME}/${PKG_VERSION}" -k "${kver}"
+  then
     echo ""
     echo "ERROR: DKMS build failed."
     echo "Check: /var/lib/dkms/${PKG_NAME}/" \

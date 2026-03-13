@@ -126,8 +126,9 @@ static void create_one_cq(
   hcq->depth = static_cast<uint32_t>(ncqe);
   hcq->length = hcq->depth * hcq->cqe_size;
 
+  void *buf_ptr = nullptr;
   hipError_t herr = hipExtMallocWithFlags(
-      &hcq->buf, hcq->length,
+      &buf_ptr, hcq->length,
       hipDeviceMallocUncached);
   if (herr != hipSuccess) {
     fprintf(stderr,
@@ -137,6 +138,7 @@ static void create_one_cq(
             label, hipGetErrorString(herr));
     return;
   }
+  hcq->buf = buf_ptr;
   (void)hipMemset(hcq->buf, 0, hcq->length);
 
   struct rocm_ernic_dv_umem_attr ua{};
@@ -147,10 +149,12 @@ static void create_one_cq(
 
   if (dmabuf_enabled) {
     uint64_t offset = 0;
+    int fd = -1;
     hsa_amd_portable_export_dmabuf(
         hcq->buf, hcq->length,
-        &hcq->dmabuf_fd, &offset);
-    ua.dmabuf_fd = hcq->dmabuf_fd;
+        &fd, &offset);
+    hcq->dmabuf_fd = fd;
+    ua.dmabuf_fd = fd;
     ua.addr = reinterpret_cast<void *>(
         static_cast<uintptr_t>(offset));
     ua.comp_mask =
@@ -348,8 +352,7 @@ void Backend::ernic_initialize_gpu_qp() {
   if (!host_qp_ || !ernic_qp_ || !ernic_scq_)
     return;
 
-  uint32_t scq_id =
-      ernic_dv.get_cq_id(ernic_scq_->cq);
+  (void)ernic_dv.get_cq_id(ernic_scq_->cq);
 
   memset(&host_qp_->ernic_cq_, 0,
          sizeof(ernic_device_cq));

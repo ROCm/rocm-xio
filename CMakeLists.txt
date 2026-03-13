@@ -17,8 +17,8 @@ endif()
 # Set the library version in a variable so we can use
 # it in *.in files and avoid version mismatch.
 set(ROCM_XIO_LIBRARY_MAJOR 0)
-set(ROCM_XIO_LIBRARY_MINOR 0)
-set(ROCM_XIO_LIBRARY_PATCH 1)
+set(ROCM_XIO_LIBRARY_MINOR 1)
+set(ROCM_XIO_LIBRARY_PATCH 0)
 set(ROCM_XIO_LIBRARY_VERSION
   "${ROCM_XIO_LIBRARY_MAJOR}.${ROCM_XIO_LIBRARY_MINOR}.${ROCM_XIO_LIBRARY_PATCH}"
   CACHE STRING "ROCM-XIO library version")
