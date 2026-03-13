@@ -30,6 +30,14 @@ int bnxt_dv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 } // namespace rdma_ep
 #endif
 
+#if defined(GDA_ERNIC)
+#include "rocm-ernic/ernic-provider.hpp"
+namespace rdma_ep {
+int ernic_dv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
+                        int attr_mask);
+} // namespace rdma_ep
+#endif
+
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
@@ -138,6 +146,23 @@ void Backend::open_dv_libs() {
   }
 #endif
 
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::UNKNOWN &&
+      (requested == Provider::UNKNOWN ||
+       requested == Provider::ROCM_ERNIC)) {
+    if (ernic_dv_dl_init() == 0) {
+      provider_ = Provider::ROCM_ERNIC;
+      fprintf(stderr,
+              "rdma_ep: ERNIC DV library "
+              "loaded.\n");
+    } else {
+      fprintf(stderr,
+              "rdma_ep: ERNIC DV library "
+              "not available.\n");
+    }
+  }
+#endif
+
   if (provider_ == Provider::UNKNOWN) {
     fprintf(stderr, "rdma_ep: No DV library available. "
                     "Using standard ibverbs path.\n");
@@ -227,6 +252,19 @@ void Backend::create_queues() {
   }
 #endif
 
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) {
+    ernic_create_cqs(ncqes);
+    ernic_create_qps(config_.sq_depth);
+    fprintf(stderr,
+            "rdma_ep: Created QP num=%u "
+            "via ERNIC DV, SQ depth=%d\n",
+            qp_ ? qp_->qp_num : 0,
+            config_.sq_depth);
+    return;
+  }
+#endif
+
   // Standard ibverbs path for non-BNXT providers
   cq_ = ibv.create_cq(context_, ncqes, nullptr, nullptr, 0);
   XIO_CHECK_NNULL(cq_, "ibv_create_cq");
@@ -287,6 +325,11 @@ void Backend::modify_qp_reset_to_init() {
     err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
   else
 #endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC)
+    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
+  else
+#endif
     err = ibv.modify_qp(qp_, &attr, attr_mask);
   XIO_CHECK_ZERO(err, "modify_qp (RESET->INIT)");
 }
@@ -329,6 +372,11 @@ void Backend::modify_qp_init_to_rtr(const DestInfo &remote) {
     err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
   else
 #endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC)
+    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
+  else
+#endif
     err = ibv.modify_qp(qp_, &attr, attr_mask);
   XIO_CHECK_ZERO(err, "modify_qp (INIT->RTR)");
 }
@@ -356,6 +404,11 @@ void Backend::modify_qp_rtr_to_rts() {
 #if defined(GDA_BNXT)
   if (provider_ == Provider::BNXT)
     err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
+  else
+#endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC)
+    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
   else
 #endif
     err = ibv.modify_qp(qp_, &attr, attr_mask);
@@ -566,7 +619,13 @@ void Backend::initialize_gpu_qp() {
     return;
   }
 #endif
-  // MLX5 and IONIC initialization will be added when ported
+
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) {
+    ernic_initialize_gpu_qp();
+    return;
+  }
+#endif
 }
 
 #undef XIO_CHECK_ZERO

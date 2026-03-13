@@ -33,6 +33,10 @@
 #include "ionic/ionic-provider.hpp"
 #endif
 
+#if defined(GDA_ERNIC)
+#include "rocm-ernic/ernic-provider.hpp"
+#endif
+
 namespace rdma_ep {
 
 // Forward declarations for vendor namespace free functions.
@@ -40,6 +44,7 @@ namespace rdma_ep {
 namespace bnxt { class Ops; }
 namespace mlx5 { class Ops; }
 namespace ionic { class Ops; }
+namespace ernic { class Ops; }
 
 class Backend;
 
@@ -49,6 +54,7 @@ public:
   friend class bnxt::Ops;
   friend class mlx5::Ops;
   friend class ionic::Ops;
+  friend class ernic::Ops;
 
   explicit QueuePair(struct ibv_pd *pd, Provider provider);
   ~QueuePair();
@@ -133,6 +139,11 @@ public:
   uint32_t sq_dbprod_{0};
   uint32_t sq_prod_{0};
   uint32_t sq_msn_{0};
+#endif
+
+#if defined(GDA_ERNIC)
+  ernic_device_cq ernic_cq_{};
+  ernic_device_sq ernic_sq_{};
 #endif
 };
 
@@ -233,6 +244,47 @@ namespace ionic {
     __device__ static void quiet_internal_ccqe_single(QueuePair &qp, uint32_t cons);
   };
 } // namespace ionic
+#endif
+
+#if defined(GDA_ERNIC)
+namespace ernic {
+  class Ops {
+  public:
+    __device__ static void post_wqe_rma(
+        QueuePair &qp, int32_t length,
+        uintptr_t laddr, uintptr_t raddr,
+        uint8_t opcode);
+    __device__ static void post_wqe_rma_single(
+        QueuePair &qp, int32_t length,
+        uintptr_t laddr, uintptr_t raddr,
+        uint8_t opcode, bool ring_db);
+    __device__ static uint64_t post_wqe_amo(
+        QueuePair &qp, uintptr_t raddr,
+        uint8_t opcode, int64_t atomic_data,
+        int64_t atomic_cmp, bool fetching);
+    __device__ static uint64_t
+    post_wqe_amo_single(
+        QueuePair &qp, uintptr_t raddr,
+        uint8_t opcode, int64_t atomic_data,
+        int64_t atomic_cmp, bool fetching);
+    __device__ static void quiet(QueuePair &qp);
+    __device__ static void quiet_single(
+        QueuePair &qp);
+
+    __device__ static void ring_doorbell(
+        QueuePair &qp, uint32_t slot_idx);
+    __device__ static void poll_cq_until(
+        QueuePair &qp, uint32_t requested);
+    __device__ static void write_rma_wqe(
+        QueuePair &qp, uintptr_t raddr,
+        uintptr_t laddr, int32_t length,
+        uint8_t opcode);
+    __device__ static uint32_t write_amo_wqe(
+        QueuePair &qp, uintptr_t raddr,
+        uint8_t opcode, int64_t atomic_data,
+        int64_t atomic_cmp, bool fetching);
+  };
+} // namespace ernic
 #endif
 
 } // namespace rdma_ep

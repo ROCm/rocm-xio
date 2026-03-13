@@ -210,10 +210,16 @@ setup_code_generation(
 option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
 option(GDA_MLX5 "Build MLX5 (Mellanox ConnectX) RDMA provider" OFF)
 option(GDA_IONIC "Build IONIC (Pensando) RDMA provider" OFF)
+option(GDA_ERNIC "Build ROCm ERNIC RDMA provider" OFF)
 
 # Build rdma-core with bnxt Direct Verbs patches
 if(GDA_BNXT)
   include(XIOBnxtDirectVerbs)
+endif()
+
+# Build rdma-core with ROCm ERNIC DV provider
+if(GDA_ERNIC)
+  include(XIOErnicDirectVerbs)
 endif()
 
 # Discover source files
@@ -229,7 +235,7 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_COMMON_DIR}/.*")
 # Filter out vendor queue-pair device code files (they are #included from queue-pair.hip)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
-  "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic)/.*-queue-pair\\.hip")
+  "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-queue-pair\\.hip")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
@@ -251,6 +257,17 @@ if(GDA_BNXT)
   )
   set_source_files_properties(
     ${ENDPOINTS_DIR}/rdma-ep/bnxt/bnxt-backend.cpp
+    PROPERTIES LANGUAGE HIP
+  )
+endif()
+
+# Add ERNIC vendor backend
+if(GDA_ERNIC)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/ernic-backend.cpp
+  )
+  set_source_files_properties(
+    ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/ernic-backend.cpp
     PROPERTIES LANGUAGE HIP
   )
 endif()
@@ -301,6 +318,9 @@ if(GDA_MLX5)
 endif()
 if(GDA_IONIC)
   target_compile_definitions(rocm-xio PRIVATE GDA_IONIC)
+endif()
+if(GDA_ERNIC)
+  target_compile_definitions(rocm-xio PRIVATE GDA_ERNIC)
 endif()
 
 # Link dependencies that consumers will need

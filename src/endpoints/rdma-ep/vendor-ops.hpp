@@ -72,6 +72,7 @@ enum class Provider : uint8_t {
   BNXT = 0,
   MLX5 = 1,
   IONIC = 2,
+  ROCM_ERNIC = 3,
   UNKNOWN = 0xFF,
 };
 
@@ -83,6 +84,8 @@ __host__ inline const char *provider_name(Provider p) {
     return "mlx5";
   case Provider::IONIC:
     return "ionic";
+  case Provider::ROCM_ERNIC:
+    return "rocm-ernic";
   default:
     return "unknown";
   }
@@ -97,6 +100,10 @@ __host__ inline Provider provider_from_string(const char *s) {
     return Provider::MLX5;
   if (strcmp(s, "ionic") == 0 || strcmp(s, "pensando") == 0)
     return Provider::IONIC;
+  if (strcmp(s, "rocm_ernic") == 0 ||
+      strcmp(s, "ernic") == 0 ||
+      strcmp(s, "rocm-ernic") == 0)
+    return Provider::ROCM_ERNIC;
   return Provider::UNKNOWN;
 }
 
@@ -104,6 +111,7 @@ __host__ inline Provider provider_from_string(const char *s) {
 constexpr uint32_t VENDOR_ID_BROADCOM = 0x14E4;
 constexpr uint32_t VENDOR_ID_MELLANOX = 0x02C9;
 constexpr uint32_t VENDOR_ID_PENSANDO = 0x1DD8;
+constexpr uint32_t VENDOR_ID_AMD = 0x1022;
 
 // Wave/lane helpers -- ported from rocshmem util.hpp
 __device__ inline uint64_t get_active_lane_mask() {

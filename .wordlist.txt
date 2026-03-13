@@ -651,8 +651,12 @@ BlueFlame
 Broadcom
 ConnectX
 CQEs
+DKMS
+dkms
 DPU
 EFA
+ERNIC
+ernicdv
 HPC
 HPE
 IOCTLs
@@ -672,6 +676,9 @@ RDMAVendor
 RQ
 Recv
 SmartNIC
+UAPI
+uapi
+UAR
 VMware
 WQE
 WQEs

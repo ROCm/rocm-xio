@@ -26,6 +26,10 @@
 #include "ionic/ionic-queue-pair.hip"
 #endif
 
+#if defined(GDA_ERNIC)
+#include "rocm-ernic/ernic-queue-pair.hip"
+#endif
+
 namespace rdma_ep {
 
 #ifndef __HIP_DEVICE_COMPILE__
@@ -74,6 +78,18 @@ QueuePair::QueuePair(struct ibv_pd *pd, Provider provider)
     op_atomic_cs_ = 0x04;  // IONIC_V2_OP_ATOMIC_CS
     nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
     fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+    break;
+#endif
+#if defined(GDA_ERNIC)
+  case Provider::ROCM_ERNIC:
+    op_rdma_write_ = 0;  // ROCM_ERNIC_WR_RDMA_WRITE
+    op_rdma_read_ = 4;   // ROCM_ERNIC_WR_RDMA_READ
+    op_atomic_fa_ = 6;   // ROCM_ERNIC_WR_ATOMIC_FA
+    op_atomic_cs_ = 5;   // ROCM_ERNIC_WR_ATOMIC_CS
+    nonfetching_atomic_lkey_ =
+        mr_nonfetching_atomic_->lkey;
+    fetching_atomic_lkey_ =
+        mr_fetching_atomic_->lkey;
     break;
 #endif
   default:
@@ -165,6 +181,9 @@ __device__ void QueuePair::post_wqe_rma(int32_t size, uintptr_t laddr,
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) { ionic::Ops::post_wqe_rma(*this, size, laddr, raddr, opcode); return; }
 #endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) { ernic::Ops::post_wqe_rma(*this, size, laddr, raddr, opcode); return; }
+#endif
 }
 
 __device__ void QueuePair::post_wqe_rma_single(int32_t size, uintptr_t laddr,
@@ -178,6 +197,9 @@ __device__ void QueuePair::post_wqe_rma_single(int32_t size, uintptr_t laddr,
 #endif
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) { ionic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db); return; }
+#endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) { ernic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db); return; }
 #endif
 }
 
@@ -196,6 +218,9 @@ __device__ uint64_t QueuePair::post_wqe_amo(int32_t size, uintptr_t raddr,
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) return ionic::Ops::post_wqe_amo(*this, raddr, opcode, atomic_data, atomic_cmp, fetching);
 #endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) return ernic::Ops::post_wqe_amo(*this, raddr, opcode, atomic_data, atomic_cmp, fetching);
+#endif
   return 0;
 }
 
@@ -209,6 +234,9 @@ __device__ void QueuePair::quiet() {
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) { ionic::Ops::quiet(*this); return; }
 #endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) { ernic::Ops::quiet(*this); return; }
+#endif
 }
 
 __device__ void QueuePair::quiet_single() {
@@ -220,6 +248,9 @@ __device__ void QueuePair::quiet_single() {
 #endif
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) { ionic::Ops::quiet_single(*this); return; }
+#endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) { ernic::Ops::quiet_single(*this); return; }
 #endif
 }
 

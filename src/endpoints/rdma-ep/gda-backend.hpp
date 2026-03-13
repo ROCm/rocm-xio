@@ -169,6 +169,18 @@ private:
   static void *ionic_dv_dlopen();
   void ionic_setup_parent_domain(struct ibv_parent_domain_init_attr *pattr);
 #endif
+
+#if defined(GDA_ERNIC)
+  struct ernic_host_qp *ernic_qp_{nullptr};
+  struct ernic_host_cq *ernic_scq_{nullptr};
+  struct ernic_host_cq *ernic_rcq_{nullptr};
+  void *ernic_dv_handle_{nullptr};
+  void ernic_create_cqs(int ncqes);
+  void ernic_create_qps(int sq_length);
+  void ernic_initialize_gpu_qp();
+  int ernic_dv_dl_init();
+  static void *ernic_dv_dlopen();
+#endif
 };
 
 } // namespace rdma_ep
