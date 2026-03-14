@@ -1,0 +1,29 @@
+# rocm-xio RDMA NIC persistent naming rules
+#
+# Renames network interfaces for RDMA NICs supported
+# by the rocm-xio project to persistent, vendor-based
+# names. Install with:
+#   sudo udev/setup-udev-rules.sh --install
+
+# Broadcom Thor 2 (bnxt_re)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x14e4", \
+  DRIVERS=="bnxt_en", \
+  NAME="rocm-bnxt%n"
+
+# AMD Pensando (ionic)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x1dd8", \
+  NAME="rocm-ionic%n"
+
+# Mellanox ConnectX (mlx5)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x02c9", \
+  NAME="rocm-mlx5-%n"
+
+# AMD ROCm ERNIC -- uses DRIVERS guard so we don't
+# accidentally rename other AMD (0x1022) devices.
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x1022", \
+  DRIVERS=="rocm_ernic", \
+  NAME="rocm-ernic%n"
