@@ -27,7 +27,7 @@
 #   --work-dir DIR    Working directory
 #                     (default: /tmp/ionic-rdma-build)
 #   --version VER     DKMS package version
-#                     (default: 0.1)
+#                     (default: 1.0.0-g<shortrev>)
 #   --build-only      Build but do not install
 #   --uninstall       Remove the DKMS module
 
@@ -35,7 +35,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PKG_NAME="ionic-rdma"
-PKG_VERSION="0.1"
+BASE_VERSION="0.1.0"
+GIT_REV="$(git -C "$(dirname "$0")" \
+  rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+PKG_VERSION="${BASE_VERSION}-g${GIT_REV}"
 KERNEL_TAG=""
 WORK_DIR="/tmp/ionic-rdma-build"
 BUILD_ONLY=false
@@ -382,6 +385,9 @@ populate_dkms() {
     "${DKMS_SRC}/"
   sudo cp "${SCRIPT_DIR}/dkms.conf" \
     "${DKMS_SRC}/"
+  sudo sed -i \
+    "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${PKG_VERSION}\"/" \
+    "${DKMS_SRC}/dkms.conf"
 
   # Kbuild for the rdma/ subdirectory
   if [ -d "${DKMS_SRC}/rdma" ]; then
