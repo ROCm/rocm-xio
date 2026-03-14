@@ -56,12 +56,31 @@ run_vendor_test() {
       ;;
   esac
 
+  # Resolve PCIe BDF and VID/DID from the
+  # RDMA device sysfs path
+  local pci_bdf=""
+  local pci_vid=""
+  local pci_did=""
+  local dev_link
+  dev_link="/sys/class/infiniband/${rdma_dev}"
+  dev_link="${dev_link}/device"
+  if [ -d "${dev_link}" ]; then
+    pci_bdf=$(basename "$(readlink -f \
+      "${dev_link}")" 2>/dev/null || echo "")
+    pci_vid=$(cat "${dev_link}/vendor" \
+      2>/dev/null || echo "")
+    pci_did=$(cat "${dev_link}/device" \
+      2>/dev/null || echo "")
+  fi
+
   echo ""
   echo "====================================="
   echo "  ${vendor^^} loopback test"
   echo "====================================="
   echo "  NIC       : ${nic_if}"
   echo "  IP        : ${nic_ip}"
+  echo "  PCIe      : ${pci_bdf}" \
+       " VID/DID=${pci_vid}/${pci_did}"
   echo ""
 
   # Module reload for vendor
