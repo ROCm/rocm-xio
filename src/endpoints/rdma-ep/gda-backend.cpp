@@ -219,8 +219,25 @@ void Backend::open_ib_device() {
     free(const_cast<char *>(dev_name));
   }
 
+  if (!device_ && config_.hca_list) {
+    for (int i = 0; i < num_devices; i++) {
+      const char *name =
+        ibv.get_device_name(device_list[i]);
+      if (name &&
+          strcmp(name, config_.hca_list) == 0) {
+        device_ = device_list[i];
+        fprintf(stderr,
+          "rdma_ep: Matched device by name:"
+          " %s\n", name);
+        break;
+      }
+    }
+  }
+
   if (!device_) {
-    fprintf(stderr, "rdma_ep: Using first available IB device.\n");
+    fprintf(stderr,
+      "rdma_ep: Using first available"
+      " IB device.\n");
     device_ = device_list[0];
   }
 
