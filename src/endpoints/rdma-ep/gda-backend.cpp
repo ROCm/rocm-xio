@@ -73,6 +73,12 @@ int Backend::init() {
   open_ib_device();
   create_queues();
 
+  if (!qp_) {
+    fprintf(stderr,
+            "rdma_ep: QP creation failed.\n");
+    return -1;
+  }
+
   if (config_.loopback) {
     setup_qp_loopback();
   }
@@ -290,9 +296,10 @@ void Backend::create_queues() {
     qp_init.recv_cq = cq_;
     qp_init.srq = nullptr;
     qp_init.cap.max_send_wr = config_.sq_depth;
-    qp_init.cap.max_recv_wr = 0;
+    // ionic_rdma kernel driver requires >= 1 recv WR
+    qp_init.cap.max_recv_wr = 1;
     qp_init.cap.max_send_sge = 1;
-    qp_init.cap.max_recv_sge = 0;
+    qp_init.cap.max_recv_sge = 1;
     qp_init.cap.max_inline_data =
         config_.inline_threshold;
     qp_init.qp_type = IBV_QPT_RC;
@@ -660,9 +667,14 @@ int Backend::register_data_buffer(void *buf, size_t size) {
     heap_mr_ = nullptr;
   }
 
-  heap_mr_ = ibv.reg_mr_host(pd_, buf, size, access);
+  struct ibv_pd *mr_pd =
+      pd_parent_ ? pd_parent_ : pd_;
+  heap_mr_ = ibv.reg_mr_host(
+      mr_pd, buf, size, access);
   if (!heap_mr_) {
-    fprintf(stderr, "rdma_ep: ibv_reg_mr failed for data buffer\n");
+    fprintf(stderr,
+            "rdma_ep: ibv_reg_mr failed "
+            "for data buffer\n");
     return -1;
   }
 

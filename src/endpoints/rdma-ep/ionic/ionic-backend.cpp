@@ -8,12 +8,11 @@
  * creation via parent domain, and GPU QueuePair
  * initialization for the ionic RDMA provider.
  *
- * Unlike bnxt/ernic which use explicit UMEM
- * registration, ionic delegates buffer management
- * to the provider via parent domains with a custom
- * GPU-uncached allocator. The DV "get" functions
- * extract device-side state after standard ibverbs
- * queue creation.
+ * Uses host-pinned memory (hipHostMalloc) for
+ * parent domain allocations. When kernel-side
+ * ib_umem_get_dmabuf support lands for ionic,
+ * switch to pd_alloc_device_uncached to use GPU
+ * device memory directly.
  */
 
 #include "gda-backend.hpp"
@@ -153,6 +152,23 @@ void Backend::ionic_create_cqs(int ncqes) {
   ionic_dv.pd_set_udma_mask(
       pd_parent_, IONIC_UDMA_MASK_LOW);
 
+  int cmb_rc = ionic_dv.pd_set_sqcmb(
+      pd_parent_, false, false, false);
+  if (cmb_rc != 0) {
+    fprintf(stderr,
+            "rdma_ep::ionic: "
+            "pd_set_sqcmb(off) failed: %d "
+            "(non-fatal)\n", cmb_rc);
+  }
+  cmb_rc = ionic_dv.pd_set_rqcmb(
+      pd_parent_, false, false, false);
+  if (cmb_rc != 0) {
+    fprintf(stderr,
+            "rdma_ep::ionic: "
+            "pd_set_rqcmb(off) failed: %d "
+            "(non-fatal)\n", cmb_rc);
+  }
+
   struct ibv_cq_init_attr_ex cq_attr;
   memset(&cq_attr, 0, sizeof(cq_attr));
   cq_attr.cqe = ncqes;
@@ -214,6 +230,28 @@ void Backend::ionic_initialize_gpu_qp() {
 
   gpu_db_page_ = dvctx.db_page;
 
+  uintptr_t db_page_va =
+      reinterpret_cast<uintptr_t>(dvctx.db_page);
+  uintptr_t db_ptr_va =
+      reinterpret_cast<uintptr_t>(dvctx.db_ptr);
+  size_t db_offset = db_ptr_va - db_page_va;
+
+  fprintf(stderr,
+          "rdma_ep::ionic: DB page=%p, "
+          "DB ptr=%p, offset=%zu\n",
+          dvctx.db_page,
+          (void *)dvctx.db_ptr,
+          db_offset);
+
+  rc = ionic_qp_set_gda_(qp_, true, false);
+  if (rc != 0) {
+    fprintf(stderr,
+            "rdma_ep::ionic: "
+            "ionic_dv_qp_set_gda failed: "
+            "%d\n", rc);
+    return;
+  }
+
   uint8_t udma_idx =
       ionic_dv.qp_get_udma_idx(qp_);
 
@@ -258,10 +296,55 @@ void Backend::ionic_initialize_gpu_qp() {
   host_qp_->sq_msn_ = 0;
   host_qp_->sq_lock_ = 0;
 
-  host_qp_->cq_dbreg_ =
-      static_cast<uint64_t *>(dvctx.db_page);
-  host_qp_->sq_dbreg_ =
-      static_cast<uint64_t *>(dvctx.db_page);
+  fprintf(stderr,
+          "rdma_ep::ionic: SQ db_val=0x%lx "
+          "stride_log2=%u depth_log2=%u, "
+          "CQ db_val=0x%lx "
+          "stride_log2=%u depth_log2=%u\n",
+          (unsigned long)dvqp.sq.db_val,
+          dvqp.sq.stride_log2,
+          dvqp.sq.depth_log2,
+          (unsigned long)dvcq.q.db_val,
+          dvcq.q.stride_log2,
+          dvcq.q.depth_log2);
+
+  hipError_t herr = hipHostRegister(
+      dvctx.db_page, getpagesize(),
+      hipHostRegisterIoMemory);
+  if (herr != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep::ionic: "
+            "hipHostRegister(db_page, IO) "
+            "failed: %s\n",
+            hipGetErrorString(herr));
+    return;
+  }
+  void *gpu_db_base = nullptr;
+  herr = hipHostGetDevicePointer(
+      &gpu_db_base, dvctx.db_page, 0);
+  if (herr != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep::ionic: "
+            "hipHostGetDevicePointer"
+            "(db_page) failed: %s\n",
+            hipGetErrorString(herr));
+    return;
+  }
+
+  uint64_t *gpu_db = reinterpret_cast<uint64_t *>(
+      reinterpret_cast<uintptr_t>(gpu_db_base)
+      + db_offset);
+
+  host_qp_->sq_dbreg_ = &gpu_db[dvctx.sq_qtype];
+  host_qp_->cq_dbreg_ = &gpu_db[dvctx.cq_qtype];
+
+  fprintf(stderr,
+          "rdma_ep::ionic: sq_qtype=%u "
+          "cq_qtype=%u, "
+          "sq_dbreg=%p cq_dbreg=%p\n",
+          dvctx.sq_qtype, dvctx.cq_qtype,
+          (void *)host_qp_->sq_dbreg_,
+          (void *)host_qp_->cq_dbreg_);
 
   host_qp_->lkey_ = 0;
   host_qp_->rkey_ = 0;
@@ -273,12 +356,14 @@ void Backend::ionic_initialize_gpu_qp() {
           "rdma_ep::ionic: GPU QP initialized "
           "(CQ mask=0x%lx, SQ mask=0x%lx, "
           "CQ buf=%p, SQ buf=%p, "
-          "DB page=%p)\n",
+          "DB page=%p, DB gpu=%p)\n",
           (unsigned long)host_qp_->cq_mask_,
           (unsigned long)host_qp_->sq_mask_,
           (void *)host_qp_->ionic_cq_buf_,
           (void *)host_qp_->ionic_sq_buf_,
-          dvctx.db_page);
+          dvctx.db_page,
+          (void *)gpu_db);
+
 }
 
 #endif // defined(GDA_IONIC)

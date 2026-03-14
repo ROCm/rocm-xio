@@ -72,12 +72,21 @@ QueuePair::QueuePair(struct ibv_pd *pd, Provider provider)
 #endif
 #if defined(GDA_IONIC)
   case Provider::IONIC:
-    op_rdma_write_ = 0x00; // IONIC_V2_OP_RDMA_WRITE
-    op_rdma_read_ = 0x01;  // IONIC_V2_OP_RDMA_READ
-    op_atomic_fa_ = 0x03;  // IONIC_V2_OP_ATOMIC_FA
-    op_atomic_cs_ = 0x04;  // IONIC_V2_OP_ATOMIC_CS
-    nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
-    fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+#if IONIC_FW_VERSION >= 2
+    op_rdma_write_ = IONIC_V2_OP_RDMA_WRITE;
+    op_rdma_read_ = IONIC_V2_OP_RDMA_READ;
+    op_atomic_fa_ = IONIC_V2_OP_ATOMIC_FA;
+    op_atomic_cs_ = IONIC_V2_OP_ATOMIC_CS;
+#else
+    op_rdma_write_ = IONIC_V1_OP_RDMA_WRITE;
+    op_rdma_read_ = IONIC_V1_OP_RDMA_READ;
+    op_atomic_fa_ = IONIC_V1_OP_ATOMIC_FA;
+    op_atomic_cs_ = IONIC_V1_OP_ATOMIC_CS;
+#endif
+    nonfetching_atomic_lkey_ =
+        mr_nonfetching_atomic_->lkey;
+    fetching_atomic_lkey_ =
+        mr_fetching_atomic_->lkey;
     break;
 #endif
 #if defined(GDA_ERNIC)

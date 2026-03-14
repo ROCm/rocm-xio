@@ -1,0 +1,128 @@
+From 7d85517b6eacba131c3ad94dc3d1456b874ba6f8 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Sat, 14 Mar 2026 14:26:57 -0600
+Subject: [PATCH 1/4] Update kernel headers for bnxt DV
+
+---
+ kernel-headers/rdma/bnxt_re-abi.h        | 47 +++++++++++++++++++++++-
+ kernel-headers/rdma/ib_user_ioctl_cmds.h |  8 ++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/kernel-headers/rdma/bnxt_re-abi.h b/kernel-headers/rdma/bnxt_re-abi.h
+index f24edf1..157938b 100644
+--- a/kernel-headers/rdma/bnxt_re-abi.h
++++ b/kernel-headers/rdma/bnxt_re-abi.h
+@@ -57,6 +57,7 @@ enum {
+ 	BNXT_RE_UCNTX_CMASK_POW2_DISABLED = 0x10ULL,
+ 	BNXT_RE_UCNTX_CMASK_MSN_TABLE_ENABLED = 0x40,
+ 	BNXT_RE_UCNTX_CMASK_QP_RATE_LIMIT_ENABLED = 0x80ULL,
++	BNXT_RE_UCNTX_CMASK_UAPI_COMPAT_SUPPORTED = 0x100,
+ };
+ 
+ enum bnxt_re_wqe_mode {
+@@ -102,12 +103,17 @@ struct bnxt_re_pd_resp {
+ struct bnxt_re_cq_req {
+ 	__aligned_u64 cq_va;
+ 	__aligned_u64 cq_handle;
++	__aligned_u64 comp_mask;
+ };
+ 
+-enum bnxt_re_cq_mask {
++enum bnxt_re_resp_cq_mask {
+ 	BNXT_RE_CQ_TOGGLE_PAGE_SUPPORT = 0x1,
+ };
+ 
++enum bnxt_re_req_cq_mask {
++	BNXT_RE_CQ_FIXED_NUM_CQE_ENABLE = 0x1,
++};
++
+ struct bnxt_re_cq_resp {
+ 	__u32 cqid;
+ 	__u32 tail;
+@@ -122,6 +128,7 @@ struct bnxt_re_resize_cq_req {
+ 
+ enum bnxt_re_qp_mask {
+ 	BNXT_RE_QP_REQ_MASK_VAR_WQE_SQ_SLOTS = 0x1,
++	BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE = 0x2,
+ };
+ 
+ struct bnxt_re_qp_req {
+@@ -130,6 +137,15 @@ struct bnxt_re_qp_req {
+ 	__aligned_u64 qp_handle;
+ 	__aligned_u64 comp_mask;
+ 	__u32 sq_slots;
++	__u32 sq_wqe_sz;
++	__u32 sq_psn_sz;
++	__u32 sq_npsn;
++	__u32 rq_slots;
++	__u32 rq_wqe_sz;
++};
++
++enum bnxt_re_create_qp_attrs {
++	BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE = UVERBS_ID_DRIVER_NS_WITH_UHW,
+ };
+ 
+ struct bnxt_re_qp_resp {
+@@ -163,6 +179,8 @@ enum bnxt_re_objects {
+ 	BNXT_RE_OBJECT_ALLOC_PAGE = (1U << UVERBS_ID_NS_SHIFT),
+ 	BNXT_RE_OBJECT_NOTIFY_DRV,
+ 	BNXT_RE_OBJECT_GET_TOGGLE_MEM,
++	BNXT_RE_OBJECT_DBR,
++	BNXT_RE_OBJECT_DEFAULT_DBR,
+ };
+ 
+ enum bnxt_re_alloc_page_type {
+@@ -231,4 +249,31 @@ struct bnxt_re_packet_pacing_caps {
+ struct bnxt_re_query_device_ex_resp {
+ 	struct bnxt_re_packet_pacing_caps packet_pacing_caps;
+ };
++
++struct bnxt_re_db_region {
++	__u32 dpi;
++	__u32 reserved;
++	__aligned_u64 umdbr;
++};
++
++enum bnxt_re_obj_dbr_alloc_attrs {
++	BNXT_RE_ALLOC_DBR_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
++	BNXT_RE_ALLOC_DBR_ATTR,
++	BNXT_RE_ALLOC_DBR_OFFSET,
++};
++
++enum bnxt_re_obj_dbr_free_attrs {
++	BNXT_RE_FREE_DBR_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
++};
++
++enum bnxt_re_obj_default_dbr_attrs {
++	BNXT_RE_DEFAULT_DBR_ATTR = (1U << UVERBS_ID_NS_SHIFT),
++};
++
++enum bnxt_re_obj_dpi_methods {
++	BNXT_RE_METHOD_DBR_ALLOC = (1U << UVERBS_ID_NS_SHIFT),
++	BNXT_RE_METHOD_DBR_FREE,
++	BNXT_RE_METHOD_GET_DEFAULT_DBR,
++};
++
+ #endif /* __BNXT_RE_UVERBS_ABI_H__*/
+diff --git a/kernel-headers/rdma/ib_user_ioctl_cmds.h b/kernel-headers/rdma/ib_user_ioctl_cmds.h
+index 72041c1..f31dd2b 100644
+--- a/kernel-headers/rdma/ib_user_ioctl_cmds.h
++++ b/kernel-headers/rdma/ib_user_ioctl_cmds.h
+@@ -158,6 +158,14 @@ enum uverbs_attrs_create_qp_cmd_attr_ids {
+ 	UVERBS_ATTR_CREATE_QP_EVENT_FD,
+ 	UVERBS_ATTR_CREATE_QP_RESP_CAP,
+ 	UVERBS_ATTR_CREATE_QP_RESP_QP_NUM,
++	UVERBS_ATTR_CREATE_QP_SQ_BUFFER_VA,
++	UVERBS_ATTR_CREATE_QP_SQ_BUFFER_LENGTH,
++	UVERBS_ATTR_CREATE_QP_SQ_BUFFER_FD,
++	UVERBS_ATTR_CREATE_QP_SQ_BUFFER_OFFSET,
++	UVERBS_ATTR_CREATE_QP_RQ_BUFFER_VA,
++	UVERBS_ATTR_CREATE_QP_RQ_BUFFER_LENGTH,
++	UVERBS_ATTR_CREATE_QP_RQ_BUFFER_FD,
++	UVERBS_ATTR_CREATE_QP_RQ_BUFFER_OFFSET,
+ };
+ 
+ enum uverbs_attrs_destroy_qp_cmd_attr_ids {
+-- 
+2.43.0
+

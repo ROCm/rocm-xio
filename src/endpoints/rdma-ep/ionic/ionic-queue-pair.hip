@@ -133,9 +133,12 @@ __device__ void Ops::poll_wave_cqes(QueuePair &qp, uint64_t activemask) {
 
   if (((qp.cq_pos_ - qp.cq_dbpos_) & qp.cq_mask_) >= 100) {
     qp.cq_dbpos_ = qp.cq_pos_;
-    __atomic_store_n(qp.cq_dbreg_,
-                     qp.cq_dbval_ | (qp.cq_mask_ & qp.cq_dbpos_),
-                     __ATOMIC_SEQ_CST);
+    __threadfence_system();
+    __hip_atomic_store(
+        qp.cq_dbreg_,
+        qp.cq_dbval_ | (qp.cq_mask_ & qp.cq_dbpos_),
+        __ATOMIC_SEQ_CST,
+        __HIP_MEMORY_SCOPE_SYSTEM);
   }
 
   qp.sq_msn_ = msn;
@@ -228,19 +231,24 @@ __device__ void Ops::ring_doorbell(QueuePair &qp, uint32_t pos) {
 
   for (int i = 0; i < lane_count; ++i) {
     if (my_lane_num == i) {
-      __threadfence();
-      __atomic_store_n(qp.sq_dbreg_,
-                       qp.sq_dbval_ | (qp.sq_mask_ & pos),
-                       __ATOMIC_SEQ_CST);
+      __threadfence_system();
+      __hip_atomic_store(
+          qp.sq_dbreg_,
+          qp.sq_dbval_ | (qp.sq_mask_ & pos),
+          __ATOMIC_SEQ_CST,
+          __HIP_MEMORY_SCOPE_SYSTEM);
     }
   }
-  __threadfence();
+  __threadfence_system();
 }
 
 __device__ void Ops::ring_doorbell_single(QueuePair &qp, uint32_t pos) {
-  __threadfence();
-  __atomic_store_n(&qp.sq_dbreg_[8 * get_lane_id()],
-                   qp.sq_dbval_ | (qp.sq_mask_ & pos), __ATOMIC_SEQ_CST);
+  __threadfence_system();
+  __hip_atomic_store(
+      &qp.sq_dbreg_[8 * get_lane_id()],
+      qp.sq_dbval_ | (qp.sq_mask_ & pos),
+      __ATOMIC_SEQ_CST,
+      __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
 // --- Quiet ---

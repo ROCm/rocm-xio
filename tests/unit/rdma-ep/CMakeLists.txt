@@ -59,18 +59,20 @@ setup_rdma_test(test-rdma-config test-rdma-config.hip)
 setup_rdma_test(test-rdma-vendors test-rdma-vendors.hip)
 setup_rdma_test(test-rdma-endian test-rdma-endian.hip)
 
-# Hardware integration tests (require BNXT NIC)
+# Unified loopback test (any GDA vendor)
+if(GDA_BNXT OR GDA_IONIC)
+  setup_rdma_test(test-rdma-loopback
+    test-rdma-loopback.hip)
+endif()
+
+# Multi-node test (requires BNXT NIC)
 if(GDA_BNXT)
-  setup_rdma_test(test-rdma-bnxt-loopback test-rdma-bnxt-loopback.hip)
-  setup_rdma_test(test-rdma-2node test-rdma-2node.hip)
+  setup_rdma_test(test-rdma-2node
+    test-rdma-2node.hip)
 endif()
 
 # Hardware integration tests (require ERNIC)
 if(GDA_ERNIC)
-  setup_rdma_test(test-rdma-ernic-loopback test-rdma-ernic-loopback.hip)
-endif()
-
-# Hardware integration tests (require ionic RDMA)
-if(GDA_IONIC)
-  setup_rdma_test(test-rdma-ionic-loopback test-rdma-ionic-loopback.hip)
+  setup_rdma_test(test-rdma-ernic-loopback
+    test-rdma-ernic-loopback.hip)
 endif()

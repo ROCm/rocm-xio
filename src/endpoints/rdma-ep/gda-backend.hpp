@@ -56,6 +56,12 @@ public:
   Provider get_provider() const { return provider_; }
   struct ibv_context *get_context() const { return context_; }
   struct ibv_pd *get_pd() const { return pd_; }
+  struct ibv_qp *get_ibv_qp() const { return qp_; }
+  struct ibv_cq *get_ibv_cq() const { return cq_; }
+  QueuePair *get_host_qp() const { return host_qp_; }
+#if defined(GDA_IONIC)
+  void *get_db_page() const { return gpu_db_page_; }
+#endif
   uint32_t get_rkey() const { return rkey_; }
   uint32_t get_lkey() const { return lkey_; }
 
@@ -172,7 +178,8 @@ private:
   void ionic_initialize_gpu_qp();
   int ionic_dv_dl_init();
   static void *ionic_dv_dlopen();
-  void ionic_setup_parent_domain(struct ibv_parent_domain_init_attr *pattr);
+  void ionic_setup_parent_domain(
+      struct ibv_parent_domain_init_attr *pattr);
 #endif
 
 #if defined(GDA_ERNIC)

@@ -210,19 +210,21 @@ setup_code_generation(
 option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
 option(GDA_MLX5 "Build MLX5 (Mellanox ConnectX) RDMA provider" OFF)
 option(GDA_IONIC "Build IONIC (Pensando) RDMA provider" OFF)
+set(IONIC_FW_VERSION "2" CACHE STRING
+    "Ionic firmware opcode version (1 or 2)")
 option(GDA_ERNIC "Build ROCm ERNIC RDMA provider" OFF)
 
-# Build rdma-core with bnxt Direct Verbs patches
+# Unified rdma-core build with vendor DV patches
+if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
+  include(XIORdmaCore)
+endif()
+
+# Vendor kernel module (DKMS) targets
 if(GDA_BNXT)
-  include(XIOBnxtDirectVerbs)
+  if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/XIOBnxtKernelModule.cmake")
+    include(XIOBnxtKernelModule)
+  endif()
 endif()
-
-# Build rdma-core with ROCm ERNIC DV provider
-if(GDA_ERNIC)
-  include(XIOErnicDirectVerbs)
-endif()
-
-# IONIC kernel module (DKMS) targets
 if(GDA_IONIC)
   include(XIOIonicKernelModule)
 endif()
@@ -333,7 +335,9 @@ if(GDA_MLX5)
   target_compile_definitions(rocm-xio PRIVATE GDA_MLX5)
 endif()
 if(GDA_IONIC)
-  target_compile_definitions(rocm-xio PRIVATE GDA_IONIC)
+  target_compile_definitions(rocm-xio PRIVATE
+    GDA_IONIC
+    IONIC_FW_VERSION=${IONIC_FW_VERSION})
 endif()
 if(GDA_ERNIC)
   target_compile_definitions(rocm-xio PRIVATE GDA_ERNIC)
