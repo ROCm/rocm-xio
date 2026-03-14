@@ -140,9 +140,18 @@ void Backend::open_dv_libs() {
 
 #if defined(GDA_IONIC)
   if (provider_ == Provider::UNKNOWN &&
-      (requested == Provider::UNKNOWN || requested == Provider::IONIC)) {
-    // IONIC DV init will be added in Phase 6
-    fprintf(stderr, "rdma_ep: IONIC DV support not yet implemented.\n");
+      (requested == Provider::UNKNOWN ||
+       requested == Provider::IONIC)) {
+    if (ionic_dv_dl_init() == 0) {
+      provider_ = Provider::IONIC;
+      fprintf(stderr,
+              "rdma_ep: IONIC DV library "
+              "loaded.\n");
+    } else {
+      fprintf(stderr,
+              "rdma_ep: IONIC DV library "
+              "not available.\n");
+    }
   }
 #endif
 
@@ -265,8 +274,53 @@ void Backend::create_queues() {
   }
 #endif
 
-  // Standard ibverbs path for non-BNXT providers
-  cq_ = ibv.create_cq(context_, ncqes, nullptr, nullptr, 0);
+#if defined(GDA_IONIC)
+  if (provider_ == Provider::IONIC) {
+    ionic_create_cqs(ncqes);
+    if (!cq_) {
+      fprintf(stderr,
+              "rdma_ep: ionic CQ creation failed"
+              " -- is this an ionic device?\n");
+      return;
+    }
+
+    struct ibv_qp_init_attr_ex qp_init;
+    memset(&qp_init, 0, sizeof(qp_init));
+    qp_init.send_cq = cq_;
+    qp_init.recv_cq = cq_;
+    qp_init.srq = nullptr;
+    qp_init.cap.max_send_wr = config_.sq_depth;
+    qp_init.cap.max_recv_wr = 0;
+    qp_init.cap.max_send_sge = 1;
+    qp_init.cap.max_recv_sge = 0;
+    qp_init.cap.max_inline_data =
+        config_.inline_threshold;
+    qp_init.qp_type = IBV_QPT_RC;
+    qp_init.sq_sig_all = 0;
+    qp_init.comp_mask = IBV_QP_INIT_ATTR_PD;
+    qp_init.pd = pd_parent_ ? pd_parent_ : pd_;
+
+    errno = 0;
+    qp_ = ibv.create_qp_ex(context_, &qp_init);
+    if (!qp_) {
+      fprintf(stderr,
+              "rdma_ep: ibv_create_qp_ex failed"
+              " (errno=%d: %s)\n",
+              errno, strerror(errno));
+      return;
+    }
+
+    fprintf(stderr,
+            "rdma_ep: Created QP num=%u "
+            "via IONIC, SQ depth=%d\n",
+            qp_->qp_num, config_.sq_depth);
+    return;
+  }
+#endif
+
+  // Standard ibverbs path for non-DV providers
+  cq_ = ibv.create_cq(context_, ncqes,
+                       nullptr, nullptr, 0);
   XIO_CHECK_NNULL(cq_, "ibv_create_cq");
 
   struct ibv_qp_init_attr_ex qp_init;
@@ -440,14 +494,38 @@ void *Backend::pd_alloc_device_uncached(struct ibv_pd *pd, void *pd_context,
   (void)alignment;
   (void)resource_type;
   void *dev_ptr = nullptr;
-  hipError_t err = hipExtMallocWithFlags(&dev_ptr, size, hipDeviceMallocUncached);
+  hipError_t err = hipExtMallocWithFlags(
+      &dev_ptr, size, hipDeviceMallocUncached);
   if (err != hipSuccess) {
-    fprintf(stderr, "rdma_ep: hipExtMallocWithFlags failed: %s\n",
+    fprintf(stderr,
+            "rdma_ep: hipExtMallocWithFlags"
+            " failed: %s\n",
             hipGetErrorString(err));
     return nullptr;
   }
   memset(dev_ptr, 0, size);
   return dev_ptr;
+}
+
+void *Backend::pd_alloc_host_pinned(
+    struct ibv_pd *pd, void *pd_context,
+    size_t size, size_t alignment,
+    uint64_t resource_type) {
+  (void)pd;
+  (void)pd_context;
+  (void)alignment;
+  (void)resource_type;
+  void *host_ptr = nullptr;
+  hipError_t err = hipHostMalloc(
+      &host_ptr, size, hipHostMallocMapped);
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "rdma_ep: hipHostMalloc failed: %s\n",
+            hipGetErrorString(err));
+    return nullptr;
+  }
+  memset(host_ptr, 0, size);
+  return host_ptr;
 }
 
 void Backend::pd_release(struct ibv_pd *pd, void *pd_context, void *ptr,
@@ -456,6 +534,15 @@ void Backend::pd_release(struct ibv_pd *pd, void *pd_context, void *ptr,
   (void)pd_context;
   (void)resource_type;
   (void)hipFree(ptr);
+}
+
+void Backend::pd_release_host(
+    struct ibv_pd *pd, void *pd_context,
+    void *ptr, uint64_t resource_type) {
+  (void)pd;
+  (void)pd_context;
+  (void)resource_type;
+  (void)hipHostFree(ptr);
 }
 
 void Backend::create_parent_domain() {
@@ -623,6 +710,13 @@ void Backend::initialize_gpu_qp() {
 #if defined(GDA_ERNIC)
   if (provider_ == Provider::ROCM_ERNIC) {
     ernic_initialize_gpu_qp();
+    return;
+  }
+#endif
+
+#if defined(GDA_IONIC)
+  if (provider_ == Provider::IONIC) {
+    ionic_initialize_gpu_qp();
     return;
   }
 #endif

@@ -1,0 +1,14 @@
+diff --git a/include/uapi/rdma/ib_user_ioctl_verbs.h b/include/uapi/rdma/ib_user_ioctl_verbs.h
+index fe15bc7e9f70..89e6a3f13191 100644
+--- a/include/uapi/rdma/ib_user_ioctl_verbs.h
++++ b/include/uapi/rdma/ib_user_ioctl_verbs.h
+@@ -255,6 +255,7 @@ enum rdma_driver_id {
+ 	RDMA_DRIVER_SIW,
+ 	RDMA_DRIVER_ERDMA,
+ 	RDMA_DRIVER_MANA,
++	RDMA_DRIVER_IONIC,
+ };
+ 
+ enum ib_uverbs_gid_type {
+-- 
+2.43.0

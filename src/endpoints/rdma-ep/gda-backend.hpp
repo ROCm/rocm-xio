@@ -134,8 +134,13 @@ private:
   static void *pd_alloc_device_uncached(ibv_pd *pd, void *pd_context,
                                         size_t size, size_t alignment,
                                         uint64_t resource_type);
+  static void *pd_alloc_host_pinned(ibv_pd *pd, void *pd_context,
+                                    size_t size, size_t alignment,
+                                    uint64_t resource_type);
   static void pd_release(ibv_pd *pd, void *pd_context, void *ptr,
                          uint64_t resource_type);
+  static void pd_release_host(ibv_pd *pd, void *pd_context, void *ptr,
+                              uint64_t resource_type);
   void create_parent_domain();
 
 #if defined(GDA_BNXT)

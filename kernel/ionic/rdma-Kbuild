@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Kbuild for ionic_rdma InfiniBand module.
+# Placed into the rdma/ subdirectory by the
+# DKMS setup script.
+
+obj-m += ionic_rdma.o
+
+ionic_rdma-y := ionic_ibdev.o \
+		ionic_admin.o \
+		ionic_controlpath.o \
+		ionic_datapath.o \
+		ionic_hw_stats.o \
+		ionic_lif_cfg.o \
+		ionic_pgtbl.o \
+		ionic_queue.o
+
+ccflags-y := -I$(M)/include -I$(M) \
+	     -DRDMA_DRIVER_IONIC=RDMA_DRIVER_MANA+1

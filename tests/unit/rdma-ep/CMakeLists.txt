@@ -69,3 +69,8 @@ endif()
 if(GDA_ERNIC)
   setup_rdma_test(test-rdma-ernic-loopback test-rdma-ernic-loopback.hip)
 endif()
+
+# Hardware integration tests (require ionic RDMA)
+if(GDA_IONIC)
+  setup_rdma_test(test-rdma-ionic-loopback test-rdma-ionic-loopback.hip)
+endif()

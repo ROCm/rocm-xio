@@ -222,6 +222,11 @@ if(GDA_ERNIC)
   include(XIOErnicDirectVerbs)
 endif()
 
+# IONIC kernel module (DKMS) targets
+if(GDA_IONIC)
+  include(XIOIonicKernelModule)
+endif()
+
 # Discover source files
 file(GLOB_RECURSE LIB_SOURCES
   ${COMMON_DIR}/*.hip
@@ -268,6 +273,17 @@ if(GDA_ERNIC)
   )
   set_source_files_properties(
     ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic/ernic-backend.cpp
+    PROPERTIES LANGUAGE HIP
+  )
+endif()
+
+# Add IONIC vendor backend
+if(GDA_IONIC)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-backend.cpp
+  )
+  set_source_files_properties(
+    ${ENDPOINTS_DIR}/rdma-ep/ionic/ionic-backend.cpp
     PROPERTIES LANGUAGE HIP
   )
 endif()
