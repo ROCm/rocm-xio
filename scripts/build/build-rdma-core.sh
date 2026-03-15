@@ -117,11 +117,13 @@ if [ "${GDA_ERNIC}" = "1" ]; then
   echo ""
   echo "--- Injecting ernic provider ---"
   LOCAL_ERNIC="${PATCHES_DIR}/rocm-ernic"
+  ERNIC_INJECTED=false
   if [ -d "${LOCAL_ERNIC}" ]; then
     cp -r "${LOCAL_ERNIC}" \
       "${SRC_DIR}/providers/rocm_ernic"
     echo "  Injected rocm_ernic from" \
          "${LOCAL_ERNIC}"
+    ERNIC_INJECTED=true
   elif [ -n "${ERNIC_DIR}" ] && \
        [ -d "${ERNIC_DIR}" ]; then
     ERNIC_PROV="${ERNIC_DIR}/rdma-core"
@@ -132,6 +134,7 @@ if [ "${GDA_ERNIC}" = "1" ]; then
         "${SRC_DIR}/providers/"
       echo "  Injected rocm_ernic from" \
            "${ERNIC_PROV}"
+      ERNIC_INJECTED=true
     else
       echo "  WARNING: ${ERNIC_PROV}" \
            "not found."
@@ -141,6 +144,18 @@ if [ "${GDA_ERNIC}" = "1" ]; then
          "found."
     echo "  Checked: ${LOCAL_ERNIC}"
     echo "  Skipping ernic injection."
+  fi
+
+  # Record rocm-ernic git SHA for provenance
+  if $ERNIC_INJECTED && \
+     [ -n "${ERNIC_DIR}" ] && \
+     [ -d "${ERNIC_DIR}/.git" ]; then
+    ERNIC_SHA="$(git -C "${ERNIC_DIR}" \
+      rev-parse --short HEAD 2>/dev/null \
+      || echo "unknown")"
+    echo "${ERNIC_SHA}" > \
+      "${SRC_DIR}/providers/rocm_ernic/SOURCE_SHA"
+    echo "  rocm-ernic SHA: ${ERNIC_SHA}"
   fi
 fi
 

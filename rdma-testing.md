@@ -82,7 +82,7 @@ cmake -B build -S . -DGDA_BNXT=ON -DBNXT_DV_BUILD_KMOD=ON -DBUILD_TESTING=ON
 cmake --build build --target all --parallel
 ```
 
-sudo LD_LIBRARY_PATH=$(pwd)/build/_deps/bnxt-dv/rdma-core-install/lib \
+sudo LD_LIBRARY_PATH=$(pwd)/build/_deps/rdma-core/install/lib \
   ./build/tests/unit/rdma-ep/test-rdma-bnxt-loopback
 
 To enable all three RDMA vendors (MLX5 and IONIC compile but are untested):

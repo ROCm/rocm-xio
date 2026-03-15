@@ -64,7 +64,7 @@ cmake --build build-dv -j$(nproc)
 ```
 
 The patched `libbnxt_re.so` is installed into
-`build-dv/_deps/bnxt-dv/rdma-core-install/lib/`.
+`build/_deps/rdma-core/install/lib/`.
 
 ## 4. Configure the NIC interface
 
@@ -120,8 +120,8 @@ files directly is much faster.
 
 ```bash
 sudo env \
-  LD_LIBRARY_PATH=$(pwd)/build-dv/_deps/bnxt-dv/\
-rdma-core-install/lib:$(pwd)/build-dv/install/lib:\
+  LD_LIBRARY_PATH=$(pwd)/build/_deps/rdma-core/\
+install/lib:$(pwd)/build/install/lib:\
 /opt/rocm/lib \
   ./build-dv/tests/unit/rdma-ep/\
 test-rdma-bnxt-loopback
@@ -216,7 +216,7 @@ The `LD_LIBRARY_PATH` is missing the rdma-core
 install directory. Make sure it includes:
 
 ```
-build-dv/_deps/bnxt-dv/rdma-core-install/lib
+build/_deps/rdma-core/install/lib
 ```
 
 ### `DV Modify QP error: 110` (ETIMEDOUT)

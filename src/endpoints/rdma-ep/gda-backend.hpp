@@ -186,7 +186,6 @@ private:
   struct ernic_host_qp *ernic_qp_{nullptr};
   struct ernic_host_cq *ernic_scq_{nullptr};
   struct ernic_host_cq *ernic_rcq_{nullptr};
-  void *ernic_dv_handle_{nullptr};
   void ernic_create_cqs(int ncqes);
   void ernic_create_qps(int sq_length);
   void ernic_initialize_gpu_qp();

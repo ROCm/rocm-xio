@@ -65,6 +65,24 @@ if(RDMA_CORE_BUILD)
   endif()
   if(GDA_ERNIC)
     set(_GDA_ERNIC_FLAG "1")
+
+    # Validate that ERNIC provider source exists
+    set(_ERNIC_LOCAL
+      "${CMAKE_SOURCE_DIR}/rdma-core/rocm-ernic")
+    set(_ERNIC_EXT
+      "${ERNIC_PROJECT_DIR}/rdma-core/providers/rocm_ernic")
+    if(NOT IS_DIRECTORY "${_ERNIC_LOCAL}" OR
+       NOT EXISTS "${_ERNIC_LOCAL}/CMakeLists.txt")
+      if(NOT IS_DIRECTORY "${_ERNIC_EXT}")
+        message(FATAL_ERROR
+          "GDA_ERNIC=ON but no rocm_ernic "
+          "provider source found.\n"
+          "  Checked: ${_ERNIC_LOCAL}\n"
+          "  Checked: ${_ERNIC_EXT}\n"
+          "Set ERNIC_PROJECT_DIR to the "
+          "rocm-ernic project root.")
+      endif()
+    endif()
   endif()
 
   set(_RDMA_CORE_ENV

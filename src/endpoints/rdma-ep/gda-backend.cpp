@@ -138,9 +138,18 @@ void Backend::open_dv_libs() {
 
 #if defined(GDA_MLX5)
   if (provider_ == Provider::UNKNOWN &&
-      (requested == Provider::UNKNOWN || requested == Provider::MLX5)) {
-    // MLX5 DV init will be added in Phase 6
-    fprintf(stderr, "rdma_ep: MLX5 DV support not yet implemented.\n");
+      (requested == Provider::UNKNOWN ||
+       requested == Provider::MLX5)) {
+    if (mlx5_dv_dl_init() == 0) {
+      provider_ = Provider::MLX5;
+      fprintf(stderr,
+              "rdma_ep: MLX5 DV library "
+              "loaded.\n");
+    } else {
+      fprintf(stderr,
+              "rdma_ep: MLX5 DV library "
+              "not available.\n");
+    }
   }
 #endif
 
@@ -732,6 +741,13 @@ void Backend::initialize_gpu_qp() {
 #if defined(GDA_BNXT)
   if (provider_ == Provider::BNXT) {
     bnxt_initialize_gpu_qp();
+    return;
+  }
+#endif
+
+#if defined(GDA_MLX5)
+  if (provider_ == Provider::MLX5) {
+    mlx5_initialize_gpu_qp();
     return;
   }
 #endif

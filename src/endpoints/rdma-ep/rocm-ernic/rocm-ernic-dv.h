@@ -16,6 +16,8 @@
 #ifndef __ROCM_ERNIC_DV_H__
 #define __ROCM_ERNIC_DV_H__
 
+#define ROCM_ERNIC_DV_API_VERSION 1
+
 #include <stdint.h>
 #include <stddef.h>
 #ifdef __cplusplus

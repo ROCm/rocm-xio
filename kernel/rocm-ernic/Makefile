@@ -1,36 +1,31 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Out-of-tree Makefile for rocm_ernic with DV
-# (Direct Verbs) extensions.
+# Out-of-tree Makefile for rocm_ernic_eth + rocm_ernic_rdma
 #
-# The rocm_ernic driver source lives in the
-# rocm-ernic project at driver/. This Makefile
-# builds it out-of-tree against installed kernel
-# headers, including the new DV uapi source.
+# Builds two modules (matching upstream rocm-ernic driver/Makefile):
+#   rocm_ernic_eth.ko  - ethernet driver (single file)
+#   rocm_ernic_rdma.ko - RDMA driver
 #
-# The source files are populated by
-# setup-rocm-ernic-dv-dkms.sh into this directory.
+# Source populated by setup-rocm-ernic-eth-rdma-dkms.sh
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
-# --- module object list ---
-obj-m += rocm_ernic.o
-rocm_ernic-y := rocm_ernic_cmd.o \
-		rocm_ernic_cq.o \
-		rocm_ernic_doorbell.o \
-		rocm_ernic_main.o \
-		rocm_ernic_misc.o \
-		rocm_ernic_mr.o \
-		rocm_ernic_qp.o \
-		rocm_ernic_srq.o \
-		rocm_ernic_verbs.o \
-		rocm_ernic_uapi.o
+# --- rocm_ernic_eth ethernet module (single file) ---
+obj-m += rocm_ernic_eth.o
 
-# Prepend our include/ to LINUXINCLUDE so that the
-# DV <rdma/rocm_ernic-abi.h> is found before any
-# stock kernel header.
-LINUXINCLUDE := -I $(M)/include $(LINUXINCLUDE)
+# --- rocm_ernic_rdma RDMA module ---
+obj-m += rocm_ernic_rdma.o
+rocm_ernic_rdma-y := rocm_ernic_cmd.o rocm_ernic_cq.o \
+	rocm_ernic_doorbell.o rocm_ernic_main.o \
+	rocm_ernic_misc.o rocm_ernic_mr.o rocm_ernic_qp.o \
+	rocm_ernic_srq.o rocm_ernic_verbs.o rocm_ernic_uapi.o
+
+# Include path for ABI header
+ccflags-y := -I$(M)/include
+
+# Prepend include/ for <rdma/rocm_ernic-abi.h> etc.
+LINUXINCLUDE := -I$(M)/include $(LINUXINCLUDE)
 
 # Ensure vmlinux symlink exists for BTF generation
 VMLINUX := $(KDIR)/vmlinux
@@ -40,8 +35,7 @@ all: check-vmlinux
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 check-vmlinux:
-	@if [ ! -f $(VMLINUX) ] && \
-	    [ -f $(VMLINUX_BTF) ]; then \
+	@if [ ! -f $(VMLINUX) ] && [ -f $(VMLINUX_BTF) ]; then \
 		echo "Creating vmlinux symlink for BTF"; \
 		sudo ln -sf $(VMLINUX_BTF) $(VMLINUX) \
 		  2>/dev/null || \
@@ -56,8 +50,9 @@ install: all
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
 	depmod -a
 	@echo ""
-	@echo "rocm_ernic (DV) module installed."
-	@echo "  sudo modprobe -r rocm_ernic"
-	@echo "  sudo modprobe rocm_ernic"
+	@echo "rocm_ernic_eth + rocm_ernic_rdma installed."
+	@echo "  sudo modprobe rocm_ernic_eth"
+	@echo "  sudo modprobe rocm_ernic_rdma"
+	@echo "  (unload in reverse order)"
 
 .PHONY: all clean install check-vmlinux

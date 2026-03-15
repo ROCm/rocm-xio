@@ -76,8 +76,15 @@ void *ernicdv_handle_ = nullptr;
 #if defined(GDA_ERNIC)
 
 void *Backend::ernic_dv_dlopen() {
-  void *handle =
-      dlopen("librocm_ernic.so", RTLD_LAZY);
+  void *handle = nullptr;
+#ifdef RDMA_CORE_LIB_DIR
+  handle = dlopen(
+      RDMA_CORE_LIB_DIR "/librocm_ernic.so",
+      RTLD_LAZY);
+#endif
+  if (!handle)
+    handle = dlopen(
+        "librocm_ernic.so", RTLD_LAZY);
   if (!handle)
     handle = dlopen(
         "/usr/local/lib/librocm_ernic.so",
@@ -418,8 +425,6 @@ void Backend::ernic_initialize_gpu_qp() {
           (void *)host_qp_->ernic_sq_.uar_ptr);
 }
 
-#endif // defined(GDA_ERNIC)
-
 int ernic_dv_modify_qp(struct ibv_qp *qp,
                        struct ibv_qp_attr *attr,
                        int attr_mask) {
@@ -428,6 +433,8 @@ int ernic_dv_modify_qp(struct ibv_qp *qp,
   return ernic_dv.modify_qp(
       qp, attr, attr_mask);
 }
+
+#endif // defined(GDA_ERNIC)
 
 #undef XIO_CHECK_ZERO
 #undef XIO_CHECK_NNULL

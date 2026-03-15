@@ -214,19 +214,23 @@ set(IONIC_FW_VERSION "2" CACHE STRING
     "Ionic firmware opcode version (1 or 2)")
 option(GDA_ERNIC "Build ROCm ERNIC RDMA provider" OFF)
 
-# Unified rdma-core build with vendor DV patches
+# Unified rdma-core build with vendor DV patches.
+# MLX5 is intentionally excluded: it uses the
+# upstream rdma-core provider as-is (no patches)
+# and depends on the system libibverbs-dev package.
 if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
   include(XIORdmaCore)
 endif()
 
 # Vendor kernel module (DKMS) targets
-if(GDA_BNXT)
-  if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/XIOBnxtKernelModule.cmake")
-    include(XIOBnxtKernelModule)
-  endif()
-endif()
+# BNXT kernel module is managed via standalone
+# setup script (kernel/bnxt/setup-bnxt-dv-dkms.sh)
+# without a CMake module.
 if(GDA_IONIC)
   include(XIOIonicKernelModule)
+endif()
+if(GDA_ERNIC)
+  include(XIOErnicKernelModule)
 endif()
 
 # Discover source files
@@ -333,6 +337,22 @@ if(GDA_BNXT)
 endif()
 if(GDA_MLX5)
   target_compile_definitions(rocm-xio PRIVATE GDA_MLX5)
+  find_path(MLX5DV_INCLUDE_DIR
+    NAMES infiniband/mlx5dv.h
+    HINTS /usr/include
+    DOC "Path to mlx5dv.h from libibverbs-dev")
+  if(NOT MLX5DV_INCLUDE_DIR)
+    message(FATAL_ERROR
+      "GDA_MLX5 requires libibverbs-dev "
+      "(infiniband/mlx5dv.h not found). "
+      "Install with: "
+      "sudo apt install libibverbs-dev")
+  endif()
+  message(STATUS
+    "MLX5: using system mlx5dv.h from "
+    "${MLX5DV_INCLUDE_DIR}")
+  target_include_directories(rocm-xio PRIVATE
+    ${MLX5DV_INCLUDE_DIR})
 endif()
 if(GDA_IONIC)
   target_compile_definitions(rocm-xio PRIVATE
@@ -341,6 +361,13 @@ if(GDA_IONIC)
 endif()
 if(GDA_ERNIC)
   target_compile_definitions(rocm-xio PRIVATE GDA_ERNIC)
+endif()
+
+# Pass the custom rdma-core lib dir so DV backends
+# can try it as a dlopen path before system fallback
+if(RDMA_CORE_LIB_DIR)
+  target_compile_definitions(rocm-xio PRIVATE
+    RDMA_CORE_LIB_DIR="${RDMA_CORE_LIB_DIR}")
 endif()
 
 # Link dependencies that consumers will need

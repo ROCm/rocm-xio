@@ -28,7 +28,7 @@
 #define RDMA_EP_MLX5_PROVIDER_HPP
 
 extern "C" {
-#include "mlx5/mlx5dv.h"
+#include <infiniband/mlx5dv.h>
 }
 
 #include "endian.hpp"

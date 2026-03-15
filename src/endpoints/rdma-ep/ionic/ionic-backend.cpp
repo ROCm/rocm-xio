@@ -82,8 +82,15 @@ qp_set_gda_fn ionic_qp_set_gda_ = nullptr;
 #if defined(GDA_IONIC)
 
 void *Backend::ionic_dv_dlopen() {
-  void *handle =
-      dlopen("libionic.so", RTLD_LAZY);
+  void *handle = nullptr;
+#ifdef RDMA_CORE_LIB_DIR
+  handle = dlopen(
+      RDMA_CORE_LIB_DIR "/libionic.so",
+      RTLD_LAZY);
+#endif
+  if (!handle)
+    handle = dlopen(
+        "libionic.so", RTLD_LAZY);
   if (!handle)
     handle = dlopen(
         "/usr/local/lib/libionic.so",

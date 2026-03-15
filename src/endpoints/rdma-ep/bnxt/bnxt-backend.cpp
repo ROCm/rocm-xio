@@ -82,8 +82,15 @@ void *bnxtdv_handle_ = nullptr;
 #if defined(GDA_BNXT)
 
 void *Backend::bnxt_dv_dlopen() {
-  void *handle =
-      dlopen("libbnxt_re.so", RTLD_LAZY);
+  void *handle = nullptr;
+#ifdef RDMA_CORE_LIB_DIR
+  handle = dlopen(
+      RDMA_CORE_LIB_DIR "/libbnxt_re.so",
+      RTLD_LAZY);
+#endif
+  if (!handle)
+    handle = dlopen(
+        "libbnxt_re.so", RTLD_LAZY);
   if (!handle)
     handle = dlopen(
         "/usr/local/lib/libbnxt_re.so",
@@ -91,7 +98,8 @@ void *Backend::bnxt_dv_dlopen() {
   if (!handle)
     fprintf(stderr,
             "rdma_ep::bnxt: Could not open "
-            "libbnxt_re.so\n");
+            "libbnxt_re.so: %s\n",
+            dlerror());
   return handle;
 }
 
