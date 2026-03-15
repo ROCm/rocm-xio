@@ -1,0 +1,136 @@
+From 654e9880b5f6f7c4d9df67788bf2e150f78cffc7 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Sat, 14 Mar 2026 17:59:47 -0600
+Subject: [PATCH] RDMAionic: Add sysfs loopback_mode attribute for port
+ loopback control
+
+Add a sysfs attribute at /sys/bus/pci/devices/<bdf>/loopback_mode
+that allows runtime control of the ionic NIC port loopback mode.
+
+Values:
+  0 = none (normal operation)
+  1 = MAC loopback
+  2 = PHY/SerDes loopback
+
+This sends the IONIC_PORT_ATTR_LOOPBACK port setattr command to
+firmware, enabling RDMA loopback testing without a physical cable.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ .../ethernet/pensando/ionic/ionic_bus_pci.c   | 44 +++++++++++++++++++
+ .../net/ethernet/pensando/ionic/ionic_dev.c   | 16 +++++++
+ .../net/ethernet/pensando/ionic/ionic_dev.h   |  2 +
+ 3 files changed, 62 insertions(+)
+
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+index 70d86c5..56f7e37 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+@@ -305,6 +305,44 @@ err_out_debugfs_del_dev:
+ 	return err;
+ }
+ 
++static ssize_t loopback_mode_show(struct device *dev,
++	struct device_attribute *attr, char *buf)
++{
++	struct ionic *ionic = pci_get_drvdata(
++		to_pci_dev(dev));
++	struct ionic_dev *idev = &ionic->idev;
++	u8 mode = 0;
++
++	if (idev->port_info)
++		mode = idev->port_info->config
++			.loopback_mode;
++
++	return sysfs_emit(buf, "%u\n", mode);
++}
++
++static ssize_t loopback_mode_store(struct device *dev,
++	struct device_attribute *attr,
++	const char *buf, size_t count)
++{
++	struct ionic *ionic = pci_get_drvdata(
++		to_pci_dev(dev));
++	unsigned int mode;
++	int err;
++
++	if (kstrtouint(buf, 0, &mode) || mode > 2)
++		return -EINVAL;
++
++	mutex_lock(&ionic->dev_cmd_lock);
++	ionic_dev_cmd_port_loopback(&ionic->idev,
++				    (u8)mode);
++	err = ionic_dev_cmd_wait(ionic, DEVCMD_TIMEOUT);
++	mutex_unlock(&ionic->dev_cmd_lock);
++
++	return err ? err : count;
++}
++
++static DEVICE_ATTR_RW(loopback_mode);
++
+ static int ionic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -380,6 +418,9 @@ static int ionic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 
+ 	ionic_auxbus_register(ionic->lif);
+ 
++	device_create_file(dev,
++			   &dev_attr_loopback_mode);
++
+ 	mod_timer(&ionic->watchdog_timer,
+ 		  round_jiffies(jiffies + ionic->watchdog_period));
+ 	ionic_queue_doorbell_check(ionic, IONIC_NAPI_DEADLINE);
+@@ -413,6 +454,9 @@ static void ionic_remove(struct pci_dev *pdev)
+ 
+ 	timer_shutdown_sync(&ionic->watchdog_timer);
+ 
++	device_remove_file(&pdev->dev,
++			   &dev_attr_loopback_mode);
++
+ 	if (ionic->lif) {
+ 		cancel_work_sync(&ionic->lif->deferred.work);
+ 		/* prevent adminq cmds if already known as down */
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_dev.c b/drivers/net/ethernet/pensando/ionic/ionic_dev.c
+index ab27e92..a160ac4 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_dev.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_dev.c
+@@ -780,6 +780,22 @@ void ionic_dev_cmd_port_pause(struct ionic_dev *idev, u8 pause_type)
+ 	ionic_dev_cmd_go(idev, &cmd);
+ }
+ 
++void ionic_dev_cmd_port_loopback(struct ionic_dev *idev,
++				u8 loopback_mode)
++{
++	union ionic_dev_cmd cmd = {
++		.port_setattr.opcode =
++			IONIC_CMD_PORT_SETATTR,
++		.port_setattr.index = 0,
++		.port_setattr.attr =
++			IONIC_PORT_ATTR_LOOPBACK,
++		.port_setattr.loopback_mode =
++			loopback_mode,
++	};
++
++	ionic_dev_cmd_go(idev, &cmd);
++}
++
+ /* VF commands */
+ int ionic_set_vf_config(struct ionic *ionic, int vf,
+ 			struct ionic_vf_setattr_cmd *vfc)
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_dev.h b/drivers/net/ethernet/pensando/ionic/ionic_dev.h
+index 35566f9..322f68b 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_dev.h
++++ b/drivers/net/ethernet/pensando/ionic/ionic_dev.h
+@@ -345,6 +345,8 @@ void ionic_dev_cmd_port_speed(struct ionic_dev *idev, u32 speed);
+ void ionic_dev_cmd_port_autoneg(struct ionic_dev *idev, u8 an_enable);
+ void ionic_dev_cmd_port_fec(struct ionic_dev *idev, u8 fec_type);
+ void ionic_dev_cmd_port_pause(struct ionic_dev *idev, u8 pause_type);
++void ionic_dev_cmd_port_loopback(struct ionic_dev *idev,
++				 u8 loopback_mode);
+ 
+ int ionic_set_vf_config(struct ionic *ionic, int vf,
+ 			struct ionic_vf_setattr_cmd *vfc);
+-- 
+2.43.0
+

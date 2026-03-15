@@ -94,17 +94,40 @@ run_vendor_test() {
         sleep 5
         ;;
       ionic)
-        sudo modprobe -r ionic_rdma \
+        local pci_bdf
+        pci_bdf=$(basename "$(readlink -f \
+          "/sys/class/net/${nic_if}/device" \
+          2>/dev/null)" 2>/dev/null || true)
+        local lb_path="/sys/bus/pci/devices"
+        lb_path="${lb_path}/${pci_bdf}/loopback_mode"
+
+        if [ -f "${lb_path}" ]; then
+          local cur
+          cur=$(cat "${lb_path}")
+          if [ "${cur}" != "2" ]; then
+            echo "Setting ionic loopback=2" \
+              "via sysfs..."
+            echo 2 | sudo tee "${lb_path}" \
+              >/dev/null
+            sleep 2
+          fi
+        else
+          echo "WARN: ${lb_path} not found," \
+            "falling back to module reload"
+          sudo modprobe -r ionic_rdma \
+            2>/dev/null || true
+          sudo modprobe -r ionic \
+            2>/dev/null || true
+          sleep 3
+          sudo modprobe ionic
+          sleep 5
+        fi
+
+        sudo ip link set "${nic_if}" up \
           2>/dev/null || true
-        sudo modprobe -r ionic \
+        sudo modprobe ionic_rdma \
           2>/dev/null || true
         sleep 3
-        sudo modprobe ionic loopback=2
-        sleep 5
-        sudo ip link set "${nic_if}" up
-        sleep 2
-        sudo modprobe ionic_rdma
-        sleep 5
         ;;
     esac
   fi
