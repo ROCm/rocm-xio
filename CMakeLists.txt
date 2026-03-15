@@ -518,9 +518,10 @@ install(FILES
     COMPONENT rocm-xio
 )
 
-# Add unit tests subdirectory
+# Add test subdirectories (unit, system, hardware)
 if(BUILD_TESTING)
-  add_subdirectory(tests/unit/rdma-ep)
+  include(XIOTestHelpers)
+  add_subdirectory(tests)
 endif()
 
 endif() # NOT XIO_DOCS_ONLY

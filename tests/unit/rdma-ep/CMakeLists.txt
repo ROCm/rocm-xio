@@ -2,77 +2,64 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Unit tests for the rdma-ep endpoint (GDA-based)
+# Unit and hardware tests for the rdma-ep endpoint
+# (GDA-based).
 
-set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
-set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
-set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
+# CPU-only unit tests (no GPU or NIC required)
+xio_add_test(
+  NAME test-rdma-config
+  SOURCE test-rdma-config.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-function(setup_rdma_test TEST_NAME SOURCE_FILE)
-  add_executable(${TEST_NAME} ${SOURCE_FILE})
+xio_add_test(
+  NAME test-rdma-vendors
+  SOURCE test-rdma-vendors.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-  set_target_properties(${TEST_NAME} PROPERTIES LANGUAGE HIP)
+xio_add_test(
+  NAME test-rdma-endian
+  SOURCE test-rdma-endian.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-  target_compile_options(${TEST_NAME} PRIVATE
-    -std=c++17
-    -Wall
-    -Wextra
-    -Wno-unused-parameter
-    -fgpu-rdc
-  )
-
-  target_include_directories(${TEST_NAME} PRIVATE
-    ${INCLUDE_DIR}
-    ${ENDPOINTS_DIR}/rdma-ep
-    ${COMMON_DIR}
-  )
-
-  target_link_libraries(${TEST_NAME} PRIVATE
-    rocm-xio
-    hip::host
-    hip::device
-    hsa-runtime64::hsa-runtime64
-    dl
-  )
-
-  target_link_options(${TEST_NAME} PRIVATE -fgpu-rdc)
-
-  # Propagate GDA vendor defines to test executables
-  if(GDA_BNXT)
-    target_compile_definitions(${TEST_NAME} PRIVATE GDA_BNXT)
-  endif()
-  if(GDA_MLX5)
-    target_compile_definitions(${TEST_NAME} PRIVATE GDA_MLX5)
-  endif()
-  if(GDA_IONIC)
-    target_compile_definitions(${TEST_NAME} PRIVATE GDA_IONIC)
-  endif()
-  if(GDA_ERNIC)
-    target_compile_definitions(${TEST_NAME} PRIVATE GDA_ERNIC)
-  endif()
-
-  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-endfunction()
-
-# New GDA-based tests
-setup_rdma_test(test-rdma-config test-rdma-config.hip)
-setup_rdma_test(test-rdma-vendors test-rdma-vendors.hip)
-setup_rdma_test(test-rdma-endian test-rdma-endian.hip)
-
-# Unified loopback test (any GDA vendor)
+# Hardware integration tests (require NIC + GPU)
 if(GDA_BNXT OR GDA_IONIC)
-  setup_rdma_test(test-rdma-loopback
-    test-rdma-loopback.hip)
+  xio_add_test(
+    NAME test-rdma-loopback
+    SOURCE test-rdma-loopback.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+  )
 endif()
 
-# Multi-node test (requires BNXT NIC)
 if(GDA_BNXT)
-  setup_rdma_test(test-rdma-2node
-    test-rdma-2node.hip)
+  xio_add_test(
+    NAME test-rdma-2node
+    SOURCE test-rdma-2node.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+  )
 endif()
 
-# Hardware integration tests (require ERNIC)
 if(GDA_ERNIC)
-  setup_rdma_test(test-rdma-ernic-loopback
-    test-rdma-ernic-loopback.hip)
+  xio_add_test(
+    NAME test-rdma-ernic-loopback
+    SOURCE test-rdma-ernic-loopback.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+  )
 endif()
