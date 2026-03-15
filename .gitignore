@@ -67,6 +67,9 @@ gda-experiments/rocSHMEM/
 # Spell-check artifacts
 wordlist.dic
 
+# rocprofv3 trace output
+.rocprofv3/
+
 # Python cache
 __pycache__/
 *.pyc

@@ -12,6 +12,10 @@
 #   VENDOR=all ./run-test-rdma-loopback.sh
 #   VENDOR=bnxt ./run-test-rdma-loopback.sh
 #   VENDOR=ionic ./run-test-rdma-loopback.sh
+#
+# GPU kernel profiling (rocprofv3):
+#   PROFILE=1 VENDOR=ionic ./run-test-rdma-loopback.sh
+#   PROFILE_DIR=/tmp/my-traces PROFILE=1 ...
 
 set -euo pipefail
 
@@ -21,6 +25,8 @@ ITERATIONS=${ITERATIONS:-10}
 BUILD_DIR=${BUILD_DIR:-./build-dv}
 BUILD_ALL=${BUILD_ALL:-false}
 VENDOR=${VENDOR:-all}
+PROFILE=${PROFILE:-0}
+PROFILE_DIR=${PROFILE_DIR:-/tmp/rocprof-out}
 
 SHA=$(git rev-parse --short HEAD 2>/dev/null \
   || echo "dev")
@@ -198,8 +204,18 @@ run_vendor_test() {
     log=$(mktemp /tmp/rdma-lb-XXXXXX.log)
 
     local rc=0
+    local prof_prefix=""
+    if [ "${PROFILE}" = "1" ]; then
+      mkdir -p "${PROFILE_DIR}"
+      prof_prefix="rocprofv3 --kernel-trace"
+      prof_prefix="${prof_prefix} -d"
+      prof_prefix="${prof_prefix} ${PROFILE_DIR}"
+      prof_prefix="${prof_prefix} -f csv"
+      prof_prefix="${prof_prefix} --"
+    fi
     # shellcheck disable=SC2086
     sudo env LD_LIBRARY_PATH="${lib_path}" \
+      ${prof_prefix} \
       "${bin}" \
       ${provider_flag} \
       --size "${TEST_SIZE}" \
@@ -270,6 +286,13 @@ run_vendor_test() {
     echo ""
     echo "${vendor^^} PASSED:" \
          "all ${ITERATIONS} iterations OK."
+  fi
+
+  if [ "${PROFILE}" = "1" ]; then
+    echo ""
+    echo "Kernel traces: ${PROFILE_DIR}/"
+    ls "${PROFILE_DIR}"/*.csv 2>/dev/null \
+      | head -5
   fi
 
   return ${total_fail}
