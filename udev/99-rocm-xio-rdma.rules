@@ -1,9 +1,13 @@
 # rocm-xio RDMA NIC persistent naming rules
 #
-# Renames network interfaces for RDMA NICs supported
-# by the rocm-xio project to persistent, vendor-based
-# names. Install with:
+# Renames network interfaces and InfiniBand devices
+# for RDMA NICs supported by the rocm-xio project
+# to persistent, vendor-based names.
+#
+# Install with:
 #   sudo udev/setup-udev-rules.sh --install
+
+# --- Network interface naming ---
 
 # Broadcom Thor 2 (bnxt_re)
 SUBSYSTEM=="net", ACTION=="add", \
@@ -27,3 +31,29 @@ SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x1022", \
   DRIVERS=="rocm_ernic", \
   NAME="rocm-ernic%n"
+
+# --- InfiniBand device naming ---
+
+# Broadcom Thor 2 (bnxt_re)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  ATTRS{vendor}=="0x14e4", \
+  RUN+="/usr/bin/rdma dev set $kernel \
+    name rocm-rdma-bnxt%n"
+
+# AMD Pensando (ionic)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  ATTRS{vendor}=="0x1dd8", \
+  RUN+="/usr/bin/rdma dev set $kernel \
+    name rocm-rdma-ionic%n"
+
+# Mellanox ConnectX (mlx5)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  ATTRS{vendor}=="0x02c9", \
+  RUN+="/usr/bin/rdma dev set $kernel \
+    name rocm-rdma-mlx5-%n"
+
+# AMD ROCm ERNIC
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  ATTRS{vendor}=="0x1022", \
+  RUN+="/usr/bin/rdma dev set $kernel \
+    name rocm-rdma-ernic%n"

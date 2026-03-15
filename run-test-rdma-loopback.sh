@@ -34,17 +34,17 @@ run_vendor_test() {
 
   case "${vendor}" in
     bnxt)
-      nic_if="${BNXT_NIC_IF:-enp195s0f0np0}"
+      nic_if="${BNXT_NIC_IF:-rocm-bnxt0}"
       nic_ip="${BNXT_NIC_IP:-198.18.0.1/24}"
-      rdma_dev="${BNXT_RDMA_DEV:-rocep195s0f0}"
+      rdma_dev="${BNXT_RDMA_DEV:-rocm-rdma-bnxt0}"
       provider_flag="--provider bnxt"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;
     ionic)
-      nic_if="${IONIC_NIC_IF:-enp132s0np0}"
+      nic_if="${IONIC_NIC_IF:-rocm-ionic0}"
       nic_ip="${IONIC_NIC_IP:-198.18.1.1/24}"
-      rdma_dev="${IONIC_RDMA_DEV:-rocep132s0}"
+      rdma_dev="${IONIC_RDMA_DEV:-rocm-rdma-ionic0}"
       provider_flag="--provider ionic"
       provider_flag="${provider_flag}"
       provider_flag="${provider_flag} --device"
