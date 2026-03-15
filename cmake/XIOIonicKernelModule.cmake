@@ -15,38 +15,38 @@
 # when GDA_IONIC=ON.
 
 option(IONIC_BUILD_KMOD
-  "Setup ionic RDMA DKMS modules" OFF)
+  "Setup ionic eth+RDMA DKMS modules" OFF)
 
 set(IONIC_DKMS_SETUP_SCRIPT
-  "${CMAKE_SOURCE_DIR}/kernel/ionic/setup-ionic-rdma-dkms.sh")
+  "${CMAKE_SOURCE_DIR}/kernel/ionic/setup-ionic-eth-rdma-dkms.sh")
 
 if(IONIC_BUILD_KMOD)
   message(STATUS
     "ionic: DKMS kmod targets enabled"
-    " (kernel/ionic/setup-ionic-rdma-dkms.sh)")
+    " (kernel/ionic/setup-ionic-eth-rdma-dkms.sh)")
 
-  add_custom_target(build-ionic-rdma-dkms
+  add_custom_target(build-ionic-eth-rdma-dkms
     COMMAND ${IONIC_DKMS_SETUP_SCRIPT}
       --build-only
     COMMENT
-      "Building ionic RDMA DKMS modules"
+      "Building ionic eth+RDMA DKMS modules"
       " (no install)"
     VERBATIM
   )
 
-  add_custom_target(install-ionic-rdma-dkms
+  add_custom_target(install-ionic-eth-rdma-dkms
     COMMAND ${IONIC_DKMS_SETUP_SCRIPT}
     COMMENT
-      "Building and installing ionic RDMA"
+      "Building and installing ionic eth+RDMA"
       " DKMS modules"
     VERBATIM
   )
 
-  add_custom_target(remove-ionic-rdma-dkms
+  add_custom_target(remove-ionic-eth-rdma-dkms
     COMMAND ${IONIC_DKMS_SETUP_SCRIPT}
       --uninstall
     COMMENT
-      "Removing ionic RDMA DKMS modules"
+      "Removing ionic eth+RDMA DKMS modules"
     VERBATIM
   )
 endif()

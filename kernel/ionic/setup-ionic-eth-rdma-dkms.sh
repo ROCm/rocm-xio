@@ -4,14 +4,15 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# Setup DKMS tree for ionic + ionic_rdma.
+# Setup DKMS tree for ionic + ionic_rdma
+# (rocm-xio).
 #
 # 1. Downloads the ionic ethernet driver source
 #    from kernel.googlesource.com (cached).
 # 2. Applies the vendored v6 RDMA patch series
 #    (14 plain .patch files in patches/).
 # 3. Copies patched source + Makefile + dkms.conf
-#    into /usr/src/ionic-rdma-<ver>/.
+#    into /usr/src/rocm-xio-ionic-eth-rdma-<ver>/.
 # 4. Registers and builds with DKMS.
 #
 # The patches originate from the v6 ionic RDMA
@@ -19,13 +20,13 @@
 # from the patchew mbox into plain unified diffs.
 #
 # Usage:
-#   setup-ionic-rdma-dkms.sh [OPTIONS]
+#   setup-ionic-eth-rdma-dkms.sh [OPTIONS]
 #
 # Options:
 #   --kernel-tag TAG  Upstream kernel tag
 #                     (default: auto-detect)
 #   --work-dir DIR    Working directory
-#                     (default: /tmp/ionic-rdma-build)
+#                     (default: /tmp/rocm-xio-ionic-eth-rdma-build)
 #   --version VER     DKMS package version
 #                     (default: 1.0.0-g<shortrev>)
 #   --build-only      Build but do not install
@@ -34,13 +35,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_NAME="ionic-rdma"
+PKG_NAME="rocm-xio-ionic-eth-rdma"
 BASE_VERSION="0.1.0"
 GIT_REV="$(git -C "$(dirname "$0")" \
   rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 PKG_VERSION="${BASE_VERSION}-g${GIT_REV}"
 KERNEL_TAG=""
-WORK_DIR="/tmp/ionic-rdma-build"
+WORK_DIR="/tmp/rocm-xio-ionic-eth-rdma-build"
 BUILD_ONLY=false
 UNINSTALL=false
 
@@ -166,7 +167,7 @@ detect_kernel_tag() {
 detect_kernel_tag
 
 echo ""
-echo "=== setup-ionic-rdma-dkms ==="
+echo "=== setup-ionic-eth-rdma-dkms ==="
 echo "  kernel tag  : ${KERNEL_TAG}"
 echo "  work dir    : ${WORK_DIR}"
 echo "  DKMS src    : ${DKMS_SRC}"
@@ -338,6 +339,40 @@ verify_source() {
 }
 
 verify_source
+
+# -------------------------------------------------------
+# Inject rocm-xio modinfo into driver source
+# -------------------------------------------------------
+
+inject_modinfo() {
+  echo "Injecting rocm-xio modinfo..."
+
+  local eth_main="${ETH_DIR}/ionic_main.c"
+  if [ -f "${eth_main}" ]; then
+    cat >> "${eth_main}" <<MODEOF
+
+/* rocm-xio project metadata (injected at build) */
+MODULE_VERSION("${PKG_VERSION}");
+MODULE_INFO(project, "rocm-xio");
+MODULE_INFO(project_pkg, "${PKG_NAME}");
+MODEOF
+    echo "  ionic_main.c: OK"
+  fi
+
+  local rdma_main="${RDMA_DIR}/ionic_ibdev.c"
+  if [ -f "${rdma_main}" ]; then
+    cat >> "${rdma_main}" <<MODEOF
+
+/* rocm-xio project metadata (injected at build) */
+MODULE_VERSION("${PKG_VERSION}");
+MODULE_INFO(project, "rocm-xio");
+MODULE_INFO(project_pkg, "${PKG_NAME}");
+MODEOF
+    echo "  ionic_ibdev.c: OK"
+  fi
+}
+
+inject_modinfo
 
 # -------------------------------------------------------
 # Populate DKMS source tree

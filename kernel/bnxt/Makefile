@@ -8,7 +8,7 @@
 # it out-of-tree against installed kernel headers, with
 # the v11 uapi-extension patches applied.
 #
-# The source files are populated by setup-bnxt-dv-dkms.sh
+# The source files are populated by setup-bnxt-re-dkms.sh
 # into this directory.
 
 KDIR ?= /lib/modules/$(shell uname -r)/build

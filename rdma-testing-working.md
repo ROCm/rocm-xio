@@ -11,7 +11,7 @@
 ## 1. Build the DKMS kernel module
 
 ```bash
-sudo kernel/bnxt/setup-bnxt-dv-dkms.sh
+sudo kernel/bnxt/setup-bnxt-re-dkms.sh
 ```
 
 This downloads the stock `bnxt_re` source, extracts
@@ -189,7 +189,7 @@ handling code in `ib_verbs.c`. The kernel falls
 back to its own buffer sizing which does not match
 the DV userspace allocation, causing `ib_umem_get`
 to fail pinning pages beyond the buffer. Re-run
-`setup-bnxt-dv-dkms.sh` (it re-extracts and
+`setup-bnxt-re-dkms.sh` (it re-extracts and
 re-patches unconditionally) and reload the module.
 
 ### `ibv_cmd_create_qp_ex2() failed: 22` (EINVAL)
@@ -199,15 +199,15 @@ patch applied. Verify:
 
 ```bash
 grep -c DV_QP_ENABLE \
-  /usr/src/bnxt-re-dv-0.1/ib_verbs.c
+  /usr/src/rocm-xio-bnxt-re-0.1/ib_verbs.c
 # expect: >= 1
 grep -c DV_QP_ENABLE \
-  /usr/src/bnxt-re-dv-0.1/include/rdma/\
+  /usr/src/rocm-xio-bnxt-re-0.1/include/rdma/\
 bnxt_re-abi.h
 # expect: >= 1
 ```
 
-If missing, re-run `setup-bnxt-dv-dkms.sh` and
+If missing, re-run `setup-bnxt-re-dkms.sh` and
 reload the module.
 
 ### `Could not open libbnxt_re.so`

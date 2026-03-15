@@ -9,7 +9,7 @@
 #   ionic_rdma.ko - InfiniBand RDMA driver
 #
 # The source files are populated by
-# setup-ionic-rdma-dkms.sh into this directory.
+# setup-ionic-eth-rdma-dkms.sh into this directory.
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)

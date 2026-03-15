@@ -5,25 +5,25 @@
 # SPDX-License-Identifier: MIT
 #
 # Setup DKMS tree for bnxt_re with uapi extensions
-# (Direct Verbs v11 patches).
+# (v11 patches).
 #
 # 1. Downloads the bnxt_re driver source from
 #    kernel.org (cached across runs).
 # 2. Extracts a fresh copy and applies the vendored
 #    v11 uapi-extension patches unconditionally.
 # 3. Copies the patched source + our Makefile/dkms.conf
-#    into /usr/src/bnxt-re-dv-<ver>/.
+#    into /usr/src/rocm-xio-bnxt-re-<ver>/.
 # 4. Registers and builds with DKMS.
 #
 # Usage:
-#   setup-bnxt-dv-dkms.sh [--kernel-tag vX.Y] \
+#   setup-bnxt-re-dkms.sh [--kernel-tag vX.Y] \
 #                          [--work-dir DIR]
 #
 # Options:
 #   --kernel-tag TAG  Upstream kernel tag for source
 #                     (default: auto-detect from uname)
 #   --work-dir DIR    Working directory for downloads
-#                     (default: /tmp/bnxt-re-dv-build)
+#                     (default: /tmp/rocm-xio-bnxt-re-build)
 #   --version VER     DKMS package version
 #                     (default: 1.0.0-g<shortrev>)
 #   --build-only      Build but do not install
@@ -32,13 +32,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_NAME="bnxt-re-dv"
+PKG_NAME="rocm-xio-bnxt-re"
 BASE_VERSION="0.1.0"
 GIT_REV="$(git -C "$(dirname "$0")" \
   rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 PKG_VERSION="${BASE_VERSION}-g${GIT_REV}"
 KERNEL_TAG=""
-WORK_DIR="/tmp/bnxt-re-dv-build"
+WORK_DIR="/tmp/rocm-xio-bnxt-re-build"
 BUILD_ONLY=false
 UNINSTALL=false
 
@@ -154,7 +154,7 @@ detect_kernel_tag() {
 detect_kernel_tag
 
 echo ""
-echo "=== setup-bnxt-dv-dkms ==="
+echo "=== setup-bnxt-re-dkms ==="
 echo "  kernel tag  : ${KERNEL_TAG}"
 echo "  work dir    : ${WORK_DIR}"
 echo "  DKMS src    : ${DKMS_SRC}"
@@ -413,6 +413,24 @@ PYEOF
 }
 
 apply_patches
+
+# -----------------------------------------------------------
+# Inject rocm-xio modinfo into driver source
+# -----------------------------------------------------------
+
+inject_modinfo() {
+  local main="${DRV_DIR}/main.c"
+  echo "Injecting rocm-xio modinfo into main.c..."
+  cat >> "${main}" <<MODEOF
+
+/* rocm-xio project metadata (injected at build) */
+MODULE_VERSION("${PKG_VERSION}");
+MODULE_INFO(project, "rocm-xio");
+MODULE_INFO(project_pkg, "${PKG_NAME}");
+MODEOF
+}
+
+inject_modinfo
 
 # -----------------------------------------------------------
 # Populate DKMS source tree
