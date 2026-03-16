@@ -44,7 +44,8 @@ make rdma-ep-tester
 
 ## Key Features
 
-- **rocSHMEM GDA Pattern**: Direct GPU doorbell writes using system-scope atomics
+- **rocSHMEM GDA Pattern**: Direct GPU doorbell writes using
+  system-scope atomics
 - **Vendor Abstraction**: Unified API across 4 different RDMA vendors
 - **Emulation Support**: Test without physical RDMA hardware
 - **GPU-Direct I/O**: Zero-copy, zero-CPU-overhead RDMA operations
@@ -61,11 +62,15 @@ __device__ void ring_mlx5_doorbell(volatile uint64_t* db, uint64_t val) {
 }
 ```
 
-No HSA memory locking needed! (Unlike NVMe, RDMA NICs support this pattern natively)
+No HSA memory locking needed! (Unlike NVMe, RDMA NICs support this pattern
+natively)
 
 ## Documentation
 
-See [`docs/RDMA_ENDPOINT_ARCHITECTURE.md`](../../docs/RDMA_ENDPOINT_ARCHITECTURE.md) for complete architecture documentation.
+See the [RDMA endpoint architecture][rdma-arch] docs for complete architecture
+documentation.
+
+[rdma-arch]: ../../docs/RDMA_ENDPOINT_ARCHITECTURE.md
 
 ## Reference Materials
 
@@ -91,4 +96,3 @@ test_rdma_vendor(RDMAVendor::MLX5, "MLX5", use_emulation);
 ## License
 
 MIT License
-

@@ -49,8 +49,3 @@ jobs:
     - name: Run tester using test-ep in emulate mode with doorbell
       run: |
         ./build/xio-tester test-ep --emulate -n 100 -t 1 --doorbell 64 -v
-
-
- 
-
-

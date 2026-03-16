@@ -1128,7 +1128,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // Wait for GPU kernel to complete
   hipError_t err = hipDeviceSynchronize();
 
-  // Detect if an error occured
+  // Detect if an error occurred
   if (err != hipSuccess) {
     fprintf(stdout, "Info: Device synchronization error: %s (code: %d).\n",
             hipGetErrorString(err), err);
