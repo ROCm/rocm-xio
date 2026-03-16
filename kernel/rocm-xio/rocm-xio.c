@@ -37,6 +37,7 @@
 #include <linux/io_uring.h>
 #include <linux/kernel.h>
 #include <linux/kprobes.h>
+#include <linux/kref.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/nvme.h>
@@ -74,7 +75,8 @@ struct queue_addr_entry {
   __u64 phys_addr;
   __u64 size;
   __u8 queue_type; /* 0=SQ, 1=CQ */
-  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format), 0 if unknown */
+  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
+  __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
   struct list_head list;
 };
 
@@ -97,6 +99,45 @@ static DEFINE_SPINLOCK(queue_addrs_lock);
 
 static LIST_HEAD(vram_buffers);
 static DEFINE_SPINLOCK(vram_buffers_lock);
+
+/* Contiguous DMA allocations for CQR=1 multi-page queues */
+struct contig_alloc_entry {
+  void* cpu_addr;
+  dma_addr_t dma_addr;
+  size_t size;
+  __u32 id;
+  struct pci_dev* pdev;
+  struct file* owner;
+  struct kref ref;
+  struct list_head list;
+};
+
+static LIST_HEAD(contig_allocs);
+static DEFINE_SPINLOCK(contig_allocs_lock);
+static __u32 contig_alloc_next_id = 1;
+
+static void contig_alloc_release(struct kref* ref) {
+  struct contig_alloc_entry* ca = container_of(ref, struct contig_alloc_entry,
+                                               ref);
+  dma_free_coherent(&ca->pdev->dev, ca->size, ca->cpu_addr, ca->dma_addr);
+  pci_dev_put(ca->pdev);
+  kfree(ca);
+}
+
+static void contig_vma_open(struct vm_area_struct* vma) {
+  struct contig_alloc_entry* ca = vma->vm_private_data;
+  kref_get(&ca->ref);
+}
+
+static void contig_vma_close(struct vm_area_struct* vma) {
+  struct contig_alloc_entry* ca = vma->vm_private_data;
+  kref_put(&ca->ref, contig_alloc_release);
+}
+
+static const struct vm_operations_struct contig_vm_ops = {
+  .open = contig_vma_open,
+  .close = contig_vma_close,
+};
 
 /* PCI MMIO bridge shadow buffer mapping */
 static __u64 mmio_bridge_shadow_gpa = 0;
@@ -641,6 +682,27 @@ static __u16 lookup_queue_bdf(__u64 virt_addr) {
 }
 
 /*
+ * Look up PRP2 value for queue (CREATE_SQ/CREATE_CQ with PC=0).
+ * Returns PRP2 if found, 0 otherwise.
+ */
+static __u64 lookup_queue_prp2(__u64 virt_addr) {
+  struct queue_addr_entry* entry;
+  __u64 prp2 = 0;
+
+  spin_lock(&queue_addrs_lock);
+  list_for_each_entry(entry, &queue_addrs, list) {
+    if (virt_addr >= entry->virt_addr &&
+        virt_addr < (entry->virt_addr + entry->size)) {
+      prp2 = entry->prp2;
+      break;
+    }
+  }
+  spin_unlock(&queue_addrs_lock);
+
+  return prp2;
+}
+
+/*
  * Look up physical address for data buffer (I/O commands).
  * First checks registered VRAM buffers, then falls back to virt_to_phys.
  */
@@ -750,12 +812,19 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     /* Look up physical address from registered queue addresses */
     phys_addr = lookup_queue_phys_addr(ubuffer);
     if (phys_addr) {
+      __u64 prp2_val;
+
       cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
-      pr_info("  ✅ Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
+      pr_info("  Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
+
+      prp2_val = lookup_queue_prp2(ubuffer);
+      if (prp2_val) {
+        cmd->common.dptr.prp2 = cpu_to_le64(prp2_val);
+        pr_info("  Injected PRP2: 0x%016llx\n", (unsigned long long)prp2_val);
+      }
     } else {
-      /* If not found, use ubuffer directly (assume it's already physical,
-       * as userspace may have gotten it via GET_VRAM_PHYS_ADDR) */
-      pr_info("rocm-axiio: Queue not registered, using ubuffer directly\n");
+      pr_info("rocm-axiio: Queue not registered, "
+              "using ubuffer directly\n");
       cmd->common.dptr.prp1 = cpu_to_le64(ubuffer);
     }
   }
@@ -894,6 +963,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->size = req.size;
       entry->queue_type = req.queue_type;
       entry->nvme_bdf = req.nvme_bdf;
+      entry->prp2 = req.prp2;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
@@ -1193,44 +1263,223 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_ALLOC_CONTIG_QUEUE: {
+      struct rocm_xio_alloc_contig_req req;
+      struct contig_alloc_entry* ca;
+      struct pci_dev* pdev;
+      unsigned int bus, devfn;
+      void* cpu_addr;
+      dma_addr_t dma_addr;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      if (req.size == 0 || req.size > (16 * 1024 * 1024)) {
+        pr_err("rocm-axiio: contig alloc: invalid "
+               "size %llu\n",
+               (unsigned long long)req.size);
+        return -EINVAL;
+      }
+
+      bus = (req.nvme_bdf >> 8) & 0xFF;
+      devfn = req.nvme_bdf & 0xFF;
+      pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
+      if (!pdev) {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+        pr_err("rocm-axiio: contig alloc: NVMe "
+               "device not found (%s)\n",
+               pci_addr);
+        return -ENODEV;
+      }
+
+      cpu_addr = dma_alloc_coherent(&pdev->dev, req.size, &dma_addr,
+                                    GFP_KERNEL);
+      if (!cpu_addr) {
+        pr_err("rocm-axiio: contig alloc: "
+               "dma_alloc_coherent failed for "
+               "%llu bytes\n",
+               (unsigned long long)req.size);
+        pci_dev_put(pdev);
+        return -ENOMEM;
+      }
+
+      memset(cpu_addr, 0, req.size);
+
+      ca = kmalloc(sizeof(*ca), GFP_KERNEL);
+      if (!ca) {
+        dma_free_coherent(&pdev->dev, req.size, cpu_addr, dma_addr);
+        pci_dev_put(pdev);
+        return -ENOMEM;
+      }
+
+      ca->cpu_addr = cpu_addr;
+      ca->dma_addr = dma_addr;
+      ca->size = req.size;
+      ca->pdev = pdev;
+      ca->owner = file;
+      kref_init(&ca->ref);
+
+      spin_lock(&contig_allocs_lock);
+      ca->id = contig_alloc_next_id++;
+      list_add(&ca->list, &contig_allocs);
+      spin_unlock(&contig_allocs_lock);
+
+      req.phys_addr = (__u64)dma_addr;
+      req.mmap_offset = ca->id;
+
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+        pr_info("rocm-axiio: contig alloc: "
+                "size=%llu dma=0x%llx id=%u "
+                "(%s)\n",
+                (unsigned long long)req.size, (unsigned long long)dma_addr,
+                ca->id, pci_addr);
+      }
+
+      if (copy_to_user((void __user*)arg, &req, sizeof(req))) {
+        spin_lock(&contig_allocs_lock);
+        list_del(&ca->list);
+        spin_unlock(&contig_allocs_lock);
+        dma_free_coherent(&pdev->dev, req.size, cpu_addr, dma_addr);
+        pci_dev_put(pdev);
+        kfree(ca);
+        return -EFAULT;
+      }
+
+      return 0;
+    }
+
+    case ROCM_XIO_FREE_CONTIG_QUEUE: {
+      struct rocm_xio_free_contig_req req;
+      struct contig_alloc_entry *ca, *tmp;
+      bool found = false;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      spin_lock(&contig_allocs_lock);
+      list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
+        if (ca->id == req.mmap_offset) {
+          list_del(&ca->list);
+          found = true;
+          break;
+        }
+      }
+      spin_unlock(&contig_allocs_lock);
+
+      if (!found) {
+        pr_warn("rocm-axiio: contig free: id=%u "
+                "not found\n",
+                req.mmap_offset);
+        return -ENOENT;
+      }
+
+      pr_info("rocm-axiio: contig free: id=%u "
+              "dma=0x%llx size=%zu\n",
+              ca->id, (unsigned long long)ca->dma_addr, ca->size);
+
+      kref_put(&ca->ref, contig_alloc_release);
+
+      return 0;
+    }
+
     default:
       return -ENOTTY;
   }
 }
 
-/* MMAP implementation for high-performance address translation */
+/* MMAP implementation: pgoff=0 -> MMIO bridge, pgoff>=1 -> contig queue */
 static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
   unsigned long pfn;
+  unsigned long size;
   int ret;
 
-  mutex_lock(&mmio_bridge_lock);
+  if (vma->vm_pgoff == 0) {
+    /* Existing MMIO bridge shadow buffer path */
+    mutex_lock(&mmio_bridge_lock);
 
-  /* Check if shadow buffer is configured */
-  if (mmio_bridge_shadow_gpa == 0) {
+    if (mmio_bridge_shadow_gpa == 0) {
+      mutex_unlock(&mmio_bridge_lock);
+      pr_err("rocm-axiio: PCI MMIO bridge shadow "
+             "buffer not configured\n");
+      return -EINVAL;
+    }
+
+    pfn = mmio_bridge_shadow_gpa >> PAGE_SHIFT;
+
+    ret = remap_pfn_range(vma, vma->vm_start, pfn, mmio_bridge_shadow_size,
+                          vma->vm_page_prot);
+    if (ret < 0) {
+      mutex_unlock(&mmio_bridge_lock);
+      pr_err("rocm-axiio: Failed to remap shadow "
+             "buffer: %d\n",
+             ret);
+      return ret;
+    }
+
+    pr_info("rocm-axiio: Mapped MMIO bridge shadow: "
+            "GPA=0x%llx size=%llu vaddr=0x%lx\n",
+            (unsigned long long)mmio_bridge_shadow_gpa,
+            (unsigned long long)mmio_bridge_shadow_size, vma->vm_start);
+
     mutex_unlock(&mmio_bridge_lock);
-    pr_err("rocm-axiio: PCI MMIO bridge shadow buffer not configured\n");
-    return -EINVAL;
+    return 0;
   }
 
-  /* Map the shadow buffer physical address */
-  pfn = mmio_bridge_shadow_gpa >> PAGE_SHIFT;
+  /* pgoff >= 1: contiguous queue allocation mapping */
+  {
+    struct contig_alloc_entry* ca;
+    __u32 target_id = (__u32)vma->vm_pgoff;
+    bool found = false;
 
-  /* Remap the physical pages to userspace */
-  ret = remap_pfn_range(vma, vma->vm_start, pfn, mmio_bridge_shadow_size,
-                        vma->vm_page_prot);
-  if (ret < 0) {
-    mutex_unlock(&mmio_bridge_lock);
-    pr_err("rocm-axiio: Failed to remap shadow buffer: %d\n", ret);
-    return ret;
+    spin_lock(&contig_allocs_lock);
+    list_for_each_entry(ca, &contig_allocs, list) {
+      if (ca->id == target_id) {
+        found = true;
+        break;
+      }
+    }
+    spin_unlock(&contig_allocs_lock);
+
+    if (!found) {
+      pr_err("rocm-axiio: contig mmap: id=%u "
+             "not found\n",
+             target_id);
+      return -ENOENT;
+    }
+
+    size = vma->vm_end - vma->vm_start;
+    if (size > ca->size) {
+      pr_err("rocm-axiio: contig mmap: requested "
+             "size %lu > alloc size %zu\n",
+             size, ca->size);
+      return -EINVAL;
+    }
+
+    vma->vm_pgoff = 0;
+
+    ret = dma_mmap_coherent(&ca->pdev->dev, vma, ca->cpu_addr, ca->dma_addr,
+                            size);
+    if (ret < 0) {
+      pr_err("rocm-axiio: contig mmap: "
+             "dma_mmap_coherent failed: "
+             "%d\n",
+             ret);
+      return ret;
+    }
+
+    kref_get(&ca->ref);
+    vma->vm_private_data = ca;
+    vma->vm_ops = &contig_vm_ops;
+
+    pr_info("rocm-axiio: contig mmap: id=%u "
+            "dma=0x%llx size=%lu vaddr=0x%lx\n",
+            target_id, (unsigned long long)ca->dma_addr, size, vma->vm_start);
+
+    return 0;
   }
-
-  pr_info("rocm-axiio: Mapped PCI MMIO bridge shadow buffer: GPA=0x%llx, "
-          "size=%llu, vaddr=0x%lx\n",
-          (unsigned long long)mmio_bridge_shadow_gpa,
-          (unsigned long long)mmio_bridge_shadow_size, vma->vm_start);
-
-  mutex_unlock(&mmio_bridge_lock);
-  return 0;
 }
 
 /* io_uring_cmd handler for high-performance async operations */
@@ -1250,12 +1499,38 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
   return -ENOSYS;
 }
 
+static int rocm_xio_release(struct inode* inode, struct file* file) {
+  struct contig_alloc_entry *ca, *tmp;
+  LIST_HEAD(to_release);
+
+  spin_lock(&contig_allocs_lock);
+  list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
+    if (ca->owner == file) {
+      list_del(&ca->list);
+      list_add(&ca->list, &to_release);
+    }
+  }
+  spin_unlock(&contig_allocs_lock);
+
+  list_for_each_entry_safe(ca, tmp, &to_release, list) {
+    list_del(&ca->list);
+    pr_info("rocm-axiio: release: freeing "
+            "contig id=%u dma=0x%llx "
+            "size=%zu\n",
+            ca->id, (unsigned long long)ca->dma_addr, ca->size);
+    kref_put(&ca->ref, contig_alloc_release);
+  }
+
+  return 0;
+}
+
 /* File operations */
 static struct file_operations fops = {
   .owner = THIS_MODULE,
   .unlocked_ioctl = rocm_xio_ioctl,
   .mmap = rocm_xio_mmap,
-  .uring_cmd = rocm_xio_uring_cmd, /* For io_uring async operations */
+  .release = rocm_xio_release,
+  .uring_cmd = rocm_xio_uring_cmd,
 };
 
 static int __init rocm_xio_init(void) {
@@ -1339,6 +1614,27 @@ static void __exit rocm_xio_exit(void) {
     kfree(entry);
   }
   spin_unlock(&vram_buffers_lock);
+
+  /* Clean up contiguous DMA allocations */
+  {
+    struct contig_alloc_entry *ca, *ca_tmp;
+    LIST_HEAD(to_free);
+
+    spin_lock(&contig_allocs_lock);
+    list_for_each_entry_safe(ca, ca_tmp, &contig_allocs, list) {
+      list_del(&ca->list);
+      list_add(&ca->list, &to_free);
+    }
+    spin_unlock(&contig_allocs_lock);
+
+    list_for_each_entry_safe(ca, ca_tmp, &to_free, list) {
+      list_del(&ca->list);
+      pr_info("rocm-axiio: exit: freeing contig "
+              "id=%u dma=0x%llx size=%zu\n",
+              ca->id, (unsigned long long)ca->dma_addr, ca->size);
+      kref_put(&ca->ref, contig_alloc_release);
+    }
+  }
 
   device_destroy(rocm_xio_class, MKDEV(major_number, 0));
   class_destroy(rocm_xio_class);
