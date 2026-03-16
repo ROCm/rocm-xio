@@ -124,6 +124,8 @@ typedef struct SDMA_PKT_WRITE_UNTILED_TAG {
     unsigned int DW_4_DATA;
   } DATA0_UNION;
 } SDMA_PKT_WRITE_UNTILED, *PSDMA_PKT_WRITE_UNTILED;
+static_assert(sizeof(SDMA_PKT_WRITE_UNTILED) == 5 * sizeof(unsigned int),
+              "SDMA PKT WRITE_UNTILED must be 5 DWORDs");
 
 typedef struct SDMA_PKT_FENCE_TAG {
   union {
@@ -156,6 +158,8 @@ typedef struct SDMA_PKT_FENCE_TAG {
     unsigned int DW_3_DATA;
   } DATA_UNION;
 } SDMA_PKT_FENCE, *PSDMA_PKT_FENCE;
+static_assert(sizeof(SDMA_PKT_FENCE) == 4 * sizeof(unsigned int),
+              "SDMA PKT FENCE must be 4 DWORDs");
 
 typedef struct SDMA_PKT_CONSTANT_FILL_TAG {
   union {
@@ -198,6 +202,8 @@ typedef struct SDMA_PKT_CONSTANT_FILL_TAG {
     unsigned int DW_4_DATA;
   } COUNT_UNION;
 } SDMA_PKT_CONSTANT_FILL, *PSDMA_PKT_CONSTANT_FILL;
+static_assert(sizeof(SDMA_PKT_CONSTANT_FILL) == 5 * sizeof(unsigned int),
+              "SDMA PKT CONSTANT_FILL must be 5 DWORDs");
 
 typedef struct SDMA_PKT_TRAP_TAG {
   union {
@@ -217,6 +223,8 @@ typedef struct SDMA_PKT_TRAP_TAG {
     unsigned int DW_1_DATA;
   } INT_CONTEXT_UNION;
 } SDMA_PKT_TRAP, *PSDMA_PKT_TRAP;
+static_assert(sizeof(SDMA_PKT_TRAP) == 2 * sizeof(unsigned int),
+              "SDMA PKT TRAP must be 2 DWORDs");
 
 typedef struct SDMA_PKT_POLL_REGMEM_TAG {
   union {
@@ -269,6 +277,8 @@ typedef struct SDMA_PKT_POLL_REGMEM_TAG {
     unsigned int DW_5_DATA;
   } DW5_UNION;
 } SDMA_PKT_POLL_REGMEM, *PSDMA_PKT_POLL_REGMEM;
+static_assert(sizeof(SDMA_PKT_POLL_REGMEM) == 6 * sizeof(unsigned int),
+              "SDMA PKT POLL_REGMEM must be 6 DWORDs");
 
 typedef struct SDMA_PKT_TIMESTAMP_TAG {
   union {
@@ -294,6 +304,8 @@ typedef struct SDMA_PKT_TIMESTAMP_TAG {
     unsigned int DW_2_DATA;
   } ADDR_HI_UNION;
 } SDMA_PKT_TIMESTAMP, *PSDMA_PKT_TIMESTAMP;
+static_assert(sizeof(SDMA_PKT_TIMESTAMP) == 3 * sizeof(unsigned int),
+              "SDMA PKT TIMESTAMP must be 3 DWORDs");
 
 typedef struct SDMA_PKT_NOP_TAG {
   union {
@@ -313,6 +325,8 @@ typedef struct SDMA_PKT_NOP_TAG {
     unsigned int DW_1_DATA;
   } DATA0_UNION;
 } SDMA_PKT_NOP, *PSDMA_PKT_NOP;
+static_assert(sizeof(SDMA_PKT_NOP) == 2 * sizeof(unsigned int),
+              "SDMA PKT NOP must be 2 DWORDs");
 
 typedef struct SDMA_PKT_ATOMIC_TAG {
   union {
@@ -376,6 +390,8 @@ typedef struct SDMA_PKT_ATOMIC_TAG {
     unsigned int DW_7_DATA;
   } LOOP_UNION;
 } SDMA_PKT_ATOMIC;
+static_assert(sizeof(SDMA_PKT_ATOMIC) == 8 * sizeof(unsigned int),
+              "SDMA PKT ATOMIC must be 8 DWORDs");
 
 typedef struct SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY_TAG {
   union {

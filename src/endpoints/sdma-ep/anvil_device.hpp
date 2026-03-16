@@ -14,8 +14,8 @@
 
 namespace anvil {
 
-// TODO
-constexpr uint64_t SDMA_QUEUE_SIZE = 256 * 1024; // 256KB
+// Matches ROCr BlitSdmaBase::kQueueSize
+constexpr uint64_t SDMA_QUEUE_SIZE = 1024 * 1024; // 1MiB
 constexpr HSA_QUEUE_PRIORITY DEFAULT_PRIORITY = HSA_QUEUE_PRIORITY_NORMAL;
 constexpr unsigned int DEFAULT_QUEUE_PERCENTAGE = 100;
 constexpr int MAX_RETRIES = 1 << 30;
