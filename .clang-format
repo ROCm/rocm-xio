@@ -1,5 +1,5 @@
 ---
-# clang-format configuration for rocm-axiio project
+# clang-format configuration for rocm-xio project
 # Based on observed code style and best practices
 
 # Base style

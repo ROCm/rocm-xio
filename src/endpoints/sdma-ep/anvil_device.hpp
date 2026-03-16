@@ -275,9 +275,9 @@ struct SdmaQueueDeviceHandle {
     __hip_atomic_store(wptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
 
-    // Ensure all updates are visisble before ringing the doorbell
+    // Ensure all updates are visible before ringing the doorbell
     // This assumes we write to uncached memory
-    // Wait for all stores to be commited
+    // Wait for all stores to be committed
     __builtin_amdgcn_s_waitcnt(0);
     // This is nop on gfx942
     __builtin_amdgcn_wave_barrier();
@@ -378,9 +378,9 @@ struct SdmaQueueSingleProducerDeviceHandle : SdmaQueueDeviceHandle {
                                                uint64_t pendingWptr) {
     *wptr = (HSAuint64)pendingWptr;
 
-    // Ensure all updates are visisble before ringing the doorbell
+    // Ensure all updates are visible before ringing the doorbell
     // This assumes we write to uncached memory
-    // Wait for all stores to be commited
+    // Wait for all stores to be committed
     __builtin_amdgcn_s_waitcnt(0);
     // This is nop on gfx942
     __builtin_amdgcn_wave_barrier();

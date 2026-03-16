@@ -6,10 +6,23 @@ matrix:
   sources:
   - '*.md'
   - 'src/**/*.md'
-  - 'docs/**/*.md'
   - 'scripts/**/*.md'
   pipeline:
   - pyspelling.filters.markdown
+  dictionary:
+    wordlists:
+    - .wordlist.txt
+    output: wordlist.dic
+    encoding: utf-8
+  default_encoding: utf-8
+  expect_match: true
+- name: restructuredtext
+  aspell:
+    lang: en
+  sources:
+  - 'docs/**/*.rst'
+  pipeline:
+  - pyspelling.filters.text
   dictionary:
     wordlists:
     - .wordlist.txt

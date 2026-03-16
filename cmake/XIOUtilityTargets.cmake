@@ -98,9 +98,28 @@ else()
   )
 endif()
 
+# Codespell (code + docs spell-checking, like hipFile)
+find_program(CODESPELL codespell PATHS ENV PATH)
+
+if(CODESPELL)
+  add_custom_target(lint-codespell
+    COMMAND ${CODESPELL} ${CMAKE_SOURCE_DIR}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Checking spelling with codespell"
+  )
+else()
+  add_custom_target(lint-codespell
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "Error: codespell not found. Install with:"
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "  pip install codespell"
+    COMMAND ${CMAKE_COMMAND} -E false
+  )
+endif()
+
 # Combined linting
 add_custom_target(lint-all
-  DEPENDS lint-format lint-spell
+  DEPENDS lint-format lint-spell lint-codespell
   COMMENT "Run all linting checks"
 )
 
@@ -108,6 +127,8 @@ add_custom_target(lint
   DEPENDS lint-format
   COMMENT "Run linting checks"
 )
+
+if(NOT XIO_DOCS_ONLY)
 
 # Assembly dump target
 find_program(OBJDUMP llvm-objdump PATHS
@@ -117,7 +138,8 @@ if(OBJDUMP)
   add_custom_target(asm
     COMMAND ${OBJDUMP} --demangle --disassemble-all
       $<TARGET_FILE:rocm-xio>
-    COMMAND ${CMAKE_COMMAND} -E echo "Use 'make asm | less -R' to view"
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "Use 'make asm | less -R' to view"
     DEPENDS rocm-xio
     COMMENT "Dumping assembly of library"
   )
@@ -130,12 +152,16 @@ else()
 endif()
 
 # List supported GPUs
-find_program(CLANGXX clang++ PATHS /opt/rocm/llvm/bin ENV PATH)
+find_program(CLANGXX clang++ PATHS
+  /opt/rocm/llvm/bin ENV PATH)
 
 if(CLANGXX)
   add_custom_target(list
-    COMMAND ${CLANGXX} --target=amdgcn --print-supported-cpus 2>&1
-      | grep -E gfx[1-9] | sort -t'x' -k2,2n | sed 's/^[ \\t]*/  /'
+    COMMAND ${CLANGXX}
+      --target=amdgcn --print-supported-cpus 2>&1
+      | grep -E gfx[1-9]
+      | sort -t'x' -k2,2n
+      | sed 's/^[ \\t]*/  /'
     COMMENT "Listing supported GPUs"
   )
 else()
@@ -145,3 +171,5 @@ else()
     COMMAND ${CMAKE_COMMAND} -E false
   )
 endif()
+
+endif() # NOT XIO_DOCS_ONLY

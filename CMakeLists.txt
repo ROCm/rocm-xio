@@ -32,11 +32,28 @@ set(ROCM_XIO_LIBRARY_SOVERSION
   "${ROCM_XIO_LIBRARY_MAJOR}"
 )
 
-project(rocm-xio
-  VERSION ${ROCM_XIO_LIBRARY_VERSION}
-  DESCRIPTION "ROCm Library for GPU-Initiated IO"
-  LANGUAGES CXX HIP
-)
+option(XIO_DOCS_ONLY
+  "Only configure documentation targets (no HIP/ROCm needed)"
+  OFF)
+
+if(XIO_DOCS_ONLY)
+  project(rocm-xio
+    VERSION ${ROCM_XIO_LIBRARY_VERSION}
+    DESCRIPTION "ROCm Library for GPU-Initiated IO"
+    LANGUAGES CXX
+  )
+else()
+  project(rocm-xio
+    VERSION ${ROCM_XIO_LIBRARY_VERSION}
+    DESCRIPTION "ROCm Library for GPU-Initiated IO"
+    LANGUAGES CXX HIP
+  )
+endif()
+
+# Add cmake/ to the module search path (all modes need this)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+
+if(NOT XIO_DOCS_ONLY)
 
 # This project uses static libraries by necessity
 option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
@@ -122,9 +139,6 @@ if(${hsakmt_FOUND})
 else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
-
-# Include helper modules
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 # Include build options modules early so options are available
 # This makes XIO_USE_SANITIZERS, XIO_USE_CODE_COVERAGE available as
@@ -400,6 +414,11 @@ install(FILES
 if(BUILD_TESTING)
   add_subdirectory(tests/unit/rdma-ep)
 endif()
+
+endif() # NOT XIO_DOCS_ONLY
+
+# Documentation (optional, requires -DXIO_BUILD_DOCS=ON)
+include(XIODocumentation)
 
 # Utility targets
 include(XIOUtilityTargets)
