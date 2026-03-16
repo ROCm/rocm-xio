@@ -120,6 +120,26 @@ static const std::string getBusId(int deviceId) {
   return std::string(busIdChar);
 }
 
+std::ostream& operator<<(std::ostream& os, const SDMA_PKT_COPY_LINEAR& cmd) {
+  os << "op: " << cmd.HEADER_UNION.op << " sub_op: " << cmd.HEADER_UNION.sub_op;
+  os << " count: " << cmd.COUNT_UNION.count;
+  os << " src[31:0] " << cmd.SRC_ADDR_LO_UNION.src_addr_31_0 << " src[63:32] "
+     << cmd.SRC_ADDR_HI_UNION.src_addr_63_32;
+  os << " dst[31:0] " << cmd.DST_ADDR_LO_UNION.dst_addr_31_0 << " dst[63:32] "
+     << cmd.DST_ADDR_HI_UNION.dst_addr_63_32;
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const SDMA_PKT_ATOMIC& cmd) {
+  os << "op: " << cmd.HEADER_UNION.op << " sub_op: " << cmd.HEADER_UNION.sub_op
+     << " operation: " << cmd.HEADER_UNION.operation;
+  os << " add[31:0] " << cmd.ADDR_LO_UNION.addr_31_0 << " addr[63:32] "
+     << cmd.ADDR_HI_UNION.addr_63_32;
+  os << " data[31:0] " << cmd.SRC_DATA_LO_UNION.src_data_31_0 << " data[63:32] "
+     << cmd.SRC_DATA_HI_UNION.src_data_63_32;
+  return os;
+}
+
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                      hsa_agent_t& localAgent, uint32_t engineId) {
   (void)remoteDeviceId;
@@ -217,6 +237,58 @@ SdmaQueue::~SdmaQueue() {
 
 SdmaQueueDeviceHandle* SdmaQueue::deviceHandle() const {
   return deviceHandle_;
+}
+
+void SdmaQueue::dump(std::ofstream& logFile) {
+  logFile << "Queue "
+          //  << " -> " << remoteDeviceId_ << ": "
+          << "wptr: " << *deviceHandle_->wptr << ", "
+          << "rptr: " << *deviceHandle_->rptr << ", "
+          << "doorbell: " << *deviceHandle_->doorbell << ", "
+          << "Queue cmd buffer address: " << deviceHandle_->queueBuf << ", "
+          << "committedWptr: " << *deviceHandle_->committedWptr << ", "
+          << "pendingWptr: " << *deviceHandle_->cachedWptr << ", " << std::endl;
+
+  size_t dw_enqueued = std::min(*deviceHandle_->wptr,
+                                (uint64_t)SDMA_QUEUE_SIZE) /
+                       sizeof(uint32_t);
+  size_t it = 0;
+  uint32_t* dwPtr = deviceHandle_->queueBuf;
+  uint64_t wrapped_rptr = *deviceHandle_->rptr % SDMA_QUEUE_SIZE;
+  uint64_t wrapped_wptr = *deviceHandle_->wptr % SDMA_QUEUE_SIZE;
+
+  logFile << "valid dw: " << dw_enqueued << "\nwrapped rptr : " << wrapped_rptr
+          << " dw rptr: " << wrapped_rptr / sizeof(uint32_t)
+          << "\nwrapper wptr " << wrapped_wptr
+          << " dw wptr: " << wrapped_wptr / sizeof(uint32_t) << std::endl;
+  while (it < dw_enqueued) {
+    logFile << "[" << it << "] ";
+    if ((*dwPtr & 0xFF) == SDMA_OP_COPY) {
+      SDMA_PKT_COPY_LINEAR* ptr = reinterpret_cast<SDMA_PKT_COPY_LINEAR*>(
+        dwPtr);
+      logFile << *ptr;
+      it += (sizeof(SDMA_PKT_COPY_LINEAR) / sizeof(uint32_t));
+      dwPtr += (sizeof(SDMA_PKT_COPY_LINEAR) / sizeof(uint32_t));
+    } else if ((*dwPtr & 0xFF) == SDMA_OP_ATOMIC) {
+      SDMA_PKT_ATOMIC* ptr = reinterpret_cast<SDMA_PKT_ATOMIC*>(dwPtr);
+      logFile << *ptr;
+      it += (sizeof(SDMA_PKT_ATOMIC) / sizeof(uint32_t));
+      dwPtr += (sizeof(SDMA_PKT_ATOMIC) / sizeof(uint32_t));
+    } else {
+      logFile << *dwPtr << std::endl;
+      dwPtr++;
+      it++;
+    }
+    logFile << std::endl;
+  }
+  logFile << "Queue "
+          //  << " -> " << remoteDeviceId_ << ": "
+          << "wptr: " << *deviceHandle_->wptr << ", "
+          << "rptr: " << *deviceHandle_->rptr << ", "
+          << "doorbell: " << *deviceHandle_->doorbell << ", "
+          << "Queue cmd buffer address: " << deviceHandle_->queueBuf << ", "
+          << "committedWptr: " << *deviceHandle_->committedWptr << ", "
+          << "pendingWptr: " << *deviceHandle_->cachedWptr << ", " << std::endl;
 }
 
 AnvilLib::~AnvilLib() {
