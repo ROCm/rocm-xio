@@ -21,6 +21,8 @@ public:
 
   SdmaQueueDeviceHandle* deviceHandle() const;
 
+  void dump(std::ofstream&);
+
 private:
   uint64_t* cachedWptr_;
   uint64_t* committedWptr_;
