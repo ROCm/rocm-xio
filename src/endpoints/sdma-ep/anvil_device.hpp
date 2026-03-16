@@ -39,6 +39,66 @@ CreateCopyPacket(void* srcBuf, void* dstBuf, long long int packetSize) {
   return copy_packet;
 }
 
+__device__ __forceinline__ SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
+CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
+                               uint32_t tile_height, uint32_t src_buffer_pitch,
+                               uint32_t dst_buffer_pitch, uint32_t src_x,
+                               uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
+  SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY packet = {};
+
+  packet.HEADER_UNION.op = SDMA_OP_COPY;
+  packet.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW;
+
+  // Source buffer base address
+  packet.SRC_ADDR_LO_UNION.src_base_addr_31_0 = (uint32_t)(uintptr_t)srcBuf;
+  packet.SRC_ADDR_HI_UNION.src_base_addr_63_32 = (uint32_t)((uintptr_t)srcBuf >>
+                                                            32);
+
+  // Source offset in bytes
+  packet.SRC_X_UNION.src_x = src_x;
+  packet.SRC_Y_UNION.src_y = src_y;
+  packet.SRC_Z_UNION.src_z = 0;
+
+  // Source pitch (row stride in bytes) - 1-based, so subtract 1
+  packet.SRC_PITCH_UNION.src_pitch = src_buffer_pitch - 1;
+
+  // Source slice pitch (for 3D) - 1-based, so subtract 1
+  // For 2D copies, set to 0 (which means slice_pitch of 1)
+  uint64_t src_slice_pitch = 1 - 1; // 0 means slice pitch of 1
+  packet.SRC_SLICE_PITCH_LO_UNION.src_slice_pitch_31_0 =
+    (uint32_t)(src_slice_pitch & 0xFFFFFFFF);
+  packet.SRC_SLICE_PITCH_HI_UNION.src_slice_pitch_47_32 =
+    (uint16_t)((src_slice_pitch >> 32) & 0xFFFF);
+
+  // Destination buffer base address
+  packet.DST_ADDR_LO_UNION.dst_data_31_0 = (uint32_t)(uintptr_t)dstBuf;
+  packet.DST_ADDR_HI_UNION.src_data_63_32 = (uint32_t)((uintptr_t)dstBuf >> 32);
+
+  // Destination offset in bytes
+  packet.DST_X_UNION.dst_x = dst_x;
+  packet.DST_Y_UNION.dst_y = dst_y;
+  packet.DST_Z_UNION.dst_z = 0;
+
+  // Destination pitch (row stride in bytes) - 1-based, so subtract 1
+  packet.DST_PITCH_UNION.dst_pitch = dst_buffer_pitch - 1;
+
+  // Destination slice pitch (for 3D) - 1-based, so subtract 1
+  // For 2D copies, set to 0 (which means slice_pitch of 1)
+  uint64_t dst_slice_pitch = 1 - 1; // 0 means slice pitch of 1
+  packet.DST_SLICE_PITCH_LO_UNION.dst_slice_pitch_31_0 =
+    (uint32_t)(dst_slice_pitch & 0xFFFFFFFF);
+  packet.DST_SLICE_PITCH_HI_UNION.dst_slice_pitch_47_32 =
+    (uint16_t)((dst_slice_pitch >> 32) & 0xFFFF);
+
+  // Rectangle dimensions (the tile to copy) - 1-based, so subtract 1
+  packet.RECT_X_UNION.rect_x = tile_width - 1;
+  packet.RECT_Y_UNION.rect_y = tile_height - 1;
+  packet.RECT_Z_UNION.rect_z = 1 -
+                               1; // 2D copy, so depth is 1, subtract 1 gives 0
+
+  return packet;
+}
+
 __device__ __forceinline__ SDMA_PKT_ATOMIC
 CreateAtomicIncPacket(HSAuint64* signal) {
   SDMA_PKT_ATOMIC packet = {};
@@ -380,6 +440,23 @@ __device__ __forceinline__ void signal(SdmaQueueDeviceHandle& handle,
                                        uint64_t* signal) {
   put_signal_counter_impl<false, true, false>(handle, nullptr, nullptr, 0,
                                               signal, nullptr);
+}
+
+__device__ __forceinline__ void put_tile(
+  SdmaQueueDeviceHandle& handle, void* dst, void* src, uint32_t tile_width,
+  uint32_t tile_height, uint32_t src_buffer_pitch, uint32_t dst_buffer_pitch,
+  uint32_t src_x, uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
+  uint64_t offset = 0;
+  auto base = handle.ReserveQueueSpace(sizeof(
+                                         SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY),
+                                       offset);
+  auto packet = CreateLargeSubWindowCopyPacket(src, dst, tile_width,
+                                               tile_height, src_buffer_pitch,
+                                               dst_buffer_pitch, src_x, src_y,
+                                               dst_x, dst_y);
+  uint64_t pendingWptr = base;
+  handle.placePacket(packet, pendingWptr, offset);
+  handle.submitPacket(base, pendingWptr);
 }
 
 __device__ __forceinline__ void put_signal(SdmaQueueDeviceHandle& handle,
