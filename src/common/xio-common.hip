@@ -1027,6 +1027,49 @@ __host__ uint64_t getPhysAddr(void* virt_addr) {
   return phys_addr;
 }
 
+__host__ int getPagePhysAddrs(void* virt_addr, size_t size, uint64_t* phys_out,
+                              size_t max_pages) {
+  size_t page_sz = sysconf(_SC_PAGESIZE);
+  uintptr_t base = reinterpret_cast<uintptr_t>(virt_addr);
+  size_t num_pages = (size + page_sz - 1) / page_sz;
+
+  if (!virt_addr || size == 0 || !phys_out || num_pages > max_pages) {
+    return -EINVAL;
+  }
+
+  int fd = open("/proc/self/pagemap", O_RDONLY);
+  if (fd < 0)
+    return -errno;
+
+  for (size_t i = 0; i < num_pages; i++) {
+    uintptr_t page_va = base + i * page_sz;
+    uint64_t page_num = page_va / page_sz;
+    off_t off = page_num * sizeof(uint64_t);
+
+    if (lseek(fd, off, SEEK_SET) != static_cast<off_t>(off)) {
+      close(fd);
+      return -EIO;
+    }
+
+    uint64_t entry = 0;
+    if (read(fd, &entry, sizeof(entry)) != sizeof(entry)) {
+      close(fd);
+      return -EIO;
+    }
+
+    if (!(entry & (1ULL << 63))) {
+      close(fd);
+      return -EFAULT;
+    }
+
+    uint64_t pfn = entry & 0x7FFFFFFFFFFFFFULL;
+    phys_out[i] = pfn * page_sz;
+  }
+
+  close(fd);
+  return static_cast<int>(num_pages);
+}
+
 __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
                               uint16_t nvme_bdf,
                               const char* kernel_module_device,
@@ -1075,7 +1118,7 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
 
 __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
                           size_t size, uint8_t queue_type, uint16_t nvme_bdf,
-                          const char* queue_name) {
+                          uint64_t prp2, const char* queue_name) {
   if (kmod_fd < 0 || !virt_addr || size == 0 || !queue_name) {
     return -EINVAL;
   }
@@ -1087,6 +1130,7 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   reg_req.size = size;
   reg_req.queue_type = queue_type;
   reg_req.nvme_bdf = nvme_bdf;
+  reg_req.prp2 = prp2;
 
   int ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
@@ -1250,6 +1294,136 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
           "coherent=%d\n",
           queue_name, setup->virt, setup->gpu, (unsigned long long)setup->phys,
           setup->uses_coherent ? 1 : 0);
+
+  return 0;
+}
+
+__host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
+                               bool is_device, const char* queue_name) {
+  if (!setup || !setup->virt || queue_size == 0)
+    return -EINVAL;
+
+  size_t page_sz = sysconf(_SC_PAGESIZE);
+  size_t num_pages = (queue_size + page_sz - 1) / page_sz;
+
+  setup->prp_list = nullptr;
+  setup->prp_list_phys = 0;
+  setup->prp2 = 0;
+
+  if (num_pages <= 1)
+    return 0;
+
+  // Ensure host queue memory is page-aligned before constructing a multi-page
+  // PRP list. If setup->virt came from a malloc-based fallback, it may not be
+  // aligned to the system page size, which would yield incorrect PRP entries.
+  if (!is_device) {
+    uintptr_t virt_addr = reinterpret_cast<uintptr_t>(setup->virt);
+    if ((virt_addr % page_sz) != 0) {
+      fprintf(stderr,
+              "ERROR: Queue %s virtual address %p is not page-aligned "
+              "(page size: %zu); cannot build PRP list\n",
+              queue_name, setup->virt, page_sz);
+      return -EINVAL;
+    }
+  }
+
+  if (is_device) {
+    fprintf(stderr,
+            "ERROR: PC=0 PRP list not supported "
+            "for device memory %s\n",
+            queue_name);
+    return -ENOTSUP;
+  }
+
+  const size_t max_pages = 1024;
+  uint64_t phys_addrs[max_pages];
+  int ret = getPagePhysAddrs(setup->virt, queue_size, phys_addrs, max_pages);
+  if (ret < 0) {
+    fprintf(stderr,
+            "ERROR: Failed to get page physical "
+            "addresses for %s: %s\n",
+            queue_name, strerror(-ret));
+    return ret;
+  }
+
+  fprintf(stdout,
+          "Info: %s spans %zu pages, building "
+          "PRP list (PC=0)\n",
+          queue_name, num_pages);
+  for (size_t i = 0; i < num_pages; i++) {
+    fprintf(stdout, "  page[%zu]: phys=0x%016llx\n", i,
+            (unsigned long long)phys_addrs[i]);
+  }
+
+  // PC=0 uses standard PRP semantics (NVMe spec 4.4):
+  // PRP1 = first page, PRP2 = second page (2 pages)
+  // or PRP2 = PRP list pointer (>2 pages).
+  if (num_pages == 2) {
+    setup->prp2 = phys_addrs[1];
+    fprintf(stdout,
+            "Info: %s PRP2 = 0x%016llx "
+            "(direct 2nd page)\n",
+            queue_name, (unsigned long long)setup->prp2);
+    return 0;
+  }
+
+  // >2 pages: build PRP list for pages 2..N
+  size_t prp_entries = num_pages - 1;
+  size_t prp_list_bytes = prp_entries * sizeof(uint64_t);
+
+  if (prp_list_bytes > page_sz) {
+    fprintf(stderr,
+            "ERROR: PRP list for %s requires "
+            "%zu bytes (max %zu). Reduce queue "
+            "size.\n",
+            queue_name, prp_list_bytes, page_sz);
+    return -E2BIG;
+  }
+
+  void* prp_list = nullptr;
+  int rc = posix_memalign(&prp_list, page_sz, page_sz);
+  if (rc != 0 || !prp_list) {
+    fprintf(stderr,
+            "ERROR: Failed to allocate PRP list "
+            "for %s\n",
+            queue_name);
+    return -ENOMEM;
+  }
+  memset(prp_list, 0, page_sz);
+
+  if (mlock(prp_list, page_sz) != 0) {
+    int err = errno;
+    fprintf(stderr,
+            "ERROR: mlock failed for PRP "
+            "list %s: %s\n",
+            queue_name, strerror(err));
+    free(prp_list);
+    return -err;
+  }
+
+  uint64_t* entries = reinterpret_cast<uint64_t*>(prp_list);
+  for (size_t i = 1; i < num_pages; i++) {
+    entries[i - 1] = phys_addrs[i];
+  }
+
+  uint64_t prp_list_phys = getPhysAddr(prp_list);
+  if (prp_list_phys == 0) {
+    fprintf(stderr,
+            "ERROR: Failed to get PRP list "
+            "physical address for %s\n",
+            queue_name);
+    free(prp_list);
+    return -EIO;
+  }
+
+  setup->prp_list = prp_list;
+  setup->prp_list_phys = prp_list_phys;
+  setup->prp2 = prp_list_phys;
+
+  fprintf(stdout,
+          "Info: %s PRP list at virt=%p "
+          "phys=0x%016llx (%zu entries)\n",
+          queue_name, prp_list, (unsigned long long)prp_list_phys, prp_entries);
 
   return 0;
 }
@@ -1528,6 +1702,251 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   *bar_gpu = gpu_ptr;
 
   return 0;
+}
+
+__host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
+  if (!cqr_out)
+    return -EINVAL;
+
+  uint8_t bus = (pci_bdf >> 8) & 0xFF;
+  uint8_t dev = (pci_bdf >> 3) & 0x1F;
+  uint8_t func = pci_bdf & 0x7;
+
+  char path[256];
+  snprintf(path, sizeof(path),
+           "/sys/bus/pci/devices/"
+           "0000:%02x:%02x.%x/resource0",
+           bus, dev, func);
+
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    fprintf(stderr,
+            "Warning: Cannot open %s to read "
+            "NVMe CAP register: %s\n",
+            path, strerror(errno));
+    return -errno;
+  }
+
+  size_t map_size = sysconf(_SC_PAGESIZE);
+  void* mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, fd, 0);
+  if (mapped == MAP_FAILED) {
+    fprintf(stderr,
+            "Warning: Cannot mmap %s to read "
+            "NVMe CAP register: %s\n",
+            path, strerror(errno));
+    close(fd);
+    return -errno;
+  }
+
+  volatile uint32_t* regs = static_cast<volatile uint32_t*>(mapped);
+  uint64_t cap = static_cast<uint64_t>(regs[0]) |
+                 (static_cast<uint64_t>(regs[1]) << 32);
+
+  munmap(mapped, map_size);
+  close(fd);
+
+  *cqr_out = (cap >> 16) & 1;
+
+  fprintf(stdout,
+          "NVMe CAP register: CQR=%d "
+          "(%s queues %s)\n",
+          *cqr_out ? 1 : 0, *cqr_out ? "contiguous" : "non-contiguous",
+          *cqr_out ? "required" : "supported");
+
+  return 0;
+}
+
+__host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
+                                    const char* queue_name,
+                                    struct xioQueueSetup* setup,
+                                    const char* kernel_module_device = ROCM_XIO_DEVICE_PATH) {
+  if (!setup || size == 0 || !queue_name)
+    return -EINVAL;
+
+  memset(setup, 0, sizeof(*setup));
+
+  const char* device_path = kernel_module_device ? kernel_module_device : ROCM_XIO_DEVICE_PATH;
+
+  int kmod_fd = openDeviceWithRetry(device_path, O_RDWR,
+                                    "rocm-xio (contig)", 5, 100);
+  if (kmod_fd < 0) {
+    fprintf(stderr,
+            "Error: Cannot open kernel module "
+            "device %s for %s contig alloc\n",
+            device_path, queue_name);
+    return -EIO;
+  }
+
+  struct rocm_axiio_alloc_contig_req req;
+  memset(&req, 0, sizeof(req));
+  req.size = size;
+  req.nvme_bdf = nvme_bdf;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_QUEUE, &req);
+  if (ret < 0) {
+    fprintf(stderr,
+            "Error: ALLOC_CONTIG_QUEUE ioctl "
+            "failed for %s (%zu bytes): %s\n",
+            queue_name, size, strerror(errno));
+    close(kmod_fd);
+    return -errno;
+  }
+
+  fprintf(stdout,
+          "%s: contig alloc: phys=0x%llx "
+          "mmap_offset=%u size=%zu\n",
+          queue_name, (unsigned long long)req.phys_addr, req.mmap_offset, size);
+
+  off_t mmap_off = (off_t)req.mmap_offset * sysconf(_SC_PAGESIZE);
+  void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      kmod_fd, mmap_off);
+
+  if (mapped == MAP_FAILED) {
+    fprintf(stderr,
+            "Error: mmap failed for %s contig "
+            "buffer: %s\n",
+            queue_name, strerror(errno));
+
+    struct rocm_axiio_free_contig_req freq;
+    memset(&freq, 0, sizeof(freq));
+    freq.mmap_offset = req.mmap_offset;
+    ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
+    close(kmod_fd);
+
+    return -errno;
+  }
+
+  memset(mapped, 0, size);
+
+  fprintf(stdout, "%s: contig buffer mapped at %p\n", queue_name, mapped);
+
+  void* gpu_ptr = nullptr;
+  hipError_t hip_err = hipHostRegister(mapped, size, hipHostRegisterMapped);
+  if (hip_err == hipSuccess) {
+    hipError_t gp_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
+    if (gp_err != hipSuccess) {
+      fprintf(stdout,
+              "Warning: hipHostGetDevicePointer "
+              "failed for %s: %s\n",
+              queue_name, hipGetErrorString(gp_err));
+      (void)hipHostUnregister(mapped);
+      gpu_ptr = nullptr;
+    }
+  } else {
+    fprintf(stdout,
+            "Info: hipHostRegister failed for "
+            "%s (%s), trying "
+            "hsa_amd_memory_lock\n",
+            queue_name, hipGetErrorString(hip_err));
+  }
+
+  if (!gpu_ptr) {
+    hsa_status_t status = hsa_init();
+    if (status != HSA_STATUS_SUCCESS && status != (hsa_status_t)0x1001) {
+      fprintf(stderr,
+              "Error: hsa_init failed for %s: "
+              "%d\n",
+              queue_name, status);
+      munmap(mapped, size);
+      return -EIO;
+    }
+
+    hsa_agent_t gpu_agent = {0};
+    hsa_iterate_agents(
+      [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        hsa_device_type_t dev_type;
+        if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dev_type) ==
+              HSA_STATUS_SUCCESS &&
+            dev_type == HSA_DEVICE_TYPE_GPU) {
+          *(hsa_agent_t*)data = agent;
+          return HSA_STATUS_INFO_BREAK;
+        }
+        return HSA_STATUS_SUCCESS;
+      },
+      &gpu_agent);
+
+    if (gpu_agent.handle == 0) {
+      fprintf(stderr,
+              "Error: No GPU agent found for "
+              "%s\n",
+              queue_name);
+      munmap(mapped, size);
+      return -ENODEV;
+    }
+
+    status = hsa_amd_memory_lock(mapped, size, &gpu_agent, 1, &gpu_ptr);
+    if (status != HSA_STATUS_SUCCESS) {
+      fprintf(stderr,
+              "Error: hsa_amd_memory_lock "
+              "failed for %s: %d\n",
+              queue_name, status);
+      munmap(mapped, size);
+      return -EIO;
+    }
+
+    fprintf(stdout,
+            "%s: registered via "
+            "hsa_amd_memory_lock\n",
+            queue_name);
+  }
+
+  fprintf(stdout, "%s: contig GPU ptr: %p (host: %p)\n", queue_name, gpu_ptr,
+          mapped);
+
+  setup->virt = mapped;
+  setup->gpu = gpu_ptr;
+  setup->phys = req.phys_addr;
+  setup->uses_coherent = false;
+  setup->prp_list = nullptr;
+  setup->prp_list_phys = 0;
+  setup->prp2 = 0;
+  setup->uses_contig = true;
+  setup->contig_id = req.mmap_offset;
+
+  return 0;
+}
+
+__host__ void freeContigQueue(struct xioQueueSetup* setup, size_t size,
+                              const char* queue_name) {
+  if (!setup || !setup->uses_contig)
+    return;
+
+  if (setup->gpu && setup->virt) {
+    hipError_t err = hipHostUnregister(setup->virt);
+    if (err != hipSuccess) {
+      hsa_amd_memory_unlock(setup->virt);
+    }
+  }
+
+  if (setup->virt) {
+    munmap(setup->virt, size);
+    setup->virt = nullptr;
+  }
+
+  int kmod_fd = openDeviceWithRetry(ROCM_XIO_DEVICE_PATH, O_RDWR,
+                                    "rocm-xio (free)", 5, 100);
+  if (kmod_fd >= 0) {
+    struct rocm_axiio_free_contig_req freq;
+    freq.mmap_offset = setup->contig_id;
+    int ret = ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
+    if (ret < 0) {
+      fprintf(stderr,
+              "Warning: FREE_CONTIG_QUEUE "
+              "failed for %s id=%u: %s\n",
+              queue_name, setup->contig_id, strerror(errno));
+    } else {
+      fprintf(stdout,
+              "%s: contig buffer freed "
+              "(id=%u)\n",
+              queue_name, setup->contig_id);
+    }
+    close(kmod_fd);
+  }
+
+  setup->gpu = nullptr;
+  setup->phys = 0;
+  setup->uses_contig = false;
+  setup->contig_id = 0;
 }
 
 int ensureDeviceNode() {

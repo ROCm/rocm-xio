@@ -404,20 +404,14 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       volatile sqeType* sqe_slot = &sqeAddr[sq_tail];
       nvme_ep::sqeWrite(sqeLocal, sqe_slot);
 
-      // Additional memory fence after write to ensure SQE is fully visible
-      // before incrementing tail and ringing doorbell
+      // Memory fence to ensure SQE is fully visible to
+      // the NVMe controller before incrementing tail and
+      // ringing the doorbell. On host memory paths this
+      // fence orders the GPU's PCIe writes but a
+      // read-back may still see stale write-combine data,
+      // so we do not verify here.
       __threadfence_system();
 
-      // Verify critical fields were written correctly (read-back check)
-      // This helps catch cases where the write didn't complete or was corrupted
-      volatile sqeType* verify_slot = sqe_slot;
-      if (verify_slot->opcode != sqeLocal.opcode ||
-          verify_slot->command_id != sqeLocal.command_id) {
-        // SQE write verification failed - trap to prevent corrupted command
-        __builtin_trap();
-      }
-
-      // Increment sq_tail after SQE is fully written and visible
       sq_tail = (sq_tail + 1) % ioParams.queueSize;
 
       // Ring doorbell
@@ -432,6 +426,13 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
 
       // Check completion status
       if (!nvme_ep::cqeOk(&cqe_new)) {
+        printf("NVMe CQE error: status=0x%04x "
+               "sc=0x%02x sct=0x%02x "
+               "cmd_id=%u sq_head=%u\n",
+               (unsigned)cqe_new.status,
+               (unsigned)nvme_ep::cqeStatusCode(&cqe_new),
+               (unsigned)nvme_ep::cqeStatusType(&cqe_new),
+               (unsigned)cqe_new.command_id, (unsigned)cqe_new.sq_head);
         __builtin_trap();
       }
 
@@ -1641,7 +1642,7 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
 
 __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
                                  uint16_t queue_size, void* sq_virt,
-                                 void* cq_virt) {
+                                 void* cq_virt, bool sq_pc, bool cq_pc) {
   struct nvme_passthru_cmd cmd;
   int ret = 0;
 
@@ -1652,18 +1653,16 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   // Create Completion Queue first (CREATE_CQ)
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_create_cq;
-  cmd.nsid = 0;                                  // Admin commands use NSID 0
-  cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = 0x00000001; // PC=1 (physically contiguous), IEN=0, IV=0
-  // PRP1 will be injected by kprobe - pass virtual address as ubuffer
+  cmd.nsid = 0;
+  cmd.cdw10 = (queue_size - 1) << 16 | queue_id;
+  cmd.cdw11 = cq_pc ? 0x00000001 : 0x00000000;
   cmd.addr = reinterpret_cast<uint64_t>(cq_virt);
-  cmd.data_len = 0; // No data transfer for CREATE_CQ
+  cmd.data_len = 0;
 
-  // Debug: Print what we're sending to the controller
   fprintf(stdout,
-          "CREATE_CQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
-          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0)\n",
-          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id);
+          "CREATE_CQ: queue_id=%u, queue_size=%u, "
+          "cdw10=0x%08x, PC=%d\n",
+          queue_id, queue_size, cmd.cdw10, cq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
@@ -1720,20 +1719,16 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   // Create Submission Queue (CREATE_SQ)
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_create_sq;
-  cmd.nsid = 0;                                  // Admin commands use NSID 0
-  cmd.cdw10 = (queue_size - 1) << 16 | queue_id; // QSIZE | QID
-  cmd.cdw11 = (queue_id << 16) | 0x0001;         // CQID | QPRIO=0, PC=1
-  // PRP1 will be injected by kprobe - pass virtual address as ubuffer
+  cmd.nsid = 0;
+  cmd.cdw10 = (queue_size - 1) << 16 | queue_id;
+  cmd.cdw11 = (queue_id << 16) | (sq_pc ? 0x0001 : 0x0000);
   cmd.addr = reinterpret_cast<uint64_t>(sq_virt);
-  cmd.data_len = 0; // No data transfer for CREATE_SQ
+  cmd.data_len = 0;
 
-  // Debug: Print what we're sending to the controller
   fprintf(stdout,
-          "CREATE_SQ: queue_id=%u, queue_size=%u, cdw10=0x%08x "
-          "(QSIZE-1=0x%04x in bits 31:16, QID=0x%04x in bits 15:0), "
-          "cdw11=0x%08x (CQID=0x%04x in bits 31:16)\n",
-          queue_id, queue_size, cmd.cdw10, (queue_size - 1), queue_id,
-          cmd.cdw11, queue_id);
+          "CREATE_SQ: queue_id=%u, queue_size=%u, "
+          "cdw10=0x%08x, cdw11=0x%08x, PC=%d\n",
+          queue_id, queue_size, cmd.cdw10, cmd.cdw11, sq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
@@ -1773,6 +1768,32 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   return 0;
 }
 
+static void freeQueueSetup(struct xioQueueSetup* s, bool is_device,
+                           const char* name, size_t size = 0) {
+  if (!s || !s->virt)
+    return;
+  if (s->prp_list) {
+#ifndef __HIP_DEVICE_COMPILE__
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (page_sz > 0) {
+      (void)munlock(s->prp_list, static_cast<size_t>(page_sz));
+    }
+#endif // __HIP_DEVICE_COMPILE__
+    free(s->prp_list);
+    s->prp_list = nullptr;
+    s->prp_list_phys = 0;
+  }
+  if (s->uses_contig) {
+    freeContigQueue(s, size, name);
+  } else if (s->uses_coherent) {
+    (void)hipHostFree(s->virt);
+  } else {
+    freeQueue(s->virt, is_device, name);
+  }
+  s->virt = nullptr;
+  s->gpu = nullptr;
+}
+
 __host__ int createQueue(const char* nvme_device,
                          const char* kernel_module_device, uint16_t queue_id,
                          uint16_t queue_size, uint16_t nvme_bdf,
@@ -1785,44 +1806,41 @@ __host__ int createQueue(const char* nvme_device,
   bool sq_is_device = (memory_mode & XIO_MEM_MODE_SQ_DEVICE) != 0;
   bool cq_is_device = (memory_mode & XIO_MEM_MODE_CQ_DEVICE) != 0;
 
-  if (!nvme_device || !kernel_module_device || !info) {
+  if (!nvme_device || !kernel_module_device || !info)
     return -EINVAL;
-  }
 
-  // Validate queue_size is power of 2 and non-zero
-  if (queue_size == 0 || (queue_size & (queue_size - 1)) != 0) {
+  if (queue_size == 0 || (queue_size & (queue_size - 1)) != 0)
     return -EINVAL;
-  }
 
-  // Calculate queue sizes in bytes
   const size_t sq_size_bytes = queue_size * NVME_EP_SQE_SIZE;
   const size_t cq_size_bytes = queue_size * NVME_EP_CQE_SIZE;
 
-  // Zero-initialize output structure
   memset(info, 0, sizeof(*info));
   info->sq_size = sq_size_bytes;
   info->cq_size = cq_size_bytes;
 
-  // Open kernel module device
   kmod_fd = open(kernel_module_device, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stdout, "Failed to open kernel module device %s: %s\n",
+    fprintf(stdout,
+            "Failed to open kernel module device "
+            "%s: %s\n",
             kernel_module_device, strerror(errno));
     return -errno;
   }
 
-  // Detect if NVMe device is emulated (QEMU) or a real
   bool is_emulated = false;
   int detect_ret = detectEmulatedNvme(nvme_device, &is_emulated);
   if (detect_ret != 0) {
-    fprintf(stderr, "Error: Failed to detect NVMe type for %s: %s.\n",
+    fprintf(stderr,
+            "Error: Failed to detect NVMe type "
+            "for %s: %s.\n",
             nvme_device, strerror(-detect_ret));
+    close(kmod_fd);
     return -detect_ret;
   }
   fprintf(stdout, "NVMe device %s detected as: %s.\n", nvme_device,
           is_emulated ? "EMULATED" : "REAL");
 
-  // Open NVMe device with retry (device may be temporarily busy)
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     fprintf(stderr, "Failed to open NVMe device %s: %s.\n", nvme_device,
@@ -1831,142 +1849,187 @@ __host__ int createQueue(const char* nvme_device,
     return -errno;
   }
 
-  // Setup SQ using unified helper
-  ret = setupQueueForGpu(sq_size_bytes, sq_is_device, nvme_bdf,
-                         kernel_module_device, is_emulated, "submission queue",
-                         &sq_setup);
-  if (ret < 0) {
-    goto cleanup;
+  // Read CQR before allocation so we can choose the
+  // right allocation path.
+  bool cqr = false;
+  {
+    int cqr_ret = readNvmeCapCqr(nvme_bdf, &cqr);
+    if (cqr_ret < 0) {
+      fprintf(stdout, "Warning: Could not read CQR, "
+                      "assuming contiguous required "
+                      "(PC=1).\n");
+      cqr = true;
+    }
   }
 
-  // Setup CQ using unified helper
-  ret = setupQueueForGpu(cq_size_bytes, cq_is_device, nvme_bdf,
-                         kernel_module_device, is_emulated, "completion queue",
-                         &cq_setup);
-  if (ret < 0) {
-    // Cleanup SQ setup
-    if (sq_setup.uses_coherent) {
-      (void)hipHostFree(sq_setup.virt);
-    } else {
-      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
+  bool sq_multi_page = !sq_is_device && sq_size_bytes > NVME_PAGE_SIZE;
+  bool cq_multi_page = !cq_is_device && cq_size_bytes > NVME_PAGE_SIZE;
+
+  // CQR=1 + multi-page: use contiguous DMA path
+  if (cqr && sq_multi_page) {
+    fprintf(stdout,
+            "CQR=1: using contiguous DMA for "
+            "submission queue (%zu bytes)\n",
+            sq_size_bytes);
+    ret = setupContigQueueForGpu(sq_size_bytes, nvme_bdf, "submission queue",
+                                 &sq_setup);
+    if (ret < 0) {
+      size_t max_sq = NVME_PAGE_SIZE / NVME_EP_SQE_SIZE;
+      fprintf(stderr,
+              "Error: Contiguous alloc failed for "
+              "SQ. Try --queue-length %zu or "
+              "smaller.\n",
+              max_sq);
+      goto cleanup;
     }
-    goto cleanup;
+  } else {
+    ret = setupQueueForGpu(sq_size_bytes, sq_is_device, nvme_bdf,
+                           kernel_module_device, is_emulated,
+                           "submission queue", &sq_setup);
+    if (ret < 0)
+      goto cleanup;
   }
 
-  // Register queue addresses with kernel module for kprobe injection
-  ret = kmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
-                     nvme_bdf, "submission queue");
-  if (ret < 0) {
-    // Cleanup both setups
-    if (sq_setup.uses_coherent) {
-      (void)hipHostFree(sq_setup.virt);
-    } else {
-      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
+  if (cqr && cq_multi_page) {
+    fprintf(stdout,
+            "CQR=1: using contiguous DMA for "
+            "completion queue (%zu bytes)\n",
+            cq_size_bytes);
+    ret = setupContigQueueForGpu(cq_size_bytes, nvme_bdf, "completion queue",
+                                 &cq_setup);
+    if (ret < 0) {
+      size_t max_cq = NVME_PAGE_SIZE / NVME_EP_CQE_SIZE;
+      fprintf(stderr,
+              "Error: Contiguous alloc failed for "
+              "CQ. Try --queue-length %zu or "
+              "smaller.\n",
+              max_cq);
+      freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                     sq_size_bytes);
+      goto cleanup;
     }
-    if (cq_setup.uses_coherent) {
-      (void)hipHostFree(cq_setup.virt);
-    } else {
-      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
+  } else {
+    ret = setupQueueForGpu(cq_size_bytes, cq_is_device, nvme_bdf,
+                           kernel_module_device, is_emulated,
+                           "completion queue", &cq_setup);
+    if (ret < 0) {
+      freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                     sq_size_bytes);
+      goto cleanup;
     }
-    goto cleanup;
   }
 
-  ret = kmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
-                     nvme_bdf, "completion queue");
-  if (ret < 0) {
-    // Cleanup both setups
-    if (sq_setup.uses_coherent) {
-      (void)hipHostFree(sq_setup.virt);
-    } else {
-      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
+  // PC flags: contiguous allocs always use PC=1
+  {
+    bool sq_pc = cqr || !sq_multi_page;
+    bool cq_pc = cqr || !cq_multi_page;
+
+    fprintf(stdout,
+            "Queue PC flags: SQ PC=%d (%zu bytes, "
+            "%s%s), CQ PC=%d (%zu bytes, %s%s)\n",
+            sq_pc ? 1 : 0, sq_size_bytes, sq_is_device ? "device" : "host",
+            sq_setup.uses_contig ? ", contig" : "", cq_pc ? 1 : 0,
+            cq_size_bytes, cq_is_device ? "device" : "host",
+            cq_setup.uses_contig ? ", contig" : "");
+
+    // Build PRP lists for multi-page host queues
+    // (only when CQR=0 allows non-contiguous)
+    if (!cqr && sq_multi_page) {
+      ret = buildQueuePrpList(&sq_setup, sq_size_bytes, sq_is_device,
+                              "submission queue");
+      if (ret < 0) {
+        freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                       sq_size_bytes);
+        freeQueueSetup(&cq_setup, cq_is_device, "completion queue",
+                       cq_size_bytes);
+        goto cleanup;
+      }
     }
-    if (cq_setup.uses_coherent) {
-      (void)hipHostFree(cq_setup.virt);
-    } else {
-      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
+    if (!cqr && cq_multi_page) {
+      ret = buildQueuePrpList(&cq_setup, cq_size_bytes, cq_is_device,
+                              "completion queue");
+      if (ret < 0) {
+        freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                       sq_size_bytes);
+        freeQueueSetup(&cq_setup, cq_is_device, "completion queue",
+                       cq_size_bytes);
+        goto cleanup;
+      }
     }
-    goto cleanup;
+
+    ret = kmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
+                       nvme_bdf, sq_setup.prp2, "submission queue");
+    if (ret < 0) {
+      freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                     sq_size_bytes);
+      freeQueueSetup(&cq_setup, cq_is_device, "completion queue",
+                     cq_size_bytes);
+      goto cleanup;
+    }
+
+    ret = kmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
+                       nvme_bdf, cq_setup.prp2, "completion queue");
+    if (ret < 0) {
+      freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                     sq_size_bytes);
+      freeQueueSetup(&cq_setup, cq_is_device, "completion queue",
+                     cq_size_bytes);
+      goto cleanup;
+    }
+
+    fprintf(stdout,
+            "Deleting existing queues (queue_id=%u) "
+            "if they exist...\n",
+            queue_id);
+    deleteQueue(nvme_fd, queue_id);
+    fprintf(stdout, "Queue deletion completed.\n");
+
+    fprintf(stdout, "Waiting 500ms before creating "
+                    "queues...\n");
+    usleep(500000);
+
+    fprintf(stdout,
+            "Creating NVMe queues (queue_id=%u, "
+            "queue_size=%u)...\n",
+            queue_id, queue_size);
+    ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_setup.virt,
+                              cq_setup.virt, sq_pc, cq_pc);
+    if (ret < 0) {
+      freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
+                     sq_size_bytes);
+      freeQueueSetup(&cq_setup, cq_is_device, "completion queue",
+                     cq_size_bytes);
+      goto cleanup;
+    }
   }
 
-  // Delete existing queues if they exist
-  fprintf(stdout, "Deleting existing queues (queue_id=%u) if they exist...\n",
-          queue_id);
-  deleteQueue(nvme_fd, queue_id);
-  fprintf(stdout, "Queue deletion completed.\n");
-
-  // If controller was reset during deletion, wait a bit more before creating
-  // queues to ensure controller is fully ready
-  // Note: We can't easily detect reset from deleteQueue, but if DELETE_SQ
-  // timed out, we already waited. Add a small delay here as a safety measure.
-  fprintf(stdout, "Waiting 500ms before creating queues...\n");
-  usleep(500000); // 500ms delay
-
-  // Create queues via NVMe admin commands
-  fprintf(stdout, "Creating NVMe queues (queue_id=%u, queue_size=%u)...\n",
-          queue_id, queue_size);
-  ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_setup.virt,
-                            cq_setup.virt);
-  if (ret < 0) {
-    // Cleanup both setups
-    if (sq_setup.uses_coherent) {
-      (void)hipHostFree(sq_setup.virt);
-    } else {
-      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
-    }
-    if (cq_setup.uses_coherent) {
-      (void)hipHostFree(cq_setup.virt);
-    } else {
-      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
-    }
-    goto cleanup;
-  }
-
-  // Calculate doorbell address
-  // Doorbell base is typically at BAR0 + 0x1000
-  // SQ doorbell: DB_BASE + (2 * qid * doorbell_stride)
-  // For now, we'll set a placeholder - caller should get this from device info
-  info->doorbell = 0; // TODO: Get from device info
-
-  // Fill output structure
+  info->doorbell = 0;
   info->sq_virt = sq_setup.virt;
   info->cq_virt = cq_setup.virt;
-  info->sq_gpu = sq_setup.gpu; // GPU-accessible pointer for kernel launch
-  info->cq_gpu = cq_setup.gpu; // GPU-accessible pointer for kernel launch
+  info->sq_gpu = sq_setup.gpu;
+  info->cq_gpu = cq_setup.gpu;
   info->sq_phys = sq_setup.phys;
   info->cq_phys = cq_setup.phys;
-  info->sq_dmabuf_fd = -1; // Not currently used
-  info->cq_dmabuf_fd = -1; // Not currently used
+  info->sq_dmabuf_fd = -1;
+  info->cq_dmabuf_fd = -1;
+  info->sq_prp_list = sq_setup.prp_list;
+  info->cq_prp_list = cq_setup.prp_list;
+  info->sq_contig_id = sq_setup.contig_id;
+  info->cq_contig_id = cq_setup.contig_id;
 
   close(nvme_fd);
   close(kmod_fd);
   return 0;
 
 cleanup:
-  // Free queues - handle coherent allocation separately
-  if (sq_setup.virt) {
-    if (sq_setup.uses_coherent) {
-      // Free HIP coherent memory
-      (void)hipHostFree(sq_setup.virt);
-    } else {
-      // Free using standard free function
-      freeQueue(sq_setup.virt, sq_is_device, "submission queue");
-    }
-  }
-  if (cq_setup.virt) {
-    if (cq_setup.uses_coherent) {
-      // Free HIP coherent memory
-      (void)hipHostFree(cq_setup.virt);
-    } else {
-      // Free using standard free function
-      freeQueue(cq_setup.virt, cq_is_device, "completion queue");
-    }
-  }
-  if (nvme_fd >= 0) {
+  if (sq_setup.virt)
+    freeQueueSetup(&sq_setup, sq_is_device, "submission queue", sq_size_bytes);
+  if (cq_setup.virt)
+    freeQueueSetup(&cq_setup, cq_is_device, "completion queue", cq_size_bytes);
+  if (nvme_fd >= 0)
     close(nvme_fd);
-  }
-  if (kmod_fd >= 0) {
+  if (kmod_fd >= 0)
     close(kmod_fd);
-  }
   return ret;
 }
 
