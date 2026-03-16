@@ -32,6 +32,9 @@ test_init
 ITERATIONS="${ITERATIONS:-128}"
 TRANSFER_SIZE="${TRANSFER_SIZE:-1048576}"
 
+# Display job information
+display_job_info
+
 cd "${PROJECT_DIR}"
 detect_gpu_arch
 if ! $sdma_ep_allowed; then
