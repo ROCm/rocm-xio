@@ -12,6 +12,7 @@ const unsigned int SDMA_OP_ATOMIC = 10;
 const unsigned int SDMA_OP_CONST_FILL = 11;
 
 const unsigned int SDMA_SUBOP_COPY_LINEAR = 0;
+const unsigned int SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW = 36;
 
 const unsigned int SDMA_SUBOP_WRITE_LINEAR = 0;
 const unsigned int SDMA_ATOMIC_ADD64 = 47;
@@ -375,3 +376,156 @@ typedef struct SDMA_PKT_ATOMIC_TAG {
     unsigned int DW_7_DATA;
   } LOOP_UNION;
 } SDMA_PKT_ATOMIC;
+
+typedef struct SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY_TAG {
+  union {
+    struct {
+      unsigned int op : 8;
+      unsigned int sub_op : 8;
+      unsigned int l : 1;
+      unsigned int reserved_0 : 8;
+      unsigned int operation : 7;
+    };
+    unsigned int DW_0_DATA;
+  } HEADER_UNION;
+
+  union {
+    struct {
+      unsigned int src_base_addr_31_0 : 32;
+    };
+    unsigned int DW_1_DATA;
+  } SRC_ADDR_LO_UNION;
+
+  union {
+    struct {
+      unsigned int src_base_addr_63_32 : 32;
+    };
+    unsigned int DW_2_DATA;
+  } SRC_ADDR_HI_UNION;
+
+  union {
+    struct {
+      unsigned int src_x : 32;
+    };
+    unsigned int DW_3_DATA;
+
+  } SRC_X_UNION;
+
+  union {
+    struct {
+      unsigned int src_y : 32;
+    };
+    unsigned int DW_4_DATA;
+  } SRC_Y_UNION;
+
+  union {
+    struct {
+      unsigned int src_z : 32;
+    };
+    unsigned int DW_5_DATA;
+
+  } SRC_Z_UNION;
+
+  union {
+    struct {
+      unsigned int src_pitch : 32;
+    };
+    unsigned int DW_6_DATA;
+  } SRC_PITCH_UNION;
+
+  union {
+    struct {
+      unsigned int src_slice_pitch_31_0 : 32;
+    };
+    unsigned int DW_7_DATA;
+  } SRC_SLICE_PITCH_LO_UNION;
+
+  union {
+    struct {
+      unsigned int src_slice_pitch_47_32 : 16;
+      unsigned int reserved_0 : 16;
+    };
+    unsigned int DW_8_DATA;
+  } SRC_SLICE_PITCH_HI_UNION;
+
+  union {
+    struct {
+      unsigned int dst_data_31_0 : 32;
+    };
+    unsigned int DW_9_DATA;
+  } DST_ADDR_LO_UNION;
+
+  union {
+    struct {
+      unsigned int src_data_63_32 : 32;
+    };
+    unsigned int DW_10_DATA;
+  } DST_ADDR_HI_UNION;
+
+  union {
+    struct {
+      unsigned int dst_x : 32;
+    };
+    unsigned int DW_11_DATA;
+  } DST_X_UNION;
+
+  union {
+    struct {
+      unsigned int dst_y : 32;
+    };
+    unsigned int DW_12_DATA;
+  } DST_Y_UNION;
+
+  union {
+    struct {
+      unsigned int dst_z : 32;
+    };
+    unsigned int DW_13_DATA;
+  } DST_Z_UNION;
+
+  union {
+    struct {
+      unsigned int dst_pitch : 32;
+    };
+    unsigned int DW_14_DATA;
+  } DST_PITCH_UNION;
+
+  union {
+    struct {
+      unsigned int dst_slice_pitch_31_0 : 32;
+    };
+    unsigned int DW_15_DATA;
+  } DST_SLICE_PITCH_LO_UNION;
+
+  union {
+    struct {
+      unsigned int dst_slice_pitch_47_32 : 16;
+      unsigned int reserved_0 : 16;
+    };
+    unsigned int DW_16_DATA;
+  } DST_SLICE_PITCH_HI_UNION;
+
+  union {
+    struct {
+      unsigned int rect_x : 32;
+    };
+    unsigned int DW_17_DATA;
+  } RECT_X_UNION;
+
+  union {
+    struct {
+      unsigned int rect_y : 32;
+    };
+    unsigned int DW_18_DATA;
+  } RECT_Y_UNION;
+
+  union {
+    struct {
+      unsigned int rect_z : 32;
+    };
+    unsigned int DW_19_DATA;
+  } RECT_Z_UNION;
+} SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY;
+static_assert(sizeof(SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY) ==
+                20 * sizeof(unsigned int),
+              "SDMA PKT LINEAR_LARGE_SUB_WINDOW_COPY must be 20 DWORDS");
