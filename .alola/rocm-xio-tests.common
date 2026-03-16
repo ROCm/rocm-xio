@@ -20,6 +20,19 @@ else
   PROJECT_DIR="${HOME}/Projects/rocm-xio"
 fi
 
+# Source env-setup.sh if present (to set up extra environment conditions
+# for automation or manual testing)
+if [ -r "${PROJECT_DIR}/.alola/.env-setup.sh" ]; then
+  echo "Sourcing ${PROJECT_DIR}/.alola/.env-setup.sh"
+  if ! . "${PROJECT_DIR}/.alola/.env-setup.sh"; then
+    echo "ERROR: Failed to source ${PROJECT_DIR}/.alola/.env-setup.sh" >&2
+    exit 1
+  fi
+elif [ -e "${PROJECT_DIR}/.alola/.env-setup.sh" ]; then
+  echo "ERROR: ${PROJECT_DIR}/.alola/.env-setup.sh exists but is not readable" >&2
+  exit 1
+fi
+
 # Detect GPU arch and set sdma_ep_allowed based on a SDMA whitelist.
 detect_gpu_arch() {
   ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
