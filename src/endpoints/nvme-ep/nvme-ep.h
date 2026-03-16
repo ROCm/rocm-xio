@@ -277,30 +277,25 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id);
 extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig);
 
 /**
- * Send NVMe CREATE_CQ and CREATE_SQ commands to create queues
+ * Send NVMe CREATE_CQ and CREATE_SQ admin commands.
  *
- * Sends the NVMe admin commands to create both the Completion Queue (CQ) and
- * Submission Queue (SQ) for the specified queue ID. The CQ is created first,
- * then the SQ (which references the CQ).
+ * Creates both CQ and SQ for the specified queue ID.
+ * CQ is created first, then SQ (which references CQ).
+ * Physical addresses are injected by the kernel module
+ * kprobe, so virtual addresses are passed in the cmds.
  *
- * Physical addresses are injected by the kernel module kprobe, so virtual
- * addresses are passed in the commands.
- *
- * @param nvme_fd File descriptor for NVMe device (opened with open())
- * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
- * @param queue_size Queue size in entries (must be power of 2)
- * @param sq_virt Virtual address of submission queue buffer
- * @param cq_virt Virtual address of completion queue buffer
- *
- * @return 0 on success, negative error code on failure
- *
- * @note This function sends the CREATE_CQ and CREATE_SQ admin commands via
- *       NVME_IOCTL_ADMIN_CMD. The kernel module kprobe will inject the
- *       physical addresses into the PRP1 fields automatically.
+ * @param nvme_fd File descriptor for NVMe device.
+ * @param queue_id Queue ID to create (1+ for IO).
+ * @param queue_size Queue size in entries (power of 2).
+ * @param sq_virt Virtual address of SQ buffer.
+ * @param cq_virt Virtual address of CQ buffer.
+ * @param sq_pc true for physically contiguous SQ.
+ * @param cq_pc true for physically contiguous CQ.
+ * @return 0 on success, negative error code on failure.
  */
 __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
                                  uint16_t queue_size, void* sq_virt,
-                                 void* cq_virt);
+                                 void* cq_virt, bool sq_pc, bool cq_pc);
 
 /**
  * Read NVMe Submission Queue Entry (SQE) from memory
@@ -740,6 +735,7 @@ struct nvmeEpConfig {
   uint16_t queueId;       // Queue ID to use (0=admin, 1+=IO queues)
   uint16_t queueLength;   // Queue length in entries (must be power of 2)
   bool queuesCreated; // Flag indicating queues have been created (for cleanup)
+  struct nvme_queue_info queueInfo; // Queue info populated by createQueue()
 
   // Physical addresses (host-side only)
   uint64_t doorbellAddr; // Physical address of doorbell register
@@ -785,8 +781,8 @@ struct nvmeEpConfig {
   // validateConfig
   nvmeEpConfig()
     : controller(""), queueId(0), queueLength(64), queuesCreated(false),
-      doorbellAddr(0), sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0),
-      ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false},
+      queueInfo{}, doorbellAddr(0), sqBaseAddr(0), cqBaseAddr(0), sqSize(0),
+      cqSize(0), ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false},
       bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
   }
