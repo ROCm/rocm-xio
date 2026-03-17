@@ -1313,6 +1313,20 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   if (num_pages <= 1)
     return 0;
 
+  // Ensure host queue memory is page-aligned before constructing a multi-page
+  // PRP list. If setup->virt came from a malloc-based fallback, it may not be
+  // aligned to the system page size, which would yield incorrect PRP entries.
+  if (!is_device) {
+    uintptr_t virt_addr = reinterpret_cast<uintptr_t>(setup->virt);
+    if ((virt_addr % page_sz) != 0) {
+      fprintf(stderr,
+              "ERROR: Queue %s virtual address %p is not page-aligned "
+              "(page size: %zu); cannot build PRP list\n",
+              queue_name, setup->virt, page_sz);
+      return -EINVAL;
+    }
+  }
+
   if (is_device) {
     fprintf(stderr,
             "ERROR: PC=0 PRP list not supported "
