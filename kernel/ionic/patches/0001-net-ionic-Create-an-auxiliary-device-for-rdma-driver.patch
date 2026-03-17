@@ -1,0 +1,293 @@
+diff --git a/Documentation/networking/device_drivers/ethernet/pensando/ionic.rst b/Documentation/networking/device_drivers/ethernet/pensando/ionic.rst
+index 05fe2b11bb18..a0029b6db31e 100644
+--- a/Documentation/networking/device_drivers/ethernet/pensando/ionic.rst
++++ b/Documentation/networking/device_drivers/ethernet/pensando/ionic.rst
+@@ -13,6 +13,7 @@ Contents
+ - Identifying the Adapter
+ - Enabling the driver
+ - Configuring the driver
++- RDMA Support via Auxiliary Device
+ - Statistics
+ - Support
+ 
+@@ -105,6 +106,15 @@ XDP
+ Support for XDP includes the basics, plus Jumbo frames, Redirect and
+ ndo_xmit.  There is no current support for zero-copy sockets or HW offload.
+ 
++RDMA Support via Auxiliary Device
++=================================
++
++The ionic driver supports RDMA (Remote Direct Memory Access) functionality
++through the Linux auxiliary device framework when advertised by the firmware.
++RDMA capability is detected during device initialization, and if supported,
++the ethernet driver will create an auxiliary device that allows the RDMA
++driver to bind and provide InfiniBand/RoCE functionality.
++
+ Statistics
+ ==========
+ 
+diff --git a/drivers/net/ethernet/pensando/Kconfig b/drivers/net/ethernet/pensando/Kconfig
+index 01fe76786f77..c99758adf3ad 100644
+--- a/drivers/net/ethernet/pensando/Kconfig
++++ b/drivers/net/ethernet/pensando/Kconfig
+@@ -24,6 +24,7 @@ config IONIC
+ 	select NET_DEVLINK
+ 	select DIMLIB
+ 	select PAGE_POOL
++	select AUXILIARY_BUS
+ 	help
+ 	  This enables the support for the Pensando family of Ethernet
+ 	  adapters.  More specific information on this driver can be
+diff --git a/drivers/net/ethernet/pensando/ionic/Makefile b/drivers/net/ethernet/pensando/ionic/Makefile
+index 4e7642a2d25f..a598972fef41 100644
+--- a/drivers/net/ethernet/pensando/ionic/Makefile
++++ b/drivers/net/ethernet/pensando/ionic/Makefile
+@@ -5,5 +5,5 @@ obj-$(CONFIG_IONIC) := ionic.o
+ 
+ ionic-y := ionic_main.o ionic_bus_pci.o ionic_devlink.o ionic_dev.o \
+ 	   ionic_debugfs.o ionic_lif.o ionic_rx_filter.o ionic_ethtool.o \
+-	   ionic_txrx.o ionic_stats.o ionic_fw.o
++	   ionic_txrx.o ionic_stats.o ionic_fw.o ionic_aux.o
+ ionic-$(CONFIG_PTP_1588_CLOCK) += ionic_phc.o
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_api.h b/drivers/net/ethernet/pensando/ionic/ionic_api.h
+new file mode 100644
+index 000000000000..f9fcd1b67b35
+--- /dev/null
++++ b/drivers/net/ethernet/pensando/ionic/ionic_api.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Copyright (C) 2018-2025, Advanced Micro Devices, Inc. */
++
++#ifndef _IONIC_API_H_
++#define _IONIC_API_H_
++
++#include <linux/auxiliary_bus.h>
++
++/**
++ * struct ionic_aux_dev - Auxiliary device information
++ * @lif:        Logical interface
++ * @idx:        Index identifier
++ * @adev:       Auxiliary device
++ */
++struct ionic_aux_dev {
++	struct ionic_lif *lif;
++	int idx;
++	struct auxiliary_device adev;
++};
++
++#endif /* _IONIC_API_H_ */
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_aux.c b/drivers/net/ethernet/pensando/ionic/ionic_aux.c
+new file mode 100644
+index 000000000000..f3c2a5227b36
+--- /dev/null
++++ b/drivers/net/ethernet/pensando/ionic/ionic_aux.c
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) 2018-2025, Advanced Micro Devices, Inc. */
++
++#include <linux/kernel.h>
++#include "ionic.h"
++#include "ionic_lif.h"
++#include "ionic_aux.h"
++
++static DEFINE_IDA(aux_ida);
++
++static void ionic_auxbus_release(struct device *dev)
++{
++	struct ionic_aux_dev *ionic_adev;
++
++	ionic_adev = container_of(dev, struct ionic_aux_dev, adev.dev);
++	ida_free(&aux_ida, ionic_adev->adev.id);
++	kfree(ionic_adev);
++}
++
++int ionic_auxbus_register(struct ionic_lif *lif)
++{
++	struct ionic_aux_dev *ionic_adev;
++	struct auxiliary_device *aux_dev;
++	int err, id;
++
++	if (!(le64_to_cpu(lif->ionic->ident.lif.capabilities) & IONIC_LIF_CAP_RDMA))
++		return 0;
++
++	ionic_adev = kzalloc(sizeof(*ionic_adev), GFP_KERNEL);
++	if (!ionic_adev)
++		return -ENOMEM;
++
++	aux_dev = &ionic_adev->adev;
++
++	id = ida_alloc(&aux_ida, GFP_KERNEL);
++	if (id < 0) {
++		dev_err(lif->ionic->dev, "Failed to allocate aux id: %d\n", id);
++		kfree(ionic_adev);
++		return id;
++	}
++
++	aux_dev->id = id;
++	aux_dev->name = "rdma";
++	aux_dev->dev.parent = &lif->ionic->pdev->dev;
++	aux_dev->dev.release = ionic_auxbus_release;
++	ionic_adev->lif = lif;
++	err = auxiliary_device_init(aux_dev);
++	if (err) {
++		dev_err(lif->ionic->dev, "Failed to initialize %s aux device: %d\n",
++			aux_dev->name, err);
++		ida_free(&aux_ida, id);
++		kfree(ionic_adev);
++		return err;
++	}
++
++	err = auxiliary_device_add(aux_dev);
++	if (err) {
++		dev_err(lif->ionic->dev, "Failed to add %s aux device: %d\n",
++			aux_dev->name, err);
++		auxiliary_device_uninit(aux_dev);
++		return err;
++	}
++
++	lif->ionic_adev = ionic_adev;
++	return 0;
++}
++
++void ionic_auxbus_unregister(struct ionic_lif *lif)
++{
++	mutex_lock(&lif->adev_lock);
++	if (!lif->ionic_adev)
++		goto out;
++
++	auxiliary_device_delete(&lif->ionic_adev->adev);
++	auxiliary_device_uninit(&lif->ionic_adev->adev);
++
++	lif->ionic_adev = NULL;
++out:
++	mutex_unlock(&lif->adev_lock);
++}
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_aux.h b/drivers/net/ethernet/pensando/ionic/ionic_aux.h
+new file mode 100644
+index 000000000000..f5528a9f187d
+--- /dev/null
++++ b/drivers/net/ethernet/pensando/ionic/ionic_aux.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Copyright (C) 2018-2025, Advanced Micro Devices, Inc. */
++
++#ifndef _IONIC_AUX_H_
++#define _IONIC_AUX_H_
++
++int ionic_auxbus_register(struct ionic_lif *lif);
++void ionic_auxbus_unregister(struct ionic_lif *lif);
++
++#endif /* _IONIC_AUX_H_ */
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+index 136bfa3516d0..f8752b1d2790 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+@@ -9,6 +9,7 @@
+ #include "ionic.h"
+ #include "ionic_bus.h"
+ #include "ionic_lif.h"
++#include "ionic_aux.h"
+ #include "ionic_debugfs.h"
+ 
+ /* Supported devices */
+@@ -375,6 +376,8 @@ static int ionic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 		goto err_out_deregister_devlink;
+ 	}
+ 
++	ionic_auxbus_register(ionic->lif);
++
+ 	mod_timer(&ionic->watchdog_timer,
+ 		  round_jiffies(jiffies + ionic->watchdog_period));
+ 	ionic_queue_doorbell_check(ionic, IONIC_NAPI_DEADLINE);
+@@ -416,6 +419,7 @@ static void ionic_remove(struct pci_dev *pdev)
+ 
+ 		if (ionic->lif->doorbell_wa)
+ 			cancel_delayed_work_sync(&ionic->doorbell_check_dwork);
++		ionic_auxbus_unregister(ionic->lif);
+ 		ionic_lif_unregister(ionic->lif);
+ 		ionic_devlink_unregister(ionic);
+ 		ionic_lif_deinit(ionic->lif);
+@@ -445,6 +449,7 @@ static void ionic_reset_prepare(struct pci_dev *pdev)
+ 	timer_delete_sync(&ionic->watchdog_timer);
+ 	cancel_work_sync(&lif->deferred.work);
+ 
++	ionic_auxbus_unregister(ionic->lif);
+ 	mutex_lock(&lif->queue_lock);
+ 	ionic_stop_queues_reconfig(lif);
+ 	ionic_txrx_free(lif);
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_lif.c b/drivers/net/ethernet/pensando/ionic/ionic_lif.c
+index 48cb5d30b5f6..8ed5d2e5fde4 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_lif.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_lif.c
+@@ -19,6 +19,7 @@
+ #include "ionic_bus.h"
+ #include "ionic_dev.h"
+ #include "ionic_lif.h"
++#include "ionic_aux.h"
+ #include "ionic_txrx.h"
+ #include "ionic_ethtool.h"
+ #include "ionic_debugfs.h"
+@@ -3293,6 +3294,7 @@ int ionic_lif_alloc(struct ionic *ionic)
+ 
+ 	mutex_init(&lif->queue_lock);
+ 	mutex_init(&lif->config_lock);
++	mutex_init(&lif->adev_lock);
+ 
+ 	spin_lock_init(&lif->adminq_lock);
+ 
+@@ -3349,6 +3351,7 @@ int ionic_lif_alloc(struct ionic *ionic)
+ 	lif->info = NULL;
+ 	lif->info_pa = 0;
+ err_out_free_mutex:
++	mutex_destroy(&lif->adev_lock);
+ 	mutex_destroy(&lif->config_lock);
+ 	mutex_destroy(&lif->queue_lock);
+ err_out_free_netdev:
+@@ -3384,6 +3387,7 @@ static void ionic_lif_handle_fw_down(struct ionic_lif *lif)
+ 
+ 	netif_device_detach(lif->netdev);
+ 
++	ionic_auxbus_unregister(ionic->lif);
+ 	mutex_lock(&lif->queue_lock);
+ 	if (test_bit(IONIC_LIF_F_UP, lif->state)) {
+ 		dev_info(ionic->dev, "Surprise FW stop, stopping queues\n");
+@@ -3446,6 +3450,8 @@ int ionic_restart_lif(struct ionic_lif *lif)
+ 	netif_device_attach(lif->netdev);
+ 	ionic_queue_doorbell_check(ionic, IONIC_NAPI_DEADLINE);
+ 
++	ionic_auxbus_register(ionic->lif);
++
+ 	return 0;
+ 
+ err_txrx_free:
+@@ -3528,6 +3534,7 @@ void ionic_lif_free(struct ionic_lif *lif)
+ 
+ 	mutex_destroy(&lif->config_lock);
+ 	mutex_destroy(&lif->queue_lock);
++	mutex_destroy(&lif->adev_lock);
+ 
+ 	/* free netdev & lif */
+ 	ionic_debugfs_del_lif(lif);
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_lif.h b/drivers/net/ethernet/pensando/ionic/ionic_lif.h
+index e01756fb7fdd..43bdd0fb8733 100644
+--- a/drivers/net/ethernet/pensando/ionic/ionic_lif.h
++++ b/drivers/net/ethernet/pensando/ionic/ionic_lif.h
+@@ -10,6 +10,7 @@
+ #include <linux/dim.h>
+ #include <linux/pci.h>
+ #include "ionic_rx_filter.h"
++#include "ionic_api.h"
+ 
+ #define IONIC_ADMINQ_LENGTH	16	/* must be a power of two */
+ #define IONIC_NOTIFYQ_LENGTH	64	/* must be a power of two */
+@@ -225,6 +226,8 @@ struct ionic_lif {
+ 	dma_addr_t info_pa;
+ 	u32 info_sz;
+ 	struct ionic_qtype_info qtype_info[IONIC_QTYPE_MAX];
++	struct ionic_aux_dev *ionic_adev;
++	struct mutex adev_lock;	/* lock for aux_dev actions */
+ 
+ 	u8 rss_hash_key[IONIC_RSS_HASH_KEY_SIZE];
+ 	u8 *rss_ind_tbl;
+-- 
+2.43.0

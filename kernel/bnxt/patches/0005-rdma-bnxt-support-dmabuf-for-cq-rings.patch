@@ -1,0 +1,112 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v11 5/6] RDMA/bnxt_re: Support dmabuf for CQ rings
+From: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Date: Tue, 10 Feb 2026 22:29:38 +0530
+Message-Id: <20260210165939.41625-6-sriharsha.basavapatna@broadcom.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+For CQs, kernel already supports pinning dmabuf based application
+memory, specified through provider attributes. Register a new devop
+for create_cq_umem() and process the umem argument. Refactor the
+existing create_cq() handler so that code is shared across both
+handlers.
+
+Signed-off-by: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Reviewed-by: Selvin Xavier <selvin.xavier@broadcom.com>
+---
+ drivers/infiniband/hw/bnxt_re/ib_verbs.c | 30 +++++++++++++++++-------
+ drivers/infiniband/hw/bnxt_re/ib_verbs.h |  2 ++
+ drivers/infiniband/hw/bnxt_re/main.c     |  1 +
+ 3 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.c b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+index fb30b3831d49..dc73f0072528 100644
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.c
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+@@ -3372,8 +3372,8 @@ static int bnxt_re_setup_sginfo(struct bnxt_re_dev *rdev,
+ 	return 0;
+ }
+ 
+-int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+-		      struct uverbs_attr_bundle *attrs)
++int bnxt_re_create_cq_umem(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
++			   struct ib_umem *umem, struct uverbs_attr_bundle *attrs)
+ {
+ 	struct bnxt_re_cq *cq = container_of(ibcq, struct bnxt_re_cq, ib_cq);
+ 	struct bnxt_re_dev *rdev = to_bnxt_re_dev(ibcq->device, ibdev);
+@@ -3410,13 +3410,18 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 		if (rc)
+ 			goto fail;
+ 
+-		cq->umem = ib_umem_get(&rdev->ibdev, req.cq_va,
+-				       entries * sizeof(struct cq_base),
+-				       IB_ACCESS_LOCAL_WRITE);
+-		if (IS_ERR(cq->umem)) {
+-			rc = PTR_ERR(cq->umem);
+-			goto fail;
++		if (umem) {
++			cq->umem = umem;
++		} else {
++			cq->umem = ib_umem_get(&rdev->ibdev, req.cq_va,
++					       entries * sizeof(struct cq_base),
++					       IB_ACCESS_LOCAL_WRITE);
++			if (IS_ERR(cq->umem)) {
++				rc = PTR_ERR(cq->umem);
++				goto fail;
++			}
+ 		}
++
+ 		rc = bnxt_re_setup_sginfo(rdev, cq->umem, &cq->qplib_cq.sg_info);
+ 		if (rc)
+ 			goto fail;
+@@ -3484,12 +3489,19 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ free_mem:
+ 	free_page((unsigned long)cq->uctx_cq_page);
+ c2fail:
+-	ib_umem_release(cq->umem);
++	if (!umem)
++		ib_umem_release(cq->umem);
+ fail:
+ 	kfree(cq->cql);
+ 	return rc;
+ }
+ 
++int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
++		      struct uverbs_attr_bundle *attrs)
++{
++	return bnxt_re_create_cq_umem(ibcq, attr, NULL, attrs);
++}
++
+ static void bnxt_re_resize_cq_complete(struct bnxt_re_cq *cq)
+ {
+ 	struct bnxt_re_dev *rdev = cq->rdev;
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.h b/drivers/infiniband/hw/bnxt_re/ib_verbs.h
+index 33e0f66b39eb..27cbe9a1c7e1 100644
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.h
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.h
+@@ -254,6 +254,8 @@ int bnxt_re_post_recv(struct ib_qp *qp, const struct ib_recv_wr *recv_wr,
+ 		      const struct ib_recv_wr **bad_recv_wr);
+ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 		      struct uverbs_attr_bundle *attrs);
++int bnxt_re_create_cq_umem(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
++			   struct ib_umem *umem, struct uverbs_attr_bundle *attrs);
+ int bnxt_re_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata);
+ int bnxt_re_destroy_cq(struct ib_cq *cq, struct ib_udata *udata);
+ int bnxt_re_poll_cq(struct ib_cq *cq, int num_entries, struct ib_wc *wc);
+diff --git a/drivers/infiniband/hw/bnxt_re/main.c b/drivers/infiniband/hw/bnxt_re/main.c
+index 73003ad25ee8..401a481afecc 100644
+--- a/drivers/infiniband/hw/bnxt_re/main.c
++++ b/drivers/infiniband/hw/bnxt_re/main.c
+@@ -1334,6 +1334,7 @@ static const struct ib_device_ops bnxt_re_dev_ops = {
+ 	.alloc_ucontext = bnxt_re_alloc_ucontext,
+ 	.create_ah = bnxt_re_create_ah,
+ 	.create_cq = bnxt_re_create_cq,
++	.create_cq_umem = bnxt_re_create_cq_umem,
+ 	.create_qp = bnxt_re_create_qp,
+ 	.create_srq = bnxt_re_create_srq,
+ 	.create_user_ah = bnxt_re_create_ah,
+-- 
+2.51.2.636.ga99f379adf
+

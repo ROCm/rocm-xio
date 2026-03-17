@@ -1,0 +1,242 @@
+From beea58072ebf717613e5f59b1632746b4f214735 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Sat, 14 Mar 2026 16:43:38 -0600
+Subject: [PATCH 15/16] RDMA/ionic: Add software resource counters to hw_stats
+
+The ionic_rdma driver exposes firmware-provided hardware statistics
+via the alloc_hw_port_stats / get_hw_stats interface. However, the
+firmware does not report resource utilization counters (active QPs,
+CQs, PDs, AHs, MRs) that are valuable for capacity planning and
+monitoring.
+
+Add driver-maintained software counters that are appended after the
+firmware-reported hw_counters. These track the current count of
+active RDMA resources and their high-water marks using atomic_t
+operations in the create/destroy paths.
+
+New counters exposed in hw_counters/:
+
+  active_qps, active_cqs, active_pds, active_ahs, active_mrs
+  watermark_qps, watermark_cqs, watermark_pds, watermark_ahs,
+  watermark_mrs
+
+This brings the ionic driver closer to parity with bnxt_re which
+exposes these counters in its hw_counters.c.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ drivers/infiniband/hw/ionic/ionic_hw_stats.c | 118 +++++++++++++++++--
+ drivers/infiniband/hw/ionic/ionic_ibdev.h    |  17 +++
+ 2 files changed, 128 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/infiniband/hw/ionic/ionic_hw_stats.c b/drivers/infiniband/hw/ionic/ionic_hw_stats.c
+index 244a80d..15ddf7d 100644
+--- a/drivers/infiniband/hw/ionic/ionic_hw_stats.c
++++ b/drivers/infiniband/hw/ionic/ionic_hw_stats.c
+@@ -6,6 +6,45 @@
+ #include "ionic_fw.h"
+ #include "ionic_ibdev.h"
+ 
++enum ionic_sw_stat_idx {
++	IONIC_SW_STAT_ACTIVE_QPS,
++	IONIC_SW_STAT_ACTIVE_CQS,
++	IONIC_SW_STAT_ACTIVE_PDS,
++	IONIC_SW_STAT_ACTIVE_AHS,
++	IONIC_SW_STAT_ACTIVE_MRS,
++	IONIC_SW_STAT_WATERMARK_QPS,
++	IONIC_SW_STAT_WATERMARK_CQS,
++	IONIC_SW_STAT_WATERMARK_PDS,
++	IONIC_SW_STAT_WATERMARK_AHS,
++	IONIC_SW_STAT_WATERMARK_MRS,
++	IONIC_SW_STAT_COUNT,
++};
++
++static const char * const ionic_sw_stat_names[] = {
++	[IONIC_SW_STAT_ACTIVE_QPS]	= "active_qps",
++	[IONIC_SW_STAT_ACTIVE_CQS]	= "active_cqs",
++	[IONIC_SW_STAT_ACTIVE_PDS]	= "active_pds",
++	[IONIC_SW_STAT_ACTIVE_AHS]	= "active_ahs",
++	[IONIC_SW_STAT_ACTIVE_MRS]	= "active_mrs",
++	[IONIC_SW_STAT_WATERMARK_QPS]	= "watermark_qps",
++	[IONIC_SW_STAT_WATERMARK_CQS]	= "watermark_cqs",
++	[IONIC_SW_STAT_WATERMARK_PDS]	= "watermark_pds",
++	[IONIC_SW_STAT_WATERMARK_AHS]	= "watermark_ahs",
++	[IONIC_SW_STAT_WATERMARK_MRS]	= "watermark_mrs",
++};
++
++static u64 ionic_sw_stat_val(struct ionic_ibdev *dev, int idx)
++{
++	struct ionic_sw_stats *sw = &dev->sw_stats;
++	int cur;
++
++	if (idx < IONIC_SW_STAT_WATERMARK_QPS)
++		return (u64)atomic_read(&sw->active[idx]);
++
++	cur = idx - IONIC_SW_STAT_WATERMARK_QPS;
++	return (u64)atomic_read(&sw->watermark[cur]);
++}
++
+ static int ionic_v1_stat_normalize(struct ionic_v1_stat *hw_stats,
+ 				   int hw_stats_count)
+ {
+@@ -186,12 +225,16 @@ static struct rdma_hw_stats *ionic_alloc_hw_stats(struct ib_device *ibdev,
+ 						  u32 port)
+ {
+ 	struct ionic_ibdev *dev = to_ionic_ibdev(ibdev);
++	int total = dev->hw_stats_count + IONIC_SW_STAT_COUNT;
+ 
+ 	if (port != 1)
+ 		return NULL;
+ 
+-	return rdma_alloc_hw_stats_struct(dev->hw_stats_hdrs,
+-					  dev->hw_stats_count,
++	if (!dev->hw_stats_hdrs_combined)
++		return NULL;
++
++	return rdma_alloc_hw_stats_struct(dev->hw_stats_hdrs_combined,
++					  total,
+ 					  RDMA_HW_STATS_DEFAULT_LIFESPAN);
+ }
+ 
+@@ -201,6 +244,7 @@ static int ionic_get_hw_stats(struct ib_device *ibdev,
+ {
+ 	struct ionic_ibdev *dev = to_ionic_ibdev(ibdev);
+ 	dma_addr_t hw_stats_dma;
++	int sw_base, sw_i;
+ 	int rc, hw_stat_i;
+ 
+ 	if (port != 1)
+@@ -225,7 +269,12 @@ static int ionic_get_hw_stats(struct ib_device *ibdev,
+ 			ionic_v1_stat_val(&dev->hw_stats[hw_stat_i],
+ 					  dev->hw_stats_buf, PAGE_SIZE);
+ 
+-	return hw_stat_i;
++	sw_base = dev->hw_stats_count;
++	for (sw_i = 0; sw_i < IONIC_SW_STAT_COUNT; ++sw_i)
++		hw_stats->value[sw_base + sw_i] =
++			ionic_sw_stat_val(dev, sw_i);
++
++	return sw_base + IONIC_SW_STAT_COUNT;
+ 
+ err_cmd:
+ 	dma_unmap_single(dev->lif_cfg.hwdev, hw_stats_dma,
+@@ -421,6 +470,52 @@ err_dma:
+ 	return rc;
+ }
+ 
++
++static int ionic_init_sw_stats(struct ionic_ibdev *dev)
++{
++	struct rdma_stat_desc *combined;
++	int total, i;
++
++	total = dev->hw_stats_count + IONIC_SW_STAT_COUNT;
++
++	combined = kcalloc(total, sizeof(*combined), GFP_KERNEL);
++	if (!combined)
++		return -ENOMEM;
++
++	for (i = 0; i < dev->hw_stats_count; i++)
++		combined[i].name = dev->hw_stats_hdrs[i].name;
++
++	for (i = 0; i < IONIC_SW_STAT_COUNT; i++)
++		combined[dev->hw_stats_count + i].name =
++			ionic_sw_stat_names[i];
++
++	dev->hw_stats_hdrs_combined = combined;
++
++	for (i = 0; i < 5; i++) {
++		atomic_set(&dev->sw_stats.active[i], 0);
++		atomic_set(&dev->sw_stats.watermark[i], 0);
++	}
++
++	return 0;
++}
++
++void ionic_sw_stat_inc(struct ionic_ibdev *dev, int idx)
++{
++	struct ionic_sw_stats *sw = &dev->sw_stats;
++	int cur, old;
++
++	cur = atomic_inc_return(&sw->active[idx]);
++
++	old = atomic_read(&sw->watermark[idx]);
++	while (cur > old)
++		old = atomic_cmpxchg(&sw->watermark[idx], old, cur);
++}
++
++void ionic_sw_stat_dec(struct ionic_ibdev *dev, int idx)
++{
++	atomic_dec(&dev->sw_stats.active[idx]);
++}
++
+ static const struct ib_device_ops ionic_hw_stats_ops = {
+ 	.driver_id = RDMA_DRIVER_IONIC,
+ 	.alloc_hw_port_stats = ionic_alloc_hw_stats,
+@@ -442,10 +537,18 @@ void ionic_stats_init(struct ionic_ibdev *dev)
+ 
+ 	if (stats_type & IONIC_LIF_RDMA_STAT_GLOBAL) {
+ 		rc = ionic_init_hw_stats(dev);
+-		if (rc)
+-			ibdev_dbg(&dev->ibdev, "Failed to init hw stats\n");
+-		else
+-			ib_set_device_ops(&dev->ibdev, &ionic_hw_stats_ops);
++		if (rc) {
++			ibdev_dbg(&dev->ibdev,
++				  "Failed to init hw stats\n");
++		} else {
++			rc = ionic_init_sw_stats(dev);
++			if (rc)
++				ibdev_dbg(&dev->ibdev,
++					  "Failed to init sw stats\n");
++			else
++				ib_set_device_ops(&dev->ibdev,
++						  &ionic_hw_stats_ops);
++		}
+ 	}
+ 
+ 	if (stats_type & IONIC_LIF_RDMA_STAT_QP) {
+@@ -481,4 +584,5 @@ void ionic_stats_cleanup(struct ionic_ibdev *dev)
+ 	kfree(dev->hw_stats);
+ 	kfree(dev->hw_stats_buf);
+ 	kfree(dev->hw_stats_hdrs);
++	kfree(dev->hw_stats_hdrs_combined);
+ }
+diff --git a/drivers/infiniband/hw/ionic/ionic_ibdev.h b/drivers/infiniband/hw/ionic/ionic_ibdev.h
+index b7a1a57..1d12f13 100644
+--- a/drivers/infiniband/hw/ionic/ionic_ibdev.h
++++ b/drivers/infiniband/hw/ionic/ionic_ibdev.h
+@@ -116,6 +116,13 @@ struct ionic_ibdev {
+ 	struct rdma_stat_desc	*hw_stats_hdrs;
+ 	struct ionic_counter_stats *counter_stats;
+ 	int			hw_stats_count;
++
++	struct ionic_sw_stats {
++		atomic_t	active[5];  /* qp, cq, pd, ah, mr */
++		atomic_t	watermark[5];
++	} sw_stats;
++
++	struct rdma_stat_desc	*hw_stats_hdrs_combined;
+ };
+ 
+ struct ionic_eq {
+@@ -499,6 +506,16 @@ int ionic_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
+ int ionic_poll_cq(struct ib_cq *ibcq, int nwc, struct ib_wc *wc);
+ int ionic_req_notify_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags);
+ 
++/* Software resource counter indices */
++#define IONIC_RES_QP	0
++#define IONIC_RES_CQ	1
++#define IONIC_RES_PD	2
++#define IONIC_RES_AH	3
++#define IONIC_RES_MR	4
++
++void ionic_sw_stat_inc(struct ionic_ibdev *dev, int idx);
++void ionic_sw_stat_dec(struct ionic_ibdev *dev, int idx);
++
+ /* ionic_hw_stats.c */
+ void ionic_stats_init(struct ionic_ibdev *dev);
+ void ionic_stats_cleanup(struct ionic_ibdev *dev);
+-- 
+2.43.0
+
