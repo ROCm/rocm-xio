@@ -282,7 +282,6 @@ public:
 
 class RdmaEndpoint : public XioEndpoint {
 private:
-  // Store RDMA config
   rdma_ep::RdmaEpConfig rdmaConfig_;
 
 public:
@@ -295,8 +294,7 @@ public:
   }
 
   __host__ const char* getDescription() const override {
-    return "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, "
-           "ROCM_ERNIC)";
+    return "RDMA endpoint with GDA support (BNXT, MLX5, IONIC)";
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
@@ -309,16 +307,14 @@ public:
 
   __host__ size_t
   getSubmissionQueueLength(const XioEndpointConfig* config) const override {
-    // Use queue length from CLI configuration (default: 64)
-    (void)config; // Not used - we use member variable instead
-    return rdmaConfig_.queueLength;
+    (void)config;
+    return 0;
   }
 
   __host__ size_t
   getCompletionQueueLength(const XioEndpointConfig* config) const override {
-    // CQ length matches SQ length
-    (void)config; // Not used - we use member variable instead
-    return rdmaConfig_.queueLength;
+    (void)config;
+    return 0;
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
@@ -335,17 +331,14 @@ public:
 
   __host__ void applyCommonConfig(
     void* endpointConfig, const XioEndpointConfig* baseConfig) override {
-    // RDMA endpoint doesn't need to apply common config yet
-    // Future: could apply pciMmioBridge or other common options
     (void)endpointConfig;
     (void)baseConfig;
   }
 
   __host__ std::string validateConfig(void* endpointConfig) override {
     if (endpointConfig) {
-      rdma_ep::RdmaEpConfig* rdmaConfig = static_cast<rdma_ep::RdmaEpConfig*>(
-        endpointConfig);
-      return rdma_ep::validateConfig(rdmaConfig);
+      auto* cfg = static_cast<rdma_ep::RdmaEpConfig*>(endpointConfig);
+      return rdma_ep::validateConfig(cfg);
     }
     return std::string();
   }
@@ -355,10 +348,6 @@ public:
       return rdma_ep::getIterations(endpointConfig);
     }
     return rdmaConfig_.iterations;
-  }
-
-  __host__ bool isEmulateMode() const override {
-    return rdmaConfig_.emulate;
   }
 };
 
