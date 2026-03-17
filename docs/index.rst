@@ -50,6 +50,7 @@ Quick Start
    :caption: User Guide
 
    building
+   testing
    endpoints
    kernel-module
    memory-modes

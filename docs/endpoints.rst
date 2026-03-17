@@ -65,9 +65,124 @@ Hardware mode:
 
    sudo ./build/xio-tester rdma-ep --hardware
 
-All vendors support GPU-direct doorbell ringing using system-scope atomics. No
-HSA memory locking is needed (unlike NVMe, RDMA NICs support this pattern
-natively).
+All vendors support GPU-direct doorbell ringing
+using system-scope atomics.  No HSA memory locking
+is needed (unlike NVMe, RDMA NICs support this
+pattern natively).
+
+Architecture
+^^^^^^^^^^^^
+
+The RDMA endpoint is derived from the GDA
+(GPU-Direct Access) backend in
+`ROCm/rocSHMEM <https://github.com/ROCm/rocSHMEM>`_.
+Key adaptations from the original rocSHMEM code:
+
+- Decoupled from rocSHMEM internals
+  (``HIPAllocator``, ``FreeList``, MPI,
+  ``constants.hpp``)
+- Simplified from a full PE mesh to a
+  single-endpoint model (1 QP + 1 CQ per connection
+  instead of ``(max_contexts + 1) * num_pes`` QPs)
+- Wrapped in ``rdma_ep`` namespace with vendor
+  sub-namespaces
+- Consolidated duplicated vendor control flow into
+  shared abstractions
+
+Each vendor provides the same function signatures
+as static methods on an ``Ops`` class, dispatched
+at compile time:
+
+.. code-block:: cpp
+
+   rdma_ep::bnxt::Ops::post_wqe_rma(qp, ...)
+   rdma_ep::mlx5::Ops::post_wqe_rma(qp, ...)
+   rdma_ep::ionic::Ops::post_wqe_rma(qp, ...)
+
+The active vendor is selected by the CMake options
+``GDA_BNXT``, ``GDA_MLX5``, ``GDA_IONIC``, or
+``GDA_ERNIC``.
+
+Two-node RDMA test
+^^^^^^^^^^^^^^^^^^
+
+For cross-node testing with two Thor 2 NICs:
+
+.. code-block:: bash
+
+   bash tests/unit/rdma-ep/run-2node-test.sh \
+     <server-node> <client-node>
+
+Or manually on each node:
+
+.. code-block:: bash
+
+   # Node A (server):
+   ./build/tests/unit/rdma-ep/test-rdma-2node \
+     --server --gid-index 3
+
+   # Node B (client):
+   ./build/tests/unit/rdma-ep/test-rdma-2node \
+     --client --server-host <server-hostname> \
+     --gid-index 3
+
+GID index 3 is required for cross-subnet Thor 2
+routing (RoCEv2 IPv4-mapped).  The test uses TCP
+over the management network for QP info exchange
+and RDMA over the Thor 2 fabric for data transfer.
+
+BNXT DV kernel module
+^^^^^^^^^^^^^^^^^^^^^
+
+The BNXT vendor backend requires a patched
+``bnxt_re`` kernel module built via DKMS:
+
+.. code-block:: bash
+
+   sudo kernel/bnxt/setup-bnxt-re-dkms.sh
+
+This downloads stock ``bnxt_re`` source, applies
+patches 0001--0007, and builds/installs via DKMS.
+Patch 0007 extends the udata ABI so the DV
+userspace can pass SQ/RQ buffer VAs through the
+write-based verbs path.  After installation:
+
+.. code-block:: bash
+
+   sudo modprobe -r bnxt_re && sudo modprobe bnxt_re
+
+Troubleshooting
+^^^^^^^^^^^^^^^
+
+``ibv_cmd_create_qp_ex2() failed: 14`` (EFAULT)
+   The DKMS module was built without the DV QP
+   handling code.  The kernel falls back to its own
+   buffer sizing, causing ``ib_umem_get`` to fail.
+   Re-run ``setup-bnxt-re-dkms.sh`` and reload the
+   module.
+
+``ibv_cmd_create_qp_ex2() failed: 22`` (EINVAL)
+   The DV QP udata patch is missing.  Verify with
+   ``grep -c DV_QP_ENABLE
+   /usr/src/rocm-xio-bnxt-re-0.1/ib_verbs.c``
+   (expect >= 1).  Re-run ``setup-bnxt-re-dkms.sh``
+   if missing.
+
+``Could not open libbnxt_re.so``
+   ``LD_LIBRARY_PATH`` is missing the rdma-core
+   install directory.  When running through CTest
+   this is set automatically; for manual runs add
+   ``build/_deps/rdma-core/install/lib``.
+
+``DV Modify QP error: 110`` (ETIMEDOUT)
+   The IPv4-mapped GID is not yet populated.
+   Verify the IP address is assigned
+   (``ip addr show``), the static neighbor entry
+   exists (``ip neigh show``), and the GID
+   ``::ffff:c612:0001`` appears in
+   ``/sys/class/infiniband/*/ports/1/gids/``.
+   Wait a few seconds after module reload for the
+   GID table to populate.
 
 sdma-ep -- SDMA Endpoint
 -------------------------
