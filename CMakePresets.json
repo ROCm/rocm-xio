@@ -79,6 +79,20 @@
       }
     },
     {
+      "name": "sweep",
+      "displayName": "Loopback sweep (multi-seed)",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "verbose"
+      },
+      "filter": {
+        "include": {
+          "label": "sweep"
+        }
+      }
+    },
+    {
       "name": "all",
       "displayName": "All tests",
       "configurePreset": "default",

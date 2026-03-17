@@ -65,8 +65,6 @@ src/tester/dump-queue-test
 src/reference/
 gda-experiments/rocSHMEM/
 
-# Spell-check artifacts
-wordlist.dic
 
 # rocprofv3 trace output
 .rocprofv3/

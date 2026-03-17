@@ -61,6 +61,20 @@ Code generation targets
    cmake --build build --target fetch-rdma-headers
    cmake --build build --target fetch-external-headers
 
+Testing targets
+^^^^^^^^^^^^^^^
+
+.. code-block:: bash
+
+   ctest --preset unit       # CPU-only tests (CI)
+   ctest --preset system     # GPU emulation tests
+   ctest --preset hardware   # NIC + GPU tests
+   ctest --preset sweep      # Multi-seed loopback
+   ctest --preset all        # Everything
+
+See :doc:`testing` for details on labels, hardware
+skip detection, and fixtures.
+
 Utility targets
 ^^^^^^^^^^^^^^^
 
