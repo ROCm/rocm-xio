@@ -1,0 +1,208 @@
+From 53c8b0a6ccf5688a94982697771166afbd728849 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Sat, 14 Mar 2026 14:27:05 -0600
+Subject: [PATCH 2/4] libibverbs: Extend create_qp API for user-allocated
+ buffers
+
+---
+ libibverbs/cmd_qp.c          | 78 +++++++++++++++++++++++++++++++++---
+ libibverbs/driver.h          | 38 ++++++++++++++++++
+ libibverbs/libibverbs.map.in |  1 +
+ 3 files changed, 112 insertions(+), 5 deletions(-)
+
+diff --git a/libibverbs/cmd_qp.c b/libibverbs/cmd_qp.c
+index 499b241..c81a9f2 100644
+--- a/libibverbs/cmd_qp.c
++++ b/libibverbs/cmd_qp.c
+@@ -73,9 +73,11 @@ static int ibv_icmd_create_qp(struct ibv_context *context,
+ 			      struct verbs_qp *vqp,
+ 			      struct ibv_qp *qp_in,
+ 			      struct ibv_qp_init_attr_ex *attr_ex,
+-			      struct ibv_command_buffer *link)
++			      struct ibv_command_buffer *link,
++			      struct verbs_create_qp_prov_attr *prov_attr,
++			      uint32_t cmd_flags)
+ {
+-	DECLARE_FBCMD_BUFFER(cmdb, UVERBS_OBJECT_QP, UVERBS_METHOD_QP_CREATE, 15, link);
++	DECLARE_FBCMD_BUFFER(cmdb, UVERBS_OBJECT_QP, UVERBS_METHOD_QP_CREATE, 23, link);
+ 	struct verbs_ex_private *priv = get_priv(context);
+ 	struct ib_uverbs_attr *handle;
+ 	uint32_t qp_num;
+@@ -205,6 +207,48 @@ static int ibv_icmd_create_qp(struct ibv_context *context,
+ 	if (attr_ex->srq)
+ 		fill_attr_in_obj(cmdb, UVERBS_ATTR_CREATE_QP_SRQ_HANDLE, attr_ex->srq->handle);
+ 
++	/* Handle SQ buffer attributes */
++	if (cmd_flags & CREATE_QP_CMD_FLAGS_WITH_SQ_MEM_VA) {
++		if (!prov_attr)
++			return EINVAL;
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_SQ_BUFFER_VA,
++				    (uintptr_t)prov_attr->sq_buffer.ptr);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_SQ_BUFFER_LENGTH,
++				    prov_attr->sq_buffer.length);
++		fallback_require_ioctl(cmdb);
++	} else if (cmd_flags & CREATE_QP_CMD_FLAGS_WITH_SQ_MEM_DMABUF) {
++		if (!prov_attr)
++			return EINVAL;
++		fill_attr_in_fd(cmdb, UVERBS_ATTR_CREATE_QP_SQ_BUFFER_FD,
++				prov_attr->sq_buffer.dmabuf.fd);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_SQ_BUFFER_OFFSET,
++				     prov_attr->sq_buffer.dmabuf.offset);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_SQ_BUFFER_LENGTH,
++				     prov_attr->sq_buffer.length);
++		fallback_require_ioctl(cmdb);
++	}
++
++	/* Handle RQ buffer attributes */
++	if (cmd_flags & CREATE_QP_CMD_FLAGS_WITH_RQ_MEM_VA) {
++		if (!prov_attr)
++			return EINVAL;
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_RQ_BUFFER_VA,
++				    (uintptr_t)prov_attr->rq_buffer.ptr);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_RQ_BUFFER_LENGTH,
++				    prov_attr->rq_buffer.length);
++		fallback_require_ioctl(cmdb);
++	} else if (cmd_flags & CREATE_QP_CMD_FLAGS_WITH_RQ_MEM_DMABUF) {
++		if (!prov_attr)
++			return EINVAL;
++		fill_attr_in_fd(cmdb, UVERBS_ATTR_CREATE_QP_RQ_BUFFER_FD,
++				prov_attr->rq_buffer.dmabuf.fd);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_RQ_BUFFER_OFFSET,
++				     prov_attr->rq_buffer.dmabuf.offset);
++		fill_attr_in_uint64(cmdb, UVERBS_ATTR_CREATE_QP_RQ_BUFFER_LENGTH,
++				     prov_attr->rq_buffer.length);
++		fallback_require_ioctl(cmdb);
++	}
++
+ 	fill_attr_out_ptr(cmdb, UVERBS_ATTR_CREATE_QP_RESP_CAP, &attr_ex->cap);
+ 	fill_attr_out_ptr(cmdb, UVERBS_ATTR_CREATE_QP_RESP_QP_NUM, &qp_num);
+ 
+@@ -391,7 +435,7 @@ int ibv_cmd_create_qp(struct ibv_pd *pd,
+ 	attr_ex.sq_sig_all = attr->sq_sig_all;
+ 	attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD;
+ 	attr_ex.pd = pd;
+-	ret = ibv_icmd_create_qp(pd->context, NULL, qp, &attr_ex, cmdb);
++	ret = ibv_icmd_create_qp(pd->context, NULL, qp, &attr_ex, cmdb, NULL, 0);
+ 	if (!ret)
+ 		memcpy(&attr->cap, &attr_ex.cap, sizeof(attr_ex.cap));
+ 
+@@ -416,7 +460,7 @@ int ibv_cmd_create_qp_ex(struct ibv_context *context,
+ 		return errno;
+ 	}
+ 
+-	return ibv_icmd_create_qp(context, qp, NULL, attr_ex, cmdb);
++	return ibv_icmd_create_qp(context, qp, NULL, attr_ex, cmdb, NULL, 0);
+ }
+ 
+ int ibv_cmd_create_qp_ex2(struct ibv_context *context,
+@@ -443,7 +487,31 @@ int ibv_cmd_create_qp_ex2(struct ibv_context *context,
+ 		return errno;
+ 	}
+ 
+-	return ibv_icmd_create_qp(context, qp, NULL, attr_ex, cmdb);
++	return ibv_icmd_create_qp(context, qp, NULL, attr_ex, cmdb, NULL, 0);
++}
++
++int ibv_cmd_create_qp_ex3(struct ibv_context *context,
++			  struct verbs_qp *qp,
++			  struct ibv_qp_init_attr_ex *attr_ex,
++			  struct verbs_create_qp_prov_attr *prov_attr,
++			  struct ibv_create_qp_ex *cmd, size_t cmd_size,
++			  struct ib_uverbs_ex_create_qp_resp *resp, size_t resp_size,
++			  uint32_t cmd_flags,
++			  struct ibv_command_buffer *driver)
++{
++	DECLARE_CMD_BUFFER_LINK_COMPAT(cmdb, UVERBS_OBJECT_QP,
++				       UVERBS_METHOD_QP_CREATE,
++				       driver, cmd, cmd_size, resp, resp_size);
++
++	if (!check_comp_mask(attr_ex->comp_mask,
++			     IBV_QP_INIT_ATTR_PD |
++			     IBV_QP_INIT_ATTR_XRCD |
++			     IBV_QP_INIT_ATTR_SEND_OPS_FLAGS)) {
++		errno = EINVAL;
++		return errno;
++	}
++
++	return ibv_icmd_create_qp(context, qp, NULL, attr_ex, cmdb, prov_attr, cmd_flags);
+ }
+ 
+ int ibv_cmd_destroy_qp(struct ibv_qp *qp)
+diff --git a/libibverbs/driver.h b/libibverbs/driver.h
+index e618772..b679650 100644
+--- a/libibverbs/driver.h
++++ b/libibverbs/driver.h
+@@ -110,6 +110,13 @@ enum create_cq_cmd_flags {
+ 	CREATE_CQ_CMD_FLAGS_WITH_MEM_DMABUF = 1 << 2,
+ };
+ 
++enum create_qp_cmd_flags {
++	CREATE_QP_CMD_FLAGS_WITH_SQ_MEM_VA = 1 << 0,
++	CREATE_QP_CMD_FLAGS_WITH_SQ_MEM_DMABUF = 1 << 1,
++	CREATE_QP_CMD_FLAGS_WITH_RQ_MEM_VA = 1 << 2,
++	CREATE_QP_CMD_FLAGS_WITH_RQ_MEM_DMABUF = 1 << 3,
++};
++
+ /* Must change the PRIVATE IBVERBS_PRIVATE_ symbol if this is changed */
+ struct verbs_create_cq_prov_attr {
+ 	struct {
+@@ -124,6 +131,29 @@ struct verbs_create_cq_prov_attr {
+ 	} buffer;
+ };
+ 
++struct verbs_create_qp_prov_attr {
++	struct {
++		uint64_t length;
++		union {
++			uint8_t *ptr;
++			struct {
++				uint64_t offset;
++				int fd;
++			} dmabuf;
++		};
++	} sq_buffer;
++	struct {
++		uint64_t length;
++		union {
++			uint8_t *ptr;
++			struct {
++				uint64_t offset;
++				int fd;
++			} dmabuf;
++		};
++	} rq_buffer;
++};
++
+ struct verbs_xrcd {
+ 	struct ibv_xrcd		xrcd;
+ 	uint32_t		comp_mask;
+@@ -671,6 +701,14 @@ int ibv_cmd_create_qp_ex2(struct ibv_context *context,
+ 			  size_t cmd_size,
+ 			  struct ib_uverbs_ex_create_qp_resp *resp,
+ 			  size_t resp_size);
++int ibv_cmd_create_qp_ex3(struct ibv_context *context,
++			  struct verbs_qp *qp,
++			  struct ibv_qp_init_attr_ex *attr_ex,
++			  struct verbs_create_qp_prov_attr *prov_attr,
++			  struct ibv_create_qp_ex *cmd, size_t cmd_size,
++			  struct ib_uverbs_ex_create_qp_resp *resp, size_t resp_size,
++			  uint32_t cmd_flags,
++			  struct ibv_command_buffer *driver);
+ int ibv_cmd_open_qp(struct ibv_context *context,
+ 		    struct verbs_qp *qp,  int vqp_sz,
+ 		    struct ibv_qp_open_attr *attr,
+diff --git a/libibverbs/libibverbs.map.in b/libibverbs/libibverbs.map.in
+index d3d4d41..78a0c77 100644
+--- a/libibverbs/libibverbs.map.in
++++ b/libibverbs/libibverbs.map.in
+@@ -202,6 +202,7 @@ IBVERBS_PRIVATE_@IBVERBS_PABI_VERSION@ {
+ 		ibv_cmd_create_flow;
+ 		ibv_cmd_create_flow_action_esp;
+ 		ibv_cmd_create_qp;
++		ibv_cmd_create_qp_ex3;
+ 		ibv_cmd_create_qp_ex2;
+ 		ibv_cmd_create_qp_ex;
+ 		ibv_cmd_create_rwq_ind_table;
+-- 
+2.43.0
+
