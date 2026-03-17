@@ -1797,21 +1797,19 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
   off_t mmap_off = (off_t)req.mmap_offset * sysconf(_SC_PAGESIZE);
   void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED,
                       kmod_fd, mmap_off);
-  close(kmod_fd);
 
   if (mapped == MAP_FAILED) {
     fprintf(stderr,
             "Error: mmap failed for %s contig "
             "buffer: %s\n",
             queue_name, strerror(errno));
-    int free_fd = openDeviceWithRetry(ROCM_XIO_DEVICE_PATH, O_RDWR,
-                                      "rocm-xio (free)", 5, 100);
-    if (free_fd >= 0) {
-      struct rocm_axiio_free_contig_req freq;
-      freq.mmap_offset = req.mmap_offset;
-      ioctl(free_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
-      close(free_fd);
-    }
+
+    struct rocm_axiio_free_contig_req freq;
+    memset(&freq, 0, sizeof(freq));
+    freq.mmap_offset = req.mmap_offset;
+    ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
+    close(kmod_fd);
+
     return -errno;
   }
 
