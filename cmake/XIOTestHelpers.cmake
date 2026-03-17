@@ -134,6 +134,19 @@ function(xio_add_test)
   # GPU resource groups for CTest resource allocation
   if(XIO_TEST_GPU)
     set_tests_properties(${XIO_TEST_NAME}
-      PROPERTIES RESOURCE_GROUPS "gpus:1")
+      PROPERTIES
+        RESOURCE_GROUPS "gpus:1"
+        SKIP_RETURN_CODE 77
+        SKIP_REGULAR_EXPRESSION "SKIP:")
+  endif()
+
+  # rdma-core library path for hardware tests
+  set(_rdma_lib
+    "${CMAKE_BINARY_DIR}/_deps/rdma-core/install/lib")
+  if(XIO_TEST_GPU AND
+     (GDA_BNXT OR GDA_IONIC OR GDA_ERNIC))
+    set_tests_properties(${XIO_TEST_NAME}
+      PROPERTIES ENVIRONMENT
+      "LD_LIBRARY_PATH=${_rdma_lib}:$ENV{LD_LIBRARY_PATH}")
   endif()
 endfunction()

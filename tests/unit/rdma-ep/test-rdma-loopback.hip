@@ -32,8 +32,8 @@
 
 #if !defined(GDA_BNXT) && !defined(GDA_IONIC)
 int main() {
-  printf("SKIPPED: no GDA vendor enabled.\n");
-  return 0;
+  printf("SKIP: no GDA vendor enabled.\n");
+  return 77;
 }
 #else
 
@@ -216,8 +216,8 @@ int main(int argc, char** argv) {
     } else
 #endif
     {
-      fprintf(stderr, "No supported NIC detected.\n");
-      return 1;
+      printf("SKIP: no supported NIC detected.\n");
+      return 77;
     }
   } else {
     fprintf(stderr, "Unknown provider: %s\n", provider_str);
@@ -240,8 +240,8 @@ int main(int argc, char** argv) {
   int device_count = 0;
   (void)hipGetDeviceCount(&device_count);
   if (device_count == 0) {
-    fprintf(stderr, "No HIP devices found.\n");
-    return 1;
+    printf("SKIP: no HIP devices found.\n");
+    return 77;
   }
   (void)hipSetDevice(0);
 

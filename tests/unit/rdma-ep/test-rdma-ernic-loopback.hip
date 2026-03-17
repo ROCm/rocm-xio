@@ -34,8 +34,8 @@
 
 #if !defined(GDA_ERNIC)
 int main() {
-  printf("SKIPPED: GDA_ERNIC not enabled.\n");
-  return 0;
+  printf("SKIP: GDA_ERNIC not enabled.\n");
+  return 77;
 }
 #else
 
@@ -97,8 +97,8 @@ int main(int argc, char** argv) {
   int device_count = 0;
   (void)hipGetDeviceCount(&device_count);
   if (device_count == 0) {
-    fprintf(stderr, "No HIP devices found.\n");
-    return 1;
+    printf("SKIP: no HIP devices found.\n");
+    return 77;
   }
   (void)hipSetDevice(0);
 

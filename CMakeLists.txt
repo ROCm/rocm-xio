@@ -531,6 +531,7 @@ install(FILES
 
 # Add test subdirectories (unit, system, hardware)
 if(BUILD_TESTING)
+  include(XIODetectGPUs)
   include(XIOTestHelpers)
   add_subdirectory(tests)
 endif()
