@@ -1776,7 +1776,16 @@ static void freeQueueSetup(struct xioQueueSetup* s, bool is_device,
 #ifndef __HIP_DEVICE_COMPILE__
     long page_sz = sysconf(_SC_PAGESIZE);
     if (page_sz > 0) {
-      (void)munlock(s->prp_list, static_cast<size_t>(page_sz));
+      int rc = munlock(s->prp_list, static_cast<size_t>(page_sz));
+      if (rc != 0) {
+        fprintf(stderr,
+                "Warning: munlock failed for PRP list '%s': %s\n",
+                (name != nullptr) ? name : "unknown", strerror(errno));
+      }
+    } else {
+      fprintf(stderr,
+              "Warning: failed to get page size for munlock of PRP list '%s'\n",
+              (name != nullptr) ? name : "unknown");
     }
 #endif // __HIP_DEVICE_COMPILE__
     free(s->prp_list);
