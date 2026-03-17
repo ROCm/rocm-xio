@@ -1,0 +1,125 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH 7/7] RDMA/bnxt_re: Support DV QP creation via udata
+From: Stephen Bates <sbates@raithlin.com>
+Date: Thu, 13 Mar 2026 12:00:00 -0600
+Message-Id: <20260313-bnxt-dv-qp-udata-v1@raithlin.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The upstream ioctl attributes for user-provided QP buffers
+(UVERBS_ATTR_CREATE_QP_SQ_BUFFER_*) are not yet merged. Extend
+the provider-specific udata (bnxt_re_qp_req) so that the DV
+userspace can pass SQ/RQ buffer information through the
+traditional write-based verbs path instead.
+
+When comp_mask has BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE set:
+  - The extended fields (sq_wqe_sz, sq_psn_sz, sq_npsn,
+    rq_slots, rq_wqe_sz) carry the DV sizing parameters.
+  - bnxt_re_init_user_qp() uses these to calculate the
+    pinned buffer sizes, overriding the default calculation
+    derived from QP capabilities.
+  - When qprva is 0 (no RQ buffer), rq.max_wqe is zeroed
+    so setup_qp_hwqs skips RQ hardware queue allocation.
+
+This matches the v5 approach ("Enhanced driver specific udata
+to avoid new CQ/QP ioctls").
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ drivers/infiniband/hw/bnxt_re/ib_verbs.c | 46 ++++++++++++++++++++-
+ include/uapi/rdma/bnxt_re-abi.h          |  6 +++
+ 2 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/include/uapi/rdma/bnxt_re-abi.h b/include/uapi/rdma/bnxt_re-abi.h
+index 1234567..abcdefg 100644
+--- a/include/uapi/rdma/bnxt_re-abi.h
++++ b/include/uapi/rdma/bnxt_re-abi.h
+@@ -124,6 +124,7 @@ struct bnxt_re_resize_cq_req {
+ 
+ enum bnxt_re_qp_mask {
+ 	BNXT_RE_QP_REQ_MASK_VAR_WQE_SQ_SLOTS = 0x1,
++	BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE = 0x2,
+ };
+ 
+ struct bnxt_re_qp_req {
+@@ -132,6 +133,11 @@ struct bnxt_re_qp_req {
+ 	__aligned_u64 qp_handle;
+ 	__aligned_u64 comp_mask;
+ 	__u32 sq_slots;
++	__u32 sq_wqe_sz;
++	__u32 sq_psn_sz;
++	__u32 sq_npsn;
++	__u32 rq_slots;
++	__u32 rq_wqe_sz;
+ };
+ 
+ struct bnxt_re_qp_resp {
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.c b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+index 2345678..bcdefgh 100644
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.c
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+@@ -1090,12 +1090,55 @@ static int bnxt_re_init_user_qp(struct bnxt_re_dev *rdev, struct bnxt_re_pd *pd,
+ 				struct bnxt_re_qp *qp, struct bnxt_re_ucontext *cntx,
+ 				struct bnxt_re_qp_req *ureq)
+ {
+ 	struct bnxt_qplib_qp *qplib_qp;
+-	int bytes = 0, psn_sz;
+ 	struct ib_umem *umem;
++	int bytes = 0, psn_sz;
+ 	int psn_nume;
+ 
+ 	qplib_qp = &qp->qplib_qp;
+ 
++	if (ureq->comp_mask & BNXT_RE_QP_REQ_MASK_DV_QP_ENABLE) {
++		bytes = (int)ureq->sq_slots * (int)ureq->sq_wqe_sz;
++		if (qplib_qp->type == CMDQ_CREATE_QP_TYPE_RC)
++			bytes += (int)ureq->sq_npsn * (int)ureq->sq_psn_sz;
++		bytes = PAGE_ALIGN(bytes);
++		umem = ib_umem_get(&rdev->ibdev, ureq->qpsva,
++				   bytes, IB_ACCESS_LOCAL_WRITE);
++		if (IS_ERR(umem))
++			return PTR_ERR(umem);
++
++		qp->sumem = umem;
++		qplib_qp->sq.sg_info.umem = umem;
++		qplib_qp->sq.sg_info.pgsize = PAGE_SIZE;
++		qplib_qp->sq.sg_info.pgshft = PAGE_SHIFT;
++		qplib_qp->qp_handle = ureq->qp_handle;
++
++		/* No RQ umem: zero RQ depth so
++		 * setup_qp_hwqs skips it */
++		if (!qplib_qp->srq && !ureq->qprva) {
++			qplib_qp->rq.max_wqe = 0;
++			qplib_qp->rq.max_sw_wqe = 0;
++		}
++		if (!qplib_qp->srq && ureq->qprva) {
++			bytes = (int)ureq->rq_slots *
++				(int)ureq->rq_wqe_sz;
++			bytes = PAGE_ALIGN(bytes);
++			umem = ib_umem_get(&rdev->ibdev, ureq->qprva,
++					   bytes,
++					   IB_ACCESS_LOCAL_WRITE);
++			if (IS_ERR(umem))
++				goto rqfail;
++			qp->rumem = umem;
++			qplib_qp->rq.sg_info.umem = umem;
++			qplib_qp->rq.sg_info.pgsize = PAGE_SIZE;
++			qplib_qp->rq.sg_info.pgshft = PAGE_SHIFT;
++		}
++
++		qplib_qp->dpi = &cntx->dpi;
++		qplib_qp->is_user = true;
++		return 0;
++	}
++
+ 	bytes = (qplib_qp->sq.max_wqe * qplib_qp->sq.wqe_size);
+ 	/* Consider mapping PSN search memory only for RC QPs. */
+ 	if (qplib_qp->type == CMDQ_CREATE_QP_TYPE_RC) {
+@@ -1766,7 +1809,7 @@ int bnxt_re_create_qp(struct ib_qp *ib_qp, struct ib_qp_init_attr *qp_init_attr
+ 	struct bnxt_re_ucontext *uctx;
+-	struct bnxt_re_qp_req ureq;
++	struct bnxt_re_qp_req ureq = {};
+ 	struct bnxt_re_dev *rdev;
+ 	struct bnxt_re_pd *pd;
+ 	struct bnxt_re_qp *qp;

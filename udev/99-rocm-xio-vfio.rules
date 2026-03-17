@@ -1,0 +1,10 @@
+# rocm-xio VFIO device permissions
+#
+# Sets /dev/vfio/* ownership to root:kvm with 0660
+# so that any user in the kvm group can use VFIO PCI
+# passthrough without sudo.
+#
+# Install with:
+#   sudo udev/setup-udev-rules.sh --install
+
+SUBSYSTEM=="vfio", OWNER="root", GROUP="kvm", MODE="0660"
