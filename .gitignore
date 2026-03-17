@@ -1,6 +1,5 @@
 # Build artifacts
-build/
-build-*/
+build*/
 # Exception: scripts/build/ contains build scripts that should be tracked
 !scripts/build/
 bin/
@@ -68,6 +67,9 @@ gda-experiments/rocSHMEM/
 
 # Spell-check artifacts
 wordlist.dic
+
+# rocprofv3 trace output
+.rocprofv3/
 
 # Python cache
 __pycache__/
