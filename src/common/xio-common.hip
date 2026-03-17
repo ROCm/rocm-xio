@@ -1755,19 +1755,22 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
 
 __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
                                     const char* queue_name,
-                                    struct xioQueueSetup* setup) {
+                                    struct xioQueueSetup* setup,
+                                    const char* kernel_module_device = ROCM_XIO_DEVICE_PATH) {
   if (!setup || size == 0 || !queue_name)
     return -EINVAL;
 
   memset(setup, 0, sizeof(*setup));
 
-  int kmod_fd = openDeviceWithRetry(ROCM_XIO_DEVICE_PATH, O_RDWR,
+  const char* device_path = kernel_module_device ? kernel_module_device : ROCM_XIO_DEVICE_PATH;
+
+  int kmod_fd = openDeviceWithRetry(device_path, O_RDWR,
                                     "rocm-xio (contig)", 5, 100);
   if (kmod_fd < 0) {
     fprintf(stderr,
             "Error: Cannot open kernel module "
-            "for %s contig alloc\n",
-            queue_name);
+            "device %s for %s contig alloc\n",
+            device_path, queue_name);
     return -EIO;
   }
 
