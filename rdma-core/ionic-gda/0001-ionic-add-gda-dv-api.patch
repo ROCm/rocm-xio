@@ -1,0 +1,250 @@
+--- a/providers/ionic/ionic_dv.h	2026-03-14 14:10:29.909324928 -0600
++++ b/providers/ionic/ionic_dv.h	2026-03-14 14:11:02.312535605 -0600
+@@ -13,60 +13,210 @@
+ extern "C" {
+ #endif
+ 
++struct ibv_cq;
++struct ibv_qp;
++
++#ifndef IONIC_EXPDB_MAX
++#define IONIC_EXPDB_MAX		16
++#endif
++
++/** IONIC_PD_TAG - tag for parent domain resource allocation. */
++#define IONIC_PD_TAG		((uint64_t)RDMA_DRIVER_IONIC << 32)
++#define IONIC_PD_TAG_CQ		(IONIC_PD_TAG | 1)
++#define IONIC_PD_TAG_SQ		(IONIC_PD_TAG | 2)
++#define IONIC_PD_TAG_RQ		(IONIC_PD_TAG | 3)
++#define IONIC_PD_TAG_RCQ	(IONIC_PD_TAG | 4)
++
++/** IONIC_UDMA_MASK_LOW - udma0 pipeline flag. */
++#define IONIC_UDMA_MASK_LOW	1
++/** IONIC_UDMA_MASK_HIGH - udma1 pipeline flag. */
++#define IONIC_UDMA_MASK_HIGH	2
++
++/** struct ionic_dv_ctx - Context info for GDA. */
++struct ionic_dv_ctx {
++	void			*db_page;
++	uint64_t		*db_ptr;
++	uint8_t			sq_qtype;
++	uint8_t			rq_qtype;
++	uint8_t			cq_qtype;
++};
++
++/** struct ionic_dv_queue - Queue info for GDA. */
++struct ionic_dv_queue {
++	void			*ptr;
++	size_t			size;
++	uint64_t		db_val;
++	uint16_t		mask;
++	uint8_t			depth_log2;
++	uint8_t			stride_log2;
++};
++
++/** struct ionic_dv_cq - CQ info for GDA. */
++struct ionic_dv_cq {
++	struct ionic_dv_queue	q;
++};
++
++/** struct ionic_dv_qp - QP info for GDA. */
++struct ionic_dv_qp {
++	struct ionic_dv_queue	rq;
++	struct ionic_dv_queue	sq;
++};
++
++/**
++ * ionic_dv_is_ionic_ctx - Test if context belongs
++ *   to ionic provider.
++ */
++bool ionic_dv_is_ionic_ctx(struct ibv_context *ibctx);
++
++/**
++ * ionic_dv_is_ionic_pd - Test if pd belongs to
++ *   ionic provider.
++ */
++bool ionic_dv_is_ionic_pd(struct ibv_pd *ibpd);
++
++/**
++ * ionic_dv_is_ionic_cq - Test if cq belongs to
++ *   ionic provider.
++ */
++bool ionic_dv_is_ionic_cq(struct ibv_cq *ibcq);
++
++/**
++ * ionic_dv_is_ionic_qp - Test if qp belongs to
++ *   ionic provider.
++ */
++bool ionic_dv_is_ionic_qp(struct ibv_qp *ibqp);
++
++/**
++ * ionic_dv_ctx_get_udma_count - Get number of
++ *   udma pipelines.
++ */
++uint8_t ionic_dv_ctx_get_udma_count(
++	struct ibv_context *ibctx);
++
++/**
++ * ionic_dv_ctx_get_udma_mask - Get mask of udma
++ *   pipeline ids.
++ */
++uint8_t ionic_dv_ctx_get_udma_mask(
++	struct ibv_context *ibctx);
++
++/**
++ * ionic_dv_pd_get_udma_mask - Get mask of udma
++ *   pipeline ids of pd or parent domain.
++ */
++uint8_t ionic_dv_pd_get_udma_mask(
++	struct ibv_pd *ibpd);
++
++/**
++ * ionic_dv_pd_set_udma_mask - Restrict pipeline
++ *   ids of pd or parent domain.
++ */
++int ionic_dv_pd_set_udma_mask(
++	struct ibv_pd *ibpd, uint8_t udma_mask);
++
++/**
++ * ionic_dv_cq_get_udma_mask - Get mask of udma
++ *   pipeline ids of completion queue.
++ */
++uint8_t ionic_dv_cq_get_udma_mask(
++	struct ibv_cq *ibcq);
++
++/**
++ * ionic_dv_qp_get_udma_idx - Get udma pipeline id
++ *   of queue pair.
++ */
++uint8_t ionic_dv_qp_get_udma_idx(
++	struct ibv_qp *ibqp);
++
++/**
++ * ionic_dv_pd_set_sqcmb - Specify send queue
++ *   preference for controller memory bar.
++ */
++int ionic_dv_pd_set_sqcmb(
++	struct ibv_pd *ibpd,
++	bool enable, bool expdb, bool require);
++
++/**
++ * ionic_dv_pd_set_rqcmb - Specify receive queue
++ *   preference for controller memory bar.
++ */
++int ionic_dv_pd_set_rqcmb(
++	struct ibv_pd *ibpd,
++	bool enable, bool expdb, bool require);
++
++/**
++ * ionic_dv_pd_set_expdb_mask - Specify expdb mask.
++ */
++int ionic_dv_pd_set_expdb_mask(
++	struct ibv_pd *ibpd, uint8_t mask);
++
+ /**
+- * ionic_dv_ctx_get_udma_count - Get number of udma pipelines.
++ * ionic_dv_qp_set_gda - Enable or disable
++ *   GPU-Direct Async (GDA) mode.
+  */
+-uint8_t ionic_dv_ctx_get_udma_count(struct ibv_context *ibctx);
++int ionic_dv_qp_set_gda(
++	struct ibv_qp *ibqp,
++	bool enable_send, bool enable_recv);
+ 
+ /**
+- * ionic_dv_ctx_get_udma_mask - Get mask of udma pipeline ids.
++ * ionic_dv_qp_get_send_dbell_data - Get send queue
++ *   doorbell data.
+  */
+-uint8_t ionic_dv_ctx_get_udma_mask(struct ibv_context *ibctx);
++int ionic_dv_qp_get_send_dbell_data(
++	struct ibv_qp *ibqp, uint64_t *dbdata);
++
++/**
++ * ionic_dv_qp_get_recv_dbell_data - Get recv queue
++ *   doorbell data.
++ */
++int ionic_dv_qp_get_recv_dbell_data(
++	struct ibv_qp *ibqp, uint64_t *dbdata);
++
++enum ionic_cq_init_attr_mask {
++	IONIC_CQ_INIT_ATTR_MASK_FLAGS	= 1 << 0,
++};
++
++enum ionic_cq_init_attr_flags {
++	IONIC_CQ_INIT_ATTR_CCQE	= 1 << 0,
++};
++
++struct ionic_cq_init_attr_ex {
++	uint32_t	comp_mask;
++	uint32_t	flags;
++};
+ 
+ /**
+- * ionic_dv_pd_get_udma_mask - Get mask of udma pipeline ids of pd or parent domain.
++ * ionic_dv_create_cq_ex - Create an IBV CQ with
++ *   vendor-specific attributes.
+  */
+-uint8_t ionic_dv_pd_get_udma_mask(struct ibv_pd *ibpd);
++struct ibv_cq_ex *ionic_dv_create_cq_ex(
++	struct ibv_context *ibctx,
++	struct ibv_cq_init_attr_ex *ex,
++	struct ionic_cq_init_attr_ex *ionic_ex);
+ 
+ /**
+- * ionic_dv_pd_set_udma_mask - Restrict pipeline ids of pd or parent domain.
+- *
+- * Queues associated with this pd will be restricted to one of the pipelines enabled by
+- * the mask at the time of queue creation.
+- *
+- * Recommended usage is to create a pd, then parent domains of that pd for each different
+- * udma mask.  Set the desired udma mask on each parent domain.  Then, create queues
+- * associated with the parent domain with the desired udma mask.
+- *
+- * Alternative usage is to create a pd, and set the desired udma mask prior to creating
+- * each queue.  Changing the udma mask of the pd has no effect on previously created
+- * queues.
++ * ionic_dv_get_ctx - Extract context information
++ *   for gpu-initiated rdma.
+  */
+-int ionic_dv_pd_set_udma_mask(struct ibv_pd *ibpd, uint8_t udma_mask);
++int ionic_dv_get_ctx(
++	struct ionic_dv_ctx *dvctx,
++	struct ibv_context *ibctx);
+ 
+ /**
+- * ionic_dv_pd_set_sqcmb - Specify send queue preference for controller memory bar.
+- *
+- * Send queues associated with this pd will use the controller memory bar according to
+- * this preference at the time of queue creation.
+- *
+- * @enable - Allow the use of the controller memory bar.
+- * @expdb - Allow the use of express doorbell optimizations.
+- * @require - Require preferences to be met, no fallback.
++ * ionic_dv_get_cq - Extract cq information for
++ *   gpu-initiated rdma.
+  */
+-int ionic_dv_pd_set_sqcmb(struct ibv_pd *ibpd, bool enable, bool expdb, bool require);
++int ionic_dv_get_cq(
++	struct ionic_dv_cq *dvcq,
++	struct ibv_cq *ibcq, uint8_t udma_idx);
+ 
+ /**
+- * ionic_dv_pd_set_rqcmb - Specify receive queue preference for controller memory bar.
+- *
+- * Receive queues associated with this pd will use the controller memory bar according to
+- * this preference at the time of queue creation.
+- *
+- * @enable - Allow the use of the controller memory bar.
+- * @expdb - Allow the use of express doorbell optimizations.
+- * @require - Require preferences to be met, no fallback.
++ * ionic_dv_get_qp - Extract qp information for
++ *   gpu-initiated rdma.
+  */
+-int ionic_dv_pd_set_rqcmb(struct ibv_pd *ibpd, bool enable, bool expdb, bool require);
++int ionic_dv_get_qp(
++	struct ionic_dv_qp *dvqp,
++	struct ibv_qp *ibqp);
+ 
+ #ifdef __cplusplus
+ }
