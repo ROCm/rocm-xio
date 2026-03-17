@@ -5,6 +5,7 @@ on:
   pull_request:
     branches:
       - main
+      - 'feat/**'
     paths:
       - '**.hip'
       - '**.cpp'
@@ -41,8 +42,13 @@ jobs:
       run: |
         mkdir -p build && cd build
         cmake -DOFFLOAD_ARCH=gfx942:xnack+ \
-          -DROCM_PATH=/opt/rocm ..
+          -DROCM_PATH=/opt/rocm \
+          -DBUILD_TESTING=ON ..
         cmake --build . --target all
+    - name: Run unit tests (CPU-only).
+      run: |
+        ctest --test-dir build -V -L "unit" \
+          --parallel --output-on-failure
     - name: Run tester using test-ep in emulate mode
       run: |
         ./build/xio-tester test-ep --emulate -n 100 -t 1 -v
