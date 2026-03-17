@@ -1412,6 +1412,7 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
             "ERROR: Failed to get PRP list "
             "physical address for %s\n",
             queue_name);
+    munlock(prp_list, page_sz);
     free(prp_list);
     return -EIO;
   }
