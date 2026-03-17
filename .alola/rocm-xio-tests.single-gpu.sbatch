@@ -31,6 +31,9 @@ THREADS=4
 DOORBELL=64
 DELAY=1000
 
+# Display job information
+display_job_info
+
 # Initialize test tracking
 test_init
 
