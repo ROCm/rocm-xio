@@ -1364,7 +1364,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&contig_allocs_lock);
       list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
-        if (ca->id == req.mmap_offset) {
+        if (ca->id == req.mmap_offset && ca->owner == file) {
           list_del(&ca->list);
           found = true;
           break;
@@ -1374,7 +1374,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       if (!found) {
         pr_warn("rocm-axiio: contig free: id=%u "
-                "not found\n",
+                "not found or not owned by caller\n",
                 req.mmap_offset);
         return -ENOENT;
       }
