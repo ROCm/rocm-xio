@@ -1,4 +1,4 @@
 [codespell]
 check-hidden = true
 skip = ./.git,./build,./build-docs,./build-*,./src/include/external
-ignore-words-list = hsa,nvme,bdf,prp,sqe,cqe,bnxt
+ignore-words-list = hsa,nvme,bdf,prp,sqe,cqe,bnxt,appliation,vas

@@ -16,6 +16,21 @@
 #ifndef ROCM_XIO_IBV_CORE_HPP
 #define ROCM_XIO_IBV_CORE_HPP
 
+#if defined(GDA_MLX5) || defined(INFINIBAND_VERBS_H)
+/*
+ * When GDA_MLX5 is enabled (or system verbs.h is
+ * already loaded), use the real libibverbs headers
+ * instead of our standalone type copies.  The MLX5
+ * provider needs the full system verbs.h for
+ * mlx5dv.h compatibility.
+ */
+#ifndef INFINIBAND_VERBS_H
+extern "C" {
+#include <infiniband/verbs.h>
+}
+#endif
+#else
+
 #include <cstddef>
 #include <cstdint>
 #include <cerrno>
@@ -642,5 +657,7 @@ ibv_alloc_parent_domain(struct ibv_context *context,
   }
   return vctx->alloc_parent_domain(context, attr);
 }
+
+#endif // !INFINIBAND_VERBS_H
 
 #endif // ROCM_XIO_IBV_CORE_HPP

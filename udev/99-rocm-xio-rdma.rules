@@ -33,27 +33,43 @@ SUBSYSTEM=="net", ACTION=="add", \
   NAME="rocm-ernic%n"
 
 # --- InfiniBand device naming ---
+#
+# DRIVERS guards prevent ATTRS{vendor} from
+# false-matching a parent PCI bridge (e.g. an AMD
+# host bridge with vendor 0x1022).
+#
+# The rename is deferred via a backgrounded subshell
+# because rdma-netlink calls from a synchronous udev
+# RUN can fail while the device is still settling.
 
 # Broadcom Thor 2 (bnxt_re)
 SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="bnxt_en", \
   ATTRS{vendor}=="0x14e4", \
-  RUN+="/usr/bin/rdma dev set $kernel \
-    name rocm-rdma-bnxt%n"
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-bnxt%n) &'"
 
 # AMD Pensando (ionic)
 SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="ionic", \
   ATTRS{vendor}=="0x1dd8", \
-  RUN+="/usr/bin/rdma dev set $kernel \
-    name rocm-rdma-ionic%n"
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-ionic%n) &'"
 
 # Mellanox ConnectX (mlx5)
 SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="mlx5_core", \
   ATTRS{vendor}=="0x02c9", \
-  RUN+="/usr/bin/rdma dev set $kernel \
-    name rocm-rdma-mlx5-%n"
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-mlx5-%n) &'"
 
 # AMD ROCm ERNIC
 SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="rocm_ernic", \
   ATTRS{vendor}=="0x1022", \
-  RUN+="/usr/bin/rdma dev set $kernel \
-    name rocm-rdma-ernic%n"
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-ernic%n) &'"

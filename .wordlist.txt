@@ -652,7 +652,6 @@ Broadcom
 ConnectX
 CQEs
 DKMS
-dkms
 DPU
 EFA
 ERNIC
@@ -679,6 +678,7 @@ SmartNIC
 UAPI
 uapi
 UAR
+VAs
 VMware
 WQE
 WQEs

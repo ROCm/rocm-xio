@@ -272,6 +272,17 @@ if(GDA_BNXT)
   )
 endif()
 
+# Add MLX5 vendor backend
+if(GDA_MLX5)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-backend.cpp
+  )
+  set_source_files_properties(
+    ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-backend.cpp
+    PROPERTIES LANGUAGE HIP
+  )
+endif()
+
 # Add ERNIC vendor backend
 if(GDA_ERNIC)
   list(APPEND LIB_SOURCES
