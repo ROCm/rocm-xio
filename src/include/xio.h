@@ -608,6 +608,7 @@ struct xioQueueSetup {
   uint64_t prp2;
   bool uses_contig;
   uint32_t contig_id;
+  int contig_fd;
 };
 
 /**

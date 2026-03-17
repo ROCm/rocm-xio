@@ -1764,6 +1764,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
     return -EINVAL;
 
   memset(setup, 0, sizeof(*setup));
+  setup->contig_fd = -1;
 
   const char* device_path = kernel_module_device ? kernel_module_device : ROCM_XIO_DEVICE_PATH;
 
@@ -1902,6 +1903,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
   setup->prp2 = 0;
   setup->uses_contig = true;
   setup->contig_id = req.mmap_offset;
+  setup->contig_fd = kmod_fd;
 
   return 0;
 }
@@ -1923,8 +1925,7 @@ __host__ void freeContigQueue(struct xioQueueSetup* setup, size_t size,
     setup->virt = nullptr;
   }
 
-  int kmod_fd = openDeviceWithRetry(ROCM_XIO_DEVICE_PATH, O_RDWR,
-                                    "rocm-xio (free)", 5, 100);
+  int kmod_fd = setup->contig_fd;
   if (kmod_fd >= 0) {
     struct rocm_axiio_free_contig_req freq;
     freq.mmap_offset = setup->contig_id;
@@ -1947,6 +1948,7 @@ __host__ void freeContigQueue(struct xioQueueSetup* setup, size_t size,
   setup->phys = 0;
   setup->uses_contig = false;
   setup->contig_id = 0;
+  setup->contig_fd = -1;
 }
 
 int ensureDeviceNode() {

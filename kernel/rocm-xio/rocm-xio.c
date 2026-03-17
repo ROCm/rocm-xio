@@ -1357,7 +1357,8 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
     case ROCM_XIO_FREE_CONTIG_QUEUE: {
       struct rocm_xio_free_contig_req req;
       struct contig_alloc_entry *ca, *tmp;
-      bool found = false;
+      bool id_found = false;
+      bool owned = false;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -1365,18 +1366,26 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       spin_lock(&contig_allocs_lock);
       list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
         if (ca->id == req.mmap_offset) {
-          list_del(&ca->list);
-          found = true;
+          id_found = true;
+          if (ca->owner == file) {
+            list_del(&ca->list);
+            owned = true;
+          }
           break;
         }
       }
       spin_unlock(&contig_allocs_lock);
 
-      if (!found) {
-        pr_warn("rocm-axiio: contig free: id=%u "
-                "not found\n",
-                req.mmap_offset);
-        return -ENOENT;
+      if (!owned) {
+        if (id_found)
+          pr_warn("rocm-axiio: contig free: id=%u "
+                  "not owned by caller\n",
+                  req.mmap_offset);
+        else
+          pr_warn("rocm-axiio: contig free: id=%u "
+                  "not found\n",
+                  req.mmap_offset);
+        return id_found ? -EPERM : -ENOENT;
       }
 
       pr_info("rocm-axiio: contig free: id=%u "
@@ -1464,7 +1473,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
       pr_err("rocm-axiio: contig mmap: requested "
              "size %lu > alloc size %zu\n",
              size, ca->size);
-      kref_put(&ca->ref, contig_alloc_entry_release);
+      kref_put(&ca->ref, contig_alloc_release);
       return -EINVAL;
     }
 
@@ -1477,7 +1486,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
              "dma_mmap_coherent failed: "
              "%d\n",
              ret);
-      kref_put(&ca->ref, contig_alloc_entry_release);
+      kref_put(&ca->ref, contig_alloc_release);
       return ret;
     }
 
