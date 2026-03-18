@@ -155,17 +155,21 @@ cat >> "$OUTPUT_FILE" << 'EOF'
  * Structure to hold queue creation results
  */
 struct nvme_queue_info {
-  void* sq_virt;     // Virtual address of submission queue (host pointer)
-  void* cq_virt;     // Virtual address of completion queue (host pointer)
-  void* sq_gpu;      // GPU-accessible pointer for submission queue
-  void* cq_gpu;      // GPU-accessible pointer for completion queue
-  uint64_t sq_phys;  // Physical address of submission queue
-  uint64_t cq_phys;  // Physical address of completion queue
-  uint64_t sq_size;  // Size of submission queue in bytes
-  uint64_t cq_size;  // Size of completion queue in bytes
-  uint64_t doorbell; // Physical address of doorbell register
-  int sq_dmabuf_fd;  // dmabuf file descriptor for SQ
-  int cq_dmabuf_fd;  // dmabuf file descriptor for CQ
+  void* sq_virt;          // Virtual address of SQ (host pointer)
+  void* cq_virt;          // Virtual address of CQ (host pointer)
+  void* sq_gpu;           // GPU-accessible pointer for SQ
+  void* cq_gpu;           // GPU-accessible pointer for CQ
+  uint64_t sq_phys;       // Physical address of SQ
+  uint64_t cq_phys;       // Physical address of CQ
+  uint64_t sq_size;       // Size of SQ in bytes
+  uint64_t cq_size;       // Size of CQ in bytes
+  uint64_t doorbell;      // Physical address of doorbell register
+  int sq_dmabuf_fd;       // dmabuf file descriptor for SQ
+  int cq_dmabuf_fd;       // dmabuf file descriptor for CQ
+  void* sq_prp_list;      // SQ PRP list buffer (for cleanup)
+  void* cq_prp_list;      // CQ PRP list buffer (for cleanup)
+  uint32_t sq_contig_id;  // SQ contiguous alloc ID (0=none)
+  uint32_t cq_contig_id;  // CQ contiguous alloc ID (0=none)
 };
 EOF
 

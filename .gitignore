@@ -19,6 +19,7 @@ kernel/*/.tmp_versions/
 kernel/*/.*.cmd
 kernel/*/.module-common.o
 kernel/*/..module-common.o.cmd
+kernel/*/.*.o.d
 
 # Generated files
 src/include/xio-endpoint-registry-gen.h

@@ -63,6 +63,7 @@ struct rocm_axiio_register_queue_addr_req {
   uint64_t size;
   uint8_t queue_type;
   uint16_t nvme_bdf;
+  uint64_t prp2;
 };
 
 struct rocm_axiio_register_buffer_req {
@@ -88,6 +89,22 @@ struct rocm_axiio_mmio_bridge_shadow_req {
   _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
 #define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
   _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
+
+struct rocm_axiio_alloc_contig_req {
+  uint64_t size;
+  uint16_t nvme_bdf;
+  uint64_t phys_addr;
+  uint32_t mmap_offset;
+};
+
+struct rocm_axiio_free_contig_req {
+  uint32_t mmap_offset;
+};
+
+#define ROCM_XIO_ALLOC_CONTIG_QUEUE                                            \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_axiio_alloc_contig_req)
+#define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
+  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_axiio_free_contig_req)
 
 // Memory mode flags (bits in memoryMode field)
 #define XIO_MEM_MODE_SQ_DEVICE 0x1
@@ -544,6 +561,21 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
                               bool is_emulated, const char* buffer_name);
 
 /**
+ * @brief Get physical addresses for each page of a buffer.
+ *
+ * Uses /proc/self/pagemap to resolve physical addresses.
+ * Only works for host memory; device memory uses DMA-BUF.
+ *
+ * @param virt_addr Page-aligned virtual address.
+ * @param size Size of the buffer in bytes.
+ * @param phys_out Output array for physical addresses.
+ * @param max_pages Maximum entries in phys_out.
+ * @return Number of pages on success, negative on failure.
+ */
+__host__ int getPagePhysAddrs(void* virt_addr, size_t size, uint64_t* phys_out,
+                              size_t max_pages);
+
+/**
  * @brief Register a queue address with the kernel module.
  *
  * Registers virtual and physical addresses for kprobe
@@ -555,11 +587,13 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
  * @param size Size of the queue in bytes.
  * @param queue_type 0 for SQ, 1 for CQ.
  * @param nvme_bdf NVMe controller BDF.
+ * @param prp2 PRP2 address for multi-page queues.
  * @param queue_name Name for logging.
  * @return 0 on success, negative error code on failure.
  */
 int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr, size_t size,
-                 uint8_t queue_type, uint16_t nvme_bdf, const char* queue_name);
+                 uint8_t queue_type, uint16_t nvme_bdf, uint64_t prp2,
+                 const char* queue_name);
 
 /**
  * @brief Queue setup structure for unified initialization.
@@ -569,6 +603,11 @@ struct xioQueueSetup {
   void* gpu;
   uint64_t phys;
   bool uses_coherent;
+  void* prp_list;
+  uint64_t prp_list_phys;
+  uint64_t prp2;
+  bool uses_contig;
+  uint32_t contig_id;
 };
 
 /**
@@ -591,6 +630,57 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
                               const char* kernel_module_device,
                               bool is_emulated, const char* queue_name,
                               struct xioQueueSetup* setup);
+
+/**
+ * @brief Build a PRP list for a multi-page queue (PC=0).
+ *
+ * For queues spanning >1 host memory page, resolves
+ * per-page physical addresses and builds a PRP list
+ * buffer. Sets setup->prp2, setup->prp_list, and
+ * setup->prp_list_phys. No-op for single-page queues.
+ *
+ * @param setup Queue setup (must have virt allocated).
+ * @param queue_size Queue size in bytes.
+ * @param is_device true for device memory.
+ * @param queue_name Name for logging.
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
+                               bool is_device, const char* queue_name);
+
+/**
+ * @brief Allocate contiguous DMA memory via kernel module.
+ *
+ * Uses dma_alloc_coherent in the kernel module to obtain
+ * physically contiguous memory for CQR=1 controllers.
+ * Maps the result into userspace and registers with HIP
+ * for GPU access (same pattern as mapPciBar).
+ *
+ * @param size Queue size in bytes.
+ * @param nvme_bdf NVMe controller BDF (0xBBDD format).
+ * @param queue_name Name for logging.
+ * @param setup Output structure with pointers/handles.
+ * @param kernel_module_device Kernel module device path
+ *        (defaults to ROCM_XIO_DEVICE_PATH).
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int setupContigQueueForGpu(
+  size_t size, uint16_t nvme_bdf, const char* queue_name,
+  struct xioQueueSetup* setup,
+  const char* kernel_module_device = ROCM_XIO_DEVICE_PATH);
+
+/**
+ * @brief Free contiguous DMA queue memory.
+ *
+ * Unregisters from HIP, unmaps from userspace, and
+ * releases the kernel module allocation.
+ *
+ * @param setup Queue setup from setupContigQueueForGpu.
+ * @param size Queue size in bytes.
+ * @param queue_name Name for logging.
+ */
+__host__ void freeContigQueue(struct xioQueueSetup* setup, size_t size,
+                              const char* queue_name);
 
 /**
  * @brief Register memory with HIP for GPU access.
@@ -693,6 +783,19 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
  */
 __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
                        void** bar_gpu, size_t bar_size);
+
+/**
+ * @brief Read the CQR bit from the NVMe CAP register.
+ *
+ * CQR (Contiguous Queues Required) indicates whether the
+ * controller requires physically contiguous I/O queues.
+ * Reads via sysfs BAR0 resource mmap.
+ *
+ * @param pci_bdf NVMe controller BDF (0xBBDD format).
+ * @param cqr_out Output: true if contiguous required.
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out);
 
 /**
  * @brief Generate and submit a PCI MMIO bridge command.
