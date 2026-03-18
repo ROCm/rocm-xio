@@ -39,6 +39,9 @@ trap cleanup EXIT
 # Initialize test tracking
 test_init
 
+# Display job information
+display_job_info
+
 echo "=========================================="
 echo "NVMe-EP Unit Test Script"
 echo "=========================================="
