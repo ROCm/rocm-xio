@@ -10,14 +10,6 @@
 NVME_EMUL=${NVME_EMUL:-/dev/nvme0}
 NVME_REAL=${NVME_REAL:-/dev/nvme1}
 
-# Resolve symlinks so sysfs lookups use the real
-# device name (e.g. /dev/rocm-xio-nvme-emul0 -> nvme1)
-NVME_EMUL=$(readlink -f "${NVME_EMUL}")
-NVME_REAL=$(readlink -f "${NVME_REAL}")
-
-NVME_EMUL_SHORT=${NVME_EMUL#/dev/}
-NVME_REAL_SHORT=${NVME_REAL#/dev/}
-
 # Check if emulated NVMe tests should be skipped
 SKIP_EMULATED=false
 if [ "$NVME_EMUL" = "none" ] || [ "$NVME_EMUL" = "NONE" ]; then
@@ -29,6 +21,18 @@ SKIP_PASSTHROUGH=false
 if [ "$NVME_REAL" = "none" ] || [ "$NVME_REAL" = "NONE" ]; then
     SKIP_PASSTHROUGH=true
 fi
+
+# Resolve symlinks so sysfs lookups use the real
+# device name (e.g. /dev/rocm-xio-nvme-emul -> /dev/nvme1)
+if [ "$SKIP_EMULATED" = "false" ]; then
+    NVME_EMUL=$(readlink -f "${NVME_EMUL}")
+fi
+if [ "$SKIP_PASSTHROUGH" = "false" ]; then
+    NVME_REAL=$(readlink -f "${NVME_REAL}")
+fi
+
+NVME_EMUL_SHORT=${NVME_EMUL#/dev/}
+NVME_REAL_SHORT=${NVME_REAL#/dev/}
 
 # Color output
 RED='\033[0;31m'
