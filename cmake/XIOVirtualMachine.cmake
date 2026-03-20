@@ -16,6 +16,7 @@
 #   make launch-test-vm               # rdma (default)
 #   VM_MODE=nvme make launch-test-vm  # nvme mode
 #   VM_MODE=ernic make launch-test-vm # ernic mode
+#   VM_MODE=full make launch-test-vm  # all devices
 
 # ---------------------------------------------------
 # 1. QEMU binary
@@ -266,7 +267,7 @@ if(_qemu_ok AND RUN_VM AND _vm_image_ok)
       "RUN_VM=${RUN_VM}"
       "GPU_BDF=${_gpu_bdf}"
       "QEMU_PATH=${_qemu_prefix}"
-      "${_launch_vm}" "$$VM_MODE"
+      "${_launch_vm}"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Launching rocm-xio test VM"
     USES_TERMINAL
@@ -396,7 +397,7 @@ if(_qemu_ok AND GEN_VM AND CLOUD_LOCALDS)
       "USER_ID=${_host_uid}"
       "IMAGES=${_vm_images_dir}"
       "PACKAGES=${_packages_file}"
-      "SIZE=64"
+      "SIZE=256"
       "VCPUS=4"
       "VMEM=8192"
       "QEMU_PATH=${_qemu_prefix_gen}"

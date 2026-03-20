@@ -19,6 +19,7 @@ DEST="/etc/udev/rules.d"
 RULES=(
   "99-rocm-xio-rdma.rules"
   "99-rocm-xio-vfio.rules"
+  "99-rocm-xio-nvme.rules"
 )
 
 usage() {
