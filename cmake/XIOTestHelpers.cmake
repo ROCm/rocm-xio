@@ -53,7 +53,7 @@ function(xio_add_test)
   add_executable(${XIO_TEST_NAME} ${XIO_TEST_SOURCE})
 
   set_target_properties(${XIO_TEST_NAME}
-    PROPERTIES LANGUAGE HIP)
+    PROPERTIES LINKER_LANGUAGE HIP)
 
   target_compile_options(${XIO_TEST_NAME} PRIVATE
     -std=c++17

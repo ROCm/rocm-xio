@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# setup-vm
+#
+# Provision a running rocm-xio test VM using the
+# sbates130272.batesste Ansible Galaxy collection.
+# Installs ROCm, development tools, and user config.
+#
+# Prerequisites:
+#   - VM must be running (make launch-test-vm)
+#   - ansible-playbook and ansible-galaxy in PATH
+#
+# Environment variables:
+#   SSH_PORT           VM SSH port (default: 2222)
+#   VM_USERNAME        VM user (default: $USER)
+#   VM_PASS            VM password (default: password)
+#   ANSIBLE_PLAYBOOK   Path to ansible-playbook
+#   ANSIBLE_GALAXY     Path to ansible-galaxy
+
+set -e
+
+SSH_PORT="${SSH_PORT:-2222}"
+VM_USERNAME="${VM_USERNAME:-${USER}}"
+VM_PASS="${VM_PASS:-password}"
+
+ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
+ANSIBLE_GALAXY="${ANSIBLE_GALAXY:-ansible-galaxy}"
+
+COLLECTION="sbates130272.batesste"
+
+echo "Installing Ansible Galaxy collection..."
+"${ANSIBLE_GALAXY}" collection install "${COLLECTION}"
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+SSH_ARGS="-o StrictHostKeyChecking=no"
+SSH_ARGS="${SSH_ARGS} -o UserKnownHostsFile=/dev/null"
+
+HOST_LINE="localhost"
+HOST_LINE="${HOST_LINE} ansible_port=${SSH_PORT}"
+HOST_LINE="${HOST_LINE} ansible_user=${VM_USERNAME}"
+HOST_LINE="${HOST_LINE} ansible_password=${VM_PASS}"
+HOST_LINE="${HOST_LINE} ansible_become_pass=${VM_PASS}"
+HOST_LINE="${HOST_LINE} ansible_ssh_common_args="
+HOST_LINE="${HOST_LINE}'${SSH_ARGS}'"
+
+cat > "${TMPDIR}/inventory.ini" <<EOF
+[testvm]
+${HOST_LINE}
+EOF
+
+cat > "${TMPDIR}/setup.yml" <<EOF
+---
+- name: Provision rocm-xio test VM
+  hosts: testvm
+  become: true
+  gather_facts: true
+  vars:
+    username: ${VM_USERNAME}
+  roles:
+    - role: ${COLLECTION}.user_setup
+      remote_user: "{{ username }}"
+      tags: [user_setup]
+    - role: ${COLLECTION}.fave_packages
+      remote_user: "{{ username }}"
+      tags: [fave_packages]
+    - role: ${COLLECTION}.git_setup
+      remote_user: "{{ username }}"
+      tags: [git_setup]
+    - role: ${COLLECTION}.rocm_setup
+      remote_user: "{{ username }}"
+      rocm_setup_user: "{{ username }}"
+      tags: [rocm_setup]
+EOF
+
+echo "Running Ansible playbook against VM..."
+echo "  SSH port: ${SSH_PORT}"
+echo "  User:     ${VM_USERNAME}"
+echo ""
+
+"${ANSIBLE_PLAYBOOK}" \
+    -i "${TMPDIR}/inventory.ini" \
+    "${TMPDIR}/setup.yml" \
+    -v

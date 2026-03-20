@@ -74,14 +74,15 @@ void* ernicdv_handle_ = nullptr;
 #if defined(GDA_ERNIC)
 
 void* Backend::ernic_dv_dlopen() {
+  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
   void* handle = nullptr;
 #ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/librocm_ernic.so", RTLD_LAZY);
+  handle = dlopen(RDMA_CORE_LIB_DIR "/librocm_ernic.so", flags);
 #endif
   if (!handle)
-    handle = dlopen("librocm_ernic.so", RTLD_LAZY);
+    handle = dlopen("librocm_ernic.so", flags);
   if (!handle)
-    handle = dlopen("/usr/local/lib/librocm_ernic.so", RTLD_LAZY);
+    handle = dlopen("/usr/local/lib/librocm_ernic.so", flags);
   if (!handle)
     fprintf(stderr,
             "rdma_ep::ernic: Could not open "

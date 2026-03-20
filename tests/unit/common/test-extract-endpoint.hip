@@ -3,80 +3,84 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for extractEndpointName() CLI parser.
+ * Unit tests for xio::extractEndpointName() CLI parser.
  * CPU-only: exercises pure argument parsing.
  */
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "xio.h"
 
-#define ASSERT_EQ(a, b) assert((a) == (b))
-#define ASSERT_TRUE(x) assert(x)
+#define ASSERT_EQ(a, b)                                                        \
+  do {                                                                         \
+    if ((a) != (b)) {                                                          \
+      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_TRUE(x)                                                         \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
 
 int test_short_flag() {
   const char* argv[] = {"prog", "-e", "nvme"};
-  std::string result =
-    extractEndpointName(3, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(3, const_cast<char**>(argv));
   ASSERT_EQ(result, "nvme");
   return 0;
 }
 
 int test_long_flag() {
   const char* argv[] = {"prog", "--endpoint", "rdma"};
-  std::string result =
-    extractEndpointName(3, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(3, const_cast<char**>(argv));
   ASSERT_EQ(result, "rdma");
   return 0;
 }
 
 int test_long_equals() {
   const char* argv[] = {"prog", "--endpoint=test-ep"};
-  std::string result =
-    extractEndpointName(2, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(2, const_cast<char**>(argv));
   ASSERT_EQ(result, "test-ep");
   return 0;
 }
 
 int test_short_equals() {
   const char* argv[] = {"prog", "-e=sdma"};
-  std::string result =
-    extractEndpointName(2, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(2, const_cast<char**>(argv));
   ASSERT_EQ(result, "sdma");
   return 0;
 }
 
 int test_no_endpoint() {
   const char* argv[] = {"prog", "--verbose"};
-  std::string result =
-    extractEndpointName(2, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(2, const_cast<char**>(argv));
   ASSERT_TRUE(result.empty());
   return 0;
 }
 
 int test_no_args() {
   const char* argv[] = {"prog"};
-  std::string result =
-    extractEndpointName(1, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(1, const_cast<char**>(argv));
   ASSERT_TRUE(result.empty());
   return 0;
 }
 
 int test_short_flag_at_end() {
   const char* argv[] = {"prog", "-e"};
-  std::string result =
-    extractEndpointName(2, const_cast<char**>(argv));
+  std::string result = xio::extractEndpointName(2, const_cast<char**>(argv));
   ASSERT_TRUE(result.empty());
   return 0;
 }
 
 int test_mixed_args() {
-  const char* argv[] = {
-    "prog", "-n", "100", "-e", "rdma", "-v"};
-  std::string result =
-    extractEndpointName(6, const_cast<char**>(argv));
+  const char* argv[] = {"prog", "-n", "100", "-e", "rdma", "-v"};
+  std::string result = xio::extractEndpointName(6, const_cast<char**>(argv));
   ASSERT_EQ(result, "rdma");
   return 0;
 }

@@ -442,6 +442,16 @@ target_link_libraries(xio-tester PRIVATE
 # Required when linking relocatable device code (like TransferBench)
 target_link_options(xio-tester PRIVATE -fgpu-rdc)
 
+# Embed the custom rdma-core lib dir in the binary
+# so dlopen'd DV libs can find their libibverbs at
+# runtime (even under sudo which strips LD_LIBRARY_PATH).
+if(RDMA_CORE_LIB_DIR)
+  set_target_properties(xio-tester PROPERTIES
+    BUILD_RPATH "${RDMA_CORE_LIB_DIR}"
+    INSTALL_RPATH "${RDMA_CORE_LIB_DIR}"
+  )
+endif()
+
 #-----------------------------------------------------------------------------
 # Install configuration
 #-----------------------------------------------------------------------------
@@ -543,3 +553,6 @@ include(XIODocumentation)
 
 # Utility targets
 include(XIOUtilityTargets)
+
+# VM-based testing (launch-test-vm target)
+include(XIOVirtualMachine)

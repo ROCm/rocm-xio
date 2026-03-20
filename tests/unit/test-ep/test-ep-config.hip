@@ -10,13 +10,26 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include <hip/hip_runtime.h>
 
 #include "test-ep.h"
 
-#define ASSERT_EQ(a, b) assert((a) == (b))
-#define ASSERT_TRUE(x) assert(x)
+#define ASSERT_EQ(a, b)                                                        \
+  do {                                                                         \
+    if ((a) != (b)) {                                                          \
+      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_TRUE(x)                                                         \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
 
 int test_magic_constants() {
   ASSERT_EQ(xio::test_ep::magicId, 0xDEADBEEFCAFEBABEULL);

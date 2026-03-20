@@ -38,6 +38,9 @@ struct RdmaEpConfig {
   int trafficClass = 0;
   bool loopback = true;
   int gpuDeviceId = 0;
+  bool verify = false;
+  uint32_t seed = 1;
+  std::string deviceName;
 };
 
 } // namespace rdma_ep
