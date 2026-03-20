@@ -26,6 +26,10 @@ else
   . "$(dirname "${BASH_SOURCE[0]}")/rocm-xio-tests.common"
 fi
 
+# Use timestamped logs directory if provided
+LOGS_DIR="${ALOLA_LOGS_DIR:-logs}"
+mkdir -p "${LOGS_DIR}" 2>/dev/null || true
+
 # Initialize test tracking
 test_init
 
@@ -103,18 +107,19 @@ run_p2p_test() {
     echo "Note: XGMI counters may not increment for SDMA on some systems; see README."
   fi
 
-  # Save JSONs to project dir for inspection (unique per array task)
-  mkdir -p "${PROJECT_DIR}/.alola/xgmi-captures"
+  # Save JSONs under the logs tree for inspection (unique per array task)
+  local xgmi_dest="${PROJECT_DIR}/.alola/${LOGS_DIR}/xgmi-captures"
+  mkdir -p "${xgmi_dest}"
   if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
     array_suffix="_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
   else
     array_suffix="_${SLURM_JOB_ID:-$$}"
   fi
   cp -f "${xgmi_before}" \
-    "${PROJECT_DIR}/.alola/xgmi-captures/xgmi_before_${label}${array_suffix}.json" \
+    "${xgmi_dest}/xgmi_before_${label}${array_suffix}.json" \
     2>/dev/null || true
   cp -f "${xgmi_after}" \
-    "${PROJECT_DIR}/.alola/xgmi-captures/xgmi_after_${label}${array_suffix}.json" \
+    "${xgmi_dest}/xgmi_after_${label}${array_suffix}.json" \
     2>/dev/null || true
   return "${p2p_rc}"
 }
