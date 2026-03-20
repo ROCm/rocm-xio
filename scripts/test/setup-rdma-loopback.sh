@@ -47,6 +47,8 @@ setup_vendor() {
       sleep 3
       modprobe bnxt_re
       sleep 5
+      ip link set "${nic_if}" up 2>/dev/null || true
+      sleep 3
       ;;
     ionic)
       local pci_bdf

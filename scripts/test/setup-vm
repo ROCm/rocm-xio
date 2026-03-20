@@ -148,10 +148,12 @@ cat > "${TMPDIR}/setup.yml" <<EOF
       when: bnxt_dkms.changed
       tags: [rocm_xio]
 
-    - name: Create VM-local kernel build directory
+    - name: Create VM-local build directory
       shell: >
         install -d -o {{ username }}
         {{ vm_build_dir }}/kernel/rocm-xio
+        && chown {{ username }}:{{ username }}
+        {{ vm_build_dir }}
       tags: [rocm_xio]
 
     - name: Copy and build rocm-xio kernel module
@@ -162,10 +164,26 @@ cat > "${TMPDIR}/setup.yml" <<EOF
         make
       tags: [rocm_xio]
 
+    - name: Install rocm-xio kernel module
+      shell: |
+        kver=\$(uname -r)
+        mkdir -p /lib/modules/\$kver/extra
+        cp {{ vm_build_dir }}/kernel/rocm-xio/rocm-xio.ko \
+          /lib/modules/\$kver/extra/
+        depmod -a
+      tags: [rocm_xio]
+
     - name: Load rocm-xio module
       shell: |
         rmmod rocm_xio 2>/dev/null || true
-        insmod {{ vm_build_dir }}/kernel/rocm-xio/rocm-xio.ko
+        modprobe rocm_xio
+      tags: [rocm_xio]
+
+    - name: Ensure rocm-xio loads on boot
+      lineinfile:
+        path: /etc/modules
+        line: rocm_xio
+        create: true
       tags: [rocm_xio]
 
     - name: Create /dev/rocm-xio device node

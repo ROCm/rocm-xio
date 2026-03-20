@@ -8,7 +8,8 @@ a QEMU VM isolates the failure domain: if the guest
 kernel panics the host stays up and the VM can simply
 be restarted.
 
-The VM infrastructure provides three CMake targets and
+The VM infrastructure provides CMake targets for image
+creation, provisioning, launching, and testing, plus
 a ``launch-vm`` wrapper script with four passthrough
 modes.
 
