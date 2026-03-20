@@ -17,6 +17,7 @@
 # Usage:
 #   ./run-test-rdma-loopback.sh
 #   BUILD_ALL=true ./run-test-rdma-loopback.sh
+#   VENDOR=mlx5 ./run-test-rdma-loopback.sh
 #   PROFILE=1 VENDOR=ionic ./run-test-rdma-loopback.sh
 #
 # For a quick CTest-only run without this wrapper:
@@ -42,7 +43,7 @@ if [ "${BUILD_ALL}" = "true" ]; then
   cmake -S . -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="/opt/rocm-xio-${SHA}" \
-    -DGDA_BNXT=ON -DGDA_IONIC=ON \
+    -DGDA_BNXT=ON -DGDA_MLX5=ON -DGDA_IONIC=ON \
     -DBUILD_TESTING=ON --fresh
 
   cmake --build "${BUILD_DIR}" \
@@ -72,6 +73,11 @@ run_sweep() {
   case "${vendor}" in
     bnxt)
       rdma_dev="${BNXT_RDMA_DEV:-rocm-rdma-bnxt0}"
+      provider_flag="${provider_flag} --device"
+      provider_flag="${provider_flag} ${rdma_dev}"
+      ;;
+    mlx5)
+      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx5-0}"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;
@@ -206,14 +212,14 @@ vendors=()
 
 case "${VENDOR}" in
   all)
-    vendors=(bnxt ionic)
+    vendors=(bnxt mlx5 ionic)
     ;;
-  bnxt|ionic)
+  bnxt|mlx5|ionic)
     vendors=("${VENDOR}")
     ;;
   *)
     echo "ERROR: VENDOR must be" \
-         "bnxt, ionic, or all"
+         "bnxt, mlx5, ionic, or all"
     exit 1
     ;;
 esac

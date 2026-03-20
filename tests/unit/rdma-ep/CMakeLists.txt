@@ -55,7 +55,7 @@ if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
 endif()
 
 # Hardware integration tests (require NIC + GPU)
-if(GDA_BNXT OR GDA_IONIC)
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
   xio_add_test(
     NAME test-rdma-loopback
     SOURCE test-rdma-loopback.hip
