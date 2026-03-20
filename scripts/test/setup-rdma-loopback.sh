@@ -11,7 +11,7 @@
 # Intended to run as:
 #   sudo scripts/test/setup-rdma-loopback.sh
 #
-# Supports VENDOR=bnxt|ionic|all (default: all).
+# Supports VENDOR=bnxt|ionic|mlx5|all (default: all).
 
 set -euo pipefail
 
@@ -31,6 +31,11 @@ setup_vendor() {
       nic_if="${IONIC_NIC_IF:-rocm-ionic0}"
       nic_ip="${IONIC_NIC_IP:-198.18.1.1/24}"
       rdma_dev="${IONIC_RDMA_DEV:-rocm-rdma-ionic0}"
+      ;;
+    mlx5)
+      nic_if="${MLX5_NIC_IF:-rocm-mlx5-0}"
+      nic_ip="${MLX5_NIC_IP:-198.18.2.1/24}"
+      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx5-0}"
       ;;
     *)
       echo "ERROR: Unknown vendor '${vendor}'"
@@ -78,6 +83,11 @@ setup_vendor() {
 
       ip link set "${nic_if}" up 2>/dev/null || true
       modprobe ionic_rdma 2>/dev/null || true
+      sleep 3
+      ;;
+    mlx5)
+      modprobe mlx5_ib 2>/dev/null || true
+      ip link set "${nic_if}" up 2>/dev/null || true
       sleep 3
       ;;
   esac
@@ -156,11 +166,13 @@ setup_vendor() {
 # --- Main ---
 vendors=()
 case "${VENDOR}" in
-  all)   vendors=(bnxt ionic) ;;
+  all)   vendors=(bnxt ionic mlx5) ;;
   bnxt)  vendors=(bnxt) ;;
   ionic) vendors=(ionic) ;;
+  mlx5)  vendors=(mlx5) ;;
   *)
-    echo "ERROR: VENDOR must be bnxt, ionic, or all"
+    echo "ERROR: VENDOR must be" \
+      "bnxt, ionic, mlx5, or all"
     exit 1
     ;;
 esac
