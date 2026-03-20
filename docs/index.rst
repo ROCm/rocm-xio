@@ -51,6 +51,7 @@ Quick Start
 
    building
    testing
+   vm-testing
    endpoints
    kernel-module
    memory-modes

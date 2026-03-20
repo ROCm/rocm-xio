@@ -79,14 +79,15 @@ qp_set_gda_fn ionic_qp_set_gda_ = nullptr;
 #if defined(GDA_IONIC)
 
 void* Backend::ionic_dv_dlopen() {
+  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
   void* handle = nullptr;
 #ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/libionic.so", RTLD_LAZY);
+  handle = dlopen(RDMA_CORE_LIB_DIR "/libionic.so", flags);
 #endif
   if (!handle)
-    handle = dlopen("libionic.so", RTLD_LAZY);
+    handle = dlopen("libionic.so", flags);
   if (!handle)
-    handle = dlopen("/usr/local/lib/libionic.so", RTLD_LAZY);
+    handle = dlopen("/usr/local/lib/libionic.so", flags);
   if (!handle)
     fprintf(stderr,
             "rdma_ep::ionic: Could not open "

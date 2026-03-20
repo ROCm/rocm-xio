@@ -47,14 +47,15 @@ mlx5dv_funcs_t mlx5_dv{};
 #if defined(GDA_MLX5)
 
 void* Backend::mlx5_dv_dlopen() {
+  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
   void* handle = nullptr;
 #ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/libmlx5.so", RTLD_LAZY);
+  handle = dlopen(RDMA_CORE_LIB_DIR "/libmlx5.so", flags);
 #endif
   if (!handle)
-    handle = dlopen("libmlx5.so", RTLD_LAZY);
+    handle = dlopen("libmlx5.so", flags);
   if (!handle)
-    handle = dlopen("/usr/lib/x86_64-linux-gnu/libmlx5.so", RTLD_LAZY);
+    handle = dlopen("/usr/lib/x86_64-linux-gnu/libmlx5.so", flags);
   if (!handle)
     fprintf(stderr,
             "rdma_ep::mlx5: Could not open "

@@ -91,12 +91,13 @@ struct rocm_xio_bind_device_req {
 
 /* Register queue address for injection (explicit virt->phys mapping) */
 struct rocm_xio_register_queue_addr_req {
-  __u64 virt_addr; /* Input: Virtual address (userspace pointer) */
-  __u64 phys_addr; /* Input: Physical address (PRP1 for kprobe) */
+  __u64 virt_addr; /* Input: Virtual address (userspace ptr) */
+  __u64 phys_addr; /* Input: Physical address (PRP1/kprobe) */
   __u64 size;      /* Input: Queue size in bytes */
+  __u64 prp2;      /* Input: PRP2 for PC=0 queues (0=none) */
+  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD) */
   __u8 queue_type; /* Input: 0=SQ, 1=CQ, 2=both */
-  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD format) */
-  __u64 prp2;      /* Input: PRP2 value for PC=0 queues (0=none) */
+  __u8 reserved[5];
 };
 
 /* Unregister queue address */

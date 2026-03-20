@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 
 #include <unistd.h>
 
@@ -17,9 +18,27 @@
 
 using namespace rdma_ep::bnxt_sizing;
 
-#define ASSERT_EQ(a, b) assert((a) == (b))
-#define ASSERT_GT(a, b) assert((a) > (b))
-#define ASSERT_TRUE(x) assert(x)
+#define ASSERT_EQ(a, b)                                                        \
+  do {                                                                         \
+    if ((a) != (b)) {                                                          \
+      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_GT(a, b)                                                        \
+  do {                                                                         \
+    if (!((a) > (b))) {                                                        \
+      printf("ASSERT_GT failed: %s:%d\n", __FILE__, __LINE__);                 \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_TRUE(x)                                                         \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
 
 int test_roundup_pow2() {
   ASSERT_EQ(roundup_pow2(0), 1u);
@@ -53,8 +72,7 @@ int test_align_up() {
 int test_calc_wqe_sz() {
   ASSERT_EQ(calc_wqe_sz(0), SQE_HDR_SZ);
   ASSERT_EQ(calc_wqe_sz(1), STRIDE + SQE_HDR_SZ);
-  ASSERT_EQ(calc_wqe_sz(2),
-            2 * STRIDE + SQE_HDR_SZ);
+  ASSERT_EQ(calc_wqe_sz(2), 2 * STRIDE + SQE_HDR_SZ);
   return 0;
 }
 
@@ -67,15 +85,12 @@ int test_compute_sq() {
   ASSERT_EQ(s.psn_sz, MSN_ENTRY_SZ);
   ASSERT_GT(s.len, 0u);
 
-  uint32_t pg =
-    static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
+  uint32_t pg = static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
   ASSERT_EQ(s.len % pg, 0u);
 
   ASSERT_EQ(s.slots % VAR_SLOT_ALIGN, 0u);
 
-  ASSERT_EQ(s.npsn,
-            static_cast<uint32_t>(
-              roundup_pow2(s.slots)));
+  ASSERT_EQ(s.npsn, static_cast<uint32_t>(roundup_pow2(s.slots)));
 
   sq_sizing s0 = compute_sq(256, 1, 0);
   ASSERT_GT(s0.len, 0u);
@@ -93,8 +108,7 @@ int test_compute_rq() {
   ASSERT_GT(r1.wqe_sz, 0u);
   ASSERT_GT(r1.len, 0u);
 
-  uint32_t pg =
-    static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
+  uint32_t pg = static_cast<uint32_t>(sysconf(_SC_PAGESIZE));
   ASSERT_EQ(r1.len % pg, 0u);
 
   rq_sizing r256 = compute_rq(256, 2);
@@ -121,7 +135,6 @@ int main() {
     printf("All BNXT sizing tests passed.\n");
     return 0;
   }
-  printf("%d BNXT sizing test(s) failed.\n",
-         failures);
+  printf("%d BNXT sizing test(s) failed.\n", failures);
   return 1;
 }

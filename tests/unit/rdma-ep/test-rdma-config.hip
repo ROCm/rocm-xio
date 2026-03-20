@@ -6,6 +6,8 @@
  */
 
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -14,80 +16,63 @@
 #include "rdma-ep.h"
 #include "vendor-ops.hpp"
 
-#define ASSERT_EQ(a, b) assert((a) == (b))
-#define ASSERT_TRUE(x) assert(x)
-#define ASSERT_STREQ(a, b) assert(strcmp((a), (b)) == 0)
+#define ASSERT_EQ(a, b)                                                        \
+  do {                                                                         \
+    if ((a) != (b)) {                                                          \
+      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_TRUE(x)                                                         \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+#define ASSERT_STREQ(a, b)                                                     \
+  do {                                                                         \
+    if (strcmp((a), (b)) != 0) {                                               \
+      printf("ASSERT_STREQ failed: %s:%d\n", __FILE__, __LINE__);              \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
 
 int test_provider_enum() {
-  ASSERT_EQ(
-    static_cast<uint8_t>(rdma_ep::Provider::BNXT),
-    0);
-  ASSERT_EQ(
-    static_cast<uint8_t>(rdma_ep::Provider::MLX5),
-    1);
-  ASSERT_EQ(
-    static_cast<uint8_t>(rdma_ep::Provider::IONIC),
-    2);
-  ASSERT_EQ(
-    static_cast<uint8_t>(
-      rdma_ep::Provider::ROCM_ERNIC),
-    3);
-  ASSERT_EQ(
-    static_cast<uint8_t>(
-      rdma_ep::Provider::UNKNOWN),
-    0xFF);
+  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::BNXT), 0);
+  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::MLX5), 1);
+  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::IONIC), 2);
+  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::ROCM_ERNIC), 3);
+  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::UNKNOWN), 0xFF);
   return 0;
 }
 
 int test_provider_name() {
-  ASSERT_STREQ(
-    rdma_ep::provider_name(rdma_ep::Provider::BNXT),
-    "bnxt");
-  ASSERT_STREQ(
-    rdma_ep::provider_name(rdma_ep::Provider::MLX5),
-    "mlx5");
-  ASSERT_STREQ(
-    rdma_ep::provider_name(
-      rdma_ep::Provider::IONIC),
-    "ionic");
-  ASSERT_STREQ(
-    rdma_ep::provider_name(
-      rdma_ep::Provider::ROCM_ERNIC),
-    "rocm-ernic");
-  ASSERT_STREQ(
-    rdma_ep::provider_name(
-      rdma_ep::Provider::UNKNOWN),
-    "unknown");
+  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::BNXT), "bnxt");
+  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::MLX5), "mlx5");
+  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::IONIC), "ionic");
+  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::ROCM_ERNIC),
+               "rocm-ernic");
+  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::UNKNOWN), "unknown");
   return 0;
 }
 
 int test_provider_from_string() {
-  ASSERT_EQ(rdma_ep::provider_from_string("bnxt"),
-            rdma_ep::Provider::BNXT);
-  ASSERT_EQ(rdma_ep::provider_from_string("bnxt_re"),
-            rdma_ep::Provider::BNXT);
-  ASSERT_EQ(rdma_ep::provider_from_string("mlx5"),
-            rdma_ep::Provider::MLX5);
-  ASSERT_EQ(rdma_ep::provider_from_string("ionic"),
+  ASSERT_EQ(rdma_ep::provider_from_string("bnxt"), rdma_ep::Provider::BNXT);
+  ASSERT_EQ(rdma_ep::provider_from_string("bnxt_re"), rdma_ep::Provider::BNXT);
+  ASSERT_EQ(rdma_ep::provider_from_string("mlx5"), rdma_ep::Provider::MLX5);
+  ASSERT_EQ(rdma_ep::provider_from_string("ionic"), rdma_ep::Provider::IONIC);
+  ASSERT_EQ(rdma_ep::provider_from_string("pensando"),
             rdma_ep::Provider::IONIC);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string("pensando"),
-    rdma_ep::Provider::IONIC);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string("rocm_ernic"),
-    rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string("ernic"),
-    rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string("rocm-ernic"),
-    rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string("invalid"),
-    rdma_ep::Provider::UNKNOWN);
-  ASSERT_EQ(
-    rdma_ep::provider_from_string(nullptr),
-    rdma_ep::Provider::UNKNOWN);
+  ASSERT_EQ(rdma_ep::provider_from_string("rocm_ernic"),
+            rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(rdma_ep::provider_from_string("ernic"),
+            rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(rdma_ep::provider_from_string("rocm-ernic"),
+            rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(rdma_ep::provider_from_string("invalid"),
+            rdma_ep::Provider::UNKNOWN);
+  ASSERT_EQ(rdma_ep::provider_from_string(nullptr), rdma_ep::Provider::UNKNOWN);
   return 0;
 }
 
