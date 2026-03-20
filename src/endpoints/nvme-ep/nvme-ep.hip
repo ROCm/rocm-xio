@@ -4,6 +4,7 @@
  */
 
 #include "nvme-ep.h"
+#include "xio-timing.h"
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
@@ -197,47 +198,6 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
     } else {
       return ioParams.baseLba + (op_index * blocks);
     }
-  }
-}
-
-/**
- * Update timing statistics atomically for less-timing mode
- * Thread-safe function to track min, max, sum, and count
- */
-__device__ void updateTimingStats(XioTimingStats* stats,
-                                  unsigned long long int duration) {
-  if (stats == nullptr) {
-    return;
-  }
-
-  // Atomically update count and sum
-  atomicAdd((unsigned long long int*)&stats->count, 1ULL);
-  atomicAdd((unsigned long long int*)&stats->sumDuration, duration);
-
-  // Atomically update min (compare-and-swap loop)
-  unsigned long long int oldMin = stats->minDuration;
-  while (duration < oldMin) {
-    unsigned long long int expected = oldMin;
-    unsigned long long int desired = duration;
-    unsigned long long int* addr = (unsigned long long int*)&stats->minDuration;
-    unsigned long long int result = atomicCAS(addr, expected, desired);
-    if (result == expected) {
-      break; // Successfully updated min
-    }
-    oldMin = result; // Retry with new value
-  }
-
-  // Atomically update max (compare-and-swap loop)
-  unsigned long long int oldMax = stats->maxDuration;
-  while (duration > oldMax) {
-    unsigned long long int expected = oldMax;
-    unsigned long long int desired = duration;
-    unsigned long long int* addr = (unsigned long long int*)&stats->maxDuration;
-    unsigned long long int result = atomicCAS(addr, expected, desired);
-    if (result == expected) {
-      break; // Successfully updated max
-    }
-    oldMax = result; // Retry with new value
   }
 }
 

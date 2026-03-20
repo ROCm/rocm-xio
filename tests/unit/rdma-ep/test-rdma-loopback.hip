@@ -41,6 +41,7 @@ using namespace rdma_ep;
 
 static constexpr uint32_t DEFAULT_XFER_SIZE = 256;
 static constexpr uint32_t DEFAULT_LFSR_SEED = 1;
+static constexpr unsigned DEFAULT_ITERATIONS = 1;
 
 static bool detect_pci_vendor(uint16_t vendor_id) {
   DIR* d = opendir("/sys/class/infiniband");
@@ -79,8 +80,10 @@ static void print_usage(const char* prog) {
           "  --size   N    Transfer size"
           " (default %u)\n"
           "  --seed   N    LFSR seed"
+          " (default %u)\n"
+          "  -n N          Iterations"
           " (default %u)\n",
-          prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED);
+          prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED, DEFAULT_ITERATIONS);
 }
 
 __global__ void loopback_db_diag_kernel(QueuePair* qp, void* src_ptr,
@@ -149,15 +152,17 @@ __global__ void loopback_db_diag_kernel(QueuePair* qp, void* src_ptr,
 
 __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
                                       void* dst_ptr, uint32_t length,
-                                      int* result,
-                                      unsigned long long* elapsed) {
+                                      int* result, unsigned long long* elapsed,
+                                      unsigned iterations) {
   if (threadIdx.x != 0)
     return;
 
   unsigned long long t0 = wall_clock64();
 
-  qp->put_nbi_single(dst_ptr, src_ptr, length, true);
-  qp->quiet_single();
+  for (unsigned i = 0; i < iterations; i++) {
+    qp->put_nbi_single(dst_ptr, src_ptr, length, true);
+    qp->quiet_single();
+  }
 
   *elapsed = wall_clock64() - t0;
   *result = 0;
@@ -166,6 +171,7 @@ __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
 int main(int argc, char** argv) {
   uint32_t xfer_size = DEFAULT_XFER_SIZE;
   uint32_t lfsr_seed = DEFAULT_LFSR_SEED;
+  unsigned iterations = DEFAULT_ITERATIONS;
   const char* provider_str = "auto";
   const char* device_name = nullptr;
   bool diag_mode = false;
@@ -179,6 +185,10 @@ int main(int argc, char** argv) {
       xfer_size = static_cast<uint32_t>(atoi(argv[++i]));
     } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
       lfsr_seed = static_cast<uint32_t>(atoi(argv[++i]));
+    } else if ((strcmp(argv[i], "-n") == 0 ||
+                strcmp(argv[i], "--iterations") == 0) &&
+               i + 1 < argc) {
+      iterations = static_cast<unsigned>(atoi(argv[++i]));
     } else if (strcmp(argv[i], "--diag") == 0) {
       diag_mode = true;
     } else {
@@ -228,8 +238,9 @@ int main(int argc, char** argv) {
   const char* prov_name = (prov == Provider::BNXT) ? "BNXT" : "IONIC";
 
   printf("=== %s Loopback Data Path Test ===\n", prov_name);
-  printf("  provider=%s  size=%u  seed=%u\n\n", prov_name, xfer_size,
-         lfsr_seed);
+  printf("  provider=%s  size=%u  seed=%u"
+         "  iterations=%u\n\n",
+         prov_name, xfer_size, lfsr_seed, iterations);
 
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
@@ -347,9 +358,12 @@ int main(int argc, char** argv) {
     hipLaunchKernelGGL(loopback_db_diag_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                        (void*)src, (void*)dst, xfer_size, d_result, d_elapsed);
   } else {
-    printf("Launching RDMA WRITE kernel...\n");
+    printf("Launching RDMA WRITE kernel"
+           " (%u iterations)...\n",
+           iterations);
     hipLaunchKernelGGL(loopback_write_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
-                       (void*)src, (void*)dst, xfer_size, d_result, d_elapsed);
+                       (void*)src, (void*)dst, xfer_size, d_result, d_elapsed,
+                       iterations);
   }
 
   herr = hipGetLastError();
@@ -440,8 +454,9 @@ int main(int argc, char** argv) {
   backend.shutdown();
 
   printf("\nPASSED: All %u bytes LFSR-verified"
-         " via %s RDMA WRITE loopback.\n",
-         xfer_size, prov_name);
+         " via %s RDMA WRITE loopback"
+         " (%u iterations).\n",
+         xfer_size, prov_name, iterations);
   return 0;
 }
 

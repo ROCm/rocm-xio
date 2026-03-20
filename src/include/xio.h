@@ -61,9 +61,10 @@ struct rocm_axiio_register_queue_addr_req {
   uint64_t virt_addr;
   uint64_t phys_addr;
   uint64_t size;
-  uint8_t queue_type;
-  uint16_t nvme_bdf;
   uint64_t prp2;
+  uint16_t nvme_bdf;
+  uint8_t queue_type;
+  uint8_t reserved[5];
 };
 
 struct rocm_axiio_register_buffer_req {

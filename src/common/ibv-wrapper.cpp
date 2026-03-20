@@ -46,14 +46,18 @@ void dlsym_load_optional(FuncPtr& out, void* handle, const char* prefix,
 } // anonymous namespace
 
 IBVWrapper::IBVWrapper() {
-  ibv_handle_ = dlopen("libibverbs.so", RTLD_NOW);
-  if (!ibv_handle_) {
+#ifdef RDMA_CORE_LIB_DIR
+  ibv_handle_ = dlopen(RDMA_CORE_LIB_DIR "/libibverbs.so", RTLD_NOW);
+#endif
+  if (!ibv_handle_)
+    ibv_handle_ = dlopen("libibverbs.so", RTLD_NOW);
+  if (!ibv_handle_)
     ibv_handle_ = dlopen("/usr/lib/x86_64-linux-gnu/libibverbs.so", RTLD_NOW);
-    if (!ibv_handle_) {
-      fprintf(stderr, "rdma_ep: Could not open libibverbs.so. "
-                      "RDMA endpoint disabled.\n");
-      return;
-    }
+  if (!ibv_handle_) {
+    fprintf(stderr, "rdma_ep: Could not open "
+                    "libibverbs.so. "
+                    "RDMA endpoint disabled.\n");
+    return;
   }
 
   if (init_function_table() != 0) {

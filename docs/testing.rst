@@ -268,3 +268,10 @@ The GitHub Actions workflows run tests as follows:
 
 Hardware and sweep tests are not run in CI -- they
 require physical NIC and GPU hardware.
+
+VM-Isolated Testing
+-------------------
+
+Hardware and RDMA tests can trigger kernel panics on
+bare metal.  For a safer alternative that isolates
+failures inside a QEMU VM, see :doc:`vm-testing`.

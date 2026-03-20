@@ -182,6 +182,7 @@ public:
   __device__ static void quiet_single(QueuePair& qp);
 
   __device__ static void ring_doorbell(QueuePair& qp, uint32_t slot_idx);
+  __device__ static void ack_cq(QueuePair& qp, uint32_t cq_cons);
   __device__ static void poll_cq_until(QueuePair& qp, uint32_t requested);
   __device__ static void write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                        uintptr_t laddr, int32_t length,

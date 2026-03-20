@@ -1,0 +1,14 @@
+# packages-rocm-xio-vm: Bootstrap packages for the
+# rocm-xio test VM. ROCm and development tools are
+# installed later via Ansible (sbates130272.batesste).
+# Note indent by 2 spaces and use a hyphen!
+  - build-essential
+  - cmake
+  - git
+  - iproute2
+  - net-tools
+  - openssh-server
+  - pciutils
+  - python-is-python3
+  - python3-pip
+  - tree

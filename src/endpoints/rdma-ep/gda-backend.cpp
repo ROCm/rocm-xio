@@ -188,9 +188,9 @@ void Backend::open_dv_libs() {
 #endif
 
   if (provider_ == Provider::UNKNOWN) {
-    fprintf(stderr, "rdma_ep: No DV library available. "
-                    "Using standard ibverbs path.\n");
-    provider_ = requested;
+    fprintf(stderr, "rdma_ep: No DV library available."
+                    " Using standard ibverbs path"
+                    " (GPU kernel will not run).\n");
   }
 }
 
@@ -367,10 +367,20 @@ void Backend::create_queues() {
   qp_init.comp_mask = IBV_QP_INIT_ATTR_PD;
   qp_init.pd = pd_;
 
+  errno = 0;
   qp_ = ibv.create_qp_ex(context_, &qp_init);
-  XIO_CHECK_NNULL(qp_, "ibv_create_qp_ex");
+  if (!qp_) {
+    fprintf(stderr,
+            "rdma_ep: ibv_create_qp_ex failed"
+            " (errno=%d: %s)."
+            " DV library required.\n",
+            errno, strerror(errno));
+    return;
+  }
 
-  fprintf(stderr, "rdma_ep: Created QP num=%u, SQ depth=%d, CQ depth=%d\n",
+  fprintf(stderr,
+          "rdma_ep: Created QP num=%u,"
+          " SQ depth=%d, CQ depth=%d\n",
           qp_->qp_num, config_.sq_depth, ncqes);
 }
 
@@ -598,11 +608,18 @@ void Backend::create_parent_domain() {
 }
 
 void Backend::setup_gpu_qp() {
+  if (provider_ == Provider::UNKNOWN) {
+    fprintf(stderr, "rdma_ep: Skipping GPU QP setup"
+                    " (no DV library loaded).\n");
+    return;
+  }
+
   size_t qp_size = sizeof(QueuePair);
 
   host_qp_ = static_cast<QueuePair*>(malloc(qp_size));
   if (!host_qp_) {
-    fprintf(stderr, "rdma_ep: malloc failed for host QueuePair\n");
+    fprintf(stderr, "rdma_ep: malloc failed"
+                    " for host QueuePair\n");
     return;
   }
 

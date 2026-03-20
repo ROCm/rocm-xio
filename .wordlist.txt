@@ -876,6 +876,40 @@ xioBufferInfo
 xioQueueSetup
 XioTimingStats
 
+# ===== VM Testing Infrastructure Terms =====
+Ansible
+ansible
+batesste
+BDF
+driverctl
+DCMAKE
+Galaxy
+localds
+mypass
+playbook
+provisioning
+qcow
+sbates
+vCPU
+
+# ===== Testing Documentation Terms =====
+ARP
+calc
+CMakePresets
+CTest
+ExtractBusNumber
+extractEndpointName
+GetBusIdDistance
+GetLcaDepth
+rocprofv
+rq
+stddev
+sz
+teardown
+udev
+XIODetectGPUs
+XIOTestHelpers
+
 # ===== Documentation Infrastructure Terms =====
 Breathe
 breathe
