@@ -10,6 +10,11 @@
 NVME_EMUL=${NVME_EMUL:-/dev/nvme0}
 NVME_REAL=${NVME_REAL:-/dev/nvme1}
 
+# Resolve symlinks so sysfs lookups use the real
+# device name (e.g. /dev/rocm-xio-nvme-emul0 -> nvme1)
+NVME_EMUL=$(readlink -f "${NVME_EMUL}")
+NVME_REAL=$(readlink -f "${NVME_REAL}")
+
 NVME_EMUL_SHORT=${NVME_EMUL#/dev/}
 NVME_REAL_SHORT=${NVME_REAL#/dev/}
 

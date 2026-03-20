@@ -9,7 +9,7 @@ kernel panics the host stays up and the VM can simply
 be restarted.
 
 The VM infrastructure provides three CMake targets and
-a ``launch-vm`` wrapper script with three passthrough
+a ``launch-vm`` wrapper script with four passthrough
 modes.
 
 Prerequisites
@@ -27,7 +27,10 @@ QEMU >= 10.1        ``apt install qemu-system-x86``
                     ``github.com/sbates130272/``
                     ``qemu-minimal``
 Ansible             ``pip install ansible``
-``rocm-ernic``      Only needed for ``ernic`` mode
+``sshpass``         ``apt install sshpass`` (needed
+                    by Ansible for SSH passwords)
+``rocm-ernic``      Only needed for ``ernic`` and
+                    ``full`` modes
 ==================  ===================================
 
 CMake detects all of these at configure time and prints
@@ -106,6 +109,9 @@ Boots the VM.  The mode is selected via the
    # Emulated RDMA NIC (rocm-ernic)
    VM_MODE=ernic make launch-test-vm
 
+   # All devices combined
+   VM_MODE=full make launch-test-vm
+
 All modes pass the GPU through via VFIO and include
 an emulated 1 TB NVMe drive so ``nvme-ep`` testing
 is always available.
@@ -153,6 +159,29 @@ Variable              Default
 ``ERNIC_BACKEND``     ``loopback``
 ====================  ================================
 
+``full``
+^^^^^^^^
+
+Combines all device types: GPU, BNXT NIC, and NVMe
+controller passthrough via ``vfio-pci``, plus an
+emulated RDMA NIC via ``rocm-ernic`` (VFIO-user).
+All four PCI devices and the emulated NVMe are
+available inside the guest simultaneously.  This is
+useful for testing scenarios that span both RDMA and
+NVMe-EP paths in a single VM.
+
+All three passthrough devices must be bound to
+``vfio-pci`` on the host before launch:
+
+.. code-block:: bash
+
+   sudo driverctl set-override 0000:10:00.0 vfio-pci
+   sudo driverctl set-override 0000:c3:00.1 vfio-pci
+   sudo driverctl set-override 0000:85:00.0 vfio-pci
+
+The ``rocm-ernic`` server is started and stopped
+automatically, just as in ``ernic`` mode.
+
 CMake Cache Variables
 ---------------------
 
@@ -193,7 +222,7 @@ Variable                Default   Notes
 ``VCPUS``               16        Guest vCPU count
 ``VMEM``                32768     Guest RAM (MB)
 ``VM_MODE``             rdma      ``rdma``, ``nvme``,
-                                  or ``ernic``
+                                  ``ernic``, or ``full``
 ======================  ========  =====================
 
 GPU Detection
@@ -253,7 +282,12 @@ Troubleshooting
 **VM image not found**
    Run ``make gen-test-vm`` first.
 
-**rocm-ernic binary not found (ernic mode)**
-   Set ``ERNIC_BIN=/path/to/rocm_ernic`` or build
-   ``rocm-ernic`` (``ninja -C build`` in the
-   ``rocm-ernic`` directory).
+**rocm-ernic binary not found (ernic/full mode)**
+   Set ``ERNIC_BIN=/path/to/rocm-ernic`` or build
+   ``rocm-ernic``:
+
+   .. code-block:: bash
+
+      cd ~/Projects/rocm-ernic
+      cmake -B build -G Ninja
+      cmake --build build

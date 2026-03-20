@@ -5,6 +5,9 @@
   - build-essential
   - cmake
   - git
+  - libcli11-dev
+  - libnl-3-dev
+  - libnl-route-3-dev
   - iproute2
   - net-tools
   - openssh-server
