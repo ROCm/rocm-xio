@@ -118,6 +118,8 @@ display_job_info() {
 }
 
 # Detect GPU arch and set sdma_ep_allowed based on a SDMA whitelist.
+# Keep this list in sync with _SDMA_OSS7_TARGETS in CMakeLists.txt
+# and the overall set of SDMA-capable architectures.
 # MI300A (APU) shares gfx942 with MI300X but its SDMA engine
 # does not support the P2P paths we test, so we exclude it.
 detect_gpu_arch() {

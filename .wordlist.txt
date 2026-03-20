@@ -82,6 +82,15 @@ OpenMPI
 # ===== SDMA and Anvil =====
 AnvilLib's
 destructor
+DWORD
+DWORDs
+mtype
+OSS
+oss
+PHY
+sDMA
+snp
+structs
 amd-smi
 amdsmi
 AnvilLib

@@ -140,6 +140,48 @@ std::ostream& operator<<(std::ostream& os, const SDMA_PKT_ATOMIC& cmd) {
   return os;
 }
 
+#if XIO_SDMA_OSS7
+
+std::ostream& operator<<(std::ostream& os,
+                         const SDMA_PKT_COPY_LINEAR_PHY_MI4& cmd) {
+  os << "MI4_PHY op: " << cmd.HEADER_UNION.op_code
+     << " sub_op: " << cmd.HEADER_UNION.sub_op_code
+     << " count: " << cmd.COUNT_UNION.count;
+  os << " src[31:0] " << cmd.SRC_ADDR_LO_UNION.src_address_lo << " src[63:32] "
+     << cmd.SRC_ADDR_HI_UNION.src_address_hi;
+  os << " dst[31:0] " << cmd.DST_ADDR_LO_UNION.dst_address_lo << " dst[63:32] "
+     << cmd.DST_ADDR_HI_UNION.dst_address_hi;
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         const SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4& cmd) {
+  os << "MI4_WS op: " << cmd.HEADER_UNION.op
+     << " sub_op: " << cmd.HEADER_UNION.subop
+     << " wait: " << cmd.HEADER_UNION.wait
+     << " signal: " << cmd.HEADER_UNION.signal
+     << " count: " << cmd.COPY_COUNT_UNION.copy_count;
+  os << " src[31:0] " << cmd.SRC_ADDR_LO_UNION.src_addr_31_0 << " src[63:32] "
+     << cmd.SRC_ADDR_HI_UNION.src_addr_63_32;
+  os << " dst[31:0] " << cmd.DST_ADDR_LO_UNION.dst_addr_31_0 << " dst[63:32] "
+     << cmd.DST_ADDR_HI_UNION.dst_addr_63_32;
+  if (cmd.HEADER_UNION.signal) {
+    os << " sig_op: " << cmd.SIGNAL_CTRL_UNION.signal_operation;
+  }
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const SDMA_PKT_FENCE_MI4& cmd) {
+  os << "MI4_FENCE op: " << cmd.HEADER_UNION.op_code
+     << " sub_op: " << cmd.HEADER_UNION.sub_op_code
+     << " data: " << cmd.DATA_UNION.data;
+  os << " addr[31:0] " << cmd.ADDR_LO_UNION.fence_addr_lo << " addr[63:32] "
+     << cmd.ADDR_HI_UNION.fence_addr_hi;
+  return os;
+}
+
+#endif /* XIO_SDMA_OSS7 */
+
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                      hsa_agent_t& localAgent, uint32_t engineId) {
   (void)remoteDeviceId;
@@ -263,17 +305,48 @@ void SdmaQueue::dump(std::ofstream& logFile) {
           << " dw wptr: " << wrapped_wptr / sizeof(uint32_t) << std::endl;
   while (it < dw_enqueued) {
     logFile << "[" << it << "] ";
-    if ((*dwPtr & 0xFF) == SDMA_OP_COPY) {
-      SDMA_PKT_COPY_LINEAR* ptr = reinterpret_cast<SDMA_PKT_COPY_LINEAR*>(
-        dwPtr);
+    uint32_t opcode = *dwPtr & 0xFF;
+    [[maybe_unused]] uint32_t subop = (*dwPtr >> 8) & 0xFF;
+    if (opcode == SDMA_OP_COPY) {
+#if XIO_SDMA_OSS7
+      if (subop == SDMA_SUBOP_COPY_LINEAR_PHY_MI4) {
+        auto* ptr = reinterpret_cast<SDMA_PKT_COPY_LINEAR_PHY_MI4*>(dwPtr);
+        logFile << *ptr;
+        constexpr size_t dw = sizeof(SDMA_PKT_COPY_LINEAR_PHY_MI4) /
+                              sizeof(uint32_t);
+        it += dw;
+        dwPtr += dw;
+      } else if (subop == SDMA_SUBOP_COPY_LINEAR_WAIT_SIGNAL_MI4) {
+        auto* ptr = reinterpret_cast<SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4*>(
+          dwPtr);
+        logFile << *ptr;
+        constexpr size_t dw = sizeof(SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4) /
+                              sizeof(uint32_t);
+        it += dw;
+        dwPtr += dw;
+      } else
+#endif /* XIO_SDMA_OSS7 */
+      {
+        auto* ptr = reinterpret_cast<SDMA_PKT_COPY_LINEAR*>(dwPtr);
+        logFile << *ptr;
+        size_t dw = sizeof(SDMA_PKT_COPY_LINEAR) / sizeof(uint32_t);
+        it += dw;
+        dwPtr += dw;
+      }
+    } else if (opcode == SDMA_OP_ATOMIC) {
+      auto* ptr = reinterpret_cast<SDMA_PKT_ATOMIC*>(dwPtr);
       logFile << *ptr;
-      it += (sizeof(SDMA_PKT_COPY_LINEAR) / sizeof(uint32_t));
-      dwPtr += (sizeof(SDMA_PKT_COPY_LINEAR) / sizeof(uint32_t));
-    } else if ((*dwPtr & 0xFF) == SDMA_OP_ATOMIC) {
-      SDMA_PKT_ATOMIC* ptr = reinterpret_cast<SDMA_PKT_ATOMIC*>(dwPtr);
+      size_t dw = sizeof(SDMA_PKT_ATOMIC) / sizeof(uint32_t);
+      it += dw;
+      dwPtr += dw;
+#if XIO_SDMA_OSS7
+    } else if (opcode == SDMA_OP_FENCE && subop == SDMA_SUBOP_FENCE_MI4) {
+      auto* ptr = reinterpret_cast<SDMA_PKT_FENCE_MI4*>(dwPtr);
       logFile << *ptr;
-      it += (sizeof(SDMA_PKT_ATOMIC) / sizeof(uint32_t));
-      dwPtr += (sizeof(SDMA_PKT_ATOMIC) / sizeof(uint32_t));
+      constexpr size_t dw = sizeof(SDMA_PKT_FENCE_MI4) / sizeof(uint32_t);
+      it += dw;
+      dwPtr += dw;
+#endif /* XIO_SDMA_OSS7 */
     } else {
       logFile << *dwPtr << std::endl;
       dwPtr++;

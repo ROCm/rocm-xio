@@ -1,21 +1,13 @@
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: MIT
+ *
+ * Pre-OSS7 (CDNA3 / MI300X) SDMA packet structures.
+ */
+
 #pragma once
 
-const unsigned int SDMA_OP_NOP = 0;
-const unsigned int SDMA_OP_COPY = 1;
-const unsigned int SDMA_OP_WRITE = 2;
-
-const unsigned int SDMA_OP_FENCE = 5;
-const unsigned int SDMA_OP_TRAP = 6;
-const unsigned int SDMA_OP_POLL_REGMEM = 8;
-const unsigned int SDMA_OP_TIMESTAMP = 13;
-const unsigned int SDMA_OP_ATOMIC = 10;
-const unsigned int SDMA_OP_CONST_FILL = 11;
-
-const unsigned int SDMA_SUBOP_COPY_LINEAR = 0;
-const unsigned int SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW = 36;
-
-const unsigned int SDMA_SUBOP_WRITE_LINEAR = 0;
-const unsigned int SDMA_ATOMIC_ADD64 = 47;
+#include "sdma_opcodes.h"
 
 typedef struct SDMA_PKT_COPY_LINEAR_TAG {
   union {
