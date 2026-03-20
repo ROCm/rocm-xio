@@ -223,9 +223,9 @@ if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
 endif()
 
 # Vendor kernel module (DKMS) targets
-# BNXT kernel module is managed via standalone
-# setup script (kernel/bnxt/setup-bnxt-dv-dkms.sh)
-# without a CMake module.
+if(GDA_BNXT)
+  include(XIOBnxtKernelModule)
+endif()
 if(GDA_IONIC)
   include(XIOIonicKernelModule)
 endif()
