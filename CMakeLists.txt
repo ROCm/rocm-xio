@@ -556,3 +556,6 @@ include(XIOUtilityTargets)
 
 # VM-based testing (launch-test-vm target)
 include(XIOVirtualMachine)
+
+# VM test targets (vm-test-ep, vm-rdma-ep, vm-nvme-ep)
+include(XIOVMTests)
