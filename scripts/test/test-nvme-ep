@@ -54,13 +54,13 @@ run_test() {
     
     # Run test, redirecting stdout to log file
     # Capture stderr separately to extract PASS/FAIL messages
-    local test_stderr=$(mktemp)
+    local test_stderr
+    test_stderr=$(mktemp)
     local exit_code=0
     "$@" > "$test_log" 2>"$test_stderr" || exit_code=$?
     
-    # Extract PASS/FAIL line from stderr (test script outputs it there)
-    # Pattern matches PASS or FAIL even with color codes
-    local result_line=$(grep -E "(PASS|FAIL):" "$test_stderr" 2>/dev/null | head -1 || echo "")
+    local result_line
+    result_line=$(grep -E "(PASS|FAIL):" "$test_stderr" 2>/dev/null | head -1 || echo "")
     if [ -n "$result_line" ]; then
         # Display the result line (it already has color codes)
         echo "$result_line"

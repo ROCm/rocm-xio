@@ -50,6 +50,8 @@ Quick Start
    :caption: User Guide
 
    building
+   testing
+   vm-testing
    endpoints
    kernel-module
    memory-modes

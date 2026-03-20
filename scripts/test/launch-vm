@@ -1,115 +1,305 @@
 #!/bin/bash
+#
+# launch-vm
+#
+# Launch a QEMU VM for rocm-xio testing. This is a thin
+# wrapper around qemu-minimal's run-vm script.
+#
+# Usage:
+#   ./launch-vm [rdma|nvme|ernic]
+#
+# Modes:
+#   rdma  - GPU + BNXT NIC passthrough (default)
+#   nvme  - GPU + NVMe controller + PCI MMIO bridge
+#   ernic - GPU passthrough + emulated RDMA NIC via
+#           rocm-ernic (VFIO-user sockets)
+#
+# Both modes always include an emulated NVMe so nvme-ep
+# testing is available regardless of mode.
+#
+# Environment variables:
+#   SSH_PORT        SSH forwarding port (default: 2222)
+#   GPU_BDF         GPU PCI BDF (default: 10:00.0)
+#   RDMA_NIC_BDF    BNXT NIC BDF for rdma mode
+#                   (default: c3:00.1)
+#   NVME_DEV_BDF    NVMe controller BDF for nvme mode
+#                   (default: 85:00.0)
+#   ERNIC_BIN       Path to rocm-ernic binary
+#   ERNIC_INSTANCES Number of ERNIC instances
+#                   (default: 1)
+#   ERNIC_BACKEND   ERNIC backend (default: loopback)
+#   RUN_VM          Path to qemu-minimal run-vm script
+#   QEMU_PATH       Path prefix for QEMU binary
+#   VCPUS           Number of vCPUs (default: 16)
+#   VMEM            VM memory in MB (default: 32768)
 
 set -e
 
-#QEMU="/opt/qemu-pci-mmio-submit/bin/qemu-system-x86_64"
-QEMU="/home/stebates/Projects/qemu/build-submit/qemu-system-x86_64"
-IMAGE="/home/stebates/Projects/qemu-minimal/images/rocm-axiio.qcow2"
-VFIO_PCI="10:00.0"
-SSH_PORT="${SSH_PORT:-2222}"  # SSH forwarding port (default: 2222)
 
-echo "==================================================================="
-echo "PCI MMIO Bridge Test - Hybrid Architecture"
-echo "==================================================================="
-echo ""
-echo "Architecture:"
-echo "  - PCI device for discovery (Vendor 0x1b36, Device 0x0015)"
-echo "  - Shadow buffer in guest RAM (not BAR/MMIO)"
-echo "  - GPA exposed via PCI config space offset 0x40"
-echo "  - VFIO device can DMA to shadow_gpa"
-echo ""
-echo "Devices:"
-echo "  - PCI MMIO Bridge: shadow-gpa=0x80000000, size=8192"
-echo "  - PCI Test Device: with RAM BAR for testing"
-echo "  - Emulated NVMe: nvme0, 4GB"
-echo "  - VFIO device: $VFIO_PCI"
-echo ""
-echo "Networking:"
-echo "  - SSH forwarding: localhost:$SSH_PORT -> guest:22"
-echo "  - Connect with: ssh -p $SSH_PORT user@localhost"
-echo ""
-echo "File Sharing:"
-echo "  - Host: /home/stebates/Projects"
-echo "  - Mount tag: 'hostfs'"
-echo "  - In guest: sudo mount -t 9p -o trans=virtio hostfs /mnt/hostfs"
-echo ""
+MODE="${1:-rdma}"
+SSH_PORT="${SSH_PORT:-2222}"
+GPU_BDF="${GPU_BDF:-10:00.0}"
+RDMA_NIC_BDF="${RDMA_NIC_BDF:-c3:00.1}"
+NVME_DEV_BDF="${NVME_DEV_BDF:-85:00.0}"
+VCPUS="${VCPUS:-16}"
+VMEM="${VMEM:-32768}"
 
-# Check if image exists
-if [ ! -f "$IMAGE" ]; then
-    echo "ERROR: Image file not found: $IMAGE"
+ERNIC_BIN="${ERNIC_BIN:-}"
+ERNIC_INSTANCES="${ERNIC_INSTANCES:-1}"
+ERNIC_BACKEND="${ERNIC_BACKEND:-loopback}"
+
+RUN_VM="${RUN_VM:-${HOME}/Projects/qemu-minimal/qemu/run-vm}"
+
+RUN_VM_DIR="$(dirname "${RUN_VM}")"
+IMAGES="${RUN_VM_DIR}/../images"
+
+ERNIC_PIDS=()
+
+cleanup() {
+    for pid in "${ERNIC_PIDS[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+            echo "Stopping rocm-ernic (pid ${pid})..."
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+        fi
+    done
+    for sock in /tmp/vfio-user-rocm-ernic-*.sock; do
+        [ -S "${sock}" ] && rm -f "${sock}"
+    done
+}
+
+check_vfio_binding() {
+    local bdf="$1"
+    local sysfs="/sys/bus/pci/devices/0000:${bdf}"
+
+    if [ ! -e "${sysfs}" ]; then
+        echo "ERROR: PCI device ${bdf} not found."
+        echo "  Check lspci output for valid BDFs."
+        exit 1
+    fi
+
+    local driver=""
+    if [ -L "${sysfs}/driver" ]; then
+        driver="$(basename \
+          "$(readlink "${sysfs}/driver")")"
+    fi
+
+    if [ "${driver}" != "vfio-pci" ]; then
+        echo "ERROR: ${bdf} is bound to" \
+             "'${driver:-none}', not vfio-pci."
+        echo "  Bind with:"
+        echo "    sudo driverctl set-override" \
+             "0000:${bdf} vfio-pci"
+        echo "  To restore later:"
+        echo "    sudo driverctl unset-override" \
+             "0000:${bdf}"
+        exit 1
+    fi
+}
+
+check_ssh_port() {
+    if ss -tln 2>/dev/null \
+         | grep -q ":${SSH_PORT} "; then
+        echo "ERROR: Port ${SSH_PORT} already in use."
+        echo "  Override with:" \
+             "SSH_PORT=2223 $0 ${MODE}"
+        exit 1
+    fi
+}
+
+find_ernic_binary() {
+    if [ -n "${ERNIC_BIN}" ] && [ -x "${ERNIC_BIN}" ]
+    then
+        return 0
+    fi
+
+    local search_paths=(
+        "${HOME}/Projects/rocm-ernic/build/rocm_ernic"
+        "${HOME}/Projects/rocm-ernic/build/rocm-ernic"
+        "/usr/local/bin/rocm_ernic"
+        "/usr/bin/rocm_ernic"
+    )
+    for p in "${search_paths[@]}"; do
+        if [ -x "${p}" ]; then
+            ERNIC_BIN="${p}"
+            return 0
+        fi
+    done
+
+    echo "ERROR: rocm-ernic binary not found."
+    echo "  Set ERNIC_BIN=/path/to/rocm_ernic or"
+    echo "  build rocm-ernic:"
+    echo "    cd ~/Projects/rocm-ernic && ninja -C build"
+    exit 1
+}
+
+start_ernic_servers() {
+    local count="${ERNIC_INSTANCES}"
+    local sockets=""
+
+    for i in $(seq 1 "${count}"); do
+        local sock="/tmp/vfio-user-rocm-ernic-${i}.sock"
+        rm -f "${sock}"
+
+        echo "Starting rocm-ernic instance ${i}..."
+        echo "  socket:  ${sock}"
+        echo "  backend: ${ERNIC_BACKEND}"
+
+        sudo "${ERNIC_BIN}" \
+            --socket "${sock}" \
+            --backend "${ERNIC_BACKEND}" \
+            --verbose &
+        ERNIC_PIDS+=($!)
+
+        local retries=0
+        while [ ! -S "${sock}" ]; do
+            sleep 0.2
+            retries=$((retries + 1))
+            if [ ${retries} -gt 25 ]; then
+                echo "ERROR: rocm-ernic did not" \
+                     "create socket ${sock}"
+                cleanup
+                exit 1
+            fi
+        done
+        echo "  rocm-ernic ${i} ready (pid ${!})"
+
+        if [ -z "${sockets}" ]; then
+            sockets="${sock}"
+        else
+            sockets="${sockets},${sock}"
+        fi
+    done
+
+    export VFIO_USERDEV="${sockets}"
+}
+
+# Validate mode
+case "${MODE}" in
+    rdma|nvme|ernic) ;;
+    *)
+        echo "ERROR: Unknown mode '${MODE}'."
+        echo "  Usage: $0 [rdma|nvme|ernic]"
+        exit 1
+        ;;
+esac
+
+# Validate run-vm exists
+if [ ! -x "${RUN_VM}" ]; then
+    echo "ERROR: run-vm not found at: ${RUN_VM}"
+    echo "  Set RUN_VM=/path/to/run-vm or install" \
+         "qemu-minimal."
     exit 1
 fi
 
-# Check if VFIO device exists
-if [ ! -e "/sys/bus/pci/devices/0000:$VFIO_PCI" ]; then
-    echo "WARNING: VFIO device $VFIO_PCI not found"
-    echo "  Continuing anyway (you can still test emulated devices)"
-    echo ""
+# Validate VM image exists
+if [ ! -f "${IMAGES}/rocm-xio-vm.qcow2" ]; then
+    echo "ERROR: VM image not found at:"
+    echo "  ${IMAGES}/rocm-xio-vm.qcow2"
+    echo "  Create it with: make gen-test-vm"
+    exit 1
 fi
 
-# Create temporary NVMe backing file
-NVME_IMG="/tmp/nvme-test-$$.img"
-echo "Creating temporary NVMe backing file: $NVME_IMG"
-dd if=/dev/zero of="$NVME_IMG" bs=1M count=4096 2>/dev/null
-echo ""
+check_ssh_port
 
-echo "==================================================================="
-echo "Starting QEMU..."
-echo "==================================================================="
+# GPU passthrough for all modes except ernic
+case "${MODE}" in
+    rdma|nvme)
+        check_vfio_binding "${GPU_BDF}"
+        ;;
+    ernic)
+        check_vfio_binding "${GPU_BDF}"
+        find_ernic_binary
+        ;;
+esac
+
+# Build mode-specific settings
+case "${MODE}" in
+    rdma)
+        check_vfio_binding "${RDMA_NIC_BDF}"
+        export PCI_HOSTDEV="${GPU_BDF},${RDMA_NIC_BDF}"
+        ;;
+    nvme)
+        check_vfio_binding "${NVME_DEV_BDF}"
+        export PCI_HOSTDEV="${GPU_BDF},${NVME_DEV_BDF}"
+        export PCI_MMIO_BRIDGE=true
+        ;;
+    ernic)
+        export PCI_HOSTDEV="${GPU_BDF}"
+        trap cleanup SIGINT ERR EXIT
+        start_ernic_servers
+        ;;
+esac
+
+SEP="==========================================="
+SEP="${SEP}=============================="
+
+echo "${SEP}"
+echo "rocm-xio Test VM  (mode: ${MODE})"
+echo "${SEP}"
 echo ""
-echo "SSH Access:"
-echo "  ssh -p $SSH_PORT user@localhost"
-echo "  (or from another terminal while VM is running)"
+echo "Devices:"
+echo "  GPU:          ${GPU_BDF} (vfio-pci)"
+case "${MODE}" in
+    rdma)
+        echo "  BNXT NIC:     ${RDMA_NIC_BDF}" \
+             "(vfio-pci)"
+        ;;
+    nvme)
+        echo "  NVMe ctrl:    ${NVME_DEV_BDF}" \
+             "(vfio-pci)"
+        ;;
+    ernic)
+        echo "  ERNIC:        ${ERNIC_INSTANCES}x" \
+             "rocm-ernic (${ERNIC_BACKEND})"
+        echo "  Sockets:      ${VFIO_USERDEV}"
+        ;;
+esac
+echo "  Emulated NVMe: 1x 1TB"
+echo ""
+echo "Networking:"
+echo "  SSH: ssh -p ${SSH_PORT} user@localhost"
 echo ""
 echo "Serial Console:"
-echo "  - Currently viewing serial console"
-echo "  - Press Ctrl-A then C to toggle to QEMU monitor"
-echo "  - Press Ctrl-A then X to exit QEMU"
+echo "  Ctrl-A then C  toggle QEMU monitor"
+echo "  Ctrl-A then X  exit QEMU"
 echo ""
-echo "Guest can discover devices via lspci:"
-echo "  00:04.0 - MMIO Bridge (Red Hat, Inc. Device 0015)"
-echo "  00:05.0 - PCI Test Device (Red Hat, Inc. Device 0005)"
-echo "  00:06.0 - NVMe (emulated)"
+echo "${SEP}"
+echo "In the guest:"
+echo "  sudo mount -t 9p" \
+     "-o trans=virtio,version=9p2000.L \\"
+echo "    hostfs /home/stebates/Projects"
+echo "  cd /home/stebates/Projects/rocm-xio/build"
+echo "  cmake .. -DCMAKE_BUILD_TYPE=Debug" \
+     "&& make -j\$(nproc)"
 echo ""
-echo "Read shadow buffer GPA from MMIO Bridge:"
-echo "  setpci -s 00:04.0 40.L  # GPA low = 0x80000000"
-echo "  setpci -s 00:04.0 44.L  # GPA high = 0x00000000"
-echo ""
-echo "Test MMIO bridge with pci-testdev:"
-echo "  Target BDF: 0x0500 (00:05.0)"
-echo "  BAR 0: Memory BAR (1MB RAM, safe for read/write)"
-echo ""
-echo "To use a different SSH port: SSH_PORT=3333 $0"
-echo "==================================================================="
+case "${MODE}" in
+    rdma)
+        echo "  # RDMA loopback test"
+        echo "  sudo ./tests/unit/rdma-ep/" \
+             "test-rdma-loopback -n 2"
+        echo "  sudo ./xio-tester rdma-ep --loopback"
+        ;;
+    nvme)
+        echo "  # NVMe endpoint test"
+        echo "  sudo ./xio-tester nvme-ep"
+        ;;
+    ernic)
+        echo "  # ERNIC loopback test"
+        echo "  sudo ./tests/unit/rdma-ep/" \
+             "test-rdma-loopback -n 2"
+        echo "  sudo ./xio-tester rdma-ep --loopback"
+        ;;
+esac
+echo "${SEP}"
 echo ""
 
-$QEMU \
-    -machine q35,accel=kvm \
-    -cpu EPYC \
-    -m 32G \
-    -smp 16 \
-    -drive file="$IMAGE",if=virtio,format=qcow2 \
-    -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
-    -device virtio-net-pci,netdev=net0 \
-    -virtfs local,path=/home/stebates/Projects,mount_tag=hostfs,security_model=none,id=hostfs \
-    -device pci-mmio-bridge,id=mmio-bridge,shadow-gpa=0x80000000,\
-shadow-size=8192,poll-interval-ns=1000000,addr=4.0 \
-    -device pci-testdev,membar=1M,membar-backed=on,addr=5.0 \
-    -drive id=nvme0,file="$NVME_IMG",if=none,format=raw \
-    -device nvme,serial=nvme0,drive=nvme0,ioeventfd=off,dbcs=off \
-    -device pcie-root-port,id=pcie.1 \
-    -device vfio-pci,host=$VFIO_PCI,id=vfio0,bus=pcie.1 \
-    -device vfio-pci,host=85:00.0,id=vfio1 \
-    -serial mon:stdio \
-    -display none \
-    -trace "pci_mmio_*",file=/tmp/qemu-rocm-xio-trace.log \
-    -trace "pci_nvme_*",file=/tmp/qemu-rocm-xio-trace.log \
-    -trace "nvme_*",file=/tmp/qemu-rocm-xio-trace.log
+export VM_NAME=rocm-xio-vm
+export VCPUS
+export VMEM
+export FILESYSTEM=/home/stebates/Projects
+export SSH_PORT
+export IMAGES
+export NVME=1
 
-    
-# Cleanup
-echo ""
-echo "Cleaning up temporary NVMe image..."
-rm -f "$NVME_IMG"
-echo "Done."
-
+exec "${RUN_VM}"

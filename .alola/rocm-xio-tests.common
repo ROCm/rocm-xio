@@ -33,6 +33,17 @@ elif [ -e "${PROJECT_DIR}/.alola/.env-setup.sh" ]; then
   exit 1
 fi
 
+# Display useful information about this slurm-based run
+display_job_info() {
+  echo "======================================================================"
+  echo "Job ID:   ${SLURM_JOB_ID}"
+  echo "Job Name: ${SLURM_JOB_NAME}"
+  echo "Node(s)   ${SLURM_NODELIST}"
+  echo "Working Directory: ${SLURM_SUBMIT_DIR}"
+  echo "Start Time:        $(date)"
+  echo "======================================================================"
+}
+
 # Detect GPU arch and set sdma_ep_allowed based on a SDMA whitelist.
 detect_gpu_arch() {
   ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
@@ -65,7 +76,10 @@ build_and_load_kernel_module_on_host() {
   ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make clean"
   ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && make -j $(nproc)"
   ${SSH_LOCALHOST} "cd ${WORKING_DIR}/kernel/rocm-xio && sudo make install"
-  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio"
+  ${SSH_LOCALHOST} "sudo depmod -a"
+  ${SSH_LOCALHOST} "sudo modprobe -r rocm-xio || true"
+  ${SSH_LOCALHOST} "sudo insmod ${WORKING_DIR}/kernel/rocm-xio/rocm-xio.ko"
+  ${SSH_LOCALHOST} "lsmod | grep rocm_xio && modinfo rocm_xio | head -5"
 }
 
 unload_kernel_module_on_host() {

@@ -4,7 +4,8 @@
 set -euo pipefail
 
 OUTPUT_DIR="$1"
-RDMA_CORE_REPO="https://raw.githubusercontent.com/linux-rdma/rdma-core/master"
+RDMA_CORE_VERSION="${RDMA_CORE_VERSION:-v62.0}"
+RDMA_CORE_REPO="https://raw.githubusercontent.com/linux-rdma/rdma-core/${RDMA_CORE_VERSION}"
 
 mkdir -p "$OUTPUT_DIR"
 

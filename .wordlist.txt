@@ -45,16 +45,29 @@ dmabuf
 DMAs
 GiB
 gib
+GID
+GIDs
+gid
+gids
 InfiniBand
 infiniband
+IPv
 libhsa
 librocm
 libstdc
+libibverbs
+loopback
+Loopback
+MPI
 RDMA
 rdma
 RoCE
+RoCEv
 SDMA
 sdma
+SHMEM
+subnet
+TCP
 XGMI
 xgmierr
 
@@ -92,10 +105,12 @@ AMDGPU
 amdgpu
 Atomics
 atomics
+dlopen
 fgpu
 gpu
 GPUs
 gpus
+HIPAllocator
 hipDeviceCanAccessPeer
 hipcc
 hipHostMalloc
@@ -104,6 +119,8 @@ hipImportExternalMemory
 HSA
 hsa
 MiB
+NUMA
+numa
 Profiler
 xhip
 
@@ -124,6 +141,7 @@ rocminfo
 # ===== Hardware and System =====
 cpu
 devmem
+hostname
 IOMMU
 iommu
 kvm
@@ -131,6 +149,10 @@ llvm
 lspci
 MMIO
 mmio
+modinfo
+netdev
+NetworkManager
+nmcli
 PCI
 pci
 pcie
@@ -138,6 +160,7 @@ PCIe
 pciutils
 QEMU
 qemu
+sysfs
 vCPUs
 VFIO
 vfio
@@ -149,6 +172,7 @@ VMEM
 VMs
 
 # ===== Code Identifiers =====
+AmoDescriptor
 cqQueue
 Ctrl
 Dev
@@ -156,6 +180,7 @@ driveEndpoint
 emulateEndpoint
 Endpoints
 eXternal
+FreeList
 Greathouse
 Iendpoints
 Lenovo
@@ -168,9 +193,13 @@ rcsD
 rcsD
 Repo
 Rescan
+RmaDescriptor
 ROCr
 rocSHMEM
+rocSHMEM's
 Sandisk
+SpinLock
+spinlock
 sqQueue
 ThinkStation
 Unmount
@@ -185,6 +214,7 @@ alola
 amdclang
 aspell
 bashrc
+devinfo
 bugfix
 bugfixes
 bugfixing
@@ -204,6 +234,7 @@ hpp
 makefile
 Makefile
 pty
+pwd
 pyspelling
 rojopolis
 shellcheck
@@ -217,10 +248,14 @@ wordlist
 # ===== Miscellaneous =====
 api
 automatable
+byteswap
 CamelCase
 Changelog
 CPUs
 datacenter
+endian
+Endian
+enum
 ar
 atlassian
 awk
@@ -399,6 +434,9 @@ yaml
 yml
 
 # ===== CMake and Build System Terms =====
+DBUILD
+DGDA
+DIOCTL
 DOFFLOAD
 DINSTALL
 DIRS
@@ -415,15 +453,20 @@ mknod
 codespellrc
 dkms
 instantiation
+iter
+iters
 MERCHANTABILITY
 NONINFRINGEMENT
 param
+pes
 pragma
 PRs
 STYLEGUIDE
 Subdirectory
 subdirectory
 sublicense
+unmanaged
+util
 vX
 
 # ===== Common Documentation Terms =====
@@ -487,6 +530,18 @@ virtBase
 pageBase
 pageSize
 
+# ===== Network Interface and Hostname Terms =====
+aus
+ccs
+dcgpu
+eno
+enp
+ffff
+np
+thohuber
+xio's
+zst
+
 # ===== HTML and Markdown Terms =====
 blockquote
 br
@@ -503,6 +558,8 @@ ADDR
 CMD
 DAXIIO
 DGPU
+EINVAL
+ETIMEDOUT
 ENV
 GPU's
 HOSTDEV
@@ -522,6 +579,7 @@ ptr
 sqeType
 threadfence
 uint
+xA
 xcafe
 xdeadbeef
 xF
@@ -646,32 +704,59 @@ vec
 xdbe
 
 # ===== RDMA Terms =====
+BCM
 BNXT
 BlueFlame
 Broadcom
+CCQE
 ConnectX
 CQEs
+CQs
+DBNXT
+DKMS
 DPU
 EFA
+ERNIC
+ernicdv
+fw
 HPC
 HPE
+hsi
+ib
+ibv
 IOCTLs
 KFD
+KMOD
+libbnxt
+lladdr
 MLX
 Mellanox
+nbi
 NIC
 NIC's
 NetXtreme
+nud
 OPA
 PVRDMA
 Paravirtualized
 Pensando
 QP
+QPs
 QueuePair
 RDMAVendor
+rma
+rocep
 RQ
 Recv
+RTR
+RTS
 SmartNIC
+UAPI
+uapi
+UAR
+udata
+umem
+VAs
 VMware
 WQE
 WQEs
@@ -790,6 +875,40 @@ XioEndpointConfig
 xioBufferInfo
 xioQueueSetup
 XioTimingStats
+
+# ===== VM Testing Infrastructure Terms =====
+Ansible
+ansible
+batesste
+BDF
+driverctl
+DCMAKE
+Galaxy
+localds
+mypass
+playbook
+provisioning
+qcow
+sbates
+vCPU
+
+# ===== Testing Documentation Terms =====
+ARP
+calc
+CMakePresets
+CTest
+ExtractBusNumber
+extractEndpointName
+GetBusIdDistance
+GetLcaDepth
+rocprofv
+rq
+stddev
+sz
+teardown
+udev
+XIODetectGPUs
+XIOTestHelpers
 
 # ===== Documentation Infrastructure Terms =====
 Breathe

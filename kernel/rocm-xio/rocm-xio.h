@@ -37,6 +37,10 @@
   _IOW(ROCM_XIO_IOC_MAGIC, 9, struct rocm_xio_unregister_buffer_req)
 #define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
   _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_xio_mmio_bridge_shadow_req)
+#define ROCM_XIO_ALLOC_CONTIG_QUEUE                                            \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_xio_alloc_contig_req)
+#define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
+  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_xio_free_contig_req)
 
 /* Flags for VRAM physical address request */
 #define ROCM_XIO_FLAG_EMULATED                                                 \
@@ -87,11 +91,13 @@ struct rocm_xio_bind_device_req {
 
 /* Register queue address for injection (explicit virt->phys mapping) */
 struct rocm_xio_register_queue_addr_req {
-  __u64 virt_addr; /* Input: Virtual address (userspace pointer) */
-  __u64 phys_addr; /* Input: Physical address (from GET_VRAM_PHYS_ADDR) */
+  __u64 virt_addr; /* Input: Virtual address (userspace ptr) */
+  __u64 phys_addr; /* Input: Physical address (PRP1/kprobe) */
   __u64 size;      /* Input: Queue size in bytes */
+  __u64 prp2;      /* Input: PRP2 for PC=0 queues (0=none) */
+  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD) */
   __u8 queue_type; /* Input: 0=SQ, 1=CQ, 2=both */
-  __u16 nvme_bdf;  /* Input: NVMe device BDF (0xBBDD format), 0 if unknown */
+  __u8 reserved[5];
 };
 
 /* Unregister queue address */
@@ -119,6 +125,19 @@ struct rocm_xio_mmio_bridge_shadow_req {
   __u16 bridge_bdf;  /* Input: PCI MMIO bridge BDF (0xBBDD format) */
   __u64 shadow_gpa;  /* Output: Shadow buffer Guest Physical Address */
   __u64 shadow_size; /* Output: Shadow buffer size in bytes */
+};
+
+/* Allocate physically contiguous queue memory via DMA API */
+struct rocm_xio_alloc_contig_req {
+  __u64 size;        /* Input: allocation size in bytes */
+  __u16 nvme_bdf;    /* Input: NVMe device BDF */
+  __u64 phys_addr;   /* Output: DMA/physical address */
+  __u32 mmap_offset; /* Output: page offset for mmap */
+};
+
+/* Free contiguous queue memory */
+struct rocm_xio_free_contig_req {
+  __u32 mmap_offset; /* Input: mmap_offset from alloc */
 };
 
 #endif /* ROCM_XIO_H */
