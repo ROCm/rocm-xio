@@ -14,7 +14,7 @@
 #   Ensure job only runs on nodes with spare NVMe devices
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
 #   Also ensure a recent ROCm version since we need to run outside enroot.
-#SBATCH --constraint=MARKHAM&NVME&(ROCM7.2.0)
+#SBATCH --constraint=MARKHAM&NVME&(ROCM7.2.0|ROCM7.3.0|ROCM7.1.1|ROCM7.0.1)
 
 set -xe
 
@@ -27,6 +27,12 @@ if [ -n "${SLURM_SUBMIT_DIR}" ]; then
 else
   . "$(dirname "${BASH_SOURCE[0]}")/rocm-xio-tests.common"
 fi
+
+run_on_host() {
+  ${SSH_LOCALHOST} "sudo \
+LD_LIBRARY_PATH=/opt/rocm/lib \
+HSA_FORCE_FINE_GRAIN_PCIE=1 $*"
+}
 
 cleanup() {
   echo "Cleaning up..."
@@ -97,6 +103,7 @@ fi
 
 # Build rocm-xio
 cd "${PROJECT_DIR}"
+detect_gpu_arch
 setup_and_build_workdir "nvme-ep"
 
 echo "Building and loading kernel module on host..."
@@ -125,32 +132,39 @@ fi
 echo ""
 
 test_run "NVMe-EP memory-mode 0" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
---controller ${NON_ROOTFS_CTRL} --access-pattern random \
---memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 --read-io -23 \
---queue-length 128\""
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 0 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io -23 \
+--queue-length 128'"
 
 sleep 3
 
+# VRAM-backed queues require CDNA GPUs; RDNA (gfx1100)
+# cannot DMA NVMe I/O to device memory reliably.
+if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
+
 test_run "NVMe-EP memory-mode 3" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
---controller ${NON_ROOTFS_CTRL} --access-pattern random \
---memory-mode 3 --less-timing --lbas-per-io 1 --lfsr-seed 32 \
---read-io -573 --queue-length 128\""
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 3 --less-timing \
+--lbas-per-io 1 --lfsr-seed 32 --read-io -573 \
+--queue-length 128'"
 
 sleep 3
 
 test_run "NVMe-EP memory-mode 11" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-sudo -E ${WORKING_DIR}/build/xio-tester nvme-ep \
---controller ${NON_ROOTFS_CTRL} --access-pattern random \
---memory-mode 11 --less-timing --lbas-per-io 1 --lfsr-seed 32 \
---read-io -573 --queue-length 128\""
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 11 --less-timing \
+--lbas-per-io 1 --lfsr-seed 32 --read-io -573 \
+--queue-length 128'"
+
+else
+  echo "INFO: Skipping VRAM memory-modes 3/11" \
+    "(${ROCM_GPU_ARCH} does not support NVMe DMA" \
+    "to device memory)."
+fi
 
 # Disable NVMe duration capture
 CAPTURE_NVME_DURATION=0
@@ -178,41 +192,36 @@ fi
 if [ "${HAVE_VERIFY_DEPS}" = "true" ]; then
 
 test_run "NVMe-EP write-verify memory-mode 0" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
-export NUM_WRITES=64; \
-export MEMORY_MODE=0; \
-export LFSR_SEED=0xDEAD; \
-export BASE_LBA=0; \
-export TEMP_DIR=${WORKING_DIR}/verify-m0; \
-sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+NUM_WRITES=64 MEMORY_MODE=0 \
+LFSR_SEED=0xDEAD BASE_LBA=0 \
+TEMP_DIR=${WORKING_DIR}/verify-m0 \
+${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
+if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
 
 sleep 3
 
 test_run "NVMe-EP write-verify memory-mode 3" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
-export NUM_WRITES=64; \
-export MEMORY_MODE=3; \
-export LFSR_SEED=0xBEEF; \
-export BASE_LBA=0; \
-export TEMP_DIR=${WORKING_DIR}/verify-m3; \
-sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+NUM_WRITES=64 MEMORY_MODE=3 \
+LFSR_SEED=0xBEEF BASE_LBA=0 \
+TEMP_DIR=${WORKING_DIR}/verify-m3 \
+${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
 
 sleep 3
 
 test_run "NVMe-EP write-verify memory-mode 11" \
-  "${SSH_LOCALHOST} \"export LD_LIBRARY_PATH=/opt/rocm/lib; \
-export HSA_FORCE_FINE_GRAIN_PCIE=1; \
-export XIO_TESTER=${WORKING_DIR}/build/xio-tester; \
-export NUM_WRITES=64; \
-export MEMORY_MODE=11; \
-export LFSR_SEED=0xCAFE; \
-export BASE_LBA=0; \
-export TEMP_DIR=${WORKING_DIR}/verify-m11; \
-sudo -E ${VERIFY_CMD} ${NON_ROOTFS_CTRL}\""
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+NUM_WRITES=64 MEMORY_MODE=11 \
+LFSR_SEED=0xCAFE BASE_LBA=0 \
+TEMP_DIR=${WORKING_DIR}/verify-m11 \
+${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
+fi # gfx1100 skip
 
 fi # HAVE_VERIFY_DEPS
 

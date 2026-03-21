@@ -126,42 +126,8 @@ run_p2p_test() {
 
 label="p2p_n${ITERATIONS}_s${TRANSFER_SIZE}"
 
-# Run the P2P test and track result
-TOTAL_TESTS=$((TOTAL_TESTS + 1))
-test_name="sdma-ep P2P (GPU 0 -> GPU 1)"
-echo ""
-echo "Running test ${TOTAL_TESTS}: ${test_name}"
-echo "----------------------------------------"
-
-# Get node name
-node_name=$(get_node_name)
-
-# Run test and capture output while also displaying it
-temp_output_file=$(mktemp)
-run_p2p_test "${ITERATIONS}" "${TRANSFER_SIZE}" "${label}" 2>&1 | tee "${temp_output_file}"
-EXIT_CODE=${PIPESTATUS[0]}
-output=$(cat "${temp_output_file}")
-rm -f "${temp_output_file}"
-
-# Extract GPU device info (model and ID) from output
-gpu_device=$(extract_gpu_device_info "${output}")
-
-# Store test information
-TEST_NAMES+=("${test_name}")
-TEST_NODES+=("${node_name}")
-TEST_GPU_DEVICES+=("${gpu_device}")
-
-if [ ${EXIT_CODE} -eq 0 ]; then
-  PASSED_TESTS=$((PASSED_TESTS + 1))
-  TEST_RESULTS+=("PASS")
-  echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
-  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
-else
-  FAILED_TESTS=$((FAILED_TESTS + 1))
-  TEST_RESULTS+=("FAIL")
-  echo "✗ Test ${TOTAL_TESTS} FAILED: ${test_name} (exit code: ${EXIT_CODE})"
-  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
-fi
+test_run "sdma-ep P2P (GPU 0 -> GPU 1)" \
+  "run_p2p_test ${ITERATIONS} ${TRANSFER_SIZE} ${label}"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"

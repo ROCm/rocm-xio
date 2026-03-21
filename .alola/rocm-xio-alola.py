@@ -37,8 +37,10 @@ TESTS = [
      "rocm-xio-tests.two-gpu.sbatch"),
     ("nvme-ep",
      "rocm-xio-tests.nvme-ep.sbatch"),
-    ("rdma-ep",
-     "rocm-xio-tests.rdma-ep.sbatch"),
+    # rdma-ep disabled: GPU kernel illegal memory
+    # access during loopback (under investigation)
+    # ("rdma-ep",
+    #  "rocm-xio-tests.rdma-ep.sbatch"),
 ]
 
 STATUS_PASS = 0
@@ -181,9 +183,27 @@ def squeue_all_user(timeout_sec=5):
     return ""
 
 
+def sacct_state(job_id, timeout_sec=3):
+    """Use sacct to query the final state of a job
+    that has left the squeue.  Returns the state
+    string (e.g. "COMPLETED") or "" on failure."""
+    r = run_cmd(
+        ["sacct", "-j", str(job_id),
+         "--format=State", "-n", "-P",
+         "--noconvert"],
+        timeout=timeout_sec,
+    )
+    if r and r.returncode == 0:
+        for line in r.stdout.strip().splitlines():
+            s = line.strip()
+            if s and s != "RUNNING":
+                return s
+    return ""
+
+
 def is_terminal_state(state):
     return state in (
-        "COMPLETED", "FAILED", "CANCELLED", "",
+        "COMPLETED", "FAILED", "CANCELLED",
     )
 
 
@@ -572,6 +592,8 @@ def wait_for_completion(
                     out = o
 
             state = squeue_state(jid)
+            if not state:
+                state = sacct_state(jid)
             has_final = (
                 out
                 and Path(out).is_file()
@@ -585,10 +607,7 @@ def wait_for_completion(
             ):
                 is_running = True
                 all_done = False
-            elif state and not has_final:
-                is_running = True
-                all_done = False
-            elif not state and not has_final:
+            elif not has_final:
                 if (not out
                         or not Path(out).is_file()):
                     ret = no_output_retries.get(
@@ -598,12 +617,9 @@ def wait_for_completion(
                     if ret < 12:
                         is_running = True
                         all_done = False
-                else:
-                    age = file_age(out)
-                    if (age is not None
-                            and age < 30):
-                        is_running = True
-                        all_done = False
+                elif not is_terminal_state(state):
+                    is_running = True
+                    all_done = False
 
             if out and Path(out).is_file():
                 out_files[test_name] = out

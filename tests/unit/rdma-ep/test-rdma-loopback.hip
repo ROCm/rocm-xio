@@ -31,8 +31,7 @@
 #include "xio-data-pattern.hpp"
 #include "xio.h"
 
-#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && \
-    !defined(GDA_IONIC)
+#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && !defined(GDA_IONIC)
 int main() {
   printf("SKIP: no GDA vendor enabled.\n");
   return 77;
@@ -211,38 +210,33 @@ int main(int argc, char** argv) {
 #if defined(GDA_MLX5)
     prov = Provider::MLX5;
 #else
-    fprintf(stderr,
-            "GDA_MLX5 not enabled in build.\n");
+    fprintf(stderr, "GDA_MLX5 not enabled in build.\n");
     return 1;
 #endif
   } else if (strcmp(provider_str, "ionic") == 0) {
 #if defined(GDA_IONIC)
     prov = Provider::IONIC;
 #else
-    fprintf(stderr,
-            "GDA_IONIC not enabled in build.\n");
+    fprintf(stderr, "GDA_IONIC not enabled in build.\n");
     return 1;
 #endif
   } else if (strcmp(provider_str, "auto") == 0) {
 #if defined(GDA_IONIC)
     if (detect_pci_vendor(VENDOR_ID_PENSANDO)) {
       prov = Provider::IONIC;
-      printf("Auto-detected: ionic (0x%04x)\n",
-             VENDOR_ID_PENSANDO);
+      printf("Auto-detected: ionic (0x%04x)\n", VENDOR_ID_PENSANDO);
     } else
 #endif
 #if defined(GDA_MLX5)
       if (detect_pci_vendor(VENDOR_ID_MELLANOX)) {
       prov = Provider::MLX5;
-      printf("Auto-detected: mlx5 (0x%04x)\n",
-             VENDOR_ID_MELLANOX);
+      printf("Auto-detected: mlx5 (0x%04x)\n", VENDOR_ID_MELLANOX);
     } else
 #endif
 #if defined(GDA_BNXT)
       if (detect_pci_vendor(VENDOR_ID_BROADCOM)) {
       prov = Provider::BNXT;
-      printf("Auto-detected: bnxt (0x%04x)\n",
-             VENDOR_ID_BROADCOM);
+      printf("Auto-detected: bnxt (0x%04x)\n", VENDOR_ID_BROADCOM);
     } else
 #endif
     {
