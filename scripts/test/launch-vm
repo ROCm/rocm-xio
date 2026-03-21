@@ -6,15 +6,17 @@
 # wrapper around qemu-minimal's run-vm script.
 #
 # Usage:
-#   ./launch-vm [rdma|nvme|ernic]
+#   ./launch-vm [rdma|nvme|ernic|full]
 #
 # Modes:
 #   rdma  - GPU + BNXT NIC passthrough (default)
 #   nvme  - GPU + NVMe controller + PCI MMIO bridge
 #   ernic - GPU passthrough + emulated RDMA NIC via
 #           rocm-ernic (VFIO-user sockets)
+#   full  - GPU + BNXT NIC + NVMe passthrough +
+#           rocm-ernic (all devices combined)
 #
-# Both modes always include an emulated NVMe so nvme-ep
+# All modes always include an emulated NVMe so nvme-ep
 # testing is available regardless of mode.
 #
 # Environment variables:
@@ -36,7 +38,7 @@
 set -e
 
 
-MODE="${1:-rdma}"
+MODE="${1:-${VM_MODE:-rdma}}"
 SSH_PORT="${SSH_PORT:-2222}"
 GPU_BDF="${GPU_BDF:-10:00.0}"
 RDMA_NIC_BDF="${RDMA_NIC_BDF:-c3:00.1}"
@@ -127,9 +129,11 @@ find_ernic_binary() {
     done
 
     echo "ERROR: rocm-ernic binary not found."
-    echo "  Set ERNIC_BIN=/path/to/rocm_ernic or"
+    echo "  Set ERNIC_BIN=/path/to/rocm-ernic or"
     echo "  build rocm-ernic:"
-    echo "    cd ~/Projects/rocm-ernic && ninja -C build"
+    echo "    cd ~/Projects/rocm-ernic &&" \
+         "cmake -B build -G Ninja &&" \
+         "cmake --build build"
     exit 1
 }
 
@@ -145,10 +149,9 @@ start_ernic_servers() {
         echo "  socket:  ${sock}"
         echo "  backend: ${ERNIC_BACKEND}"
 
-        sudo "${ERNIC_BIN}" \
+        "${ERNIC_BIN}" \
             --socket "${sock}" \
-            --backend "${ERNIC_BACKEND}" \
-            --verbose &
+            --backend "${ERNIC_BACKEND}" &
         ERNIC_PIDS+=($!)
 
         local retries=0
@@ -162,7 +165,7 @@ start_ernic_servers() {
                 exit 1
             fi
         done
-        echo "  rocm-ernic ${i} ready (pid ${!})"
+        echo "  rocm-ernic ${i} ready (pid $!)"
 
         if [ -z "${sockets}" ]; then
             sockets="${sock}"
@@ -176,10 +179,10 @@ start_ernic_servers() {
 
 # Validate mode
 case "${MODE}" in
-    rdma|nvme|ernic) ;;
+    rdma|nvme|ernic|full) ;;
     *)
         echo "ERROR: Unknown mode '${MODE}'."
-        echo "  Usage: $0 [rdma|nvme|ernic]"
+        echo "  Usage: $0 [rdma|nvme|ernic|full]"
         exit 1
         ;;
 esac
@@ -202,12 +205,16 @@ fi
 
 check_ssh_port
 
-# GPU passthrough for all modes except ernic
+# GPU passthrough and ernic binary for all modes
 case "${MODE}" in
     rdma|nvme)
         check_vfio_binding "${GPU_BDF}"
         ;;
     ernic)
+        check_vfio_binding "${GPU_BDF}"
+        find_ernic_binary
+        ;;
+    full)
         check_vfio_binding "${GPU_BDF}"
         find_ernic_binary
         ;;
@@ -226,6 +233,14 @@ case "${MODE}" in
         ;;
     ernic)
         export PCI_HOSTDEV="${GPU_BDF}"
+        trap cleanup SIGINT ERR EXIT
+        start_ernic_servers
+        ;;
+    full)
+        check_vfio_binding "${RDMA_NIC_BDF}"
+        check_vfio_binding "${NVME_DEV_BDF}"
+        export PCI_HOSTDEV="${GPU_BDF},${RDMA_NIC_BDF},${NVME_DEV_BDF}"
+        export PCI_MMIO_BRIDGE=true
         trap cleanup SIGINT ERR EXIT
         start_ernic_servers
         ;;
@@ -250,6 +265,15 @@ case "${MODE}" in
              "(vfio-pci)"
         ;;
     ernic)
+        echo "  ERNIC:        ${ERNIC_INSTANCES}x" \
+             "rocm-ernic (${ERNIC_BACKEND})"
+        echo "  Sockets:      ${VFIO_USERDEV}"
+        ;;
+    full)
+        echo "  BNXT NIC:     ${RDMA_NIC_BDF}" \
+             "(vfio-pci)"
+        echo "  NVMe ctrl:    ${NVME_DEV_BDF}" \
+             "(vfio-pci)"
         echo "  ERNIC:        ${ERNIC_INSTANCES}x" \
              "rocm-ernic (${ERNIC_BACKEND})"
         echo "  Sockets:      ${VFIO_USERDEV}"
@@ -289,6 +313,15 @@ case "${MODE}" in
         echo "  sudo ./tests/unit/rdma-ep/" \
              "test-rdma-loopback -n 2"
         echo "  sudo ./xio-tester rdma-ep --loopback"
+        ;;
+    full)
+        echo "  # RDMA loopback test"
+        echo "  sudo ./tests/unit/rdma-ep/" \
+             "test-rdma-loopback -n 2"
+        echo "  sudo ./xio-tester rdma-ep --loopback"
+        echo ""
+        echo "  # NVMe endpoint test"
+        echo "  sudo ./xio-tester nvme-ep"
         ;;
 esac
 echo "${SEP}"
