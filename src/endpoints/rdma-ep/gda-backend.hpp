@@ -40,6 +40,7 @@ struct BackendConfig {
   bool pcie_relaxed_ordering{false};
   int traffic_class{0};
   bool loopback{true};
+  bool pci_mmio_bridge{false};
   DestInfo remote{};
   const char* hca_list{nullptr};
 };
@@ -205,11 +206,14 @@ private:
   struct ernic_host_qp* ernic_qp_{nullptr};
   struct ernic_host_cq* ernic_scq_{nullptr};
   struct ernic_host_cq* ernic_rcq_{nullptr};
+  uint16_t mmio_bridge_bdf_{0};
+  void* mmio_shadow_gpu_{nullptr};
   void ernic_create_cqs(int ncqes);
   void ernic_create_qps(int sq_length);
   void ernic_initialize_gpu_qp();
   int ernic_dv_dl_init();
   static void* ernic_dv_dlopen();
+  int ernic_init_mmio_bridge();
 #endif
 };
 

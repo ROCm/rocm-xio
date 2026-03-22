@@ -330,9 +330,13 @@ public:
   }
 
   __host__ void applyCommonConfig(
-    void* endpointConfig, const XioEndpointConfig* baseConfig) override {
-    (void)endpointConfig;
-    (void)baseConfig;
+    void* endpointConfig,
+    const XioEndpointConfig* baseConfig) override {
+    if (endpointConfig && baseConfig) {
+      auto* cfg = static_cast<
+          rdma_ep::RdmaEpConfig*>(endpointConfig);
+      cfg->pciMmioBridge = baseConfig->pciMmioBridge;
+    }
   }
 
   __host__ std::string validateConfig(void* endpointConfig) override {

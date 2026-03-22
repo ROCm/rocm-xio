@@ -5,10 +5,11 @@
  * RDMA Endpoint -- GPU-Direct Access (GDA) for RDMA NICs
  *
  * Derived from ROCm/rocSHMEM GDA backend, adapted for rocm-xio.
- * Supports three RDMA vendors:
- *   - BNXT (Broadcom Thor 2) -- primary, tested locally
+ * Supports four RDMA vendors:
+ *   - BNXT (Broadcom Thor 2) -- primary
  *   - MLX5 (Mellanox/NVIDIA ConnectX)
  *   - IONIC (Pensando)
+ *   - ROCm ERNIC (AMD emulated RDMA NIC)
  */
 
 #ifndef RDMA_EP_H
@@ -41,6 +42,7 @@ struct RdmaEpConfig {
   bool verify = false;
   uint32_t seed = 1;
   std::string deviceName;
+  bool pciMmioBridge = false;
 };
 
 } // namespace rdma_ep

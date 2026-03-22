@@ -43,6 +43,10 @@ struct ernic_device_sq : public ernic_device_wq {
   volatile uint32_t* uar_ptr;
   uint32_t uar_qp_offset;
   uint32_t qpn;
+  void* mmio_shadow_buf;
+  uint16_t ernic_target_bdf;
+  uint8_t uar_bar_index;
+  bool use_mmio_bridge;
 } __attribute__((packed));
 
 /* Host-side CQ (used during setup) */

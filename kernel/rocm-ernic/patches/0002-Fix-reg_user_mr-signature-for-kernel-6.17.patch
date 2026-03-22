@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Fri, 21 Mar 2026 17:40:00 -0600
+Subject: [PATCH] rocm_ernic: fix reg_user_mr signature for kernel 6.17+
+
+Kernel 6.17 added a struct ib_dmah parameter to the
+ib_device_ops.reg_user_mr callback. Add the parameter
+to both the declaration and definition.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ rocm_ernic_mr.c    | 1 +
+ rocm_ernic_verbs.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/rocm_ernic_verbs.h b/rocm_ernic_verbs.h
+--- a/rocm_ernic_verbs.h
++++ b/rocm_ernic_verbs.h
+@@ -373,6 +373,7 @@
+ struct ib_mr *rocm_ernic_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+                                      u64 virt_addr, int access_flags,
++                                     struct ib_dmah *dmah,
+                                      struct ib_udata *udata);
+diff --git a/rocm_ernic_mr.c b/rocm_ernic_mr.c
+--- a/rocm_ernic_mr.c
++++ b/rocm_ernic_mr.c
+@@ -110,6 +110,7 @@
+ struct ib_mr *rocm_ernic_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
+                                      u64 virt_addr, int access_flags,
++                                     struct ib_dmah *dmah,
+                                      struct ib_udata *udata)
+-- 
+2.43.0

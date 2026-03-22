@@ -17,6 +17,7 @@
  */
 
 #include "queue-pair.hpp"
+#include "xio.h"
 
 #if defined(GDA_ERNIC)
 
@@ -98,15 +99,32 @@ __device__ static inline void* ernic_get_sq_wqe(ernic_device_sq* sq,
 
 namespace ernic {
 
-__device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
+__device__ void Ops::ring_doorbell(QueuePair& qp,
+                                   uint32_t slot_idx) {
+  uint32_t val = (qp.ernic_sq_.qpn & 0x00FFFFFF) |
+                 ERNIC_UAR_QP_SEND;
+  __threadfence_system();
+
+  if (qp.ernic_sq_.use_mmio_bridge &&
+      qp.ernic_sq_.mmio_shadow_buf) {
+    xio::genPciMmioBridgeCmd(
+        qp.ernic_sq_.mmio_shadow_buf,
+        qp.ernic_sq_.ernic_target_bdf,
+        qp.ernic_sq_.uar_bar_index,
+        qp.ernic_sq_.uar_qp_offset, val,
+        PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+    return;
+  }
+
   if (!qp.ernic_sq_.uar_ptr)
     return;
-  uint32_t val = (qp.ernic_sq_.qpn & 0x00FFFFFF) | ERNIC_UAR_QP_SEND;
-  __threadfence_system();
-  volatile uint32_t* db = qp.ernic_sq_.uar_ptr +
-                          (qp.ernic_sq_.uar_qp_offset / 4);
-  __hip_atomic_store(const_cast<uint32_t*>(db), val, __ATOMIC_SEQ_CST,
-                     __HIP_MEMORY_SCOPE_SYSTEM);
+  volatile uint32_t* db =
+      qp.ernic_sq_.uar_ptr +
+      (qp.ernic_sq_.uar_qp_offset / 4);
+  __hip_atomic_store(
+      const_cast<uint32_t*>(db), val,
+      __ATOMIC_SEQ_CST,
+      __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
 __device__ void Ops::poll_cq_until(QueuePair& qp, uint32_t requested) {

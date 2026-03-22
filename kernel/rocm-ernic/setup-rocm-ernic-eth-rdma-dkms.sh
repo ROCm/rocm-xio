@@ -101,12 +101,16 @@ fi
 # Prerequisites
 # -------------------------------------------------------
 
+PATCHES_DIR="${SCRIPT_DIR}/patches"
+
 check_prereqs() {
   local missing=()
   command -v dkms &>/dev/null \
     || missing+=("dkms")
   command -v make &>/dev/null \
     || missing+=("make")
+  command -v patch &>/dev/null \
+    || missing+=("patch")
 
   if [ ${#missing[@]} -gt 0 ]; then
     echo "ERROR: Missing required tools:" \
@@ -230,6 +234,58 @@ populate_dkms() {
 }
 
 populate_dkms
+
+# -------------------------------------------------------
+# Apply vendored patches (rocm-xio additions)
+# -------------------------------------------------------
+
+apply_patches() {
+  if [ ! -d "${PATCHES_DIR}" ] || \
+     [ -z "$(ls -A "${PATCHES_DIR}"/*.patch \
+       2>/dev/null)" ]; then
+    echo "No patches to apply."
+    return
+  fi
+
+  echo ""
+  echo "Applying vendored patches..."
+
+  local applied=0
+  local failed=0
+  for p in "${PATCHES_DIR}"/*.patch; do
+    local name
+    name=$(basename "${p}" .patch)
+
+    local out
+    out=$(sudo patch -d "${DKMS_SRC}" \
+      -p1 --fuzz=3 --force \
+      --no-backup-if-mismatch \
+      < "${p}" 2>&1 || true)
+    local n_ok
+    n_ok=$(echo "${out}" \
+      | grep -c "^patching file" || true)
+    local n_fail
+    n_fail=$(echo "${out}" \
+      | grep -c "FAILED" || true)
+
+    if [ "${n_fail}" -gt 0 ]; then
+      failed=$((failed + 1))
+      echo "  PARTIAL: ${name}" \
+        "(${n_ok} ok, ${n_fail} failed)"
+    elif [ "${n_ok}" -gt 0 ]; then
+      applied=$((applied + 1))
+      echo "  OK: ${name} (${n_ok} files)"
+    else
+      echo "  SKIP: ${name}" \
+        "(already applied or no match)"
+    fi
+  done
+
+  echo "${applied} applied," \
+    "${failed} failed."
+}
+
+apply_patches
 
 # -------------------------------------------------------
 # Register and build with DKMS

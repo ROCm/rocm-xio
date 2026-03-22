@@ -11,7 +11,11 @@
 # Intended to run as:
 #   sudo scripts/test/setup-rdma-loopback.sh
 #
-# Supports VENDOR=bnxt|ionic|all (default: all).
+# Supports VENDOR=bnxt|ionic|ernic|all (default: all).
+#
+# ERNIC loopback mode is selectable via env var:
+#   ERNIC_LOOPBACK=sysfs   (default) sysfs attribute
+#   ERNIC_LOOPBACK=server  rely on rocm-ernic server
 
 set -euo pipefail
 
@@ -31,6 +35,11 @@ setup_vendor() {
       nic_if="${IONIC_NIC_IF:-rocm-ionic0}"
       nic_ip="${IONIC_NIC_IP:-198.18.1.1/24}"
       rdma_dev="${IONIC_RDMA_DEV:-rocm-rdma-ionic0}"
+      ;;
+    ernic)
+      nic_if="${ERNIC_NIC_IF:-rocm-ernic0}"
+      nic_ip="${ERNIC_NIC_IP:-198.18.2.1/24}"
+      rdma_dev="${ERNIC_RDMA_DEV:-rocm-rdma-ernic0}"
       ;;
     *)
       echo "ERROR: Unknown vendor '${vendor}'"
@@ -79,6 +88,46 @@ setup_vendor() {
       ip link set "${nic_if}" up 2>/dev/null || true
       modprobe ionic_rdma 2>/dev/null || true
       sleep 3
+      ;;
+    ernic)
+      local ernic_lb="${ERNIC_LOOPBACK:-sysfs}"
+
+      modprobe -r rocm_ernic_rdma 2>/dev/null || true
+      modprobe -r rocm_ernic_eth 2>/dev/null || true
+      sleep 3
+      modprobe rocm_ernic_eth
+      sleep 3
+      modprobe rocm_ernic_rdma
+      sleep 5
+      ip link set "${nic_if}" up 2>/dev/null || true
+      sleep 3
+
+      if [ "${ernic_lb}" = "sysfs" ]; then
+        local pci_bdf
+        pci_bdf=$(basename "$(readlink -f \
+          "/sys/class/net/${nic_if}/device" \
+          2>/dev/null)" 2>/dev/null || true)
+        local lb_path="/sys/bus/pci/devices"
+        lb_path="${lb_path}/${pci_bdf}/loopback_mode"
+
+        if [ -f "${lb_path}" ]; then
+          local cur
+          cur=$(cat "${lb_path}")
+          if [ "${cur}" != "1" ]; then
+            echo "Setting ernic loopback=1" \
+              "via sysfs..."
+            echo 1 > "${lb_path}"
+            sleep 2
+          fi
+        else
+          echo "WARN: ${lb_path} not found."
+          echo "  Is the loopback_mode patch" \
+            "installed?"
+        fi
+      else
+        echo "Using server-side loopback" \
+          "(ERNIC_LOOPBACK=server)"
+      fi
       ;;
   esac
 
@@ -156,11 +205,13 @@ setup_vendor() {
 # --- Main ---
 vendors=()
 case "${VENDOR}" in
-  all)   vendors=(bnxt ionic) ;;
+  all)   vendors=(bnxt ionic ernic) ;;
   bnxt)  vendors=(bnxt) ;;
   ionic) vendors=(ionic) ;;
+  ernic) vendors=(ernic) ;;
   *)
-    echo "ERROR: VENDOR must be bnxt, ionic, or all"
+    echo "ERROR: VENDOR must be" \
+      "bnxt, ionic, ernic, or all"
     exit 1
     ;;
 esac

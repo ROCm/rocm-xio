@@ -108,4 +108,20 @@ if(GDA_ERNIC)
   )
   set_tests_properties(test-rdma-ernic-loopback
     PROPERTIES FIXTURES_REQUIRED RDMA_HW)
+
+  # Seed-parameterized sweep tests for ERNIC
+  foreach(seed RANGE 1 5)
+    add_test(
+      NAME test-rdma-ernic-loopback-seed${seed}
+      COMMAND test-rdma-ernic-loopback
+        --seed ${seed} --size 256)
+    set_tests_properties(
+      test-rdma-ernic-loopback-seed${seed}
+      PROPERTIES
+        LABELS "hardware;rdma;sweep"
+        TIMEOUT 300
+        RESOURCE_GROUPS "gpus:1"
+        SKIP_RETURN_CODE 77
+        FIXTURES_REQUIRED RDMA_HW)
+  endforeach()
 endif()

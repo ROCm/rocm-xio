@@ -25,6 +25,7 @@
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
 #include "rocm-ernic/ernic-provider.hpp"
+#include "xio.h"
 
 namespace rdma_ep {
 
@@ -308,27 +309,132 @@ void Backend::ernic_create_qps(int sq_length) {
           qp_->qp_num, ernic_qp_->sq_depth, ernic_qp_->sq_len);
 }
 
+int Backend::ernic_init_mmio_bridge() {
+  if (!config_.pci_mmio_bridge)
+    return 0;
+
+  uint16_t bdf = 0;
+  int ret = xio::detectPciMmioBridgeBdf(&bdf);
+  if (ret != 0) {
+    fprintf(stderr,
+            "rdma_ep::ernic: "
+            "detectPciMmioBridgeBdf failed\n");
+    return -1;
+  }
+  mmio_bridge_bdf_ = bdf;
+
+  void* shadow_virt = nullptr;
+  ret = xio::mapMmioBridgeShadowBuffer(
+      bdf, &shadow_virt);
+  if (ret != 0) {
+    fprintf(stderr,
+            "rdma_ep::ernic: "
+            "mapMmioBridgeShadowBuffer failed\n");
+    return -1;
+  }
+
+  void* shadow_gpu = nullptr;
+  ret = xio::registerMmioBridgeShadowBufferForGpu(
+      shadow_virt, 4096, &shadow_gpu);
+  if (ret != 0) {
+    fprintf(stderr,
+            "rdma_ep::ernic: "
+            "registerMmioBridgeShadowBufferForGpu"
+            " failed\n");
+    return -1;
+  }
+  mmio_shadow_gpu_ = shadow_gpu;
+
+  fprintf(stderr,
+          "rdma_ep::ernic: MMIO bridge ready "
+          "(BDF=0x%04x, shadow=%p)\n",
+          mmio_bridge_bdf_,
+          mmio_shadow_gpu_);
+  return 0;
+}
+
 void Backend::ernic_initialize_gpu_qp() {
   if (!host_qp_ || !ernic_qp_ || !ernic_scq_)
     return;
 
   (void)ernic_dv.get_cq_id(ernic_scq_->cq);
 
-  memset(&host_qp_->ernic_cq_, 0, sizeof(ernic_device_cq));
+  memset(&host_qp_->ernic_cq_, 0,
+         sizeof(ernic_device_cq));
   host_qp_->ernic_cq_.buf = ernic_scq_->buf;
   host_qp_->ernic_cq_.depth = ernic_scq_->depth;
-  host_qp_->ernic_cq_.cqe_size = ernic_scq_->cqe_size;
+  host_qp_->ernic_cq_.cqe_size =
+      ernic_scq_->cqe_size;
 
-  memset(&host_qp_->ernic_sq_, 0, sizeof(ernic_device_sq));
+  memset(&host_qp_->ernic_sq_, 0,
+         sizeof(ernic_device_sq));
   host_qp_->ernic_sq_.buf = ernic_qp_->sq_buf;
   host_qp_->ernic_sq_.depth = ernic_qp_->sq_depth;
-  host_qp_->ernic_sq_.wqe_size = ernic_qp_->sq_wqe_size;
+  host_qp_->ernic_sq_.wqe_size =
+      ernic_qp_->sq_wqe_size;
   host_qp_->ernic_sq_.qpn = qp_->qp_num;
-  host_qp_->ernic_sq_.mtu = ibv_mtu_to_int(port_attr_.active_mtu);
+  host_qp_->ernic_sq_.mtu =
+      ibv_mtu_to_int(port_attr_.active_mtu);
 
-  if (ernic_qp_->uar_ptr) {
-    hipError_t herr = hipHostRegister(ernic_qp_->uar_ptr, getpagesize(),
-                                      hipHostRegisterDefault);
+  host_qp_->ernic_sq_.use_mmio_bridge =
+      config_.pci_mmio_bridge && mmio_shadow_gpu_;
+  host_qp_->ernic_sq_.mmio_shadow_buf =
+      mmio_shadow_gpu_;
+  host_qp_->ernic_sq_.uar_bar_index = 2;
+
+  if (host_qp_->ernic_sq_.use_mmio_bridge) {
+    uint16_t ernic_bdf = 0;
+    const char* ib_name =
+        ibv.get_device_name(device_);
+    char link[512];
+    char resolved[512];
+    snprintf(link, sizeof(link),
+             "/sys/class/infiniband/%s/device",
+             ib_name);
+    ssize_t len = readlink(link, resolved,
+                           sizeof(resolved) - 1);
+    if (len > 0) {
+      resolved[len] = '\0';
+      const char* base = strrchr(resolved, '/');
+      if (base)
+        base++;
+      else
+        base = resolved;
+      unsigned bus = 0, dev = 0, func = 0;
+      if (sscanf(base, "%*x:%x:%x.%x",
+                 &bus, &dev, &func) == 3) {
+        ernic_bdf =
+            (static_cast<uint16_t>(bus) << 8) |
+            (static_cast<uint16_t>(dev) << 3) |
+            static_cast<uint16_t>(func);
+        host_qp_->ernic_sq_.ernic_target_bdf =
+            ernic_bdf;
+        fprintf(stderr,
+                "rdma_ep::ernic: ERNIC PCI "
+                "BDF=0x%04x (%s)\n",
+                ernic_bdf, base);
+      } else {
+        fprintf(stderr,
+                "rdma_ep::ernic: "
+                "BDF parse failed: %s\n",
+                base);
+        host_qp_->ernic_sq_.use_mmio_bridge =
+            false;
+      }
+    } else {
+      fprintf(stderr,
+              "rdma_ep::ernic: "
+              "readlink failed for %s\n",
+              link);
+      host_qp_->ernic_sq_.use_mmio_bridge = false;
+    }
+  }
+
+  if (!host_qp_->ernic_sq_.use_mmio_bridge &&
+      ernic_qp_->uar_ptr) {
+    hipError_t herr = hipHostRegister(
+        ernic_qp_->uar_ptr, getpagesize(),
+        hipHostRegisterDefault);
     if (herr != hipSuccess) {
       fprintf(stderr,
               "rdma_ep::ernic: "
@@ -338,7 +444,8 @@ void Backend::ernic_initialize_gpu_qp() {
       return;
     }
     void* dev_uar = nullptr;
-    herr = hipHostGetDevicePointer(&dev_uar, ernic_qp_->uar_ptr, 0);
+    herr = hipHostGetDevicePointer(
+        &dev_uar, ernic_qp_->uar_ptr, 0);
     if (herr != hipSuccess) {
       fprintf(stderr,
               "rdma_ep::ernic: "
@@ -347,21 +454,30 @@ void Backend::ernic_initialize_gpu_qp() {
               hipGetErrorString(herr));
       return;
     }
-    host_qp_->ernic_sq_.uar_ptr = static_cast<volatile uint32_t*>(dev_uar);
-    host_qp_->ernic_sq_.uar_qp_offset = ernic_qp_->uar_qp_offset;
+    host_qp_->ernic_sq_.uar_ptr =
+        static_cast<volatile uint32_t*>(dev_uar);
+    host_qp_->ernic_sq_.uar_qp_offset =
+        ernic_qp_->uar_qp_offset;
   }
 
   host_qp_->lkey_ = 0;
   host_qp_->rkey_ = 0;
   host_qp_->qp_num_ = qp_->qp_num;
-  host_qp_->inline_threshold_ = config_.inline_threshold;
+  host_qp_->inline_threshold_ =
+      config_.inline_threshold;
 
   fprintf(stderr,
           "rdma_ep::ernic: GPU QP initialized "
           "(CQ depth=%u, SQ depth=%u, "
-          "SQ buf=%p, UAR=%p)\n",
-          host_qp_->ernic_cq_.depth, host_qp_->ernic_sq_.depth,
-          host_qp_->ernic_sq_.buf, (void*)host_qp_->ernic_sq_.uar_ptr);
+          "SQ buf=%p, UAR=%p, "
+          "mmio_bridge=%s)\n",
+          host_qp_->ernic_cq_.depth,
+          host_qp_->ernic_sq_.depth,
+          host_qp_->ernic_sq_.buf,
+          (void*)host_qp_->ernic_sq_.uar_ptr,
+          host_qp_->ernic_sq_.use_mmio_bridge
+              ? "yes"
+              : "no");
 }
 
 int ernic_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,

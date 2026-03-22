@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stephen Bates <sbates@raithlin.com>
+Date: Fri, 21 Mar 2026 12:00:00 -0600
+Subject: [PATCH] rocm_ernic_eth: Add sysfs loopback_mode attribute
+
+Add a sysfs attribute at /sys/bus/pci/devices/<bdf>/loopback_mode
+that allows runtime control of the ERNIC NIC loopback mode.
+
+Values:
+  0 = none (normal operation)
+  1 = loopback (NIC loops traffic back internally)
+
+When the attribute is written, the driver writes the loopback
+control register in the device BAR. The VFIO-user server
+intercepts this register write and switches its internal data
+path accordingly.
+
+This is modeled after the ionic loopback_mode sysfs attribute
+(patch 0018 in kernel/ionic/patches/).
+
+Once tested and verified, this code will be contributed back
+to the rocm-ernic project upstream.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ rocm_ernic_eth.c | 50 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/rocm_ernic_eth.c b/rocm_ernic_eth.c
+--- a/rocm_ernic_eth.c
++++ b/rocm_ernic_eth.c
+@@ -28,6 +28,9 @@
+ 
+ #define DRV_NAME "rocm_ernic"
+ 
++/* Loopback control register offset in BAR0 */
++#define ROCM_ERNIC_LOOPBACK_REG 0x100
++
+ static const struct pci_device_id rocm_ernic_pci_tbl[] = {
+ 	{ PCI_DEVICE(0x1022, 0x0001) },
+ 	{ 0, }
+@@ -35,6 +38,47 @@ static const struct pci_device_id rocm_ernic_pci_tbl[] = {
+ 
+ MODULE_DEVICE_TABLE(pci, rocm_ernic_pci_tbl);
+ 
++static ssize_t loopback_mode_show(struct device *dev,
++	struct device_attribute *attr, char *buf)
++{
++	struct pci_dev *pdev = to_pci_dev(dev);
++	void __iomem *bar0 = pci_iomap(pdev, 0, 0);
++	u32 val = 0;
++
++	if (bar0) {
++		val = ioread32(bar0 + ROCM_ERNIC_LOOPBACK_REG);
++		pci_iounmap(pdev, bar0);
++	}
++
++	return sysfs_emit(buf, "%u\n", val & 0x1);
++}
++
++static ssize_t loopback_mode_store(struct device *dev,
++	struct device_attribute *attr,
++	const char *buf, size_t count)
++{
++	struct pci_dev *pdev = to_pci_dev(dev);
++	void __iomem *bar0;
++	unsigned int mode;
++
++	if (kstrtouint(buf, 0, &mode) || mode > 1)
++		return -EINVAL;
++
++	bar0 = pci_iomap(pdev, 0, 0);
++	if (!bar0) {
++		dev_err(dev,
++			"rocm_ernic: failed to map BAR0"
++			" for loopback control\n");
++		return -EIO;
++	}
++
++	iowrite32(mode, bar0 + ROCM_ERNIC_LOOPBACK_REG);
++	pci_iounmap(pdev, bar0);
++
++	dev_info(dev,
++		"rocm_ernic: loopback_mode set to %u\n",
++		mode);
++
++	return count;
++}
++
++static DEVICE_ATTR_RW(loopback_mode);
++
+ static int rocm_ernic_probe(struct pci_dev *pdev,
+ 	const struct pci_device_id *ent)
+ {
+@@ -50,6 +94,9 @@ static int rocm_ernic_probe(struct pci_dev *pdev,
+ 		goto err_disable;
+ 	}
+ 
++	device_create_file(&pdev->dev,
++			   &dev_attr_loopback_mode);
++
+ 	/* Register netdev and proceed with init */
+ 
+ err_disable:
+@@ -59,6 +106,9 @@ err_disable:
+ static void rocm_ernic_remove(struct pci_dev *pdev)
+ {
+ 	struct net_device *netdev = pci_get_drvdata(pdev);
++
++	device_remove_file(&pdev->dev,
++			   &dev_attr_loopback_mode);
+ 
+ 	if (netdev) {
+ 		unregister_netdev(netdev);
+-- 
+2.43.0

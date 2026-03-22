@@ -43,28 +43,38 @@ using namespace rdma_ep;
 
 static constexpr uint32_t DEFAULT_XFER_SIZE = 256;
 static constexpr uint32_t DEFAULT_LFSR_SEED = 1;
+static constexpr unsigned DEFAULT_ITERATIONS = 1;
 
 static void print_usage(const char* prog) {
   fprintf(stderr,
           "Usage: %s [OPTIONS]\n"
-          "  --size  N   Transfer size in bytes "
-          "(default %u)\n"
-          "  --seed  N   LFSR seed "
-          "(default %u)\n",
-          prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED);
+          "  --device DEV  RDMA device name\n"
+          "  --size   N    Transfer size"
+          " (default %u)\n"
+          "  --seed   N    LFSR seed"
+          " (default %u)\n"
+          "  -n N          Iterations"
+          " (default %u)\n"
+          "  --pci-mmio-bridge  Use PCI MMIO"
+          " bridge for doorbells\n",
+          prog, DEFAULT_XFER_SIZE,
+          DEFAULT_LFSR_SEED, DEFAULT_ITERATIONS);
 }
 
-__global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
-                                      void* dst_ptr, uint32_t length,
-                                      int* result,
-                                      unsigned long long* elapsed) {
+__global__ void loopback_write_kernel(
+    QueuePair* qp, void* src_ptr, void* dst_ptr,
+    uint32_t length, int* result,
+    unsigned long long* elapsed,
+    unsigned iterations) {
   if (threadIdx.x != 0)
     return;
 
   unsigned long long t0 = wall_clock64();
 
-  qp->put_nbi_single(dst_ptr, src_ptr, length, true);
-  qp->quiet_single();
+  for (unsigned i = 0; i < iterations; i++) {
+    qp->put_nbi_single(dst_ptr, src_ptr, length, true);
+    qp->quiet_single();
+  }
 
   *elapsed = wall_clock64() - t0;
   *result = 0;
@@ -73,12 +83,31 @@ __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
 int main(int argc, char** argv) {
   uint32_t xfer_size = DEFAULT_XFER_SIZE;
   uint32_t lfsr_seed = DEFAULT_LFSR_SEED;
+  unsigned iterations = DEFAULT_ITERATIONS;
+  const char* device_name = nullptr;
+  bool use_mmio_bridge = false;
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
-      xfer_size = static_cast<uint32_t>(atoi(argv[++i]));
-    } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
-      lfsr_seed = static_cast<uint32_t>(atoi(argv[++i]));
+    if (strcmp(argv[i], "--size") == 0 &&
+        i + 1 < argc) {
+      xfer_size =
+          static_cast<uint32_t>(atoi(argv[++i]));
+    } else if (strcmp(argv[i], "--seed") == 0 &&
+               i + 1 < argc) {
+      lfsr_seed =
+          static_cast<uint32_t>(atoi(argv[++i]));
+    } else if ((strcmp(argv[i], "-n") == 0 ||
+                strcmp(argv[i],
+                       "--iterations") == 0) &&
+               i + 1 < argc) {
+      iterations =
+          static_cast<unsigned>(atoi(argv[++i]));
+    } else if (strcmp(argv[i], "--device") == 0 &&
+               i + 1 < argc) {
+      device_name = argv[++i];
+    } else if (strcmp(argv[i],
+                      "--pci-mmio-bridge") == 0) {
+      use_mmio_bridge = true;
     } else {
       print_usage(argv[0]);
       return 1;
@@ -86,7 +115,10 @@ int main(int argc, char** argv) {
   }
 
   printf("=== ERNIC Loopback Data Path Test ===\n");
-  printf("  size=%u  seed=%u\n\n", xfer_size, lfsr_seed);
+  printf("  size=%u  seed=%u  iterations=%u"
+         "  mmio-bridge=%s\n\n",
+         xfer_size, lfsr_seed, iterations,
+         use_mmio_bridge ? "yes" : "no");
 
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
@@ -109,6 +141,9 @@ int main(int argc, char** argv) {
   cfg.cq_depth = 256;
   cfg.inline_threshold = 28;
   cfg.loopback = true;
+  cfg.pci_mmio_bridge = use_mmio_bridge;
+  if (device_name)
+    cfg.hca_list = device_name;
 
   Backend backend(cfg);
   int ret = backend.init();
@@ -199,9 +234,14 @@ int main(int argc, char** argv) {
   assert(xio::dataPattern(true, pre_p));
   assert(dst[0] == 0x00);
 
-  printf("Launching RDMA WRITE kernel...\n");
-  hipLaunchKernelGGL(loopback_write_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
-                     (void*)src, (void*)dst, xfer_size, d_result, d_elapsed);
+  printf("Launching RDMA WRITE kernel"
+         " (%u iterations)...\n",
+         iterations);
+  hipLaunchKernelGGL(loopback_write_kernel,
+                     dim3(1), dim3(1), 0, 0, gpu_qp,
+                     (void*)src, (void*)dst,
+                     xfer_size, d_result, d_elapsed,
+                     iterations);
 
   herr = hipGetLastError();
   if (herr != hipSuccess) {
@@ -265,8 +305,9 @@ int main(int argc, char** argv) {
   backend.shutdown();
 
   printf("\nPASSED: All %u bytes LFSR-verified "
-         "via RDMA WRITE loopback.\n",
-         xfer_size);
+         "via RDMA WRITE loopback"
+         " (%u iterations).\n",
+         xfer_size, iterations);
   return 0;
 }
 

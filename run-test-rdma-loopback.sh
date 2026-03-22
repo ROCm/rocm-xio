@@ -47,11 +47,15 @@ if [ "${BUILD_ALL}" = "true" ]; then
 
   cmake --build "${BUILD_DIR}" \
     --target test-rdma-loopback \
+    --target test-rdma-ernic-loopback \
     --target install-rdma-core \
     --parallel
 else
   cmake --build "${BUILD_DIR}" \
     --target test-rdma-loopback 2>/dev/null \
+    || true
+  cmake --build "${BUILD_DIR}" \
+    --target test-rdma-ernic-loopback 2>/dev/null \
     || true
 fi
 
@@ -69,16 +73,29 @@ run_sweep() {
   local provider_flag="--provider ${vendor}"
   local rdma_dev
 
+  local bin="${BUILD_DIR}/tests/unit/rdma-ep"
+
   case "${vendor}" in
     bnxt)
       rdma_dev="${BNXT_RDMA_DEV:-rocm-rdma-bnxt0}"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
+      bin="${bin}/test-rdma-loopback"
       ;;
     ionic)
       rdma_dev="${IONIC_RDMA_DEV:-rocm-rdma-ionic0}"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
+      bin="${bin}/test-rdma-loopback"
+      ;;
+    ernic)
+      rdma_dev="${ERNIC_RDMA_DEV:-rocm-rdma-ernic0}"
+      provider_flag="--device ${rdma_dev}"
+      if [ "${USE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+        provider_flag="${provider_flag}"
+        provider_flag="${provider_flag} --pci-mmio-bridge"
+      fi
+      bin="${bin}/test-rdma-ernic-loopback"
       ;;
   esac
 
@@ -86,9 +103,6 @@ run_sweep() {
   lib_path="${BUILD_DIR}/_deps/rdma-core"
   lib_path="${lib_path}/install/lib"
   lib_path="${lib_path}:/opt/rocm/lib"
-
-  local bin="${BUILD_DIR}/tests/unit/rdma-ep"
-  bin="${bin}/test-rdma-loopback"
 
   echo ""
   echo "=== ${vendor^^} RDMA loopback sweep ==="
@@ -206,14 +220,14 @@ vendors=()
 
 case "${VENDOR}" in
   all)
-    vendors=(bnxt ionic)
+    vendors=(bnxt ionic ernic)
     ;;
-  bnxt|ionic)
+  bnxt|ionic|ernic)
     vendors=("${VENDOR}")
     ;;
   *)
     echo "ERROR: VENDOR must be" \
-         "bnxt, ionic, or all"
+         "bnxt, ionic, ernic, or all"
     exit 1
     ;;
 esac

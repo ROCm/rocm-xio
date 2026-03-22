@@ -8,9 +8,10 @@
 # a running VM via SSH.
 #
 # Targets:
-#   make vm-test-ep   Run test-ep inside the VM
-#   make vm-rdma-ep   Run rdma-ep loopback inside the VM
-#   make vm-nvme-ep   Run nvme-ep suite inside the VM
+#   make vm-test-ep        Run test-ep inside the VM
+#   make vm-rdma-ep        Run rdma-ep loopback (bnxt)
+#   make vm-rdma-ernic-ep  Run rdma-ep ERNIC loopback
+#   make vm-nvme-ep        Run nvme-ep suite
 
 set(_vm_ssh_port "2222")
 set(_vm_ssh_user "${XIO_VM_USERNAME}")
@@ -60,6 +61,17 @@ add_custom_target(vm-rdma-ep
   COMMAND ssh ${_vm_ssh_opts} ${_vm_host}
     "cd ${_vm_xio_dir} && sudo VENDOR=bnxt scripts/test/setup-rdma-loopback.sh && cd ${_vm_build_dir} && sudo LD_LIBRARY_PATH=${_vm_rdma_lib} ./xio-tester rdma-ep --provider bnxt --loopback -n 128 --verbose"
   COMMENT "Running rdma-ep loopback inside VM"
+  USES_TERMINAL
+  VERBATIM
+)
+
+# -------------------------------------------------
+# vm-rdma-ernic-ep
+# -------------------------------------------------
+add_custom_target(vm-rdma-ernic-ep
+  COMMAND ssh ${_vm_ssh_opts} ${_vm_host}
+    "cd ${_vm_xio_dir} && sudo VENDOR=ernic scripts/test/setup-rdma-loopback.sh && cd ${_vm_build_dir} && sudo LD_LIBRARY_PATH=${_vm_rdma_lib} ./tests/unit/rdma-ep/test-rdma-ernic-loopback --size 256 -n 128 --pci-mmio-bridge"
+  COMMENT "Running rdma-ep ERNIC loopback inside VM"
   USES_TERMINAL
   VERBATIM
 )

@@ -763,6 +763,11 @@ void Backend::initialize_gpu_qp() {
 
 #if defined(GDA_ERNIC)
   if (provider_ == Provider::ROCM_ERNIC) {
+    if (ernic_init_mmio_bridge() != 0) {
+      fprintf(stderr,
+              "rdma_ep: MMIO bridge init "
+              "failed\n");
+    }
     ernic_initialize_gpu_qp();
     return;
   }
