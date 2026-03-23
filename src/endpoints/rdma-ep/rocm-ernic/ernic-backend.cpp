@@ -205,41 +205,56 @@ void Backend::ernic_create_qps(int sq_length) {
   uint32_t max_rwr = 0;
   uint32_t max_rsge = 0;
 
-  size_t pgsz = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  size_t pgsz = static_cast<size_t>(
+      sysconf(_SC_PAGESIZE));
   uint32_t sq_wqe_sz = 128;
   ernic_qp_->sq_depth = max_swr;
   ernic_qp_->sq_wqe_size = sq_wqe_sz;
-  ernic_qp_->sq_len = max_swr * sq_wqe_sz;
-  if (ernic_qp_->sq_len < pgsz)
-    ernic_qp_->sq_len = static_cast<uint32_t>(pgsz);
+  uint32_t sq_data_len = max_swr * sq_wqe_sz;
+  if (sq_data_len < pgsz)
+    sq_data_len = static_cast<uint32_t>(pgsz);
+  ernic_qp_->sq_len = sq_data_len;
 
   uint32_t rq_wqe_sz = 64;
   ernic_qp_->rq_depth = max_rwr ? max_rwr : 1;
   ernic_qp_->rq_wqe_size = rq_wqe_sz;
-  ernic_qp_->rq_len = ernic_qp_->rq_depth * rq_wqe_sz;
+  ernic_qp_->rq_len =
+      ernic_qp_->rq_depth * rq_wqe_sz;
   if (ernic_qp_->rq_len < pgsz)
-    ernic_qp_->rq_len = static_cast<uint32_t>(pgsz);
+    ernic_qp_->rq_len =
+        static_cast<uint32_t>(pgsz);
 
-  void* sq_ptr = nullptr;
-  if (posix_memalign(&sq_ptr, pgsz, ernic_qp_->sq_len)) {
+  /*
+   * Allocate SQ buffer with a header page for the
+   * PVRDMA ring state (prod_tail / cons_head). The
+   * server reads prod_tail to find new WQEs. The
+   * header page is at offset 0, WQE data starts at
+   * offset PAGE_SIZE.
+   */
+  size_t sq_alloc_len = pgsz + sq_data_len;
+  void* sq_alloc = nullptr;
+  if (posix_memalign(&sq_alloc, pgsz,
+                     sq_alloc_len)) {
     fprintf(stderr, "rdma_ep::ernic: "
                     "posix_memalign SQ failed\n");
     return;
   }
-  memset(sq_ptr, 0, ernic_qp_->sq_len);
-  hipError_t herr = hipHostRegister(sq_ptr, ernic_qp_->sq_len,
-                                    hipHostRegisterDefault);
+  memset(sq_alloc, 0, sq_alloc_len);
+  hipError_t herr = hipHostRegister(
+      sq_alloc, sq_alloc_len,
+      hipHostRegisterDefault);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::ernic: "
             "hipHostRegister SQ failed: %s\n",
             hipGetErrorString(herr));
   }
-  ernic_qp_->sq_buf = sq_ptr;
+  ernic_qp_->sq_buf =
+      static_cast<char*>(sq_alloc) + pgsz;
 
   struct rocm_ernic_dv_umem_attr sq_ua {};
-  sq_ua.addr = sq_ptr;
-  sq_ua.size = ernic_qp_->sq_len;
+  sq_ua.addr = sq_alloc;
+  sq_ua.size = sq_alloc_len;
   sq_ua.access_flags = IBV_ACCESS_LOCAL_WRITE;
   sq_ua.dmabuf_fd = -1;
 
@@ -373,6 +388,14 @@ void Backend::ernic_initialize_gpu_qp() {
   host_qp_->ernic_sq_.qpn = qp_->qp_num;
   host_qp_->ernic_sq_.mtu =
       ibv_mtu_to_int(port_attr_.active_mtu);
+
+  size_t pgsz_init = static_cast<size_t>(
+      sysconf(_SC_PAGESIZE));
+  volatile int32_t* ring_state =
+      reinterpret_cast<volatile int32_t*>(
+          static_cast<char*>(ernic_qp_->sq_buf) -
+          pgsz_init);
+  host_qp_->ernic_sq_.ring_prod_tail = ring_state;
 
   host_qp_->ernic_sq_.use_mmio_bridge =
       config_.pci_mmio_bridge && mmio_shadow_gpu_;

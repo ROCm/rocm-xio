@@ -382,10 +382,12 @@ int rocm_ernic_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
         }
 
         if (!qp->is_kernel) {
-            rocm_ernic_page_dir_insert_umem(&qp->pdir, qp->sumem, 0);
+            rocm_ernic_page_dir_insert_umem(
+                &qp->pdir, qp->sumem, 0);
             if (!is_srq && qp->rumem)
-                rocm_ernic_page_dir_insert_umem(&qp->pdir, qp->rumem,
-                                                qp->npages_send);
+                rocm_ernic_page_dir_insert_umem(
+                    &qp->pdir, qp->rumem,
+                    qp->npages_send);
         } else {
             qp->sq.ring = qp->pdir.pages[0];
             qp->rq.ring = is_srq ? NULL : &qp->sq.ring[1];

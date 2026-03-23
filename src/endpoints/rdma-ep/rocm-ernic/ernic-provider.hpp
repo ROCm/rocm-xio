@@ -47,6 +47,7 @@ struct ernic_device_sq : public ernic_device_wq {
   uint16_t ernic_target_bdf;
   uint8_t uar_bar_index;
   bool use_mmio_bridge;
+  volatile int32_t* ring_prod_tail;
 } __attribute__((packed));
 
 /* Host-side CQ (used during setup) */

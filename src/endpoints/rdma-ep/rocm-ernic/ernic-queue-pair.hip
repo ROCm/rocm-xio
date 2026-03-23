@@ -175,12 +175,19 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
   sge.lkey = qp.lkey_;
 
   memcpy(wqe_ptr, &hdr, sizeof(hdr));
-  memcpy((char*)wqe_ptr + sizeof(hdr), &sge, sizeof(sge));
+  memcpy((char*)wqe_ptr + sizeof(hdr),
+         &sge, sizeof(sge));
 
   qp.ernic_sq_.tail++;
   if (qp.ernic_sq_.tail >= qp.ernic_sq_.depth)
     qp.ernic_sq_.tail = 0;
   qp.ernic_sq_.psn++;
+
+  if (qp.ernic_sq_.ring_prod_tail) {
+    __threadfence_system();
+    *qp.ernic_sq_.ring_prod_tail =
+        static_cast<int32_t>(qp.ernic_sq_.tail);
+  }
 }
 
 __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
