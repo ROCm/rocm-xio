@@ -179,8 +179,27 @@ start_ernic_servers() {
 }
 
 check_mmio_bridge_support() {
-    local qemu_bin
-    qemu_bin="${QEMU_PATH:+${QEMU_PATH}/bin/}qemu-system-x86_64"
+    local qemu_bin=""
+    if [ -n "${QEMU_PATH}" ]; then
+        if [ -x "${QEMU_PATH}/qemu-system-x86_64" ]
+        then
+            qemu_bin="${QEMU_PATH}/qemu-system-x86_64"
+        elif [ -x \
+          "${QEMU_PATH}/bin/qemu-system-x86_64" ]
+        then
+            qemu_bin="${QEMU_PATH}/bin/qemu-system-x86_64"
+        fi
+    fi
+    if [ -z "${qemu_bin}" ]; then
+        qemu_bin="$(command -v \
+          qemu-system-x86_64 2>/dev/null || true)"
+    fi
+    if [ -z "${qemu_bin}" ]; then
+        echo "WARN: cannot locate" \
+             "qemu-system-x86_64," \
+             "skipping MMIO bridge check."
+        return
+    fi
     if ! "${qemu_bin}" -device help 2>&1 \
          | grep -q 'pci-mmio-bridge'; then
         echo "ERROR: QEMU at ${qemu_bin}" \

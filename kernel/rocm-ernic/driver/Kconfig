@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config INFINIBAND_ROCM_ERNIC
+	tristate "AMD ROCm ERNIC - Emulated RDMA NIC Driver"
+	depends on PCI && INET
+	help
+	  This driver provides support for AMD ROCm ERNIC (Emulated RDMA NIC),
+	  designed for use with libvfio-user based userspace device emulation.
+	  
+	  The driver enables RDMA functionality in virtual machines through
+	  a userspace server that bridges to host InfiniBand hardware. It
+	  includes polling logic to handle asynchronous operations in
+	  vfio-user environments.
+	  
+	  This driver is based on VMware's PVRDMA driver but has been adapted
+	  for AMD's ROCm ecosystem and enhanced for vfio-user compatibility.
+	  
+	  If unsure, say N.

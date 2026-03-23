@@ -1,0 +1,15 @@
+/* Export symbols matching the rocm-xio ernic DV API
+ * (rocm-ernic-dv.h).  See Documentation/versioning.md. */
+ROCM_ERNIC_1.0 {
+	global:
+		rocm_ernic_dv_umem_reg;
+		rocm_ernic_dv_umem_dereg;
+		rocm_ernic_dv_create_cq;
+		rocm_ernic_dv_destroy_cq;
+		rocm_ernic_dv_create_qp;
+		rocm_ernic_dv_destroy_qp;
+		rocm_ernic_dv_modify_qp;
+		rocm_ernic_dv_get_cq_id;
+		rocm_ernic_dv_get_qp_attr;
+	local: *;
+};

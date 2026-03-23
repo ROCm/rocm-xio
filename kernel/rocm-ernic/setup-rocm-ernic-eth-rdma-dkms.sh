@@ -65,15 +65,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Auto-detect rocm-ernic directory
+# Auto-detect driver source: prefer in-tree copy,
+# fall back to external rocm-ernic project.
+INTREE_DRV="${SCRIPT_DIR}/driver"
 if [ -z "${ERNIC_DIR}" ]; then
-  ERNIC_DIR="$(cd "${XIO_ROOT}/.." && pwd)/rocm-ernic"
+  if [ -d "${INTREE_DRV}" ] && \
+     [ -f "${INTREE_DRV}/rocm_ernic_main.c" ]; then
+    ERNIC_DIR="${XIO_ROOT}"
+    ERNIC_DRV_DIR="${INTREE_DRV}"
+    echo "Using in-tree driver source:" \
+      "${INTREE_DRV}"
+  else
+    ERNIC_DIR="$(cd "${XIO_ROOT}/.." \
+      && pwd)/rocm-ernic"
+    ERNIC_DRV_DIR="${ERNIC_DIR}/driver"
+  fi
+else
+  ERNIC_DRV_DIR="${ERNIC_DIR}/driver"
 fi
 
-ERNIC_DRV_DIR="${ERNIC_DIR}/driver"
-
-# GIT_REV from rocm-ernic repo (not rocm-xio)
-GIT_REV="$(git -C "${ERNIC_DIR}" rev-parse --short HEAD 2>/dev/null \
+# GIT_REV: use rocm-xio rev for in-tree source,
+# rocm-ernic rev for external source.
+GIT_REV="$(git -C "${ERNIC_DIR}" \
+  rev-parse --short HEAD 2>/dev/null \
   || echo "unknown")"
 
 if [ -z "${PKG_VERSION}" ]; then
