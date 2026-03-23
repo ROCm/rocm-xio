@@ -47,12 +47,36 @@ struct rocm_ernic_alloc_pd_resp_ex {
     __u32 reserved;
 };
 
+struct rocm_ernic_create_cq_cmd {
+    struct ibv_create_cq ibv_cmd;
+    __aligned_u64 buf_addr;
+    __u32 buf_size;
+    __u32 reserved;
+    __aligned_u64 comp_mask;
+    __u32 ncqe;
+    __u32 cqe_size;
+};
+
 struct rocm_ernic_create_cq_resp_ex {
     struct ib_uverbs_create_cq_resp ibv_resp;
     __u32 cqn;
     __u32 ncqe;
     __u32 cqe_size;
     __u32 reserved;
+};
+
+struct rocm_ernic_create_qp_cmd {
+    struct ibv_create_qp ibv_cmd;
+    __aligned_u64 rbuf_addr;
+    __aligned_u64 sbuf_addr;
+    __u32 rbuf_size;
+    __u32 sbuf_size;
+    __aligned_u64 qp_addr;
+    __aligned_u64 comp_mask;
+    __u32 sq_wqe_size;
+    __u32 sq_depth;
+    __u32 rq_wqe_size;
+    __u32 rq_depth;
 };
 
 struct rocm_ernic_create_qp_resp_ex {

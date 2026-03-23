@@ -122,35 +122,33 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
   hcq->depth = static_cast<uint32_t>(ncqe);
   hcq->length = hcq->depth * hcq->cqe_size;
 
+  /*
+   * For the emulated ERNIC, use host-mapped memory
+   * instead of GPU uncached memory. The emulated
+   * device does DMA through QEMU's guest physical
+   * memory, which requires host-pinnable addresses.
+   * hipHostMalloc with hipHostMallocMapped gives
+   * us host memory with a GPU-accessible pointer.
+   */
   void* buf_ptr = nullptr;
-  hipError_t herr = hipExtMallocWithFlags(&buf_ptr, hcq->length,
-                                          hipDeviceMallocUncached);
+  hipError_t herr = hipHostMalloc(
+      &buf_ptr, hcq->length, hipHostMallocMapped);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::ernic: "
-            "hipExtMallocWithFlags %s "
+            "hipHostMalloc %s "
             "failed: %s\n",
             label, hipGetErrorString(herr));
     return;
   }
   hcq->buf = buf_ptr;
-  (void)hipMemset(hcq->buf, 0, hcq->length);
+  memset(hcq->buf, 0, hcq->length);
 
   struct rocm_ernic_dv_umem_attr ua {};
   ua.addr = hcq->buf;
   ua.size = hcq->length;
   ua.access_flags = IBV_ACCESS_LOCAL_WRITE;
   ua.dmabuf_fd = -1;
-
-  if (dmabuf_enabled) {
-    uint64_t offset = 0;
-    int fd = -1;
-    hsa_amd_portable_export_dmabuf(hcq->buf, hcq->length, &fd, &offset);
-    hcq->dmabuf_fd = fd;
-    ua.dmabuf_fd = fd;
-    ua.addr = reinterpret_cast<void*>(static_cast<uintptr_t>(offset));
-    ua.comp_mask = ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF;
-  }
 
   hcq->umem = dv.umem_reg(ctx, &ua);
   if (!hcq->umem) {
