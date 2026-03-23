@@ -132,15 +132,36 @@ __device__ void Ops::ring_doorbell(QueuePair& qp,
       __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
-__device__ void Ops::poll_cq_until(QueuePair& qp, uint32_t requested) {
+__device__ void Ops::poll_cq_until(QueuePair& qp,
+                                   uint32_t requested) {
+  /*
+   * Poll the CQ ring producer tail to detect new
+   * completions. The VFIO-user server updates this
+   * after writing each CQE. Compare against the
+   * number of WQEs we've sent (ernic_sq_.tail) to
+   * determine when all operations are complete.
+   */
+  if (qp.ernic_cq_.ring_prod_tail) {
+    uint32_t target = qp.ernic_sq_.tail;
+    do {
+      int32_t prod = __hip_atomic_load(
+          const_cast<int32_t*>(
+              qp.ernic_cq_.ring_prod_tail),
+          __ATOMIC_ACQUIRE,
+          __HIP_MEMORY_SCOPE_SYSTEM);
+      if (static_cast<uint32_t>(prod) >= target)
+        return;
+    } while (true);
+  }
+
   uint32_t sq_depth = qp.ernic_sq_.depth;
   do {
-    auto* cqe = (struct ernic_cqe*)qp.ernic_cq_.buf;
-    (void)cqe;
     uint32_t sq_head = qp.ernic_sq_.head;
-    uint32_t sq_tail = __hip_atomic_load(&qp.ernic_sq_.tail, __ATOMIC_SEQ_CST,
-                                         __HIP_MEMORY_SCOPE_AGENT);
-    uint32_t consumed = (sq_tail - sq_head + sq_depth) % sq_depth;
+    uint32_t sq_tail = __hip_atomic_load(
+        &qp.ernic_sq_.tail, __ATOMIC_SEQ_CST,
+        __HIP_MEMORY_SCOPE_AGENT);
+    uint32_t consumed =
+        (sq_tail - sq_head + sq_depth) % sq_depth;
     uint32_t available = sq_depth - consumed;
     if (available >= requested)
       return;

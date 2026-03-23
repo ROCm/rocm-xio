@@ -33,6 +33,7 @@ struct ernic_device_wq {
 struct ernic_device_cq : public ernic_device_wq {
   uint32_t cons_idx;
   uint32_t cqe_size;
+  volatile int32_t* ring_prod_tail;
 } __attribute__((packed));
 
 /* Device-side SQ (GPU-visible) */

@@ -123,30 +123,41 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
   hcq->length = hcq->depth * hcq->cqe_size;
 
   /*
-   * For the emulated ERNIC, use host-mapped memory
-   * instead of GPU uncached memory. The emulated
-   * device does DMA through QEMU's guest physical
-   * memory, which requires host-pinnable addresses.
-   * hipHostMalloc with hipHostMallocMapped gives
-   * us host memory with a GPU-accessible pointer.
+   * Allocate CQ buffer with a header page for the
+   * PVRDMA ring state (prod_tail / cons_head).
+   * The server maps page 0 as ring state and
+   * page 1+ as CQE data. The header page lets
+   * the GPU poll the CQ producer tail to detect
+   * new completions.
    */
-  void* buf_ptr = nullptr;
-  hipError_t herr = hipHostMalloc(
-      &buf_ptr, hcq->length, hipHostMallocMapped);
+  size_t pgsz_cq = static_cast<size_t>(
+      sysconf(_SC_PAGESIZE));
+  size_t cq_alloc_len = pgsz_cq + hcq->length;
+  void* cq_alloc = nullptr;
+  if (posix_memalign(&cq_alloc, pgsz_cq,
+                     cq_alloc_len)) {
+    fprintf(stderr,
+            "rdma_ep::ernic: "
+            "posix_memalign %s failed\n",
+            label);
+    return;
+  }
+  memset(cq_alloc, 0, cq_alloc_len);
+  hipError_t herr = hipHostRegister(
+      cq_alloc, cq_alloc_len,
+      hipHostRegisterDefault);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::ernic: "
-            "hipHostMalloc %s "
-            "failed: %s\n",
+            "hipHostRegister %s failed: %s\n",
             label, hipGetErrorString(herr));
-    return;
   }
-  hcq->buf = buf_ptr;
-  memset(hcq->buf, 0, hcq->length);
+  hcq->buf =
+      static_cast<char*>(cq_alloc) + pgsz_cq;
 
   struct rocm_ernic_dv_umem_attr ua {};
-  ua.addr = hcq->buf;
-  ua.size = hcq->length;
+  ua.addr = cq_alloc;
+  ua.size = cq_alloc_len;
   ua.access_flags = IBV_ACCESS_LOCAL_WRITE;
   ua.dmabuf_fd = -1;
 
@@ -378,6 +389,21 @@ void Backend::ernic_initialize_gpu_qp() {
   host_qp_->ernic_cq_.depth = ernic_scq_->depth;
   host_qp_->ernic_cq_.cqe_size =
       ernic_scq_->cqe_size;
+
+  /*
+   * The CQ ring state is at offset 8 from the
+   * header page start (second PvrdmaRingState).
+   * The server's create_cq_ring uses
+   * &ring_state[1] for the CQ ring.
+   */
+  size_t pgsz_cqi = static_cast<size_t>(
+      sysconf(_SC_PAGESIZE));
+  volatile int32_t* cq_ring_state =
+      reinterpret_cast<volatile int32_t*>(
+          static_cast<char*>(ernic_scq_->buf) -
+          pgsz_cqi + 8);
+  host_qp_->ernic_cq_.ring_prod_tail =
+      cq_ring_state;
 
   memset(&host_qp_->ernic_sq_, 0,
          sizeof(ernic_device_sq));
