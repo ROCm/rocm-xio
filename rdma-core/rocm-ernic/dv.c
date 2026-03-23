@@ -29,7 +29,20 @@ rocm_ernic_dv_umem_reg(struct ibv_context *ctx,
     struct rocm_ernic_dv_umem *umem;
     int ret;
 
-    if (!in || !in->addr || in->size == 0) {
+    fprintf(stderr,
+            "rocm_ernic_dv: umem_reg: "
+            "addr=%p size=%zu comp_mask=0x%lx "
+            "dmabuf_fd=%d access=0x%x\n",
+            in ? in->addr : NULL,
+            in ? in->size : 0,
+            in ? (unsigned long)in->comp_mask : 0,
+            in ? in->dmabuf_fd : -1,
+            in ? in->access_flags : 0);
+
+    if (!in || in->size == 0) {
+        fprintf(stderr,
+                "rocm_ernic_dv: umem_reg: "
+                "EINVAL (null input or zero size)\n");
         errno = EINVAL;
         return NULL;
     }
@@ -37,14 +50,31 @@ rocm_ernic_dv_umem_reg(struct ibv_context *ctx,
     if ((in->comp_mask &
          ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF) &&
         in->dmabuf_fd < 0) {
+        fprintf(stderr,
+                "rocm_ernic_dv: umem_reg: "
+                "EBADF (dmabuf fd=%d)\n",
+                in->dmabuf_fd);
         errno = EBADF;
         return NULL;
     }
 
-    ret = ibv_dontfork_range(in->addr, in->size);
-    if (ret) {
-        errno = ret;
-        return NULL;
+    /*
+     * Skip ibv_dontfork_range for dmabuf-backed
+     * buffers and GPU device memory where addr
+     * may not be a valid CPU VA.
+     */
+    if (!(in->comp_mask &
+          ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF) &&
+        in->addr) {
+        ret = ibv_dontfork_range(in->addr, in->size);
+        if (ret) {
+            fprintf(stderr,
+                    "rocm_ernic_dv: umem_reg: "
+                    "dontfork failed: %d (%s)\n",
+                    ret, strerror(ret));
+            errno = ret;
+            return NULL;
+        }
     }
 
     umem = calloc(1, sizeof(*umem));
@@ -85,7 +115,7 @@ struct ibv_cq *rocm_ernic_dv_create_cq(
     struct rocm_ernic_dv_cq_init_attr *attr)
 {
     struct rocm_ernic_cq *cq;
-    struct ib_uverbs_create_cq_resp resp = {};
+    struct rocm_ernic_create_cq_resp_ex resp = {};
     int ret;
 
     if (!attr || !attr->umem_handle ||
@@ -100,17 +130,27 @@ struct ibv_cq *rocm_ernic_dv_create_cq(
         return NULL;
     }
 
+    fprintf(stderr,
+            "rocm_ernic_dv: create_cq: "
+            "ncqe=%u umem=%p\n",
+            attr->ncqe, (void *)attr->umem_handle);
+
     ret = ibv_cmd_create_cq(
         ctx, (int)attr->ncqe, NULL, 0,
         &cq->vcq.cq, NULL, 0,
-        &resp, sizeof(resp));
+        &resp.ibv_resp, sizeof(resp));
     if (ret) {
+        fprintf(stderr,
+                "rocm_ernic_dv: create_cq: "
+                "ibv_cmd_create_cq failed: "
+                "%d (%s)\n",
+                ret, strerror(-ret));
         free(cq);
         errno = -ret;
         return NULL;
     }
 
-    cq->cqn = resp.cq_handle;
+    cq->cqn = resp.cqn;
     cq->ncqe = attr->ncqe;
     cq->cqe_size = sizeof(struct rocm_ernic_cqe);
 
@@ -148,7 +188,7 @@ struct ibv_qp *rocm_ernic_dv_create_qp(
     struct rocm_ernic_qp *qp;
     struct ibv_qp_init_attr ib_attr = {};
     struct ibv_create_qp cmd = {};
-    struct ib_uverbs_create_qp_resp resp = {};
+    struct rocm_ernic_create_qp_resp_ex resp = {};
     int ret;
 
     if (!attr || !attr->send_cq ||
@@ -177,7 +217,8 @@ struct ibv_qp *rocm_ernic_dv_create_qp(
 
     ret = ibv_cmd_create_qp(pd, &qp->vqp.qp, &ib_attr,
                             &cmd, sizeof(cmd),
-                            &resp, sizeof(resp));
+                            &resp.ibv_resp,
+                            sizeof(resp));
     if (ret) {
         free(qp);
         errno = -ret;
@@ -186,6 +227,10 @@ struct ibv_qp *rocm_ernic_dv_create_qp(
 
     qp->qpn = resp.qpn;
     qp->qp_handle = resp.qp_handle;
+    qp->sq_depth = resp.sq_depth;
+    qp->rq_depth = resp.rq_depth;
+    qp->sq_wqe_size = resp.sq_wqe_size;
+    qp->rq_wqe_size = resp.rq_wqe_size;
 
     return &qp->vqp.qp;
 }
