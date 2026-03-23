@@ -17,9 +17,11 @@ monitor  Watch live SLURM job status.
 import argparse
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +105,74 @@ def git_short_sha():
     if r and r.returncode == 0:
         return r.stdout.strip()
     return "unknown"
+
+
+def prepare_snapshot(ref):
+    """Extract *ref* via ``git archive`` into a temp
+    directory under ``/tmp``.
+
+    Returns ``(snapshot_path, resolved_sha)``.
+    """
+    r = run_cmd(
+        ["git", "-C", str(REPO_DIR),
+         "rev-parse", "--short", ref],
+        timeout=5,
+    )
+    if not r or r.returncode != 0:
+        print(red(
+            f"ERROR: cannot resolve ref: {ref}"))
+        sys.exit(1)
+    resolved = r.stdout.strip()
+    snap = Path(tempfile.mkdtemp(
+        prefix=f"rocm-xio-{resolved}-"))
+    archive = subprocess.Popen(
+        ["git", "-C", str(REPO_DIR),
+         "archive", ref],
+        stdout=subprocess.PIPE,
+    )
+    extract = subprocess.Popen(
+        ["tar", "-x", "-C", str(snap)],
+        stdin=archive.stdout,
+    )
+    archive.stdout.close()
+    extract.communicate()
+    if extract.returncode != 0:
+        print(red(
+            "ERROR: git archive | tar failed"))
+        shutil.rmtree(snap, ignore_errors=True)
+        sys.exit(1)
+    print(f"Snapshot of {ref} ({resolved}) "
+          f"extracted to {snap}")
+    return snap, resolved
+
+
+def squeue_node(job_id, timeout_sec=2):
+    """Return the node a job is running on."""
+    r = run_cmd(
+        ["squeue", "-j", str(job_id),
+         "-h", "-o", "%N"],
+        timeout=timeout_sec,
+    )
+    if r and r.returncode == 0:
+        return r.stdout.strip()
+    return ""
+
+
+def read_sbatch_constraint(script_path):
+    """Parse the ``#SBATCH --constraint=`` value
+    from a sbatch script."""
+    try:
+        for line in Path(
+            script_path
+        ).read_text().splitlines():
+            m = re.match(
+                r"^#SBATCH\s+--constraint=(.+)",
+                line)
+            if m:
+                return m.group(1).strip()
+    except OSError:
+        pass
+    return None
 
 
 # ── Job-IDs file I/O ──────────────────────────────────
@@ -432,8 +502,24 @@ def extract_test_summary(out_path):
 # ── Submit jobs ────────────────────────────────────────
 
 
-def submit_jobs():
+def submit_jobs(
+    tag="", source_dir=None,
+    commit_mode=False, exclude_nodes=None,
+    partition=None, extra_exclude=None,
+):
     """Submit sbatch jobs.
+
+    *tag*: suffix for the logs directory name to
+    avoid collisions in parallel waves.
+    *source_dir*: path to a snapshot directory
+    (--commit mode); sbatch runs from there.
+    *commit_mode*: if True, strip MARKHAM constraint
+    and --container-mount-home from sbatch flags.
+    *exclude_nodes*: comma-separated node list
+    passed to ``sbatch --exclude``.
+    *partition*: SLURM partition name.
+    *extra_exclude*: additional nodes to exclude
+    (used by --spread).
 
     Returns ``(logs_dir, job_ids, out_files,
     err_files)``.
@@ -444,34 +530,76 @@ def submit_jobs():
     print()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logs_dir = f"logs/{ts}"
-    Path(logs_dir).mkdir(parents=True, exist_ok=True)
+    if tag:
+        ts = f"{ts}_{tag}"
+    abs_logs = (SCRIPT_DIR / "logs" / ts).resolve()
+    abs_logs.mkdir(parents=True, exist_ok=True)
+    logs_dir = str(abs_logs)
     print(f"Logs directory: {logs_dir}")
     print()
+
+    submit_dir = (
+        Path(source_dir) if source_dir
+        else SCRIPT_DIR)
+
+    exclude_list = []
+    if exclude_nodes:
+        exclude_list += exclude_nodes.split(",")
+    if extra_exclude:
+        exclude_list += [
+            n for n in extra_exclude
+            if n not in exclude_list]
 
     job_ids = {}
     out_files = {}
     err_files = {}
     for test_name, script in TESTS:
-        if not Path(script).is_file():
+        script_path = submit_dir / script
+        if not script_path.is_file():
             print(
                 "ERROR: Test script not found: "
-                f"{script}")
+                f"{script_path}")
             continue
         print(yellow(
             f"Submitting {test_name}..."))
         base = _base(script)
         out_pat = f"{logs_dir}/%x.%j.out"
         err_pat = f"{logs_dir}/%x.%j.err"
-        r = run_cmd([
+
+        cmd = [
             "sbatch",
+            f"--chdir={submit_dir}",
             "--export=ALL,"
             f"ALOLA_LOGS_DIR={logs_dir}",
             f"--job-name={base}",
             f"--output={out_pat}",
             f"--error={err_pat}",
-            script,
-        ], timeout=30)
+        ]
+
+        if commit_mode:
+            orig = read_sbatch_constraint(
+                script_path)
+            if orig:
+                relaxed = re.sub(
+                    r"MARKHAM&?", "", orig)
+                if relaxed:
+                    cmd.append(
+                        f"--constraint={relaxed}")
+            cmd.append(
+                "--container-mount-home=no")
+
+        if exclude_list:
+            cmd.append(
+                "--exclude="
+                + ",".join(exclude_list))
+
+        if partition:
+            cmd.append(
+                f"--partition={partition}")
+
+        cmd.append(str(script_path))
+
+        r = run_cmd(cmd, timeout=30)
 
         if r and r.returncode == 0:
             m = re.search(r"\d+", r.stdout)
@@ -884,7 +1012,10 @@ def display_results(
 
 
 def _run_once(submit, wait, verbose,
-              deadline=None):
+              deadline=None, source_dir=None,
+              commit_mode=False,
+              exclude_nodes=None,
+              partition=None):
     """Execute one submit / wait / report cycle.
 
     Returns exit code (0-3, or 124 for timeout).
@@ -930,7 +1061,12 @@ def _run_once(submit, wait, verbose,
     # Phase 1 -- submit
     if submit:
         (logs_dir, job_ids,
-         out_files, err_files) = submit_jobs()
+         out_files, err_files) = submit_jobs(
+            source_dir=source_dir,
+            commit_mode=commit_mode,
+            exclude_nodes=exclude_nodes,
+            partition=partition,
+        )
 
     # Phase 2 -- load existing state
     if not submit or wait:
@@ -972,6 +1108,109 @@ def _run_once(submit, wait, verbose,
         logs_dir, verbose, submit)
 
 
+# ── Wave-based parallel execution ─────────────────────
+
+
+def _run_wave(
+    wave_start, wave_size, timeout_sec,
+    verbose, source_dir=None,
+    commit_mode=False, exclude_nodes=None,
+    partition=None, spread=False,
+):
+    """Submit *wave_size* iterations at once, wait
+    for all, and return a list of exit codes.
+
+    When *spread* is True, each iteration within
+    the wave excludes nodes already allocated by
+    earlier iterations in the same wave.
+    """
+    wave_jobs = {}
+    wave_outs = {}
+    wave_logs = []
+    used_nodes = []
+
+    for slot in range(wave_size):
+        idx = wave_start + slot + 1
+        tag = f"p{idx}"
+        print("=" * 39)
+        print(
+            f"  Submitting iteration {idx} "
+            f"(wave slot {slot + 1}/"
+            f"{wave_size})")
+        print("=" * 39)
+
+        extra_ex = list(used_nodes) if spread else []
+        remove_job_ids_file()
+        logs_dir, job_ids, out_files, _ = (
+            submit_jobs(
+                tag=tag,
+                source_dir=source_dir,
+                commit_mode=commit_mode,
+                exclude_nodes=exclude_nodes,
+                partition=partition,
+                extra_exclude=extra_ex,
+            ))
+        wave_logs.append(logs_dir)
+
+        for tname, jid in job_ids.items():
+            key = f"{tname}__p{idx}"
+            wave_jobs[key] = jid
+            if tname in out_files:
+                wave_outs[key] = out_files[tname]
+
+        if spread:
+            time.sleep(1)
+            for jid in job_ids.values():
+                node = squeue_node(jid)
+                if node and node not in used_nodes:
+                    used_nodes.append(node)
+
+    print()
+    print("=" * 39)
+    print(
+        f"Wave submitted: {wave_size} iterations,"
+        f" {len(wave_jobs)} total jobs")
+    if used_nodes:
+        print(
+            f"Nodes allocated: "
+            + ", ".join(used_nodes))
+    print("=" * 39)
+    print()
+
+    dl = time.time() + timeout_sec
+    ok = wait_for_completion(
+        wave_jobs, wave_outs, "", dl)
+
+    results = []
+    for slot in range(wave_size):
+        idx = wave_start + slot + 1
+        ld = wave_logs[slot]
+        all_pass = True
+        for tname, _ in TESTS:
+            key = f"{tname}__p{idx}"
+            out = wave_outs.get(key)
+            if not out:
+                jid = wave_jobs.get(key, "")
+                if jid:
+                    out, _ = find_output_file(
+                        tname, jid, ld)
+            if out:
+                st = get_file_status(out)
+                if st != STATUS_PASS:
+                    all_pass = False
+            else:
+                all_pass = False
+        if not ok:
+            results.append(RC_TIMEOUT)
+        elif all_pass:
+            results.append(0)
+        else:
+            results.append(1)
+
+    remove_job_ids_file()
+    return results
+
+
 # ── cmd_run ────────────────────────────────────────────
 
 
@@ -980,6 +1219,7 @@ def cmd_run(args):
 
     original_handler = signal.getsignal(
         signal.SIGINT)
+    snapshot_dir = None
 
     def _on_sigint(_sig, _frame):
         print()
@@ -999,16 +1239,38 @@ def cmd_run(args):
     signal.signal(signal.SIGINT, _on_sigint)
 
     try:
+        commit_mode = False
+        source_dir = None
+        if args.commit:
+            snap, resolved = prepare_snapshot(
+                args.commit)
+            snapshot_dir = snap
+            source_dir = str(snap)
+            commit_mode = True
+            print(
+                f"Using snapshot: {snap} "
+                f"({resolved})")
+            print()
+
         if args.iterations == 1:
             rc = _run_once(
                 args.submit, args.wait,
-                args.verbose)
+                args.verbose,
+                source_dir=source_dir,
+                commit_mode=commit_mode,
+                exclude_nodes=args.exclude_nodes,
+                partition=args.partition)
             sys.exit(rc)
 
         # ── repeat mode (iterations > 1) ──
-        sha = git_short_sha()
+        if commit_mode:
+            sha = source_dir.split("-")[-1].rstrip(
+                "/")
+        else:
+            sha = git_short_sha()
         timeout_sec = args.timeout
         total = args.iterations
+        parallel = args.parallel
         tally = {
             "pass": 0, "fail": 0,
             "timeout": 0, "other": 0,
@@ -1019,55 +1281,118 @@ def cmd_run(args):
             f"Repeat test run -- commit {sha}")
         print(f"Started: {datetime.now()}")
         print(f"Total iterations: {total}")
+        print(f"Parallel: {parallel}")
         print(
-            "Timeout per iteration: "
+            "Timeout per wave: "
             f"{timeout_sec // 60}m")
+        if commit_mode:
+            print(f"Snapshot: {source_dir}")
+        if args.spread:
+            print("Spread: enabled")
+        if args.exclude_nodes:
+            print(
+                f"Exclude: {args.exclude_nodes}")
+        if args.partition:
+            print(
+                f"Partition: {args.partition}")
         print("=" * 39)
         print()
 
-        for i in range(1, total + 1):
-            print("=" * 39)
-            print(
-                f"Run {i} of {total} -- "
-                f"{datetime.now()}")
-            print(f"  commit: {sha}")
-            print("=" * 39)
-
-            remove_job_ids_file()
-            dl = time.time() + timeout_sec
-            rc = _run_once(
-                submit=True, wait=True,
-                verbose=args.verbose,
-                deadline=dl)
-
-            if rc == RC_TIMEOUT:
-                print()
+        if parallel == 1:
+            for i in range(1, total + 1):
+                print("=" * 39)
                 print(
-                    f"TIMEOUT after {timeout_sec}s"
-                    f" on run {i}")
-                _, jids = load_job_ids()
-                if jids:
-                    cancel_jobs(jids)
+                    f"Run {i} of {total} -- "
+                    f"{datetime.now()}")
+                print(f"  commit: {sha}")
+                print("=" * 39)
 
-            print(
-                f"Run {i} exited with code {rc}")
+                remove_job_ids_file()
+                dl = time.time() + timeout_sec
+                rc = _run_once(
+                    submit=True, wait=True,
+                    verbose=args.verbose,
+                    deadline=dl,
+                    source_dir=source_dir,
+                    commit_mode=commit_mode,
+                    exclude_nodes=(
+                        args.exclude_nodes),
+                    partition=args.partition)
 
-            if rc == 0:
-                tally["pass"] += 1
-            elif rc == 1:
-                tally["fail"] += 1
-            elif rc == RC_TIMEOUT:
-                tally["timeout"] += 1
-            else:
-                tally["other"] += 1
+                if rc == RC_TIMEOUT:
+                    print()
+                    print(
+                        f"TIMEOUT after "
+                        f"{timeout_sec}s"
+                        f" on run {i}")
+                    _, jids = load_job_ids()
+                    if jids:
+                        cancel_jobs(jids)
 
-            print(
-                f"Running tally: "
-                f"pass={tally['pass']} "
-                f"fail={tally['fail']} "
-                f"timeout={tally['timeout']} "
-                f"other={tally['other']}")
-            print()
+                print(
+                    f"Run {i} exited "
+                    f"with code {rc}")
+
+                if rc == 0:
+                    tally["pass"] += 1
+                elif rc == 1:
+                    tally["fail"] += 1
+                elif rc == RC_TIMEOUT:
+                    tally["timeout"] += 1
+                else:
+                    tally["other"] += 1
+
+                print(
+                    f"Running tally: "
+                    f"pass={tally['pass']} "
+                    f"fail={tally['fail']} "
+                    f"timeout={tally['timeout']} "
+                    f"other={tally['other']}")
+                print()
+        else:
+            wave_num = 0
+            for ws in range(0, total, parallel):
+                wave_num += 1
+                wave_size = min(
+                    parallel, total - ws)
+                print("=" * 39)
+                print(
+                    f"Wave {wave_num}: "
+                    f"iterations "
+                    f"{ws + 1}-{ws + wave_size} "
+                    f"of {total}")
+                print(f"  {datetime.now()}")
+                print("=" * 39)
+                print()
+
+                codes = _run_wave(
+                    ws, wave_size,
+                    timeout_sec, args.verbose,
+                    source_dir=source_dir,
+                    commit_mode=commit_mode,
+                    exclude_nodes=(
+                        args.exclude_nodes),
+                    partition=args.partition,
+                    spread=args.spread,
+                )
+
+                for rc in codes:
+                    if rc == 0:
+                        tally["pass"] += 1
+                    elif rc == 1:
+                        tally["fail"] += 1
+                    elif rc == RC_TIMEOUT:
+                        tally["timeout"] += 1
+                    else:
+                        tally["other"] += 1
+
+                print(
+                    f"Running tally: "
+                    f"pass={tally['pass']} "
+                    f"fail={tally['fail']} "
+                    f"timeout={tally['timeout']} "
+                    f"other={tally['other']}")
+                print()
 
         print("=" * 39)
         print(
@@ -1082,6 +1407,13 @@ def cmd_run(args):
             1 if tally["fail"] > 0 else 0)
 
     finally:
+        if snapshot_dir:
+            print(
+                f"Cleaning up snapshot: "
+                f"{snapshot_dir}")
+            shutil.rmtree(
+                snapshot_dir,
+                ignore_errors=True)
         signal.signal(
             signal.SIGINT, original_handler)
 
@@ -1328,6 +1660,44 @@ def main():
             "Per-iteration timeout in seconds "
             "(default: 1800). Only used when "
             "--iterations > 1."),
+    )
+    p_run.add_argument(
+        "--parallel", type=int, default=1,
+        metavar="P",
+        help=(
+            "Submit P iterations concurrently "
+            "(default: 1). Requires "
+            "--iterations. Spreads jobs across "
+            "more nodes."),
+    )
+    p_run.add_argument(
+        "--commit", type=str, default=None,
+        metavar="REF",
+        help=(
+            "Test a specific commit, tag, or "
+            "branch instead of the working "
+            "tree. Creates a snapshot in /tmp "
+            "via git archive."),
+    )
+    p_run.add_argument(
+        "--spread", action="store_true",
+        help=(
+            "Spread parallel jobs across "
+            "distinct nodes by excluding "
+            "already-allocated nodes within "
+            "each wave."),
+    )
+    p_run.add_argument(
+        "--exclude-nodes", type=str,
+        default=None, metavar="NODES",
+        help=(
+            "Comma-separated list of nodes to "
+            "exclude (e.g. node1,node2)."),
+    )
+    p_run.add_argument(
+        "--partition", type=str, default=None,
+        metavar="PART",
+        help="SLURM partition to submit to.",
     )
     p_run.set_defaults(func=cmd_run)
 

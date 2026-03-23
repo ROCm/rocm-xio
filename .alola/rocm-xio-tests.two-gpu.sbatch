@@ -108,7 +108,11 @@ run_p2p_test() {
   fi
 
   # Save JSONs under the logs tree for inspection (unique per array task)
-  local xgmi_dest="${PROJECT_DIR}/.alola/${LOGS_DIR}/xgmi-captures"
+  if [[ "${LOGS_DIR}" = /* ]]; then
+    local xgmi_dest="${LOGS_DIR}/xgmi-captures"
+  else
+    local xgmi_dest="${PROJECT_DIR}/.alola/${LOGS_DIR}/xgmi-captures"
+  fi
   mkdir -p "${xgmi_dest}"
   if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
     array_suffix="_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"

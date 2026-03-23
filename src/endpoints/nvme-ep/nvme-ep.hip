@@ -1100,26 +1100,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // Delete NVMe queues before freeing buffers to ensure the
   // controller stops referencing queue/data memory regions
-  fprintf(stdout,
-          "\nCleaning up NVMe queues (queue_id=%u)...\n",
+  fprintf(stdout, "\nCleaning up NVMe queues (queue_id=%u)...\n",
           nvmeConfig->queueId);
-  int cleanup_fd = openDeviceWithRetry(
-    nvmeConfig->controller.c_str(), O_RDWR,
-    "NVMe device", 3, 50);
+  int cleanup_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
+                                       "NVMe device", 3, 50);
   if (cleanup_fd >= 0) {
-    int del_ret =
-      deleteQueue(cleanup_fd, nvmeConfig->queueId);
+    deleteQueue(cleanup_fd, nvmeConfig->queueId);
     close(cleanup_fd);
-    if (del_ret == 0) {
-      fprintf(stdout,
-              "NVMe queues deleted successfully.\n");
-      nvmeConfig->queuesCreated = false;
-    } else {
-      fprintf(stderr,
-              "Warning: Failed to delete NVMe "
-              "queues: %s\n",
-              strerror(-del_ret));
-    }
+    nvmeConfig->queuesCreated = false;
   } else {
     fprintf(stderr,
             "Warning: Could not reopen NVMe device "
