@@ -36,7 +36,11 @@ constexpr uint32_t ERNIC_SEND_INLINE = (1 << 3);
 /* UAR doorbell bits */
 constexpr uint32_t ERNIC_UAR_QP_SEND = (1u << 30);
 
-/* WQE header: matches rocm_ernic_sq_wqe_hdr */
+/*
+ * WQE header: must match pvrdma_sq_wqe_hdr layout
+ * (80 bytes) so the SGE starts at the same offset
+ * the VFIO-user server expects.
+ */
 struct ernic_wqe_hdr {
   uint64_t wr_id;
   uint32_t num_sge;
@@ -61,6 +65,7 @@ struct ernic_wqe_hdr {
       uint32_t rkey;
       uint32_t pad;
     } atomic;
+    uint8_t _pad[48];
   } wr;
 };
 

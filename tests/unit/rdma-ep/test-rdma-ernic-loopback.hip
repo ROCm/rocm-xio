@@ -162,11 +162,12 @@ int main(int argc, char** argv) {
 
   size_t buf_size = xfer_size * 2;
   void* buf = nullptr;
-  herr = hipHostMalloc(&buf, buf_size, hipHostMallocMapped);
-  if (herr != hipSuccess) {
-    fprintf(stderr, "hipHostMalloc failed: %s\n", hipGetErrorString(herr));
+  if (posix_memalign(&buf, 4096, buf_size)) {
+    fprintf(stderr, "posix_memalign failed\n");
     return 1;
   }
+  printf("Data buffer: %p (size=%zu)\n",
+         buf, buf_size);
 
   uint8_t* src = static_cast<uint8_t*>(buf);
   uint8_t* dst = src + xfer_size;
@@ -183,41 +184,29 @@ int main(int argc, char** argv) {
   ret = backend.register_data_buffer(buf, buf_size);
   if (ret != 0) {
     fprintf(stderr, "register_data_buffer failed.\n");
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
   printf("Buffer registered: "
          "lkey=0x%x, rkey=0x%x\n",
          backend.get_lkey(), backend.get_rkey());
 
-  void* buf_gpu = nullptr;
-  herr = hipHostGetDevicePointer(&buf_gpu, buf, 0);
-  if (herr != hipSuccess) {
-    fprintf(stderr,
-            "hipHostGetDevicePointer "
-            "failed: %s\n",
-            hipGetErrorString(herr));
-    (void)hipHostFree(buf);
-    return 1;
-  }
-
-  printf("Addresses: src=%p, dst=%p "
-         "(GPU: %p)\n",
-         (void*)src, (void*)dst, buf_gpu);
+  printf("Addresses: src=%p, dst=%p\n",
+         (void*)src, (void*)dst);
 
   int* d_result = nullptr;
   unsigned long long* d_elapsed = nullptr;
   herr = hipMalloc(&d_result, sizeof(int));
   if (herr != hipSuccess) {
     fprintf(stderr, "hipMalloc(result) failed.\n");
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
   herr = hipMalloc(&d_elapsed, sizeof(unsigned long long));
   if (herr != hipSuccess) {
     fprintf(stderr, "hipMalloc(elapsed) failed.\n");
     (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
   int h_result = -1;
@@ -248,7 +237,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(herr));
     (void)hipFree(d_elapsed);
     (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
 
@@ -257,7 +246,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Kernel sync failed: %s\n", hipGetErrorString(herr));
     (void)hipFree(d_elapsed);
     (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
 
@@ -269,7 +258,7 @@ int main(int argc, char** argv) {
 
   if (h_result != 0) {
     fprintf(stderr, "Kernel reported error: %d\n", h_result);
-    (void)hipHostFree(buf);
+    free(buf);
     return 1;
   }
 
@@ -296,7 +285,7 @@ int main(int argc, char** argv) {
             "\nFAILED: LFSR mismatch at offset "
             "%zu (got 0x%02x).\n",
             err_offset, dst[err_offset]);
-    (void)hipHostFree(buf);
+    free(buf);
     backend.shutdown();
     return 1;
   }
