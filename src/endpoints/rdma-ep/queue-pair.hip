@@ -43,9 +43,20 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
   (void)hipMemset(nonfetching_atomic_, 0, 8);
   (void)hipMemset(fetching_atomic_, 0, 8 * FETCHING_ATOMIC_CNT);
 
-  mr_nonfetching_atomic_ = ibv.reg_mr(pd, nonfetching_atomic_, 8, access);
-  mr_fetching_atomic_ = ibv.reg_mr(pd, fetching_atomic_,
-                                   8 * FETCHING_ATOMIC_CNT, access);
+  mr_nonfetching_atomic_ = ibv.reg_mr(
+      pd, nonfetching_atomic_, 8, access);
+  mr_fetching_atomic_ = ibv.reg_mr(
+      pd, fetching_atomic_,
+      8 * FETCHING_ATOMIC_CNT, access);
+
+  if (!mr_nonfetching_atomic_ ||
+      !mr_fetching_atomic_) {
+    fprintf(stderr,
+            "rdma_ep: atomic MR reg failed "
+            "(nf=%p f=%p), atomics disabled\n",
+            (void*)mr_nonfetching_atomic_,
+            (void*)mr_fetching_atomic_);
+  }
 
   switch (provider) {
 #if defined(GDA_BNXT)
@@ -88,12 +99,18 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
 #endif
 #if defined(GDA_ERNIC)
     case Provider::ROCM_ERNIC:
-      op_rdma_write_ = 0; // ROCM_ERNIC_WR_RDMA_WRITE
-      op_rdma_read_ = 4;  // ROCM_ERNIC_WR_RDMA_READ
-      op_atomic_fa_ = 6;  // ROCM_ERNIC_WR_ATOMIC_FA
-      op_atomic_cs_ = 5;  // ROCM_ERNIC_WR_ATOMIC_CS
-      nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
-      fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+      op_rdma_write_ = 0;
+      op_rdma_read_ = 4;
+      op_atomic_fa_ = 6;
+      op_atomic_cs_ = 5;
+      nonfetching_atomic_lkey_ =
+          mr_nonfetching_atomic_
+              ? mr_nonfetching_atomic_->lkey
+              : 0;
+      fetching_atomic_lkey_ =
+          mr_fetching_atomic_
+              ? mr_fetching_atomic_->lkey
+              : 0;
       break;
 #endif
     default:
