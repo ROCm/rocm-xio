@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -80,15 +81,33 @@ def yellow(text):
 # ── Subprocess / git helpers ───────────────────────────
 
 
+class CmdTimeout:
+    """Sentinel returned by run_cmd on timeout.
+
+    Carries returncode = -1 so callers that check
+    ``r.returncode == 0`` treat it as a failure
+    without special-casing.
+    """
+    returncode = -1
+    stdout = ""
+    stderr = ""
+
+    def __init__(self, cmd, seconds):
+        self.cmd = cmd
+        self.seconds = seconds
+
+
 def run_cmd(args, timeout=None):
-    """Run *args*, return CompletedProcess or None."""
+    """Run *args*, return CompletedProcess,
+    CmdTimeout, or None (not found)."""
     try:
         return subprocess.run(
             args, capture_output=True,
             text=True, timeout=timeout,
         )
-    except (subprocess.TimeoutExpired,
-            FileNotFoundError):
+    except subprocess.TimeoutExpired:
+        return CmdTimeout(args, timeout)
+    except FileNotFoundError:
         return None
 
 
@@ -132,9 +151,13 @@ def prepare_snapshot(ref):
     )
     archive.stdout.close()
     extract.communicate()
-    if extract.returncode != 0:
+    archive.wait()
+    if archive.returncode != 0 \
+            or extract.returncode != 0:
         print(red(
-            "ERROR: git archive | tar failed"))
+            "ERROR: git archive | tar failed "
+            f"(archive={archive.returncode}, "
+            f"tar={extract.returncode})"))
         shutil.rmtree(snap, ignore_errors=True)
         sys.exit(1)
     print(f"Snapshot of {ref} ({resolved}) "
@@ -269,7 +292,10 @@ def sacct_state(job_id, timeout_sec=3):
 
 def is_terminal_state(state):
     return state in (
-        "COMPLETED", "FAILED", "CANCELLED",
+        "COMPLETED", "COMPLETING",
+        "FAILED", "CANCELLED",
+        "TIMEOUT", "NODE_FAIL",
+        "PREEMPTED", "OUT_OF_MEMORY",
     )
 
 
@@ -398,6 +424,19 @@ def find_latest_output(test_name, logs_dir):
 
 
 # ── Status helpers ─────────────────────────────────────
+
+
+def file_last_line(filepath, max_len=50):
+    """Return the last non-empty line of *filepath*
+    without reading the entire file into memory."""
+    try:
+        with open(filepath) as fh:
+            tail = deque(fh, maxlen=1)
+            if tail:
+                return tail[0].strip()[:max_len]
+    except OSError:
+        pass
+    return ""
 
 
 def file_has_status(filepath, status_word):
@@ -535,7 +574,7 @@ def submit_jobs(
     print()
 
     submit_dir = (
-        Path(source_dir) if source_dir
+        Path(source_dir) / ".alola" if source_dir
         else SCRIPT_DIR)
 
     exclude_list = []
@@ -597,7 +636,8 @@ def submit_jobs(
 
         r = run_cmd(cmd, timeout=30)
 
-        if r and r.returncode == 0:
+        if isinstance(r, subprocess.CompletedProcess) \
+                and r.returncode == 0:
             m = re.search(r"\d+", r.stdout)
             jid = m.group() if m else ""
             job_ids[test_name] = jid
@@ -607,15 +647,29 @@ def submit_jobs(
                 f"{logs_dir}/{base}.{jid}.out")
             err_files[test_name] = (
                 f"{logs_dir}/{base}.{jid}.err")
+        elif isinstance(r, CmdTimeout):
+            print(f"  {red('ERROR:')} sbatch timed "
+                  f"out after {r.seconds}s "
+                  "(SLURM controller may be "
+                  "unreachable)")
+        elif r is None:
+            print(f"  {red('ERROR:')} sbatch "
+                  "command not found")
         else:
-            msg = ""
-            if r:
-                msg = (
-                    r.stderr or r.stdout or ""
-                ).strip()
+            msg = (
+                r.stderr or r.stdout or ""
+            ).strip()
             if not msg:
-                msg = "sbatch not available"
+                msg = (f"sbatch exited with "
+                       f"code {r.returncode}")
             print(f"  {red('ERROR:')} {msg}")
+
+    if not job_ids:
+        print()
+        print(red(
+            "ERROR: No jobs were submitted. "
+            "Cannot continue."))
+        return logs_dir, job_ids, out_files, err_files
 
     print()
     print("All jobs submitted. Job IDs:")
@@ -755,14 +809,7 @@ def wait_for_completion(
                         all_done = False
                 else:
                     col = yellow
-                try:
-                    last = (
-                        Path(out).read_text()
-                        .splitlines()[-1]
-                        .strip()[:50]
-                    )
-                except (OSError, IndexError):
-                    last = ""
+                last = file_last_line(out)
                 if last:
                     status_lines.append(
                         f"{col(test_name + ':')} "
@@ -1063,6 +1110,8 @@ def _run_once(submit, wait, verbose,
             exclude_nodes=exclude_nodes,
             partition=partition,
         )
+        if not job_ids:
+            return 1
 
     # Phase 2 -- load existing state
     if not submit or wait:
@@ -1211,6 +1260,14 @@ def _run_wave(
 
 
 def cmd_run(args):
+    for name in ("iterations", "parallel", "timeout"):
+        val = getattr(args, name, None)
+        if val is not None and val < 1:
+            print(red(
+                f"ERROR: --{name} must be >= 1 "
+                f"(got {val})"))
+            sys.exit(1)
+
     os.chdir(SCRIPT_DIR)
 
     original_handler = signal.getsignal(

@@ -113,18 +113,22 @@ run_p2p_test() {
   else
     local xgmi_dest="${PROJECT_DIR}/.alola/${LOGS_DIR}/xgmi-captures"
   fi
-  mkdir -p "${xgmi_dest}"
-  if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
-    array_suffix="_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+  if mkdir -p "${xgmi_dest}" 2>/dev/null; then
+    if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
+      array_suffix="_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+    else
+      array_suffix="_${SLURM_JOB_ID:-$$}"
+    fi
+    cp -f "${xgmi_before}" \
+      "${xgmi_dest}/xgmi_before_${label}${array_suffix}.json" \
+      2>/dev/null || true
+    cp -f "${xgmi_after}" \
+      "${xgmi_dest}/xgmi_after_${label}${array_suffix}.json" \
+      2>/dev/null || true
   else
-    array_suffix="_${SLURM_JOB_ID:-$$}"
+    echo "WARN: cannot create '${xgmi_dest}';" \
+      "XGMI captures will not be archived"
   fi
-  cp -f "${xgmi_before}" \
-    "${xgmi_dest}/xgmi_before_${label}${array_suffix}.json" \
-    2>/dev/null || true
-  cp -f "${xgmi_after}" \
-    "${xgmi_dest}/xgmi_after_${label}${array_suffix}.json" \
-    2>/dev/null || true
   return "${p2p_rc}"
 }
 
