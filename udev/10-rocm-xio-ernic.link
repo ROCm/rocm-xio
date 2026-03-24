@@ -1,0 +1,15 @@
+# Copyright (c) Advanced Micro Devices, Inc.
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Rename AMD ROCm ERNIC NIC to a persistent
+# rocm-xio name.  Processed by systemd
+# net_setup_link at udev priority 80, before
+# the default NamePolicy applies.
+
+[Match]
+Driver=rocm_ernic
+
+[Link]
+Name=rocm-ernic0

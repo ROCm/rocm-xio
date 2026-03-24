@@ -1,0 +1,15 @@
+# Copyright (c) Advanced Micro Devices, Inc.
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Rename Broadcom Thor 2 (bnxt_en) NIC to a
+# persistent rocm-xio name.  Processed by
+# systemd net_setup_link at udev priority 80,
+# before the default NamePolicy applies.
+
+[Match]
+Driver=bnxt_en
+
+[Link]
+Name=rocm-bnxt0

@@ -198,6 +198,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   bcfg.traffic_class = cfg->trafficClass;
   bcfg.loopback = cfg->loopback;
   bcfg.pci_mmio_bridge = cfg->pciMmioBridge;
+  if (!cfg->deviceName.empty())
+    bcfg.hca_list = cfg->deviceName.c_str();
 
   rdma_ep::Backend backend(bcfg);
   int ret = backend.init();

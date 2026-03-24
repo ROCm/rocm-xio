@@ -161,7 +161,8 @@ fixture handles:
 - Kernel module reload (``modprobe bnxt_re`` /
   ``ionic_rdma``)
 - Ionic sysfs loopback mode configuration
-- RDMA device renaming (udev fallback)
+- RDMA device renaming (systemd .link / udev
+  fallback)
 - IP address and static ARP neighbor setup
 - GID table readiness polling
 

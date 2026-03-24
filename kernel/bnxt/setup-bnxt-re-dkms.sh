@@ -415,6 +415,24 @@ PYEOF
 apply_patches
 
 # -----------------------------------------------------------
+# Kernel 6.17+ compat: ensure is_user in qplib_qp
+# -----------------------------------------------------------
+
+fixup_kernel_compat() {
+  local fp="${DRV_DIR}/qplib_fp.h"
+  if ! grep -q 'is_user' "${fp}" 2>/dev/null ||
+     ! grep -B5 'is_user' "${fp}" \
+       | grep -q 'struct bnxt_qplib_qp'; then
+    echo "Adding is_user to bnxt_qplib_qp" \
+      "(kernel compat fixup)..."
+    sed -i '/u8\t\t\t\tstate;/a\\tu8\t\t\t\tis_user;' \
+      "${fp}"
+  fi
+}
+
+fixup_kernel_compat
+
+# -----------------------------------------------------------
 # Inject rocm-xio modinfo into driver source
 # -----------------------------------------------------------
 

@@ -212,30 +212,22 @@ void Backend::open_ib_device() {
     abort();
   }
 
-  // Use topology to find closest NIC to GPU
-  const char* dev_name = nullptr;
-  int nic_idx = GetClosestNicToGpu(config_.gpu_device_id, config_.hca_list,
-                                   &dev_name);
-
-  if (nic_idx >= 0 && dev_name) {
+  /*
+   * Device selection priority:
+   * 1. Explicit --device name (hca_list)
+   * 2. Topology: closest NIC to GPU
+   * 3. First available device
+   */
+  if (config_.hca_list) {
     for (int i = 0; i < num_devices; i++) {
-      const char* name = ibv.get_device_name(device_list[i]);
-      if (name && strcmp(name, dev_name) == 0) {
-        device_ = device_list[i];
-        break;
-      }
-    }
-    free(const_cast<char*>(dev_name));
-  }
-
-  if (!device_ && config_.hca_list) {
-    for (int i = 0; i < num_devices; i++) {
-      const char* name = ibv.get_device_name(device_list[i]);
-      if (name && strcmp(name, config_.hca_list) == 0) {
+      const char* name =
+          ibv.get_device_name(device_list[i]);
+      if (name &&
+          strcmp(name, config_.hca_list) == 0) {
         device_ = device_list[i];
         fprintf(stderr,
-                "rdma_ep: Matched device by name:"
-                " %s\n",
+                "rdma_ep: Matched device by "
+                "name: %s\n",
                 name);
         break;
       }
@@ -243,8 +235,28 @@ void Backend::open_ib_device() {
   }
 
   if (!device_) {
-    fprintf(stderr, "rdma_ep: Using first available"
-                    " IB device.\n");
+    const char* dev_name = nullptr;
+    int nic_idx = GetClosestNicToGpu(
+        config_.gpu_device_id, config_.hca_list,
+        &dev_name);
+    if (nic_idx >= 0 && dev_name) {
+      for (int i = 0; i < num_devices; i++) {
+        const char* name =
+            ibv.get_device_name(device_list[i]);
+        if (name &&
+            strcmp(name, dev_name) == 0) {
+          device_ = device_list[i];
+          break;
+        }
+      }
+      free(const_cast<char*>(dev_name));
+    }
+  }
+
+  if (!device_) {
+    fprintf(stderr,
+            "rdma_ep: Using first available"
+            " IB device.\n");
     device_ = device_list[0];
   }
 

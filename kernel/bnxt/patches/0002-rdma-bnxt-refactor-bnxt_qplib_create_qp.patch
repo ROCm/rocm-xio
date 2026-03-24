@@ -148,21 +148,23 @@ index 76f198390467..feb364e45e14 100644
 +		      CMDQ_CREATE_QP_SQ_LVL_SFT);
 +	sq->hwq.pg_sz_lvl = pg_sz_lvl;
 +
-+	hwq_attr.res = res;
-+	hwq_attr.sginfo = &rq->sg_info;
-+	hwq_attr.stride = bnxt_qplib_get_stride();
-+	hwq_attr.depth = bnxt_qplib_get_depth(rq, qplib_qp->wqe_mode, false);
-+	hwq_attr.aux_stride = 0;
-+	hwq_attr.aux_depth = 0;
-+	hwq_attr.type = HWQ_TYPE_QUEUE;
-+	rc = bnxt_qplib_alloc_init_hwq(&rq->hwq, &hwq_attr);
-+	if (rc)
-+		goto free_sq_hwq;
-+	pg_sz_lvl = bnxt_qplib_base_pg_size(&rq->hwq) <<
-+		CMDQ_CREATE_QP_RQ_PG_SIZE_SFT;
-+	pg_sz_lvl |= ((rq->hwq.level & CMDQ_CREATE_QP_RQ_LVL_MASK) <<
-+		      CMDQ_CREATE_QP_RQ_LVL_SFT);
-+	rq->hwq.pg_sz_lvl = pg_sz_lvl;
++	if (rq->max_wqe) {
++		hwq_attr.res = res;
++		hwq_attr.sginfo = &rq->sg_info;
++		hwq_attr.stride = bnxt_qplib_get_stride();
++		hwq_attr.depth = bnxt_qplib_get_depth(rq, qplib_qp->wqe_mode, false);
++		hwq_attr.aux_stride = 0;
++		hwq_attr.aux_depth = 0;
++		hwq_attr.type = HWQ_TYPE_QUEUE;
++		rc = bnxt_qplib_alloc_init_hwq(&rq->hwq, &hwq_attr);
++		if (rc)
++			goto free_sq_hwq;
++		pg_sz_lvl = bnxt_qplib_base_pg_size(&rq->hwq) <<
++			CMDQ_CREATE_QP_RQ_PG_SIZE_SFT;
++		pg_sz_lvl |= ((rq->hwq.level & CMDQ_CREATE_QP_RQ_LVL_MASK) <<
++			      CMDQ_CREATE_QP_RQ_LVL_SFT);
++		rq->hwq.pg_sz_lvl = pg_sz_lvl;
++	}
 +
 +	if (qplib_qp->psn_sz) {
 +		rc = bnxt_re_qp_alloc_init_xrrq(qp);
@@ -377,7 +379,7 @@ index 3e44311bf939..0ddd4f21a083 100644
 +	if (rc)
 +		return rc;
 +
-+	if (!qplqp->srq) {
++	if (!qplqp->srq && rq->max_wqe) {
 +		rc = bnxt_qplib_alloc_init_swq(rq);
 +		if (rc)
 +			goto free_sq_swq;
@@ -650,7 +652,8 @@ index 3e44311bf939..0ddd4f21a083 100644
  			     CMDQ_CREATE_QP_SQ_SGE_SFT) | 0);
 @@ -1043,29 +994,10 @@ int bnxt_qplib_create_qp(struct bnxt_qplib_res *res, struct bnxt_qplib_qp *qp)
  	/* RQ */
- 	if (!qp->srq) {
+-	if (!qp->srq) {
++	if (!qp->srq && rq->max_wqe) {
  		rq->dbinfo.flags = 0;
 -		hwq_attr.res = res;
 -		hwq_attr.sginfo = &rq->sg_info;
