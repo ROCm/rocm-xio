@@ -48,23 +48,51 @@ test_run "test-ep basic" \
   "./build/xio-tester test-ep -n ${ITERATIONS}"
 
 test_run "test-ep with threads and delay" \
-  "./build/xio-tester test-ep -n ${ITERATIONS} --threads ${THREADS} --doorbell ${DOORBELL} --delay ${DELAY}"
+  "./build/xio-tester test-ep -n ${ITERATIONS} \
+  --threads ${THREADS} --doorbell ${DOORBELL} \
+  --delay ${DELAY}"
 
 test_run "test-ep with negative delay" \
-  "./build/xio-tester test-ep -n ${ITERATIONS} --threads ${THREADS} --doorbell ${DOORBELL} --delay -${DELAY}"
+  "./build/xio-tester test-ep -n ${ITERATIONS} \
+  --threads ${THREADS} --doorbell ${DOORBELL} \
+  --delay -${DELAY}"
 
 for MEMORY_MODE in 1 2 3 4 5 6 7; do
   test_run "test-ep memory-mode ${MEMORY_MODE}" \
-    "./build/xio-tester test-ep -n ${ITERATIONS} --threads ${THREADS} --doorbell ${DOORBELL} --delay ${DELAY} --memory-mode ${MEMORY_MODE}"
+    "./build/xio-tester test-ep -n ${ITERATIONS} \
+    --threads ${THREADS} --doorbell ${DOORBELL} \
+    --delay ${DELAY} --memory-mode ${MEMORY_MODE}"
 done
+
+test_run "test-ep with histogram" \
+  "./build/xio-tester test-ep -n ${ITERATIONS} --histogram"
+
+for DB in 16 32 128; do
+  test_run "test-ep doorbell ${DB}" \
+    "./build/xio-tester test-ep -n ${ITERATIONS} \
+    --threads ${THREADS} --doorbell ${DB}"
+done
+
+test_run "test-ep max-threads" \
+  "./build/xio-tester test-ep -n ${ITERATIONS} --threads 32"
 
 # Subcommand must come first; run sdma-ep only when GPU is whitelisted
 if $sdma_ep_allowed; then
   test_run "sdma-ep p2p --to-host" \
     "./build/xio-tester sdma-ep p2p --to-host --verify -n 100"
 else
-  echo "INFO: Skipping sdma-ep tests (${ROCM_GPU_ARCH} not in SDMA whitelist)."
+  echo "INFO: Skipping sdma-ep tests" \
+    "(${ROCM_GPU_ARCH} not in SDMA whitelist)."
 fi
+
+# Negative tests: verify invalid arguments fail gracefully.
+# The ! prefix inverts the exit code so test_run records PASS
+# when the command correctly exits non-zero.
+test_run "test-ep invalid memory-mode (expect fail)" \
+  "! ./build/xio-tester test-ep --memory-mode 99 -n 1"
+
+test_run "test-ep invalid thread count (expect fail)" \
+  "! ./build/xio-tester test-ep --threads 0 -n 1"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"

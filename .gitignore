@@ -78,5 +78,4 @@ __pycache__/
 .alola/*.err
 .alola/*.out
 .alola/logs/
-.alola/xgmi-captures/
 .alola/.alola-job-ids
