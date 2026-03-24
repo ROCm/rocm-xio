@@ -45,15 +45,31 @@ display_job_info() {
 }
 
 # Detect GPU arch and set sdma_ep_allowed based on a SDMA whitelist.
+# MI300A (APU) shares gfx942 with MI300X but its SDMA engine
+# does not support the P2P paths we test, so we exclude it.
 detect_gpu_arch() {
-  ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo | grep -m 1 -E gfx[^0]{1} | \
-    sed -e 's/ *Name: *\(gfx[0-9,a-f]*\) *$/\1/')
+  ROCM_GPU_ARCH=$(/opt/rocm/bin/rocminfo \
+    | grep -m 1 -E gfx[^0]{1} \
+    | sed -e 's/ *Name: *\(gfx[0-9,a-f]*\) *$/\1/')
+  ROCM_GPU_MODEL=$(/opt/rocm/bin/rocminfo \
+    | grep -m 1 "Marketing Name:" \
+    | sed -e 's/ *Marketing Name: *//')
   echo "Detected GPU architecture: ${ROCM_GPU_ARCH}"
+  echo "Detected GPU model: ${ROCM_GPU_MODEL}"
   SDMA_EP_GFX_WHITELIST="${SDMA_EP_GFX_WHITELIST:-gfx941 gfx942 gfx950}"
   sdma_ep_allowed=false
   for g in $SDMA_EP_GFX_WHITELIST; do
-    if [ "${ROCM_GPU_ARCH}" = "$g" ]; then sdma_ep_allowed=true; break; fi
+    if [ "${ROCM_GPU_ARCH}" = "$g" ]; then
+      sdma_ep_allowed=true
+      break
+    fi
   done
+  if echo "${ROCM_GPU_MODEL}" \
+     | grep -qi "MI300A"; then
+    echo "INFO: MI300A detected;" \
+      "disabling SDMA P2P tests."
+    sdma_ep_allowed=false
+  fi
 }
 
 # Create temp dir, rsync project (from current dir, must be PROJECT_DIR), build.
