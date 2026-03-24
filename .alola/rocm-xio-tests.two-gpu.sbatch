@@ -26,6 +26,10 @@ else
   . "$(dirname "${BASH_SOURCE[0]}")/rocm-xio-tests.common"
 fi
 
+# Use timestamped logs directory if provided
+LOGS_DIR="${ALOLA_LOGS_DIR:-logs}"
+mkdir -p "${LOGS_DIR}" 2>/dev/null || true
+
 # Initialize test tracking
 test_init
 
@@ -103,60 +107,31 @@ run_p2p_test() {
     echo "Note: XGMI counters may not increment for SDMA on some systems; see README."
   fi
 
-  # Save JSONs to project dir for inspection (unique per array task)
-  mkdir -p "${PROJECT_DIR}/.alola/xgmi-captures"
+  # Save JSONs under the logs tree for inspection (unique per array task)
+  if [[ "${LOGS_DIR}" = /* ]]; then
+    local xgmi_dest="${LOGS_DIR}/xgmi-captures"
+  else
+    local xgmi_dest="${PROJECT_DIR}/.alola/${LOGS_DIR}/xgmi-captures"
+  fi
+  mkdir -p "${xgmi_dest}"
   if [ -n "${SLURM_ARRAY_TASK_ID}" ]; then
     array_suffix="_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
   else
     array_suffix="_${SLURM_JOB_ID:-$$}"
   fi
   cp -f "${xgmi_before}" \
-    "${PROJECT_DIR}/.alola/xgmi-captures/xgmi_before_${label}${array_suffix}.json" \
+    "${xgmi_dest}/xgmi_before_${label}${array_suffix}.json" \
     2>/dev/null || true
   cp -f "${xgmi_after}" \
-    "${PROJECT_DIR}/.alola/xgmi-captures/xgmi_after_${label}${array_suffix}.json" \
+    "${xgmi_dest}/xgmi_after_${label}${array_suffix}.json" \
     2>/dev/null || true
   return "${p2p_rc}"
 }
 
 label="p2p_n${ITERATIONS}_s${TRANSFER_SIZE}"
 
-# Run the P2P test and track result
-TOTAL_TESTS=$((TOTAL_TESTS + 1))
-test_name="sdma-ep P2P (GPU 0 -> GPU 1)"
-echo ""
-echo "Running test ${TOTAL_TESTS}: ${test_name}"
-echo "----------------------------------------"
-
-# Get node name
-node_name=$(get_node_name)
-
-# Run test and capture output while also displaying it
-temp_output_file=$(mktemp)
-run_p2p_test "${ITERATIONS}" "${TRANSFER_SIZE}" "${label}" 2>&1 | tee "${temp_output_file}"
-EXIT_CODE=${PIPESTATUS[0]}
-output=$(cat "${temp_output_file}")
-rm -f "${temp_output_file}"
-
-# Extract GPU device info (model and ID) from output
-gpu_device=$(extract_gpu_device_info "${output}")
-
-# Store test information
-TEST_NAMES+=("${test_name}")
-TEST_NODES+=("${node_name}")
-TEST_GPU_DEVICES+=("${gpu_device}")
-
-if [ ${EXIT_CODE} -eq 0 ]; then
-  PASSED_TESTS=$((PASSED_TESTS + 1))
-  TEST_RESULTS+=("PASS")
-  echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
-  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
-else
-  FAILED_TESTS=$((FAILED_TESTS + 1))
-  TEST_RESULTS+=("FAIL")
-  echo "✗ Test ${TOTAL_TESTS} FAILED: ${test_name} (exit code: ${EXIT_CODE})"
-  echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
-fi
+test_run "sdma-ep P2P (GPU 0 -> GPU 1)" \
+  "run_p2p_test ${ITERATIONS} ${TRANSFER_SIZE} ${label}"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
