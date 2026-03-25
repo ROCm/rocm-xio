@@ -105,6 +105,13 @@ echo "Detecting RDMA NICs on host..."
 
 DETECTED_VENDORS=""
 
+resolve_ib_bdf() {
+  local ib_dev="$1"
+  ${SSH_LOCALHOST} \
+    "readlink -f /sys/class/infiniband/${ib_dev}/device \
+    | xargs basename" 2>/dev/null || echo "unknown"
+}
+
 HAS_BNXT=$(${SSH_LOCALHOST} \
   "ls -d /sys/class/infiniband/rocm-rdma-bnxt* \
   /sys/class/infiniband/bnxt_* 2>/dev/null \
@@ -112,8 +119,9 @@ HAS_BNXT=$(${SSH_LOCALHOST} \
 if [ -n "${HAS_BNXT}" ]; then
   BNXT_DEV=$(${SSH_LOCALHOST} \
     "basename ${HAS_BNXT}")
+  BNXT_BDF=$(resolve_ib_bdf "${BNXT_DEV}")
   DETECTED_VENDORS="${DETECTED_VENDORS} bnxt"
-  echo "  Found BNXT: ${BNXT_DEV}"
+  echo "  Found BNXT: ${BNXT_DEV} (PCI ${BNXT_BDF})"
 fi
 
 HAS_MLX5=$(${SSH_LOCALHOST} \
@@ -123,8 +131,9 @@ HAS_MLX5=$(${SSH_LOCALHOST} \
 if [ -n "${HAS_MLX5}" ]; then
   MLX5_DEV=$(${SSH_LOCALHOST} \
     "basename ${HAS_MLX5}")
+  MLX5_BDF=$(resolve_ib_bdf "${MLX5_DEV}")
   DETECTED_VENDORS="${DETECTED_VENDORS} mlx5"
-  echo "  Found MLX5: ${MLX5_DEV}"
+  echo "  Found MLX5: ${MLX5_DEV} (PCI ${MLX5_BDF})"
 fi
 
 HAS_IONIC=$(${SSH_LOCALHOST} \
@@ -134,8 +143,9 @@ HAS_IONIC=$(${SSH_LOCALHOST} \
 if [ -n "${HAS_IONIC}" ]; then
   IONIC_DEV=$(${SSH_LOCALHOST} \
     "basename ${HAS_IONIC}")
+  IONIC_BDF=$(resolve_ib_bdf "${IONIC_DEV}")
   DETECTED_VENDORS="${DETECTED_VENDORS} ionic"
-  echo "  Found IONIC: ${IONIC_DEV}"
+  echo "  Found IONIC: ${IONIC_DEV} (PCI ${IONIC_BDF})"
 fi
 
 if [ -z "${DETECTED_VENDORS}" ]; then
@@ -165,15 +175,17 @@ LIB_PATH="${RDMA_CORE_LIB}:/opt/rocm/lib"
 
 for vendor in ${DETECTED_VENDORS}; do
   RDMA_DEV=""
+  RDMA_BDF=""
   case "${vendor}" in
-    bnxt)  RDMA_DEV="${BNXT_DEV}" ;;
-    mlx5)  RDMA_DEV="${MLX5_DEV}" ;;
-    ionic) RDMA_DEV="${IONIC_DEV}" ;;
+    bnxt)  RDMA_DEV="${BNXT_DEV}";  RDMA_BDF="${BNXT_BDF}" ;;
+    mlx5)  RDMA_DEV="${MLX5_DEV}";  RDMA_BDF="${MLX5_BDF}" ;;
+    ionic) RDMA_DEV="${IONIC_DEV}"; RDMA_BDF="${IONIC_BDF}" ;;
   esac
 
   echo ""
   echo "--- ${vendor^^} loopback ---"
   echo "  device=${RDMA_DEV}"
+  echo "  PCI BDF=${RDMA_BDF}"
   echo "  size=${LOOPBACK_SIZE}"
   echo "  iterations=${LOOPBACK_ITERS}"
   echo ""
