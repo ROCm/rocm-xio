@@ -24,18 +24,17 @@
 #include <hip/hip_runtime.h>
 
 #include <arpa/inet.h>
-#include <dirent.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
 #include "vendor-ops.hpp"
 #include "xio-data-pattern.hpp"
 
-#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && \
-    !defined(GDA_IONIC)
+#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && !defined(GDA_IONIC)
 int main() {
   printf("SKIP: no GDA vendor enabled.\n");
   return 77;
@@ -286,37 +285,6 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
   }
 }
 
-// --- PCI vendor auto-detection ---
-
-static bool detect_pci_vendor(uint16_t vendor_id) {
-  DIR* d = opendir("/sys/class/infiniband");
-  if (!d)
-    return false;
-  struct dirent* ent;
-  while ((ent = readdir(d)) != nullptr) {
-    if (ent->d_name[0] == '.')
-      continue;
-    char path[512];
-    snprintf(path, sizeof(path),
-             "/sys/class/infiniband/%s"
-             "/device/vendor",
-             ent->d_name);
-    FILE* f = fopen(path, "r");
-    if (!f)
-      continue;
-    unsigned int vid = 0;
-    if (fscanf(f, "%x", &vid) == 1 &&
-        vid == vendor_id) {
-      fclose(f);
-      closedir(d);
-      return true;
-    }
-    fclose(f);
-  }
-  closedir(d);
-  return false;
-}
-
 // --- Main ---
 
 static void print_usage(const char* prog) {
@@ -355,20 +323,15 @@ int main(int argc, char** argv) {
       is_server = true;
     else if (strcmp(argv[i], "--client") == 0)
       is_client = true;
-    else if (strcmp(argv[i], "--server-host") == 0 &&
-             i + 1 < argc)
+    else if (strcmp(argv[i], "--server-host") == 0 && i + 1 < argc)
       server_host = argv[++i];
-    else if (strcmp(argv[i], "--provider") == 0 &&
-             i + 1 < argc)
+    else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc)
       provider_str = argv[++i];
-    else if (strcmp(argv[i], "--device") == 0 &&
-             i + 1 < argc)
+    else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc)
       device_name = argv[++i];
-    else if (strcmp(argv[i], "--pingpong-size") == 0 &&
-             i + 1 < argc)
+    else if (strcmp(argv[i], "--pingpong-size") == 0 && i + 1 < argc)
       pp_size = atoi(argv[++i]);
-    else if (strcmp(argv[i], "--pingpong-iters") == 0 &&
-             i + 1 < argc)
+    else if (strcmp(argv[i], "--pingpong-iters") == 0 && i + 1 < argc)
       pp_iters = atoi(argv[++i]);
     else {
       print_usage(argv[0]);
@@ -377,8 +340,7 @@ int main(int argc, char** argv) {
   }
 
   if (pp_size < 8) {
-    fprintf(stderr,
-            "Pingpong size must be >= 8 bytes\n");
+    fprintf(stderr, "Pingpong size must be >= 8 bytes\n");
     return 1;
   }
 
@@ -396,46 +358,40 @@ int main(int argc, char** argv) {
 #if defined(GDA_BNXT)
     prov = Provider::BNXT;
 #else
-    fprintf(stderr,
-            "GDA_BNXT not enabled in build.\n");
+    fprintf(stderr, "GDA_BNXT not enabled in build.\n");
     return 1;
 #endif
   } else if (strcmp(provider_str, "mlx5") == 0) {
 #if defined(GDA_MLX5)
     prov = Provider::MLX5;
 #else
-    fprintf(stderr,
-            "GDA_MLX5 not enabled in build.\n");
+    fprintf(stderr, "GDA_MLX5 not enabled in build.\n");
     return 1;
 #endif
   } else if (strcmp(provider_str, "ionic") == 0) {
 #if defined(GDA_IONIC)
     prov = Provider::IONIC;
 #else
-    fprintf(stderr,
-            "GDA_IONIC not enabled in build.\n");
+    fprintf(stderr, "GDA_IONIC not enabled in build.\n");
     return 1;
 #endif
   } else if (strcmp(provider_str, "auto") == 0) {
 #if defined(GDA_IONIC)
     if (detect_pci_vendor(VENDOR_ID_PENSANDO)) {
       prov = Provider::IONIC;
-      printf("Auto-detected: ionic (0x%04x)\n",
-             VENDOR_ID_PENSANDO);
+      printf("Auto-detected: ionic (0x%04x)\n", VENDOR_ID_PENSANDO);
     } else
 #endif
 #if defined(GDA_MLX5)
       if (detect_pci_vendor(VENDOR_ID_MELLANOX)) {
       prov = Provider::MLX5;
-      printf("Auto-detected: mlx5 (0x%04x)\n",
-             VENDOR_ID_MELLANOX);
+      printf("Auto-detected: mlx5 (0x%04x)\n", VENDOR_ID_MELLANOX);
     } else
 #endif
 #if defined(GDA_BNXT)
       if (detect_pci_vendor(VENDOR_ID_BROADCOM)) {
       prov = Provider::BNXT;
-      printf("Auto-detected: bnxt (0x%04x)\n",
-             VENDOR_ID_BROADCOM);
+      printf("Auto-detected: bnxt (0x%04x)\n", VENDOR_ID_BROADCOM);
     } else
 #endif
     {
@@ -443,8 +399,7 @@ int main(int argc, char** argv) {
       return 77;
     }
   } else {
-    fprintf(stderr,
-            "Unknown provider: %s\n", provider_str);
+    fprintf(stderr, "Unknown provider: %s\n", provider_str);
     print_usage(argv[0]);
     return 1;
   }
@@ -452,15 +407,12 @@ int main(int argc, char** argv) {
   const char* prov_name = provider_name(prov);
   const char* role = is_server ? "SERVER" : "CLIENT";
   setbuf(stdout, NULL);
-  printf("=== 2-Node RDMA Test [%s] ===\n",
-         role);
+  printf("=== 2-Node RDMA Test [%s] ===\n", role);
   printf("  provider=%s\n\n", prov_name);
 
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "hipInit: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "hipInit: %s\n", hipGetErrorString(herr));
     return 1;
   }
   (void)hipSetDevice(0);
