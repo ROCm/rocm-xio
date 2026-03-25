@@ -1210,8 +1210,11 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     return -ENOMEM;
   }
 
-  // Zero-initialize queue
-  memset(setup->virt, 0, size);
+  // Zero-initialize host queues; device memory is already
+  // zeroed by hipMemset inside allocateQueue().
+  if (!is_device) {
+    memset(setup->virt, 0, size);
+  }
 
   // Step 2: Reallocate with coherent memory if host memory
   if (!is_device) {
