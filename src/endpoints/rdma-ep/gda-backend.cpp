@@ -17,6 +17,7 @@
 #include <hip/hip_runtime.h>
 
 #include <dlfcn.h>
+#include <endian.h>
 #include <unistd.h>
 
 #include "ibv-wrapper.hpp"
@@ -85,9 +86,19 @@ int Backend::init() {
 
   if (config_.loopback) {
     setup_qp_loopback();
+
+#if defined(GDA_MLX5)
+    if (provider_ == Provider::MLX5) {
+      int smoke = mlx5_cpu_loopback_smoke_test();
+      if (smoke != 0) {
+        fprintf(stderr, "rdma_ep: MLX5 CPU loopback "
+                        "smoke test failed. QP or NIC "
+                        "may not be functional.\n");
+        return -1;
+      }
+    }
+#endif
   }
-  // When not loopback, QP state transitions are deferred until
-  // connect_to_peer() is called after TCP exchange of connection info.
 
   setup_gpu_qp();
   return 0;
@@ -99,6 +110,11 @@ void Backend::shutdown() {
 #if defined(GDA_BNXT)
   if (provider_ == Provider::BNXT)
     bnxt_cleanup();
+#endif
+
+#if defined(GDA_MLX5)
+  if (provider_ == Provider::MLX5)
+    mlx5_cleanup();
 #endif
 
   if (qp_) {
@@ -440,6 +456,9 @@ void Backend::modify_qp_init_to_rtr(const DestInfo& remote) {
 
   if (provider_ == Provider::IONIC) {
     attr.max_dest_rd_atomic = 15;
+  } else if (device_attr_.max_qp_rd_atom > 0) {
+    attr.max_dest_rd_atomic = static_cast<uint8_t>(
+      device_attr_.max_qp_rd_atom > 255 ? 255 : device_attr_.max_qp_rd_atom);
   } else {
     attr.max_dest_rd_atomic = 1;
   }
@@ -453,6 +472,12 @@ void Backend::modify_qp_init_to_rtr(const DestInfo& remote) {
     memcpy(&attr.ah_attr.grh.dgid, &remote.gid, 16);
   } else {
     attr.ah_attr.dlid = remote.lid;
+    attr.ah_attr.sl = 0;
+    attr.ah_attr.is_global = 1;
+    attr.ah_attr.grh.sgid_index = gid_index_;
+    attr.ah_attr.grh.hop_limit = 1;
+    attr.ah_attr.grh.traffic_class = config_.traffic_class;
+    memcpy(&attr.ah_attr.grh.dgid, &remote.gid, 16);
   }
 
   int attr_mask = IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_RQ_PSN |
@@ -486,6 +511,9 @@ void Backend::modify_qp_rtr_to_rts() {
 
   if (provider_ == Provider::IONIC) {
     attr.max_rd_atomic = 15;
+  } else if (device_attr_.max_qp_rd_atom > 0) {
+    attr.max_rd_atomic = static_cast<uint8_t>(
+      device_attr_.max_qp_rd_atom > 255 ? 255 : device_attr_.max_qp_rd_atom);
   } else {
     attr.max_rd_atomic = 1;
   }
@@ -677,7 +705,10 @@ DestInfo Backend::get_local_dest_info() const {
 int Backend::set_remote_rkey(uint32_t remote_rkey) {
   if (!host_qp_ || !gpu_qp_)
     return -1;
-  host_qp_->rkey_ = remote_rkey;
+  if (provider_ == Provider::MLX5)
+    host_qp_->rkey_ = htobe32(remote_rkey);
+  else
+    host_qp_->rkey_ = remote_rkey;
   hipError_t err = hipMemcpy(gpu_qp_, host_qp_, sizeof(QueuePair),
                              hipMemcpyDefault);
   if (err != hipSuccess) {
@@ -712,8 +743,13 @@ int Backend::register_data_buffer(void* buf, size_t size) {
     return -1;
   }
 
-  host_qp_->lkey_ = heap_mr_->lkey;
-  host_qp_->rkey_ = heap_mr_->rkey;
+  if (provider_ == Provider::MLX5) {
+    host_qp_->lkey_ = htobe32(heap_mr_->lkey);
+    host_qp_->rkey_ = htobe32(heap_mr_->rkey);
+  } else {
+    host_qp_->lkey_ = heap_mr_->lkey;
+    host_qp_->rkey_ = heap_mr_->rkey;
+  }
   rkey_ = heap_mr_->rkey;
   lkey_ = heap_mr_->lkey;
 
