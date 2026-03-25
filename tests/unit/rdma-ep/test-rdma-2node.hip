@@ -5,14 +5,14 @@
  * 2-Node RDMA client-server test.
  *
  * Uses TCP over management network for QP info exchange, then
- * GPU-initiated RDMA WRITE over Thor 2 NICs for data transfer.
+ * GPU-initiated RDMA WRITE for data transfer.
  *
  * Usage:
- *   Server: ./test-rdma-2node --server [--device bnxt_re0] [--gid-index 3]
- *   Client: ./test-rdma-2node --client --server-host <hostname> [--device
- * bnxt_re0] [--gid-index 3]
+ *   Server: ./test-rdma-2node --server [--provider mlx5] [--device mlx5_0]
+ *   Client: ./test-rdma-2node --client --server-host <hostname>
+ *           [--provider mlx5] [--device mlx5_0]
  *
- * Requires: BNXT NIC (Thor 2), GDA_BNXT=ON build, two nodes with RDMA fabric.
+ * Supports BNXT, MLX5, and IONIC providers via --provider flag.
  */
 
 #include <cassert>
@@ -24,6 +24,7 @@
 #include <hip/hip_runtime.h>
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -33,10 +34,11 @@
 #include "vendor-ops.hpp"
 #include "xio-data-pattern.hpp"
 
-#if !defined(GDA_BNXT)
+#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && \
+    !defined(GDA_IONIC)
 int main() {
-  printf("SKIPPED: GDA_BNXT not enabled.\n");
-  return 0;
+  printf("SKIP: no GDA vendor enabled.\n");
+  return 77;
 }
 #else
 
@@ -51,6 +53,8 @@ static constexpr uint8_t DATA_PATTERN = 0xA5;
 struct ExchangeMsg {
   uint32_t qpn;
   uint32_t rkey;
+  uint16_t lid;
+  uint16_t pad;
   uint64_t remote_addr;
   uint8_t gid[16];
 } __attribute__((packed));
@@ -282,18 +286,58 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
   }
 }
 
+// --- PCI vendor auto-detection ---
+
+static bool detect_pci_vendor(uint16_t vendor_id) {
+  DIR* d = opendir("/sys/class/infiniband");
+  if (!d)
+    return false;
+  struct dirent* ent;
+  while ((ent = readdir(d)) != nullptr) {
+    if (ent->d_name[0] == '.')
+      continue;
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/sys/class/infiniband/%s"
+             "/device/vendor",
+             ent->d_name);
+    FILE* f = fopen(path, "r");
+    if (!f)
+      continue;
+    unsigned int vid = 0;
+    if (fscanf(f, "%x", &vid) == 1 &&
+        vid == vendor_id) {
+      fclose(f);
+      closedir(d);
+      return true;
+    }
+    fclose(f);
+  }
+  closedir(d);
+  return false;
+}
+
 // --- Main ---
 
 static void print_usage(const char* prog) {
   fprintf(stderr,
           "Usage:\n"
           "  %s --server [options]\n"
-          "  %s --client --server-host HOST [options]\n"
+          "  %s --client --server-host HOST"
+          " [options]\n"
           "\nOptions:\n"
-          "  --device DEV          RDMA device name (default: auto-detect)\n"
-          "  --gid-index N         GID index (default: 3, RoCEv2 IPv4-mapped)\n"
-          "  --pingpong-size N     Ping-pong payload in bytes (default: 64)\n"
-          "  --pingpong-iters N    Ping-pong iterations (default: 100)\n",
+          "  --provider P          "
+          "bnxt|mlx5|ionic|auto"
+          " (default: auto)\n"
+          "  --device DEV          "
+          "RDMA device name"
+          " (default: auto-detect)\n"
+          "  --pingpong-size N     "
+          "Ping-pong payload in bytes"
+          " (default: 64)\n"
+          "  --pingpong-iters N    "
+          "Ping-pong iterations"
+          " (default: 100)\n",
           prog, prog);
 }
 
@@ -302,7 +346,7 @@ int main(int argc, char** argv) {
   bool is_client = false;
   const char* server_host = nullptr;
   const char* device_name = nullptr;
-  int gid_index = 3;
+  const char* provider_str = "auto";
   uint32_t pp_size = 64;
   uint32_t pp_iters = 100;
 
@@ -311,15 +355,20 @@ int main(int argc, char** argv) {
       is_server = true;
     else if (strcmp(argv[i], "--client") == 0)
       is_client = true;
-    else if (strcmp(argv[i], "--server-host") == 0 && i + 1 < argc)
+    else if (strcmp(argv[i], "--server-host") == 0 &&
+             i + 1 < argc)
       server_host = argv[++i];
-    else if (strcmp(argv[i], "--device") == 0 && i + 1 < argc)
+    else if (strcmp(argv[i], "--provider") == 0 &&
+             i + 1 < argc)
+      provider_str = argv[++i];
+    else if (strcmp(argv[i], "--device") == 0 &&
+             i + 1 < argc)
       device_name = argv[++i];
-    else if (strcmp(argv[i], "--gid-index") == 0 && i + 1 < argc)
-      gid_index = atoi(argv[++i]);
-    else if (strcmp(argv[i], "--pingpong-size") == 0 && i + 1 < argc)
+    else if (strcmp(argv[i], "--pingpong-size") == 0 &&
+             i + 1 < argc)
       pp_size = atoi(argv[++i]);
-    else if (strcmp(argv[i], "--pingpong-iters") == 0 && i + 1 < argc)
+    else if (strcmp(argv[i], "--pingpong-iters") == 0 &&
+             i + 1 < argc)
       pp_iters = atoi(argv[++i]);
     else {
       print_usage(argv[0]);
@@ -327,10 +376,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  (void)gid_index; // TODO: plumb into BackendConfig
-
   if (pp_size < 8) {
-    fprintf(stderr, "Pingpong size must be >= 8 bytes\n");
+    fprintf(stderr,
+            "Pingpong size must be >= 8 bytes\n");
     return 1;
   }
 
@@ -343,21 +391,82 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  Provider prov;
+  if (strcmp(provider_str, "bnxt") == 0) {
+#if defined(GDA_BNXT)
+    prov = Provider::BNXT;
+#else
+    fprintf(stderr,
+            "GDA_BNXT not enabled in build.\n");
+    return 1;
+#endif
+  } else if (strcmp(provider_str, "mlx5") == 0) {
+#if defined(GDA_MLX5)
+    prov = Provider::MLX5;
+#else
+    fprintf(stderr,
+            "GDA_MLX5 not enabled in build.\n");
+    return 1;
+#endif
+  } else if (strcmp(provider_str, "ionic") == 0) {
+#if defined(GDA_IONIC)
+    prov = Provider::IONIC;
+#else
+    fprintf(stderr,
+            "GDA_IONIC not enabled in build.\n");
+    return 1;
+#endif
+  } else if (strcmp(provider_str, "auto") == 0) {
+#if defined(GDA_IONIC)
+    if (detect_pci_vendor(VENDOR_ID_PENSANDO)) {
+      prov = Provider::IONIC;
+      printf("Auto-detected: ionic (0x%04x)\n",
+             VENDOR_ID_PENSANDO);
+    } else
+#endif
+#if defined(GDA_MLX5)
+      if (detect_pci_vendor(VENDOR_ID_MELLANOX)) {
+      prov = Provider::MLX5;
+      printf("Auto-detected: mlx5 (0x%04x)\n",
+             VENDOR_ID_MELLANOX);
+    } else
+#endif
+#if defined(GDA_BNXT)
+      if (detect_pci_vendor(VENDOR_ID_BROADCOM)) {
+      prov = Provider::BNXT;
+      printf("Auto-detected: bnxt (0x%04x)\n",
+             VENDOR_ID_BROADCOM);
+    } else
+#endif
+    {
+      printf("SKIP: no supported NIC detected.\n");
+      return 77;
+    }
+  } else {
+    fprintf(stderr,
+            "Unknown provider: %s\n", provider_str);
+    print_usage(argv[0]);
+    return 1;
+  }
+
+  const char* prov_name = provider_name(prov);
   const char* role = is_server ? "SERVER" : "CLIENT";
   setbuf(stdout, NULL);
-  printf("=== 2-Node RDMA Test [%s] ===\n\n", role);
+  printf("=== 2-Node RDMA Test [%s] ===\n",
+         role);
+  printf("  provider=%s\n\n", prov_name);
 
-  // --- Init HIP ---
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
-    fprintf(stderr, "hipInit: %s\n", hipGetErrorString(herr));
+    fprintf(stderr,
+            "hipInit: %s\n",
+            hipGetErrorString(herr));
     return 1;
   }
   (void)hipSetDevice(0);
 
-  // --- Create Backend (loopback=false, defer QP connection) ---
   BackendConfig cfg;
-  cfg.provider = Provider::BNXT;
+  cfg.provider = prov;
   cfg.gpu_device_id = 0;
   cfg.sq_depth = 256;
   cfg.cq_depth = 256;
@@ -426,6 +535,8 @@ int main(int argc, char** argv) {
   ExchangeMsg local_msg{};
   local_msg.qpn = local_dest.qpn;
   local_msg.rkey = backend.get_rkey();
+  local_msg.lid = static_cast<uint16_t>(local_dest.lid);
+  local_msg.pad = 0;
   local_msg.remote_addr = reinterpret_cast<uint64_t>(reg_buf);
   memcpy(local_msg.gid, local_dest.gid.raw, 16);
 
@@ -444,6 +555,7 @@ int main(int argc, char** argv) {
 
   // --- Connect QP to peer ---
   DestInfo peer{};
+  peer.lid = remote_msg.lid;
   peer.qpn = remote_msg.qpn;
   peer.psn = 0;
   memcpy(peer.gid.raw, remote_msg.gid, 16);
@@ -624,4 +736,4 @@ int main(int argc, char** argv) {
   return 0;
 }
 
-#endif // GDA_BNXT
+#endif // GDA_BNXT || GDA_MLX5 || GDA_IONIC
