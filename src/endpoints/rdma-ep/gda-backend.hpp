@@ -183,7 +183,14 @@ private:
 
 #if defined(GDA_MLX5)
   void* mlx5dv_handle_{nullptr};
+  void* mlx5_registered_sq_{nullptr};
+  void* mlx5_registered_cq_{nullptr};
+  void* mlx5_registered_sq_dbr_page_{nullptr};
+  void* mlx5_registered_cq_dbr_page_{nullptr};
+  void* mlx5_registered_bf_{nullptr};
   void mlx5_initialize_gpu_qp();
+  void mlx5_cleanup();
+  int mlx5_cpu_loopback_smoke_test();
   int mlx5_dv_dl_init();
   static void* mlx5_dv_dlopen();
 #endif

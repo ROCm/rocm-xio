@@ -294,7 +294,19 @@ struct gda_mlx5_device_queue {
 };
 
 struct gda_mlx5_device_cq : public gda_mlx5_device_queue<mlx5_cqe64> {
-  using gda_mlx5_device_queue::gda_mlx5_device_queue;
+  uint32_t depth;
+  uint32_t cons_index;
+  uint32_t cqe_size;
+
+  __host__ inline gda_mlx5_device_cq(mlx5_cqe64* buf, __be32* dbrec,
+                                     uint32_t depth, uint32_t cqe_size)
+    : gda_mlx5_device_queue{buf, dbrec}, depth{depth}, cons_index{0},
+      cqe_size{cqe_size} {
+  }
+
+  __host__ inline gda_mlx5_device_cq()
+    : gda_mlx5_device_queue{}, depth{0}, cons_index{0}, cqe_size{64} {
+  }
 };
 
 struct gda_mlx5_device_sq : public gda_mlx5_device_queue<gda_mlx5_wqe> {
@@ -323,6 +335,9 @@ struct gda_mlx5_device_sq : public gda_mlx5_device_queue<gda_mlx5_wqe> {
 
 struct mlx5dv_funcs_t {
   int (*init_obj)(struct mlx5dv_obj* obj, uint64_t obj_type);
+  bool (*is_supported)(struct ibv_device* device);
+  int (*query_device)(struct ibv_context* ctx,
+                      struct mlx5dv_context* attrs_out);
 };
 
 } // namespace rdma_ep

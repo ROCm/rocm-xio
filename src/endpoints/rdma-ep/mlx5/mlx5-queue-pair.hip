@@ -1,11 +1,12 @@
-/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc.
+ * All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Derived from ROCm/rocSHMEM src/gda/mlx5/queue_pair_mlx5.cpp, adapted for
- * rocm-xio. MLX5 (Mellanox ConnectX) GPU-side device code: WQE construction via
- * gda_mlx5_wqe constructors, BlueFlame doorbell, alternating CQ polling.
- * Single-endpoint model (no PE parameter).
+ * MLX5 (Mellanox ConnectX) GPU-side device code:
+ * WQE construction, BlueFlame doorbell, CQ polling
+ * with ownership bit protocol. Single-endpoint
+ * model (no PE parameter).
  */
 
 #include "queue-pair.hpp"
@@ -42,6 +43,39 @@ __device__ static inline bool mlx5_atomic_compare(T* obj, T* expected,
   return val == exp;
 }
 
+__device__ static inline const char* mlx5_syndrome_str(uint8_t syndrome) {
+  switch (syndrome) {
+    case 0x01:
+      return "Local Length Error";
+    case 0x02:
+      return "Local QP Operation Error";
+    case 0x03:
+      return "Local EE Context Op Error";
+    case 0x04:
+      return "Local Protection Error";
+    case 0x05:
+      return "WR Flush Error";
+    case 0x06:
+      return "Memory Window Bind Error";
+    case 0x10:
+      return "Bad Response Error";
+    case 0x11:
+      return "Local Access Error";
+    case 0x12:
+      return "Remote Invalid Request";
+    case 0x13:
+      return "Remote Access Error";
+    case 0x14:
+      return "Remote Operation Error";
+    case 0x15:
+      return "Transport Retry Exceeded";
+    case 0x16:
+      return "RNR Retry Exceeded";
+    default:
+      return "Unknown";
+  }
+}
+
 namespace mlx5 {
 
 __device__ void Ops::ring_doorbell(QueuePair& qp, uint16_t sq_wqebb_counter,
@@ -73,13 +107,23 @@ __device__ void Ops::check_cqe_error(QueuePair& qp, const mlx5_cqe64* cqe) {
                                            &err_cqe->syndrome),
                                          __ATOMIC_ACQUIRE,
                                          __HIP_MEMORY_SCOPE_SYSTEM);
-    printf("rdma_ep::mlx5: CQ requester error syndrome=0x%x\n", syndrome);
+    printf("rdma_ep::mlx5: CQE error "
+           "syndrome=0x%x (%s)\n",
+           syndrome, mlx5_syndrome_str(syndrome));
   } else if (opcode == MLX5_CQE_INVALID) {
     printf("rdma_ep::mlx5: CQ invalid completion\n");
   } else {
-    printf("rdma_ep::mlx5: CQ unexpected opcode=0x%x\n", opcode);
+    printf("rdma_ep::mlx5: CQ unexpected "
+           "opcode=0x%x\n",
+           opcode);
   }
   abort();
+}
+
+__device__ static inline void mlx5_update_cq_ci(gda_mlx5_device_cq& cq) {
+  __hip_atomic_store(cq.dbrec,
+                     endian::to_be<uint32_t>(cq.cons_index & 0xffffff),
+                     __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
 __device__ void Ops::poll_cq_until(QueuePair& qp,
@@ -88,26 +132,31 @@ __device__ void Ops::poll_cq_until(QueuePair& qp,
 
   uint64_t sq_post = __hip_atomic_load(&qp.mlx5_sq_.post, __ATOMIC_ACQUIRE,
                                        __HIP_MEMORY_SCOPE_AGENT);
-  if (sq_post <= static_cast<uint64_t>((sq_depth - requested_available_slots)))
+  if (sq_post <= static_cast<uint64_t>(sq_depth - requested_available_slots))
     return;
 
+  uint32_t cq_depth = qp.mlx5_cq_.depth;
   uint16_t consumed_slots;
   uint16_t available_slots;
 
   do {
-    struct mlx5_cqe64* cqe = &qp.mlx5_cq_.buf[1 - (sq_post % 2)];
+    uint32_t ci = qp.mlx5_cq_.cons_index;
+    uint32_t cq_idx = ci % cq_depth;
+    uint8_t owner_expected = (ci / cq_depth) & 1;
 
-    uint32_t wqecnt_sig_op_own = __hip_atomic_load(reinterpret_cast<uint32_t*>(
-                                                     &cqe->wqe_counter),
-                                                   __ATOMIC_ACQUIRE,
-                                                   __HIP_MEMORY_SCOPE_SYSTEM);
+    struct mlx5_cqe64* cqe = &qp.mlx5_cq_.buf[cq_idx];
 
-    __be16 be_wqe_counter = static_cast<__be16>(wqecnt_sig_op_own);
-    uint8_t opcode = static_cast<uint8_t>(wqecnt_sig_op_own >> 28);
-    uint16_t sq_head = endian::from_be(be_wqe_counter);
+    uint8_t op_own = __hip_atomic_load(const_cast<uint8_t*>(&cqe->op_own),
+                                       __ATOMIC_ACQUIRE,
+                                       __HIP_MEMORY_SCOPE_SYSTEM);
+    uint8_t opcode = op_own >> 4;
+    uint8_t owner = op_own & 1;
 
-    uint16_t sq_tail = __hip_atomic_load(&qp.mlx5_sq_.tail, __ATOMIC_ACQUIRE,
-                                         __HIP_MEMORY_SCOPE_AGENT);
+    if (owner != owner_expected) {
+      sq_post = __hip_atomic_load(&qp.mlx5_sq_.post, __ATOMIC_ACQUIRE,
+                                  __HIP_MEMORY_SCOPE_AGENT);
+      continue;
+    }
 
     if (opcode == MLX5_CQE_INVALID) {
       sq_post = __hip_atomic_load(&qp.mlx5_sq_.post, __ATOMIC_ACQUIRE,
@@ -115,9 +164,21 @@ __device__ void Ops::poll_cq_until(QueuePair& qp,
       continue;
     }
 
-#ifdef DEBUG
-    check_cqe_error(qp, cqe);
-#endif
+    if (opcode == MLX5_CQE_REQ_ERR) {
+      check_cqe_error(qp, cqe);
+    }
+
+    __be16 be_wqe_counter = __hip_atomic_load(const_cast<__be16*>(
+                                                &cqe->wqe_counter),
+                                              __ATOMIC_ACQUIRE,
+                                              __HIP_MEMORY_SCOPE_SYSTEM);
+    uint16_t sq_head = endian::from_be(be_wqe_counter);
+
+    qp.mlx5_cq_.cons_index = ci + 1;
+    mlx5_update_cq_ci(qp.mlx5_cq_);
+
+    uint16_t sq_tail = __hip_atomic_load(&qp.mlx5_sq_.tail, __ATOMIC_ACQUIRE,
+                                         __HIP_MEMORY_SCOPE_AGENT);
 
     uint16_t posted = sq_tail;
     uint16_t completed = sq_head + 1;
