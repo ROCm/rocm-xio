@@ -1,0 +1,28 @@
+# rocm-xio NVMe persistent naming rules
+#
+# Creates stable symlinks for NVMe controllers so
+# test scripts do not depend on probe-order device
+# numbering.
+#
+# Install with:
+#   sudo udev/setup-udev-rules.sh --install
+
+# QEMU emulated NVMe (Red Hat 1b36:0010)
+SUBSYSTEM=="nvme", ATTRS{vendor}=="0x1b36", \
+  ATTRS{device}=="0x0010", \
+  SYMLINK+="rocm-xio-nvme-emul"
+
+# Microchip NVMe (11f8:f117)
+SUBSYSTEM=="nvme", ATTRS{vendor}=="0x11f8", \
+  ATTRS{device}=="0xf117", \
+  SYMLINK+="rocm-xio-nvme-microchip"
+
+# WD Black SN850X (15b7:5030)
+SUBSYSTEM=="nvme", ATTRS{vendor}=="0x15b7", \
+  ATTRS{device}=="0x5030", \
+  SYMLINK+="rocm-xio-nvme-wd"
+
+# KIOXIA XG8 (1e0f:0010)
+SUBSYSTEM=="nvme", ATTRS{vendor}=="0x1e0f", \
+  ATTRS{device}=="0x0010", \
+  SYMLINK+="rocm-xio-nvme-kioxia"

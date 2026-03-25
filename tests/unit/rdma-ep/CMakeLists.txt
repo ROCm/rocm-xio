@@ -2,59 +2,110 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Unit tests for the rdma-ep endpoint
-# These tests are GPU-based HIP tests that perform RDMA operations from the GPU
+# Unit and hardware tests for the rdma-ep endpoint
+# (GDA-based).
 
-# Get directory paths from parent
-set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
-set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
+# CPU-only unit tests (no GPU or NIC required)
+xio_add_test(
+  NAME test-rdma-config
+  SOURCE test-rdma-config.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-# Function to set up a GPU-based RDMA test executable
-function(setup_rdma_test TEST_NAME SOURCE_FILE NEEDS_VENDOR_DIRS)
-  # Create executable
-  add_executable(${TEST_NAME} ${SOURCE_FILE})
+xio_add_test(
+  NAME test-rdma-vendors
+  SOURCE test-rdma-vendors.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-  # Set language to HIP
-  set_target_properties(${TEST_NAME} PROPERTIES LANGUAGE HIP)
+xio_add_test(
+  NAME test-rdma-endian
+  SOURCE test-rdma-endian.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
 
-  # Set compile options
-  target_compile_options(${TEST_NAME} PRIVATE
-    -std=c++17
-    -Wall
-    -Wextra
+# BNXT queue sizing math (CPU-only, no GPU or NIC)
+xio_add_test(
+  NAME test-bnxt-sizing
+  SOURCE test-bnxt-sizing.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+    ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep/bnxt
+)
+
+# Hardware setup fixture (runs once before all
+# hardware tests via FIXTURES_REQUIRED)
+if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
+  add_test(NAME rdma-hw-setup
+    COMMAND sudo
+      ${CMAKE_SOURCE_DIR}/scripts/test/setup-rdma-loopback.sh)
+  set_tests_properties(rdma-hw-setup PROPERTIES
+    FIXTURES_SETUP RDMA_HW
+    LABELS "hardware;fixture"
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77)
+endif()
+
+# Hardware integration tests (require NIC + GPU)
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
+  xio_add_test(
+    NAME test-rdma-loopback
+    SOURCE test-rdma-loopback.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
   )
+  set_tests_properties(test-rdma-loopback PROPERTIES
+    FIXTURES_REQUIRED RDMA_HW)
 
-  # Set include directories
-  set(INCLUDE_DIRS
-    ${INCLUDE_DIR}
-    ${ENDPOINTS_DIR}/rdma-ep
+  # Seed-parameterized sweep tests
+  foreach(seed RANGE 1 5)
+    add_test(
+      NAME test-rdma-loopback-seed${seed}
+      COMMAND test-rdma-loopback
+        --seed ${seed} --size 256)
+    set_tests_properties(
+      test-rdma-loopback-seed${seed}
+      PROPERTIES
+        LABELS "hardware;rdma;sweep"
+        TIMEOUT 300
+        RESOURCE_GROUPS "gpus:1"
+        SKIP_RETURN_CODE 77
+        FIXTURES_REQUIRED RDMA_HW)
+  endforeach()
+endif()
+
+if(GDA_BNXT)
+  xio_add_test(
+    NAME test-rdma-2node
+    SOURCE test-rdma-2node.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
   )
+  set_tests_properties(test-rdma-2node PROPERTIES
+    FIXTURES_REQUIRED RDMA_HW)
+endif()
 
-  if(NEEDS_VENDOR_DIRS)
-    list(APPEND INCLUDE_DIRS
-      ${ENDPOINTS_DIR}/rdma-ep/mlx
-      ${ENDPOINTS_DIR}/rdma-ep/bnxt
-      ${ENDPOINTS_DIR}/rdma-ep/ionic
-      ${ENDPOINTS_DIR}/rdma-ep/rocm-ernic
-    )
-  endif()
-
-  target_include_directories(${TEST_NAME} PRIVATE ${INCLUDE_DIRS})
-
-  # Link libraries
-  target_link_libraries(${TEST_NAME} PRIVATE
-    rocm-xio
-    hip::host
-    hip::device
+if(GDA_ERNIC)
+  xio_add_test(
+    NAME test-rdma-ernic-loopback
+    SOURCE test-rdma-ernic-loopback.hip
+    LABELS hardware rdma
+    GPU
+    INCLUDE_DIRS
+      ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
   )
-
-  # Add to CTest
-  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-endfunction()
-
-# Set up all test executables
-setup_rdma_test(test-rdma-wqe-cqe test-rdma-wqe-cqe.hip TRUE)
-setup_rdma_test(test-rdma-vendors test-rdma-vendors.hip TRUE)
-setup_rdma_test(test-rdma-queue-ops test-rdma-queue-ops.hip FALSE)
-setup_rdma_test(test-rdma-cqe-generation test-rdma-cqe-generation.hip TRUE)
-setup_rdma_test(test-rdma-config test-rdma-config.hip FALSE)
+  set_tests_properties(test-rdma-ernic-loopback
+    PROPERTIES FIXTURES_REQUIRED RDMA_HW)
+endif()

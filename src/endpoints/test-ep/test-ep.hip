@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "test-ep.h"
+#include "xio-timing.h"
 #include "xio.h"
 
 namespace xio::test_ep {
@@ -321,75 +322,6 @@ std::vector<std::thread> launchCpuThreads(void* hostSqeAddr, void* hostCqeAddr,
   }
 
   return cpuThreadHandles;
-}
-
-// Helper function to update timing stats (shared between GPU and CPU code)
-__device__ __host__ void updateTimingStats(XioTimingStats* stats,
-                                           unsigned long long int duration) {
-  if (stats == nullptr) {
-    return;
-  }
-
-#ifdef __HIP_DEVICE_COMPILE__
-  // GPU version: use atomics
-  atomicAdd((unsigned long long int*)&stats->count, 1ULL);
-  atomicAdd((unsigned long long int*)&stats->sumDuration, duration);
-
-  // Atomically update min
-  unsigned long long int oldMin = stats->minDuration;
-  while (duration < oldMin) {
-    unsigned long long int expected = oldMin;
-    unsigned long long int desired = duration;
-    unsigned long long int* addr = (unsigned long long int*)&stats->minDuration;
-    unsigned long long int result = atomicCAS(addr, expected, desired);
-    if (result == expected) {
-      break;
-    }
-    oldMin = result;
-  }
-
-  // Atomically update max
-  unsigned long long int oldMax = stats->maxDuration;
-  while (duration > oldMax) {
-    unsigned long long int expected = oldMax;
-    unsigned long long int desired = duration;
-    unsigned long long int* addr = (unsigned long long int*)&stats->maxDuration;
-    unsigned long long int result = atomicCAS(addr, expected, desired);
-    if (result == expected) {
-      break;
-    }
-    oldMax = result;
-  }
-#else
-  // CPU version: use std::atomic_ullong (atomic<unsigned long long>)
-  // Note: atomic header is included later in the file, but we need it here
-  // Use reinterpret_cast to treat the memory as atomic
-  std::atomic_ullong* countPtr = reinterpret_cast<std::atomic_ullong*>(
-    &stats->count);
-  std::atomic_ullong* sumPtr = reinterpret_cast<std::atomic_ullong*>(
-    &stats->sumDuration);
-  std::atomic_ullong* minPtr = reinterpret_cast<std::atomic_ullong*>(
-    &stats->minDuration);
-  std::atomic_ullong* maxPtr = reinterpret_cast<std::atomic_ullong*>(
-    &stats->maxDuration);
-
-  countPtr->fetch_add(1);
-  sumPtr->fetch_add(duration);
-
-  // Update min
-  unsigned long long int oldMin = minPtr->load();
-  while (duration < oldMin &&
-         !minPtr->compare_exchange_weak(oldMin, duration)) {
-    // Retry
-  }
-
-  // Update max
-  unsigned long long int oldMax = maxPtr->load();
-  while (duration > oldMax &&
-         !maxPtr->compare_exchange_weak(oldMax, duration)) {
-    // Retry
-  }
-#endif
 }
 
 // Endpoint kernel - receives pointers directly like simple-test

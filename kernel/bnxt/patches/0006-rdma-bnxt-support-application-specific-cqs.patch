@@ -1,0 +1,89 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v11 6/6] RDMA/bnxt_re: Support application specific CQs
+From: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Date: Tue, 10 Feb 2026 22:29:39 +0530
+Message-Id: <20260210165939.41625-7-sriharsha.basavapatna@broadcom.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This patch supports application allocated memory for CQs.
+
+The application allocates and manages the CQs directly. To support
+this, the driver exports a new comp_mask to indicate direct control
+of the CQ. When this comp_mask bit is set in the ureq, the driver
+maps this application allocated CQ memory into hardware. As the
+application manages this memory, the CQ depth ('cqe') passed by it
+must be used as is and the driver shouldn't update it.
+
+Signed-off-by: Sriharsha Basavapatna <sriharsha.basavapatna@broadcom.com>
+Reviewed-by: Selvin Xavier <selvin.xavier@broadcom.com>
+---
+ drivers/infiniband/hw/bnxt_re/ib_verbs.c | 18 ++++++++++++++----
+ include/uapi/rdma/bnxt_re-abi.h          |  2 ++
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.c b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+index dc73f0072528..04588b4f79c0 100644
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.c
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+@@ -3372,6 +3372,9 @@ static int bnxt_re_setup_sginfo(struct bnxt_re_dev *rdev,
+ 	return 0;
+ }
+ 
++static u64 bnxt_re_cq_cmask_supported = (BNXT_RE_CQ_TOGGLE_PAGE_SUPPORT |
++					 BNXT_RE_CQ_APP_ALLOC_ENABLE);
++
+ int bnxt_re_create_cq_umem(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+ 			   struct ib_umem *umem, struct uverbs_attr_bundle *attrs)
+ {
+@@ -3382,6 +3385,7 @@ int bnxt_re_create_cq_umem(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
+ 		rdma_udata_to_drv_context(udata, struct bnxt_re_ucontext, ib_uctx);
+ 	struct bnxt_qplib_dev_attr *dev_attr = rdev->dev_attr;
+ 	struct bnxt_qplib_chip_ctx *cctx;
++	struct bnxt_re_cq_req req = {};
+ 	int cqe = attr->cqe;
+ 	int rc, entries;
+ 	u32 active_cqs;
+@@ -3404,11 +3408,17 @@ int bnxt_re_create_cq_umem(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
+ 		entries = dev_attr->max_cq_wqes + 1;
+ 
+ 	if (udata) {
+-		struct bnxt_re_cq_req req;
++		rc = ib_copy_validate_udata_in_cm(udata, req, cq_handle,
++						  bnxt_re_cq_cmask_supported);
++		if (rc) {
++			ibdev_dbg(&rdev->ibdev,
++				  "CQ udata validation failed: %d comp_mask: 0x%llx supported: 0x%llx\n",
++				  -rc, req.comp_mask, bnxt_re_cq_cmask_supported);
++			return rc;
++		}
+ 
+-		rc = ib_copy_validate_udata_in(udata, req, cq_handle);
+-		if (rc)
+-			goto fail;
++		if (req.comp_mask & BNXT_RE_CQ_APP_ALLOC_ENABLE)
++			entries = cqe;
+ 
+ 		if (umem) {
+ 			cq->umem = umem;
+diff --git a/include/uapi/rdma/bnxt_re-abi.h b/include/uapi/rdma/bnxt_re-abi.h
+index 1f7685665db1..26eeb78193fa 100644
+--- a/include/uapi/rdma/bnxt_re-abi.h
++++ b/include/uapi/rdma/bnxt_re-abi.h
+@@ -103,10 +103,12 @@ struct bnxt_re_pd_resp {
+ struct bnxt_re_cq_req {
+ 	__aligned_u64 cq_va;
+ 	__aligned_u64 cq_handle;
++	__aligned_u64 comp_mask;
+ };
+ 
+ enum bnxt_re_cq_mask {
+ 	BNXT_RE_CQ_TOGGLE_PAGE_SUPPORT = 0x1,
++	BNXT_RE_CQ_APP_ALLOC_ENABLE = 0x2,
+ };
+ 
+ struct bnxt_re_cq_resp {
+-- 
+2.51.2.636.ga99f379adf
+
