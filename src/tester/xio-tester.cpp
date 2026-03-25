@@ -203,9 +203,20 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  // Explicitly initialize the HIP runtime so that init overhead
+  // is isolated from benchmark timing and errors are reported
+  // clearly before any device queries.
+  if (!emulateMode) {
+    hipError_t herr = hipInit(0);
+    if (herr != hipSuccess) {
+      std::cerr << "hipInit failed: " << hipGetErrorString(herr) << std::endl;
+      return EXIT_FAILURE;
+    }
+  }
+
   // Get GPU device information (skip in emulate mode)
   int deviceId = 0;
-  double gpuClockPeriodNs = 10.0; // Default: 10ns (100MHz) for emulate mode
+  double gpuClockPeriodNs = 10.0;
   if (!emulateMode) {
     HIP_CHECK(hipGetDevice(&deviceId));
     hipDeviceProp_t deviceProp;
