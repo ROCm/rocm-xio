@@ -13,9 +13,6 @@ set -e
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Parse command line arguments
@@ -164,13 +161,14 @@ get_lba_size() {
     # nvme-cli output format: "lbaf  0 : ms:0   lbads:9  rp:0x2 (in use)"
     # We need to match format entries (starting with "lbaf"), not "nlbaf"
     # Find the format marked "(in use)" and extract lbads value
-    local lbaf_line=$($NVME_CMD id-ns "$ns" 2>/dev/null | grep "^lbaf" | grep "in use" | head -1)
+    local lbaf_line
+    lbaf_line=$($NVME_CMD id-ns "$ns" 2>/dev/null | grep "^lbaf" | grep "in use" | head -1)
     if [ -n "$lbaf_line" ]; then
-        # Extract lbads field (field 5 contains "lbads:9")
-        local lbads_str=$(echo "$lbaf_line" | awk '{print $5}')
+        local lbads_str
+        lbads_str=$(echo "$lbaf_line" | awk '{print $5}')
         if [ -n "$lbads_str" ]; then
-            # Extract number after colon: "lbads:9" -> "9"
-            local lbads=$(echo "$lbads_str" | cut -d: -f2)
+            local lbads
+            lbads=$(echo "$lbads_str" | cut -d: -f2)
             if [ -n "$lbads" ] && [ "$lbads" -ge 0 ] 2>/dev/null; then
                 # LBA size = 2^lbads bytes
                 echo $((1 << lbads))
@@ -180,11 +178,13 @@ get_lba_size() {
     fi
     
     # Fallback: try to get any format entry (first one)
-    local lbaf_line=$($NVME_CMD id-ns "$ns" 2>/dev/null | grep "^lbaf" | head -1)
+    lbaf_line=$($NVME_CMD id-ns "$ns" 2>/dev/null | grep "^lbaf" | head -1)
     if [ -n "$lbaf_line" ]; then
-        local lbads_str=$(echo "$lbaf_line" | awk '{print $5}')
+        local lbads_str
+        lbads_str=$(echo "$lbaf_line" | awk '{print $5}')
         if [ -n "$lbads_str" ]; then
-            local lbads=$(echo "$lbads_str" | cut -d: -f2)
+            local lbads
+            lbads=$(echo "$lbads_str" | cut -d: -f2)
             if [ -n "$lbads" ] && [ "$lbads" -ge 0 ] 2>/dev/null; then
                 echo $((1 << lbads))
                 return
@@ -290,14 +290,16 @@ EOF
 test_device() {
     local device=$1
     local ns="${device}n1"
-    local device_name=$(basename "$device")
+    local device_name
+    device_name=$(basename "$device")
     
     echo "========================================"
     echo "Testing NVMe: $device"
     echo "========================================"
     
     # Get LBA size
-    local lba_size=$(get_lba_size "$device")
+    local lba_size
+    lba_size=$(get_lba_size "$device")
     echo "LBA size: $lba_size bytes"
     
     # Calculate total data written
@@ -329,13 +331,14 @@ test_device() {
     
     echo "Command: $write_cmd"
     
+    # shellcheck disable=SC2024
     if ! sudo $write_cmd > "$TEMP_DIR/${device_name}_write.log" 2>&1; then
         echo "✗ Write failed - check log: $TEMP_DIR/${device_name}_write.log"
         return 1
     fi
     
-    # Extract LBA size from C++ output to verify it matches
-    local detected_lba_size=$(grep -i "Selected LBA size" "$TEMP_DIR/${device_name}_write.log" | grep -oE "[0-9]+" | head -1)
+    local detected_lba_size
+    detected_lba_size=$(grep -i "Selected LBA size" "$TEMP_DIR/${device_name}_write.log" | grep -oE "[0-9]+" | head -1)
     if [ -n "$detected_lba_size" ] && [ "$detected_lba_size" != "$lba_size" ]; then
         echo "Warning: LBA size mismatch - using C++ detected size: $detected_lba_size bytes"
         lba_size=$detected_lba_size

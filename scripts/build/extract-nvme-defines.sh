@@ -23,7 +23,7 @@ mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # Temporary file for processing
 TMP_FILE=$(mktemp)
-trap "rm -f $TMP_FILE" EXIT
+trap 'rm -f "$TMP_FILE"' EXIT
 
 # Function to convert kernel types to HIP-friendly types
 convert_kernel_types() {

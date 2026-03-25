@@ -1,0 +1,223 @@
+#!/bin/bash
+#
+# setup-vm
+#
+# Provision a running rocm-xio test VM using the
+# sbates130272.batesste Ansible Galaxy collection.
+# Installs the HWE kernel, ROCm, development tools,
+# user config, then mounts the host filesystem,
+# installs udev rules, builds the patched bnxt_re
+# DKMS module, builds and loads the rocm-xio kernel
+# module, and builds the rocm-xio project inside
+# the VM.
+#
+# Prerequisites:
+#   - VM must be running (make launch-test-vm)
+#   - ansible-playbook and ansible-galaxy in PATH
+#
+# Environment variables:
+#   SSH_PORT           VM SSH port (default: 2222)
+#   VM_USERNAME        VM user (default: $USER)
+#   VM_PASS            VM password (default: password)
+#   ANSIBLE_PLAYBOOK   Path to ansible-playbook
+#   ANSIBLE_GALAXY     Path to ansible-galaxy
+
+set -e
+
+SSH_PORT="${SSH_PORT:-2222}"
+VM_USERNAME="${VM_USERNAME:-${USER}}"
+VM_PASS="${VM_PASS:-password}"
+
+ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
+ANSIBLE_GALAXY="${ANSIBLE_GALAXY:-ansible-galaxy}"
+
+COLLECTION="sbates130272.batesste"
+
+echo "Installing Ansible Galaxy collection..."
+"${ANSIBLE_GALAXY}" collection install "${COLLECTION}"
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "${TMPDIR}"' EXIT
+
+SSH_ARGS="-o StrictHostKeyChecking=no"
+SSH_ARGS="${SSH_ARGS} -o UserKnownHostsFile=/dev/null"
+
+HOST_LINE="rocm-xio-vm"
+HOST_LINE="${HOST_LINE} ansible_host=localhost"
+HOST_LINE="${HOST_LINE} ansible_port=${SSH_PORT}"
+HOST_LINE="${HOST_LINE} ansible_user=${VM_USERNAME}"
+HOST_LINE="${HOST_LINE} ansible_password=${VM_PASS}"
+HOST_LINE="${HOST_LINE} ansible_become_pass=${VM_PASS}"
+HOST_LINE="${HOST_LINE} ansible_ssh_common_args="
+HOST_LINE="${HOST_LINE}'${SSH_ARGS}'"
+
+cat > "${TMPDIR}/inventory.ini" <<EOF
+[testvm]
+${HOST_LINE}
+EOF
+
+PROJECTS="/home/${VM_USERNAME}/Projects"
+XIO="${PROJECTS}/rocm-xio"
+GIT_SHORT_REV="$(git -C "$(dirname "$0")/../.." \
+  rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+VM_BUILD_DIR="/opt/rocm-xio-build-${GIT_SHORT_REV}"
+
+cat > "${TMPDIR}/setup.yml" <<EOF
+---
+- name: Provision rocm-xio test VM
+  hosts: testvm
+  become: true
+  gather_facts: true
+  vars:
+    username: ${VM_USERNAME}
+    projects_dir: ${PROJECTS}
+    xio_dir: ${XIO}
+    vm_build_dir: ${VM_BUILD_DIR}
+  pre_tasks:
+    - name: Remove stale rocm-xio-bnxt-re DKMS module
+      shell: >
+        if dkms status rocm-xio-bnxt-re 2>/dev/null
+        | grep -q .; then
+        dkms remove rocm-xio-bnxt-re --all
+        2>/dev/null; fi
+      changed_when: false
+      ignore_errors: true
+      tags: [hwe_kernel]
+
+    - name: Fix broken dpkg state
+      shell: dpkg --configure -a
+      changed_when: false
+      ignore_errors: true
+      tags: [hwe_kernel]
+
+    - name: Install HWE kernel
+      apt:
+        name: linux-generic-hwe-24.04
+        state: present
+        update_cache: true
+      register: hwe_kernel
+      tags: [hwe_kernel]
+
+    - name: Reboot to HWE kernel
+      reboot:
+        reboot_timeout: 300
+      when: hwe_kernel.changed
+      tags: [hwe_kernel]
+
+  roles:
+    - role: ${COLLECTION}.user_setup
+      remote_user: "{{ username }}"
+      tags: [user_setup]
+    - role: ${COLLECTION}.fave_packages
+      remote_user: "{{ username }}"
+      tags: [fave_packages]
+    - role: ${COLLECTION}.git_setup
+      remote_user: "{{ username }}"
+      tags: [git_setup]
+    - role: ${COLLECTION}.rocm_setup
+      remote_user: "{{ username }}"
+      rocm_setup_user: "{{ username }}"
+      tags: [rocm_setup]
+  tasks:
+    - name: Mount 9p host filesystem
+      ansible.posix.mount:
+        path: "{{ projects_dir }}"
+        src: hostfs
+        fstype: 9p
+        opts: >-
+          trans=virtio,version=9p2000.L,nofail
+        state: mounted
+      tags: [rocm_xio]
+
+    - name: Install rocm-xio udev rules
+      shell: >
+        {{ xio_dir }}/udev/setup-udev-rules.sh
+        --install
+      changed_when: false
+      tags: [rocm_xio]
+
+    - name: Build and install patched bnxt_re DKMS
+      shell: >
+        {{ xio_dir }}/kernel/bnxt/setup-bnxt-re-dkms.sh
+      register: bnxt_dkms
+      tags: [rocm_xio]
+
+    - name: Reload bnxt_re module
+      shell: >
+        modprobe -r bnxt_re && modprobe bnxt_re
+      when: bnxt_dkms.changed
+      tags: [rocm_xio]
+
+    - name: Create VM-local build directory
+      shell: >
+        install -d -o {{ username }}
+        {{ vm_build_dir }}/kernel/rocm-xio
+        && chown {{ username }}:{{ username }}
+        {{ vm_build_dir }}
+      tags: [rocm_xio]
+
+    - name: Copy and build rocm-xio kernel module
+      shell: |
+        cp -a {{ xio_dir }}/kernel/rocm-xio/* \
+          {{ vm_build_dir }}/kernel/rocm-xio/
+        cd {{ vm_build_dir }}/kernel/rocm-xio
+        make
+      tags: [rocm_xio]
+
+    - name: Install rocm-xio kernel module
+      shell: |
+        kver=\$(uname -r)
+        mkdir -p /lib/modules/\$kver/extra
+        cp {{ vm_build_dir }}/kernel/rocm-xio/rocm-xio.ko \
+          /lib/modules/\$kver/extra/
+        depmod -a
+      tags: [rocm_xio]
+
+    - name: Load rocm-xio module
+      shell: |
+        rmmod rocm_xio 2>/dev/null || true
+        modprobe rocm_xio
+      tags: [rocm_xio]
+
+    - name: Ensure rocm-xio loads on boot
+      lineinfile:
+        path: /etc/modules
+        line: rocm_xio
+        create: true
+      tags: [rocm_xio]
+
+    - name: Create /dev/rocm-xio device node
+      shell: |
+        major=\$(grep rocm-xio /proc/devices \
+          | awk '{print \$1}')
+        [ -c /dev/rocm-xio ] \
+          || mknod /dev/rocm-xio c \$major 0
+        chmod 666 /dev/rocm-xio
+      args:
+        creates: /dev/rocm-xio
+      tags: [rocm_xio]
+
+    - name: Configure rocm-xio (out-of-source)
+      become: false
+      shell: >
+        cmake -S {{ xio_dir }}
+        -B {{ vm_build_dir }}
+        -DCMAKE_BUILD_TYPE=Debug
+      tags: [rocm_xio]
+
+    - name: Build rocm-xio
+      become: false
+      shell: >
+        cmake --build {{ vm_build_dir }} --parallel
+      tags: [rocm_xio]
+EOF
+
+echo "Running Ansible playbook against VM..."
+echo "  SSH port: ${SSH_PORT}"
+echo "  User:     ${VM_USERNAME}"
+echo ""
+
+"${ANSIBLE_PLAYBOOK}" \
+    -i "${TMPDIR}/inventory.ini" \
+    "${TMPDIR}/setup.yml" \
+    -v

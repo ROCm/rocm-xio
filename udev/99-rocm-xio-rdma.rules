@@ -1,0 +1,75 @@
+# rocm-xio RDMA NIC persistent naming rules
+#
+# Renames network interfaces and InfiniBand devices
+# for RDMA NICs supported by the rocm-xio project
+# to persistent, vendor-based names.
+#
+# Install with:
+#   sudo udev/setup-udev-rules.sh --install
+
+# --- Network interface naming ---
+
+# Broadcom Thor 2 (bnxt_re)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x14e4", \
+  DRIVERS=="bnxt_en", \
+  NAME="rocm-bnxt%n"
+
+# AMD Pensando (ionic)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x1dd8", \
+  NAME="rocm-ionic%n"
+
+# Mellanox ConnectX (mlx5)
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x02c9", \
+  NAME="rocm-mlx5-%n"
+
+# AMD ROCm ERNIC -- uses DRIVERS guard so we don't
+# accidentally rename other AMD (0x1022) devices.
+SUBSYSTEM=="net", ACTION=="add", \
+  ATTR{device/vendor}=="0x1022", \
+  DRIVERS=="rocm_ernic", \
+  NAME="rocm-ernic%n"
+
+# --- InfiniBand device naming ---
+#
+# DRIVERS guards prevent ATTRS{vendor} from
+# false-matching a parent PCI bridge (e.g. an AMD
+# host bridge with vendor 0x1022).
+#
+# The rename is deferred via a backgrounded subshell
+# because rdma-netlink calls from a synchronous udev
+# RUN can fail while the device is still settling.
+
+# Broadcom Thor 2 (bnxt_re)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="bnxt_en", \
+  ATTRS{vendor}=="0x14e4", \
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-bnxt%n) &'"
+
+# AMD Pensando (ionic)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="ionic", \
+  ATTRS{vendor}=="0x1dd8", \
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-ionic%n) &'"
+
+# Mellanox ConnectX (mlx5)
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="mlx5_core", \
+  ATTRS{vendor}=="0x02c9", \
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-mlx5-%n) &'"
+
+# AMD ROCm ERNIC
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="rocm_ernic", \
+  ATTRS{vendor}=="0x1022", \
+  RUN+="/bin/sh -c '(sleep 1; \
+    /usr/bin/rdma dev set %k \
+    name rocm-rdma-ernic%n) &'"
