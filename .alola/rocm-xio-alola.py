@@ -42,6 +42,8 @@ TESTS = [
      "rocm-xio-tests.nvme-ep.sbatch"),
     ("rdma-ep",
      "rocm-xio-tests.rdma-ep.sbatch"),
+    ("rdma-ep-2node",
+     "rocm-xio-tests.rdma-ep-2node.sbatch"),
 ]
 
 STATUS_PASS = 0

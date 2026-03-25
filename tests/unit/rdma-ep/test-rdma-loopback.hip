@@ -22,9 +22,9 @@
 
 #include <hip/hip_runtime.h>
 
-#include <dirent.h>
 #include <unistd.h>
 
+#include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
 #include "vendor-ops.hpp"
@@ -43,34 +43,6 @@ using namespace rdma_ep;
 static constexpr uint32_t DEFAULT_XFER_SIZE = 256;
 static constexpr uint32_t DEFAULT_LFSR_SEED = 1;
 static constexpr unsigned DEFAULT_ITERATIONS = 1;
-
-static bool detect_pci_vendor(uint16_t vendor_id) {
-  DIR* d = opendir("/sys/class/infiniband");
-  if (!d)
-    return false;
-  struct dirent* ent;
-  while ((ent = readdir(d)) != nullptr) {
-    if (ent->d_name[0] == '.')
-      continue;
-    char path[512];
-    snprintf(path, sizeof(path),
-             "/sys/class/infiniband/%s"
-             "/device/vendor",
-             ent->d_name);
-    FILE* f = fopen(path, "r");
-    if (!f)
-      continue;
-    unsigned int vid = 0;
-    if (fscanf(f, "%x", &vid) == 1 && vid == vendor_id) {
-      fclose(f);
-      closedir(d);
-      return true;
-    }
-    fclose(f);
-  }
-  closedir(d);
-  return false;
-}
 
 static void print_usage(const char* prog) {
   fprintf(stderr,
