@@ -84,7 +84,7 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
   endforeach()
 endif()
 
-if(GDA_BNXT)
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
   xio_add_test(
     NAME test-rdma-2node
     SOURCE test-rdma-2node.hip
