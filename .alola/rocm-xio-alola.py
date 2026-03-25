@@ -40,10 +40,8 @@ TESTS = [
      "rocm-xio-tests.two-gpu.sbatch"),
     ("nvme-ep",
      "rocm-xio-tests.nvme-ep.sbatch"),
-    # rdma-ep disabled: GPU kernel illegal memory
-    # access during loopback (under investigation)
-    # ("rdma-ep",
-    #  "rocm-xio-tests.rdma-ep.sbatch"),
+    ("rdma-ep",
+     "rocm-xio-tests.rdma-ep.sbatch"),
 ]
 
 STATUS_PASS = 0

@@ -19,7 +19,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
-#SBATCH --constraint=MARKHAM&IB
+#SBATCH --constraint=MARKHAM&IB&(ROCM7.2.0|ROCM7.3.0|ROCM7.1.1|ROCM7.0.1)
 #SBATCH --gpus-per-node=1
 
 set -xe
@@ -36,6 +36,7 @@ fi
 
 LOOPBACK_SEEDS="${LOOPBACK_SEEDS:-1 2 3 4 5}"
 LOOPBACK_SIZE="${LOOPBACK_SIZE:-256}"
+LOOPBACK_ITERS="${LOOPBACK_ITERS:-100}"
 
 cleanup() {
   echo "Cleaning up..."
@@ -174,6 +175,7 @@ for vendor in ${DETECTED_VENDORS}; do
   echo "--- ${vendor^^} loopback ---"
   echo "  device=${RDMA_DEV}"
   echo "  size=${LOOPBACK_SIZE}"
+  echo "  iterations=${LOOPBACK_ITERS}"
   echo ""
 
   for seed in ${LOOPBACK_SEEDS}; do
@@ -185,7 +187,8 @@ for vendor in ${DETECTED_VENDORS}; do
           --provider ${vendor} \
           --device ${RDMA_DEV} \
           --size ${LOOPBACK_SIZE} \
-          --seed ${seed}\""
+          --seed ${seed} \
+          -n ${LOOPBACK_ITERS}\""
     sleep 1
   done
 done
