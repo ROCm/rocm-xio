@@ -48,19 +48,22 @@ public:
   void init();
   bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1);
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
+  SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
+                             uint32_t engineId, int* channelIdx = nullptr);
+  int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
 
 private:
   /*
-   * OAM MAP
-   * src\dst    0	1	2	3	4	5	6	7
-   * 0	        0	7	6	1	2	4	5	3
-   * 1	        7	0	1	5	4	2	3	6
-   * 2	        5	1	0	6	7	3	2	4
-   * 3	        1	6	5	0	3	7	4	2
-   * 4	        2	4	7	3	0	5	6	1
-   * 5	        4	2	3	7	6	0	1	5
-   * 6	        5	3	2	4	6	1	0	7
-   * 7	        3	6	4	2	1	5	7	0
+   * MI300X OAM MAP (XGMI topology -> SDMA engine)
+   * src\dst  0  1  2  3  4  5  6  7
+   * 0        0  7  6  1  2  4  5  3
+   * 1        7  0  1  5  4  2  3  6
+   * 2        5  1  0  6  7  3  2  4
+   * 3        1  6  5  0  3  7  4  2
+   * 4        2  4  7  3  0  5  6  1
+   * 5        4  2  3  7  6  0  1  5
+   * 6        5  3  2  4  6  1  0  7
+   * 7        3  6  4  2  1  5  7  0
    */
   std::array<std::array<int, 8>, 8> mi300xOamMap = {{{0, 7, 6, 1, 2, 4, 5, 3},
                                                      {7, 0, 1, 5, 4, 2, 3, 6},
@@ -72,8 +75,6 @@ private:
                                                      {3, 6, 4, 2, 1, 5, 7, 0}}};
 
   int getOamId(int deviceId);
-
-  int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
 
   std::once_flag init_flag;
   std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>>

@@ -123,9 +123,67 @@ RDMA Endpoint
 SDMA Endpoint
 -------------
 
+Configuration
+^^^^^^^^^^^^^
+
 .. doxygenstruct:: sdma_ep::SdmaEpConfig
    :members:
    :undoc-members:
+
+Host-Side Setup
+^^^^^^^^^^^^^^^
+
+.. doxygenstruct:: sdma_ep::SdmaConnectionInfo
+   :members:
+   :undoc-members:
+
+.. doxygenstruct:: sdma_ep::SdmaQueueInfo
+   :members:
+   :undoc-members:
+
+.. doxygenfunction:: sdma_ep::initEndpoint
+
+.. doxygenfunction:: sdma_ep::shutdownEndpoint
+
+.. doxygenfunction:: sdma_ep::createConnection
+
+.. doxygenfunction:: sdma_ep::createQueue
+
+.. doxygenfunction:: sdma_ep::destroyQueue
+
+Device-Side Operations
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. doxygenfunction:: sdma_ep::put
+
+.. doxygenfunction:: sdma_ep::putTile
+
+.. doxygenfunction:: sdma_ep::signal
+
+.. doxygenfunction:: sdma_ep::putSignal
+
+.. doxygenfunction:: sdma_ep::putSignalCounter
+
+.. doxygenfunction:: sdma_ep::putCounter
+
+.. doxygenfunction:: sdma_ep::signalCounter
+
+.. doxygenfunction:: sdma_ep::waitSignal
+
+.. doxygenfunction:: sdma_ep::waitCounter
+
+.. doxygenfunction:: sdma_ep::flush
+
+.. doxygenfunction:: sdma_ep::quiet
+
+CLI and Validation
+^^^^^^^^^^^^^^^^^^
+
+.. doxygenfunction:: sdma_ep::registerCliOptions
+
+.. doxygenfunction:: sdma_ep::validateConfig
+
+.. doxygenfunction:: sdma_ep::getIterations
 
 Test Endpoint
 -------------

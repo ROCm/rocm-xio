@@ -12,6 +12,8 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+#include <CLI/CLI.hpp>
+
 #include "anvil.hpp"
 #include "anvil_device.hpp"
 #include "sdma-ep.h"
@@ -50,17 +52,157 @@ static void lfsr_fill_chunk(void* buf, size_t size, uint32_t state) {
   }
 }
 
-// SDMA endpoint implementation using anvil library for hardware access
 namespace sdma_ep {
 
-// Initialize the anvil library singleton
-static bool anvil_initialized = false;
+static bool s_initialized = false;
 
-void ensureAnvilInit() {
-  if (!anvil_initialized) {
+int initEndpoint() {
+  if (s_initialized)
+    return 0;
+  try {
     anvil::AnvilLib::getInstance().init();
-    anvil_initialized = true;
+    s_initialized = true;
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "sdma_ep::initEndpoint: " << e.what() << std::endl;
+    return -1;
   }
+}
+
+void shutdownEndpoint() {
+  s_initialized = false;
+}
+
+int createConnection(int srcDeviceId, int dstDeviceId,
+                     SdmaConnectionInfo* info) {
+  if (!s_initialized) {
+    std::cerr << "sdma_ep::createConnection: " << "call initEndpoint() first"
+              << std::endl;
+    return -1;
+  }
+  try {
+    if (srcDeviceId != dstDeviceId) {
+      anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
+    }
+    uint32_t engineId =
+      anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+    if (info) {
+      info->srcDeviceId = srcDeviceId;
+      info->dstDeviceId = dstDeviceId;
+      info->engineId = engineId;
+    }
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "sdma_ep::createConnection: " << e.what() << std::endl;
+    return -1;
+  }
+}
+
+int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
+  if (!s_initialized) {
+    std::cerr << "sdma_ep::createQueue: " << "call initEndpoint() first"
+              << std::endl;
+    return -1;
+  }
+  try {
+    uint32_t engineId =
+      anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+    int channelIdx = 0;
+    anvil::SdmaQueue* q = anvil::AnvilLib::getInstance().createSdmaQueue(
+      srcDeviceId, dstDeviceId, engineId, &channelIdx);
+    if (!q) {
+      std::cerr << "sdma_ep::createQueue: " << "queue creation failed"
+                << std::endl;
+      return -1;
+    }
+    if (info) {
+      info->deviceHandle = q->deviceHandle();
+      info->srcDeviceId = srcDeviceId;
+      info->dstDeviceId = dstDeviceId;
+      info->channelIdx = channelIdx;
+    }
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "sdma_ep::createQueue: " << e.what() << std::endl;
+    return -1;
+  }
+}
+
+void destroyQueue(SdmaQueueInfo* info) {
+  if (info) {
+    info->deviceHandle = nullptr;
+  }
+}
+
+void registerCliOptions(CLI::App& app, SdmaEpConfig* config) {
+  app
+    .add_option("--src-gpu", config->srcDeviceId,
+                "Source HIP device ID (default: 0)")
+    ->default_val(-1)
+    ->group("Endpoint Options");
+  app
+    .add_option("--dst-gpu", config->dstDeviceId,
+                "Destination HIP device ID for P2P "
+                "(default: 1)")
+    ->default_val(-1)
+    ->group("Endpoint Options");
+
+  CLI::App* p2p =
+    app.add_subcommand("p2p", "Simple P2P between GPU -> GPU or GPU -> Host");
+  p2p
+    ->add_flag("--to-host", config->useHostDst,
+               "Use pinned host memory as destination "
+               "(single GPU only)")
+    ->group("Endpoint Options");
+  p2p
+    ->add_flag("--verify", config->verifyData,
+               "Verify destination buffer after transfer")
+    ->group("Endpoint Options");
+
+  CLI::App* pingPong =
+    app.add_subcommand("ping-pong", "Bidirectional ping-pong transfer between "
+                                    "two GPUs");
+  pingPong
+    ->add_flag("--use-counter", config->useCounter,
+               "Use counter-based completion")
+    ->group("Endpoint Options");
+  pingPong
+    ->add_flag("--use-flush", config->useFlush, "Use flush-based completion")
+    ->group("Endpoint Options");
+
+  CLI::App* bufferReuse = app.add_subcommand("buffer-reuse",
+                                             "Test buffer reuse patterns");
+  bufferReuse
+    ->add_flag("--use-counter", config->useCounter,
+               "Use counter-based completion")
+    ->group("Endpoint Options");
+  bufferReuse
+    ->add_flag("--use-flush", config->useFlush, "Use flush-based completion")
+    ->group("Endpoint Options");
+}
+
+std::string validateConfig(SdmaEpConfig* config) {
+  if (!config)
+    return std::string();
+  if (config->testType.empty()) {
+    return "Missing test subcommand. Available: "
+           "p2p, ping-pong, buffer-reuse";
+  }
+  if (config->useCounter && config->useFlush) {
+    return "Cannot use both --use-counter and "
+           "--use-flush at the same time";
+  }
+  if (config->transferSize == 0)
+    return "transfer-size must be > 0";
+  if (config->transferSize % 4 != 0)
+    return "transfer-size must be a multiple of 4 "
+           "(LFSR uses dwords)";
+  return std::string();
+}
+
+unsigned getIterations(void* endpointConfig) {
+  (void)endpointConfig;
+  return 128;
 }
 
 } // namespace sdma_ep
@@ -367,12 +509,8 @@ __global__ void sdma_buffer_reuse_kernel(
 hipError_t sdma_ep_run(XioEndpointConfig* config) {
   hipError_t err;
 
-  // Initialize anvil library for hardware SDMA access
-  try {
-    sdma_ep::ensureAnvilInit();
-  } catch (const std::exception& e) {
-    std::cerr << "Failed to initialize anvil library: " << e.what()
-              << std::endl;
+  if (sdma_ep::initEndpoint() != 0) {
+    std::cerr << "Failed to initialize SDMA endpoint" << std::endl;
     return hipErrorInitializationError;
   }
 
@@ -455,13 +593,10 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
     }
     if (canAccess == 0) {
       std::cerr << "P2P not available: GPU " << srcGpu << " cannot access GPU "
-                << dstGpu << " (hipDeviceCanAccessPeer returned 0)"
-                << std::endl;
+                << dstGpu << std::endl;
       return hipErrorInvalidDevice;
     }
-    anvil::EnablePeerAccess(srcGpu, dstGpu);
 
-    // For buffer-reuse and ping-pong, enable bidirectional peer access
     if (testType == "buffer-reuse" || testType == "ping-pong") {
       int canAccessReverse = 0;
       err = hipDeviceCanAccessPeer(&canAccessReverse, dstGpu, srcGpu);
@@ -472,59 +607,39 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       }
       if (canAccessReverse == 0) {
         std::cerr << "P2P not available: GPU " << dstGpu
-                  << " cannot access GPU " << srcGpu
-                  << " (hipDeviceCanAccessPeer returned 0)" << std::endl;
+                  << " cannot access GPU " << srcGpu << std::endl;
         return hipErrorInvalidDevice;
       }
-      anvil::EnablePeerAccess(dstGpu, srcGpu);
     }
   }
 
-  // Create bidirectional SDMA connections and queues
-  try {
-    bool success = anvil::AnvilLib::getInstance().connect(srcGpu, dstGpu, 1);
-    if (!success) {
-      std::cerr << "Failed to connect SDMA (src=" << srcGpu
-                << ", dst=" << dstGpu << ")" << std::endl;
-      return hipErrorInvalidDevice;
-    }
-
-    success = anvil::AnvilLib::getInstance().connect(dstGpu, srcGpu, 1);
-    if (!success) {
-      std::cerr << "Failed to connect SDMA (src=" << dstGpu
-                << ", dst=" << srcGpu << ")" << std::endl;
-      return hipErrorInvalidDevice;
-    }
-  } catch (const std::exception& e) {
-    std::cerr << "SDMA connect error: " << e.what() << std::endl;
+  sdma_ep::SdmaConnectionInfo connFwd, connRev;
+  if (sdma_ep::createConnection(srcGpu, dstGpu, &connFwd) != 0) {
+    std::cerr << "Failed to create SDMA connection " << srcGpu << " -> "
+              << dstGpu << std::endl;
+    return hipErrorInvalidDevice;
+  }
+  if (sdma_ep::createConnection(dstGpu, srcGpu, &connRev) != 0) {
+    std::cerr << "Failed to create SDMA connection " << dstGpu << " -> "
+              << srcGpu << std::endl;
     return hipErrorInvalidDevice;
   }
 
-  // Store SDMA queue handles in a map indexed by rank
-  std::map<int, anvil::SdmaQueueDeviceHandle*> sdmaHandles;
-
-  try {
-    anvil::SdmaQueue* queue0 =
-      anvil::AnvilLib::getInstance().getSdmaQueue(srcGpu, dstGpu, 0);
-    if (queue0 == nullptr) {
-      std::cerr << "Failed to get SDMA queue (rank 0: " << srcGpu << " -> "
-                << dstGpu << ")" << std::endl;
-      return hipErrorInvalidValue;
-    }
-    sdmaHandles[0] = queue0->deviceHandle();
-
-    anvil::SdmaQueue* queue1 =
-      anvil::AnvilLib::getInstance().getSdmaQueue(dstGpu, srcGpu, 0);
-    if (queue1 == nullptr) {
-      std::cerr << "Failed to get SDMA queue (rank 1: " << dstGpu << " -> "
-                << srcGpu << ")" << std::endl;
-      return hipErrorInvalidValue;
-    }
-    sdmaHandles[1] = queue1->deviceHandle();
-  } catch (const std::exception& e) {
-    std::cerr << "SDMA queue error: " << e.what() << std::endl;
+  sdma_ep::SdmaQueueInfo qInfo0, qInfo1;
+  if (sdma_ep::createQueue(srcGpu, dstGpu, &qInfo0) != 0) {
+    std::cerr << "Failed to create SDMA queue (rank 0)" << std::endl;
     return hipErrorInvalidValue;
   }
+  if (sdma_ep::createQueue(dstGpu, srcGpu, &qInfo1) != 0) {
+    std::cerr << "Failed to create SDMA queue (rank 1)" << std::endl;
+    return hipErrorInvalidValue;
+  }
+
+  std::map<int, anvil::SdmaQueueDeviceHandle*> sdmaHandles;
+  sdmaHandles[0] = static_cast<anvil::SdmaQueueDeviceHandle*>(
+    qInfo0.deviceHandle);
+  sdmaHandles[1] = static_cast<anvil::SdmaQueueDeviceHandle*>(
+    qInfo1.deviceHandle);
 
   // Set device for memory allocations
   err = hipSetDevice(srcGpu);

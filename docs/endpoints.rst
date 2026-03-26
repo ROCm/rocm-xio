@@ -231,6 +231,88 @@ Larger transfer size:
 Transfer size (``-s``) accepts bytes or suffixes: ``4k``, ``1M``, ``2G``.
 Suffixes are power-of-2 (KiB, MiB, GiB). Value must be a multiple of 4.
 
+Host-Side Setup (Library API)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Applications that want to use shader-initiated SDMA from
+their own GPU kernels (outside the xio-tester) use the
+three-step host-side setup API:
+
+.. code-block:: cpp
+
+   #include "sdma-ep.h"
+
+   // 1. Initialize the SDMA subsystem (HSA + KFD)
+   sdma_ep::initEndpoint();
+
+   // 2. Create a connection (peer access + engine)
+   sdma_ep::SdmaConnectionInfo conn;
+   sdma_ep::createConnection(0, 1, &conn);
+
+   // 3. Create an SDMA queue
+   sdma_ep::SdmaQueueInfo qInfo;
+   sdma_ep::createQueue(0, 1, &qInfo);
+
+   // Pass qInfo.deviceHandle to your GPU kernel
+   myKernel<<<1,1>>>(
+     static_cast<sdma_ep::SdmaQueueHandle*>(
+       qInfo.deviceHandle),
+     dst, src, size);
+
+   // Cleanup (nullifies handle; hsakmt/HSA resources
+   // are released at process exit by AnvilLib destructor)
+   sdma_ep::destroyQueue(&qInfo);
+   sdma_ep::shutdownEndpoint();
+
+See the :doc:`api` page for full function signatures
+and cleanup semantics.
+
+Device-Side Operations (Kernel API)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+GPU kernels use the ``sdma_ep::`` device-side functions
+to issue SDMA transfers, signal completion, and wait for
+results. All functions are ``__device__ __forceinline__``
+and operate on a ``SdmaQueueHandle`` reference.
+
+.. code-block:: cpp
+
+   #include "sdma-ep.h"
+
+   __global__ void myKernel(
+       sdma_ep::SdmaQueueHandle* handle,
+       void* dst, void* src, size_t size,
+       uint64_t* signal) {
+
+     // DMA copy (non-blocking)
+     sdma_ep::put(*handle, dst, src, size);
+
+     // Copy with completion signal
+     sdma_ep::putSignal(
+       *handle, dst, src, size, signal);
+
+     // Wait for remote signal
+     sdma_ep::waitSignal(signal, 1);
+
+     // Wait for all submitted ops
+     sdma_ep::quiet(*handle);
+   }
+
+Available operations:
+
+======================  ==============================
+Function                Description
+======================  ==============================
+``put()``               Linear DMA copy
+``putTile()``           2D sub-window DMA copy
+``signal()``            Atomic increment via SDMA
+``putSignal()``         Copy + signal (batched)
+``putSignalCounter()``  Copy + signal + counter
+``waitSignal()``        Spin-poll signal >= expected
+``flush()``             Wait for specific op
+``quiet()``             Wait for all submitted ops
+======================  ==============================
+
 Limitations
 ^^^^^^^^^^^
 

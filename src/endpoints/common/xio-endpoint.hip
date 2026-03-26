@@ -356,12 +356,6 @@ class SdmaEndpoint : public XioEndpoint {
   static constexpr size_t kSqeSize = 0;
   static constexpr size_t kCqeSize = 0;
   unsigned iterations_ = 128;
-  bool useHostDst_ = false;
-  bool verifyData_ = false;
-  bool useCounter_ = false;
-  bool useFlush_ = false;
-  int srcDeviceId_ = -1;
-  int dstDeviceId_ = -1;
   size_t transferSize_ = 4096;
   sdma_ep::SdmaEpConfig sdmaEpConfig_;
   std::map<std::string, CLI::App*> testSubcommands;
@@ -395,102 +389,40 @@ public:
     app.add_option("-n,--iterations", iterations_, "Number of SDMA transfers")
       ->default_val(128)
       ->group("Endpoint Options");
-
     app
-      .add_option("--src-gpu", srcDeviceId_,
-                  "Source HIP device ID (default: 0)")
-      ->default_val(-1)
-      ->group("Endpoint Options");
-    app
-      .add_option("--dst-gpu", dstDeviceId_,
-                  "Destination HIP device ID for P2P (default: 1)")
-      ->default_val(-1)
-      ->group("Endpoint Options");
-    app
-      .add_option(
-        "-s,--transfer-size", transferSize_,
-        "Transfer size per iteration: number or 4k/1M/2G (binary, power-of-2; "
-        "default 4096)")
+      .add_option("-s,--transfer-size", transferSize_,
+                  "Transfer size per iteration: number or "
+                  "4k/1M/2G (binary, power-of-2; default 4096)")
       ->default_val(4096)
       ->transform(CLI::Validator(transferSizeTransform,
                                  "4k/1M/2G (binary) or bytes", "SIZE"))
       ->group("Endpoint Options");
 
-    // Register p2p subcommand
-    CLI::App* p2p =
-      app.add_subcommand("p2p", "Simple P2P between GPU -> GPU or GPU -> Host");
-    p2p
-      ->add_flag("--to-host", useHostDst_,
-                 "Use pinned host memory as destination (single GPU only)")
-      ->group("Endpoint Options");
-    p2p
-      ->add_flag("--verify", verifyData_,
-                 "Verify destination buffer contains expected pattern after "
-                 "transfer (host-dst or P2P)")
-      ->group("Endpoint Options");
-    testSubcommands["p2p"] = p2p;
+    sdma_ep::registerCliOptions(app, &sdmaEpConfig_);
 
-    // Register ping-pong subcommand
-    CLI::App* pingPong = app.add_subcommand(
-      "ping-pong", "Bidirectional ping-pong transfer between two GPUs");
-    pingPong
-      ->add_flag("--use-counter", useCounter_,
-                 "Use counter-based approach for buffer reuse")
-      ->group("Endpoint Options");
-    pingPong
-      ->add_flag("--use-flush", useFlush_,
-                 "Use flush-based approach for buffer reuse")
-      ->group("Endpoint Options");
-    testSubcommands["ping-pong"] = pingPong;
-
-    // Register buffer-reuse subcommand
-    CLI::App* bufferReuse = app.add_subcommand("buffer-reuse",
-                                               "Test buffer reuse patterns");
-    bufferReuse
-      ->add_flag("--use-counter", useCounter_,
-                 "Use counter-based approach for buffer reuse")
-      ->group("Endpoint Options");
-    bufferReuse
-      ->add_flag("--use-flush", useFlush_,
-                 "Use flush-based approach for buffer reuse")
-      ->group("Endpoint Options");
-    testSubcommands["buffer-reuse"] = bufferReuse;
+    for (auto* sub : app.get_subcommands({})) {
+      std::string name = sub->get_name();
+      if (name == "p2p" || name == "ping-pong" || name == "buffer-reuse") {
+        testSubcommands[name] = sub;
+      }
+    }
   }
 
   __host__ void* initializeEndpointConfig() override {
-    // Determine which test subcommand was selected
     for (const auto& [name, subcmd] : testSubcommands) {
       if (subcmd && subcmd->parsed()) {
         sdmaEpConfig_.testType = name;
         break;
       }
     }
-
-    sdmaEpConfig_.useHostDst = useHostDst_;
-    sdmaEpConfig_.verifyData = verifyData_;
-    sdmaEpConfig_.useCounter = useCounter_;
-    sdmaEpConfig_.useFlush = useFlush_;
-    sdmaEpConfig_.srcDeviceId = srcDeviceId_;
-    sdmaEpConfig_.dstDeviceId = dstDeviceId_;
     sdmaEpConfig_.transferSize = transferSize_;
     return &sdmaEpConfig_;
   }
 
   __host__ std::string validateConfig(void* endpointConfig) override {
     if (endpointConfig) {
-      const auto* ep = static_cast<const sdma_ep::SdmaEpConfig*>(
-        endpointConfig);
-      if (ep->testType.empty()) {
-        return "Missing test subcommand. Available: p2p, ping-pong, "
-               "buffer-reuse";
-      }
-      if (ep->useCounter && ep->useFlush) {
-        return "Cannot use both --use-counter and --use-flush at the same time";
-      }
-      if (ep->transferSize == 0)
-        return "transfer-size must be > 0";
-      if (ep->transferSize % 4 != 0)
-        return "transfer-size must be a multiple of 4 (LFSR uses dwords)";
+      return sdma_ep::validateConfig(
+        static_cast<sdma_ep::SdmaEpConfig*>(endpointConfig));
     }
     return std::string();
   }
