@@ -101,4 +101,19 @@ if(XIO_BUILD_DOCS)
     COMMENT "Building Sphinx HTML documentation"
     VERBATIM
   )
+
+  # ── Serve target: launch a local HTTP server ────────────
+  # Usage: cmake --build build --target docs-serve
+  # Then browse http://<hostname>:8080
+  set(XIO_DOCS_PORT "8080" CACHE STRING
+    "Port for the docs-serve HTTP server")
+  add_custom_target(docs-serve
+    COMMAND ${Python3_EXECUTABLE} -m http.server
+      ${XIO_DOCS_PORT} --bind 0.0.0.0
+    DEPENDS sphinx-html
+    WORKING_DIRECTORY ${XIO_DOC_PATH}/html
+    COMMENT "Serving docs at http://0.0.0.0:${XIO_DOCS_PORT}"
+    USES_TERMINAL
+    VERBATIM
+  )
 endif()
