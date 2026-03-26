@@ -551,11 +551,13 @@ endif() # NOT XIO_DOCS_ONLY
 # Documentation (optional, requires -DXIO_BUILD_DOCS=ON)
 include(XIODocumentation)
 
-# Utility targets
-include(XIOUtilityTargets)
+if(NOT XIO_DOCS_ONLY)
+  # Utility targets
+  include(XIOUtilityTargets)
 
-# VM-based testing (launch-test-vm target)
-include(XIOVirtualMachine)
+  # VM-based testing (launch-test-vm target)
+  include(XIOVirtualMachine)
 
-# VM test targets (vm-test-ep, vm-rdma-ep, vm-nvme-ep)
-include(XIOVMTests)
+  # VM test targets (vm-test-ep, vm-rdma-ep, vm-nvme-ep)
+  include(XIOVMTests)
+endif()
