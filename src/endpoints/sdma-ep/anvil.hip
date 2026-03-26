@@ -327,15 +327,24 @@ void AnvilLib::init() {
   });
 }
 
+SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
+                                     uint32_t engineId, int* channelIdx) {
+  auto& vec = sdma_channels_[dstDeviceId];
+  vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                               gpuAgents_[srcDeviceId],
+                                               engineId));
+  if (channelIdx)
+    *channelIdx = static_cast<int>(vec.size() - 1);
+  return vec.back().get();
+}
+
 bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
-  uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId); // + 1) * 2;
+  uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
   std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
             << " with " << numChannels << " channels using engine " << engineId
             << std::endl;
   for (int c = 0; c < numChannels; ++c) {
-    sdma_channels_[dstDeviceId].emplace_back(
-      std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
-                                  gpuAgents_[srcDeviceId], engineId));
+    createSdmaQueue(srcDeviceId, dstDeviceId, engineId);
   }
   return true;
 }
