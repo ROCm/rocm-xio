@@ -327,6 +327,7 @@ test_device() {
     write_cmd="$write_cmd --base-lba $BASE_LBA"
     write_cmd="$write_cmd --lbas-per-io $BLOCKS_PER_CMD"
     write_cmd="$write_cmd --access-pattern sequential"
+    write_cmd="$write_cmd --batch-size 0"
     write_cmd="$write_cmd -m $MEMORY_MODE"
     
     echo "Command: $write_cmd"

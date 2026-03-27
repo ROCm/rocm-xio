@@ -101,7 +101,7 @@ echo ""
 
 echo "Step 1: Writing $NUM_WRITES random LBAs..."
 write_cmd="$XIO_TESTER nvme-ep"
-write_cmd="$write_cmd --write-io -${NUM_WRITES}"
+write_cmd="$write_cmd --write-io ${NUM_WRITES}"
 write_cmd="$write_cmd --controller $NVME_DEVICE"
 write_cmd="$write_cmd --access-pattern random"
 write_cmd="$write_cmd --lbas-per-io 1"
@@ -162,8 +162,9 @@ def get_random_lba(op_index, cmd_id,
 def generate_expected_block(lba_size, lfsr_seed):
     """Reproduces dataPattern() from nvme-ep.h.
 
-    In sequential mode buffer_offset=0 for all writes,
-    so offset=0 => lba=0, base_seed=0, seed=lfsr_seed.
+    With batch-size 1 (default), buffer_offset=0 for
+    all writes, so offset=0 => lba=0, base_seed=0,
+    seed=lfsr_seed.
     """
     M32 = 0xFFFFFFFF
     pattern = bytearray(lba_size)

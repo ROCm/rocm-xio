@@ -43,7 +43,7 @@ Quick Start
    export HSA_FORCE_FINE_GRAIN_PCIE=1
    sudo ./build/xio-tester nvme-ep \
      --controller /dev/nvme0 \
-     --read-io 50 --write-io 50 --verbose
+     --read-io 50 --verbose
 
 .. toctree::
    :maxdepth: 2

@@ -135,7 +135,7 @@ test_run "NVMe-EP memory-mode 0" \
   "run_on_host '${WORKING_DIR}/build/xio-tester \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io -23 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
 --queue-length 128'"
 
 sleep 3
@@ -148,7 +148,7 @@ test_run "NVMe-EP memory-mode 3" \
   "run_on_host '${WORKING_DIR}/build/xio-tester \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --access-pattern random --memory-mode 3 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io -573 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
 --queue-length 128'"
 
 sleep 3
@@ -157,7 +157,7 @@ test_run "NVMe-EP memory-mode 11" \
   "run_on_host '${WORKING_DIR}/build/xio-tester \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --access-pattern random --memory-mode 11 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io -573 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
 --queue-length 128'"
 
 else

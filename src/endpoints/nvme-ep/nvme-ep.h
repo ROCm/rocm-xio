@@ -64,13 +64,14 @@ struct nvmeIoParams {
   uint64_t baseLba;      // Starting LBA for I/O operations
   uint64_t lbaRangeLbas; // LBA range limit (0 = no limit)
   bool useRandomAccess;  // true for random access, false for sequential
-  int readIo;            // Number of read operations (negative = sequential)
-  int writeIo;           // Number of write operations (negative = sequential)
+  int readIo;            // Number of read operations
+  int writeIo;           // Number of write operations
   uint32_t lfsrSeed;     // Seed for LFSR test pattern (0 = derive from LBA)
   uint16_t queueSize;    // Queue size in entries
   uint32_t nsid;         // Namespace ID (must be > 0)
   uint32_t lbasPerIo;    // Number of LBAs per I/O operation (default: 1)
   bool infiniteMode;     // Infinite mode: run forever
+  uint32_t batchSize;    // SQEs per doorbell (1=sequential, 0=all)
 };
 
 /**
@@ -104,36 +105,28 @@ struct nvmeBufferParams {
 /**
  * Drive NVMe endpoint I/O operations from GPU device code
  *
- * This function executes NVMe read/write operations directly from GPU kernels,
- * supporting both batch mode (multiple operations queued) and sequential mode
- * (one operation at a time with completion waiting). The function handles
- * queue management, doorbell ringing, completion polling, and data pattern
- * generation/verification.
+ * Executes NVMe read/write operations directly from GPU kernels
+ * using a unified batched loop. The batchSize parameter controls
+ * how many SQEs are submitted before ringing the doorbell:
+ *   batchSize 1 — one SQE per doorbell (sequential)
+ *   batchSize 0 — all ops at once (fills queue)
+ *   batchSize N — N SQEs per doorbell ring
  *
- * @param config Base endpoint configuration containing queue pointers,
- *               timing arrays, and common parameters. The submissionQueue
- *               and completionQueue fields must be valid GPU-accessible
- *               pointers.
- * @param ioParams NVMe-specific I/O parameters including LBA configuration,
- *                 operation counts, access pattern, and test pattern seed.
- *                 Negative readIo/writeIo values indicate sequential mode.
- * @param doorbellParams Doorbell configuration for notifying the NVMe
- *                       controller. Supports both PCI MMIO bridge mode and
- *                       direct BAR0 access. At least one mode must be
- *                       configured (shadowBufferVirt for MMIO bridge or
- *                       nvmeBar0Gpu for direct access).
- * @param bufferParams Data buffer configuration for read/write operations.
- *                     Buffers must be GPU-accessible. DMA addresses are used
- *                     for PRP (Physical Region Page) entries in NVMe commands.
- *                     Buffers can be nullptr if not used for a given operation
- *                     type.
+ * @param config Base endpoint configuration containing queue
+ *               pointers, timing arrays, and common parameters.
+ * @param ioParams NVMe-specific I/O parameters including LBA
+ *                 configuration, operation counts, access pattern,
+ *                 test pattern seed, and batchSize.
+ * @param doorbellParams Doorbell configuration for notifying the
+ *                       NVMe controller. Supports PCI MMIO bridge
+ *                       and direct BAR0 access.
+ * @param bufferParams Data buffer configuration for read/write
+ *                     operations. Each SQE in a batch uses a
+ *                     separate buffer region (offset b*xfer_size)
+ *                     to avoid data races between in-flight I/Os.
  *
- * @note This is a device function and must be called from GPU kernels.
- * @note Sequential mode: if readIo < 0 or writeIo < 0, operations are issued
- *       one at a time with completion waiting. Writes execute before reads
- *       when both are negative.
- * @note Batch mode: operations are queued and completed asynchronously.
- * @note The function uses config.iterations for batch mode operation count.
+ * @note Device function — must be called from GPU kernels.
+ * @note Writes execute before reads when both are requested.
  */
 __device__ void driveEndpoint(const XioEndpointConfig& config,
                               const nvmeIoParams& ioParams,
@@ -751,11 +744,12 @@ struct nvmeEpConfig {
     uint64_t baseLba;      // Starting LBA for I/O operations (default: 0)
     uint64_t lbaRangeLbas; // LBA range limit (0 = no limit, default: 0)
     uint32_t lfsrSeed;     // Seed for LFSR pattern (0 = derive from LBA)
-    int readIo;    // Number of read I/O operations (negative for sequential)
-    int writeIo;   // Number of write I/O operations (negative for sequential)
-    uint32_t nsid; // Namespace ID (default: 1, must be > 0)
-    uint32_t lbasPerIo; // Number of LBAs per I/O operation (default: 1)
-    bool infiniteMode;  // Infinite mode: run forever.
+    int readIo;            // Number of read I/O operations
+    int writeIo;           // Number of write I/O operations
+    uint32_t nsid;         // Namespace ID (default: 1, must be > 0)
+    uint32_t lbasPerIo;    // Number of LBAs per I/O (default: 1)
+    bool infiniteMode;     // Infinite mode: run forever
+    uint32_t batchSize;    // SQEs per doorbell (1=seq, 0=all)
   } ioParams;
 
   // Data buffer configuration (mirrors nvmeBufferParams POD struct)
@@ -782,7 +776,7 @@ struct nvmeEpConfig {
   nvmeEpConfig()
     : controller(""), queueId(0), queueLength(64), queuesCreated(false),
       queueInfo{}, doorbellAddr(0), sqBaseAddr(0), cqBaseAddr(0), sqSize(0),
-      cqSize(0), ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false},
+      cqSize(0), ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false, 1},
       bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
   }
