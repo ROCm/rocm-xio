@@ -23,21 +23,40 @@ A software-only endpoint for validating the XIO framework. No hardware required.
 nvme-ep -- NVMe Endpoint
 -------------------------
 
-Implements NVMe command submission (SQE) and completion (CQE) handling.
-Supports Read and Write commands with configurable IO patterns.
+Implements NVMe command submission (SQE) and completion
+(CQE) handling. Supports Read and Write commands with
+configurable IO patterns and doorbell batching.
 
 .. code-block:: bash
 
    export HSA_FORCE_FINE_GRAIN_PCIE=1
    sudo ./build/xio-tester nvme-ep \
      --controller /dev/nvme0 \
-     --read-io 50 --write-io 50 --verbose
+     --read-io 8 --verbose
 
 Key features:
 
 - Direct GPU-to-NVMe submission via memory-mapped queues
 - Sequential and pseudo-random LBA access patterns
-- Configurable queue depth, IO size, and iteration count
+- Configurable queue depth, IO size, and batch size
+- ``--batch-size`` controls SQEs per doorbell ring:
+  ``1`` (default) submits one SQE at a time,
+  ``0`` submits all at once,
+  any other value ``N`` batches ``N`` SQEs per
+  doorbell
+
+.. code-block:: bash
+
+   # 16 reads, 4 SQEs per doorbell (4 rounds)
+   sudo ./build/xio-tester nvme-ep \
+     --controller /dev/nvme0 \
+     --read-io 16 --batch-size 4
+
+   # Infinite reads, 8 SQEs per doorbell
+   sudo ./build/xio-tester nvme-ep \
+     --controller /dev/nvme0 \
+     --read-io 1 --batch-size 8 \
+     --infinite --less-timing
 
 rdma-ep -- RDMA Endpoint
 -------------------------
