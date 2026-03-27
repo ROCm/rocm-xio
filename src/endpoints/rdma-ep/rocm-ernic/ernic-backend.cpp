@@ -25,6 +25,7 @@
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
 #include "rocm-ernic/ernic-provider.hpp"
+#include "xio.h"
 
 namespace rdma_ep {
 
@@ -144,7 +145,7 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
   if (dmabuf_enabled) {
     uint64_t offset = 0;
     int fd = -1;
-    hsa_amd_portable_export_dmabuf(hcq->buf, hcq->length, &fd, &offset);
+    xio::exportDmabuf(hcq->buf, hcq->length, &fd, &offset);
     hcq->dmabuf_fd = fd;
     ua.dmabuf_fd = fd;
     ua.addr = reinterpret_cast<void*>(static_cast<uintptr_t>(offset));

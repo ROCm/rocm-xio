@@ -16,6 +16,8 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "xio.h"
+
 namespace rdma_ep {
 
 IBVWrapper ibv;
@@ -228,10 +230,9 @@ struct ibv_mr* IBVWrapper::reg_mr(struct ibv_pd* pd, void* addr, size_t length,
     uint64_t offset = 0;
     int fd = 0;
 
-    hsa_status_t status = hsa_amd_portable_export_dmabuf(addr, length, &fd,
-                                                         &offset);
+    hsa_status_t status = xio::exportDmabuf(addr, length, &fd, &offset);
     if (status != HSA_STATUS_SUCCESS) {
-      fprintf(stderr, "rdma_ep: hsa_amd_portable_export_dmabuf failed: %d\n",
+      fprintf(stderr, "rdma_ep: exportDmabuf failed: %d\n",
               status);
       return nullptr;
     }
@@ -266,7 +267,7 @@ int IBVWrapper::dereg_mr(struct ibv_mr* mr) {
   if (is_dmabuf_supported()) {
     auto it = dmabuf_fd_map_.find((uintptr_t)mr);
     if (it != dmabuf_fd_map_.end()) {
-      close(it->second);
+      xio::closeDmabuf(it->second);
       dmabuf_fd_map_.erase(it);
     }
   }

@@ -31,6 +31,7 @@
 #include "gda-backend.hpp"
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
+#include "xio.h"
 
 namespace rdma_ep {
 
@@ -150,7 +151,7 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
   if (dmabuf_enabled) {
     int fd = -1;
     uint64_t offset = 0;
-    hsa_amd_portable_export_dmabuf(hcq->buf, hcq->length, &fd, &offset);
+    xio::exportDmabuf(hcq->buf, hcq->length, &fd, &offset);
     hcq->dmabuf_fd = fd;
     hcq->dmabuf_offset = offset;
   }

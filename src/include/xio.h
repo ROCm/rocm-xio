@@ -113,6 +113,18 @@ struct rocm_axiio_free_contig_req {
 #define XIO_MEM_MODE_DOORBELL_DEVICE 0x4
 #define XIO_MEM_MODE_DATA_DEVICE 0x8
 
+// Device memory allocation flags for allocDeviceMemory()
+#define XIO_DEVICE_MEM_FINE_GRAINED 0x0
+#define XIO_DEVICE_MEM_COARSE_GRAINED 0x1
+#define XIO_DEVICE_MEM_UNCACHED 0x2
+#define XIO_DEVICE_MEM_VMEM 0x4
+
+// Host memory allocation flags for allocHostMemory()
+#define XIO_HOST_MEM_MAPPED 0x0
+#define XIO_HOST_MEM_COHERENT 0x1
+#define XIO_HOST_MEM_PINNED 0x2
+#define XIO_HOST_MEM_PLAIN 0x4
+
 // PCI MMIO Bridge command types
 #define PCI_MMIO_BRIDGE_CMD_NOP 0
 #define PCI_MMIO_BRIDGE_CMD_WRITE 1
@@ -386,10 +398,75 @@ void freeDataBuffer(void* ptr, unsigned memoryMode);
  * @brief Allocate HSA device memory.
  * @param size Size in bytes.
  * @param ptr Output pointer.
- * @param direction Label for logging ("read"/"write").
+ * @param label Label for logging.
+ * @param flags XIO_DEVICE_MEM_* flags (default:
+ *              fine-grained).
+ * @param gpuId GPU device ID (only used for VMEM path,
+ *              default: 0).
  * @return HSA status code.
  */
-hsa_status_t allocDeviceMemory(size_t size, void** ptr, const char* direction);
+hsa_status_t allocDeviceMemory(size_t size, void** ptr,
+                               const char* label,
+                               unsigned flags = XIO_DEVICE_MEM_FINE_GRAINED,
+                               int gpuId = 0);
+
+/**
+ * @brief Free device memory allocated by
+ *        allocDeviceMemory().
+ * @param ptr Pointer to free.
+ * @param flags Flags used at allocation time.
+ */
+void freeDeviceMemory(void* ptr, unsigned flags);
+
+/**
+ * @brief Allocate host memory with consistent semantics.
+ * @param size Size in bytes.
+ * @param ptr Output pointer.
+ * @param label Label for logging.
+ * @param flags XIO_HOST_MEM_* flags (default: mapped).
+ * @return hipSuccess on success.
+ */
+hipError_t allocHostMemory(size_t size, void** ptr,
+                           const char* label,
+                           unsigned flags = XIO_HOST_MEM_MAPPED);
+
+/**
+ * @brief Free host memory allocated by
+ *        allocHostMemory().
+ * @param ptr Pointer to free.
+ * @param flags Flags used at allocation time.
+ */
+void freeHostMemory(void* ptr, unsigned flags);
+
+/**
+ * @brief Export memory as DMA-BUF.
+ *
+ * Uses hsa_amd_portable_export_dmabuf_v2 when available,
+ * falling back to v1.  For vmem allocations, uses
+ * hsa_amd_vmem_export_shareable_handle instead.
+ *
+ * @param ptr Pointer to export.
+ * @param size Size in bytes.
+ * @param fd_out Output dmabuf file descriptor.
+ * @param offset_out Output offset within dmabuf.
+ * @param flags hsa_amd_dma_buf_mapping_type_t flags
+ *              (default: NONE).
+ * @return HSA status code.
+ */
+hsa_status_t exportDmabuf(const void* ptr, size_t size,
+                          int* fd_out, uint64_t* offset_out,
+                          uint64_t flags = 0);
+
+/**
+ * @brief Close a dmabuf file descriptor.
+ *
+ * Uses hsa_amd_portable_close_dmabuf when available,
+ * falling back to close(2).
+ *
+ * @param fd dmabuf file descriptor to close.
+ * @return HSA status code.
+ */
+hsa_status_t closeDmabuf(int fd);
 
 /**
  * @brief Extract endpoint name from CLI arguments.
