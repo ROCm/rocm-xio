@@ -32,8 +32,8 @@ Run a quick NVMe test (requires an NVMe device):
 
 ```
 export HSA_FORCE_FINE_GRAIN_PCIE=1
-sudo ./build/xio-tester nvme-ep --controller /dev/nvme0 \
-  --read-io 50 --write-io 50 --verbose
+sudo ./build/xio-tester nvme-ep \
+  --controller /dev/nvme0 --read-io 50 --verbose
 ```
 
 ## Building rocm-xio
