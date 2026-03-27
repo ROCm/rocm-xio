@@ -11,6 +11,7 @@
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM
+#SBATCH --exclude=ctr-halo-b47-02
 #SBATCH --gpus-per-node=1
 
 set -xe
@@ -40,6 +41,9 @@ test_init
 cd "${PROJECT_DIR}"
 detect_gpu_arch
 setup_and_build_workdir "single-gpu"
+
+test_run "ctest unit tests" \
+  "ctest --test-dir build --preset unit"
 
 test_run "test-ep --emulate" \
   "./build/xio-tester test-ep --emulate -n ${ITERATIONS}"

@@ -8,3 +8,4 @@
 add_subdirectory(common)
 add_subdirectory(test-ep)
 add_subdirectory(rdma-ep)
+add_subdirectory(nvme-ep)
