@@ -106,6 +106,9 @@ cd "${PROJECT_DIR}"
 detect_gpu_arch
 setup_and_build_workdir "nvme-ep"
 
+test_run "ctest nvme-ep unit tests" \
+  "ctest --test-dir build -L nvme -LE hardware"
+
 echo "Building and loading kernel module on host..."
 build_and_load_kernel_module_on_host
 
@@ -121,6 +124,14 @@ ${SCP_COMMAND} \
   ${WORKING_DIR}/${VERIFY_SCRIPT} \
   localhost:${WORKING_DIR}/${VERIFY_SCRIPT}
 
+# Copy hardware unit test binary to host
+HW_TEST_DIR="build/tests/unit/nvme-ep"
+${SSH_LOCALHOST} \
+  "mkdir -p ${WORKING_DIR}/${HW_TEST_DIR}"
+${SCP_COMMAND} \
+  ${WORKING_DIR}/${HW_TEST_DIR}/test-nvme-hardware \
+  localhost:${WORKING_DIR}/${HW_TEST_DIR}/test-nvme-hardware
+
 # Run tests
 echo "=========================================="
 echo "Running NVMe-EP unit tests"
@@ -130,6 +141,16 @@ if [ -n "${NVME_NAMESPACE}" ]; then
   echo "NVMe Namespace: ${NVME_NAMESPACE}"
 fi
 echo ""
+
+test_run "nvme-ep hardware unit tests" \
+  "run_on_host \
+'${WORKING_DIR}/${HW_TEST_DIR}/test-nvme-hardware \
+--controller ${NON_ROOTFS_CTRL}'"
+
+test_run "nvme-ep reject --threads > 1 (expect fail)" \
+  "! run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--threads 2 -n 1'"
 
 test_run "NVMe-EP memory-mode 0" \
   "run_on_host '${WORKING_DIR}/build/xio-tester \
