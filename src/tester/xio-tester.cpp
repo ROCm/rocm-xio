@@ -65,8 +65,10 @@ int main(int argc, char** argv) {
   // Common options (will be inherited by subcommands via fallthrough)
   // We'll use a single config that gets copied to the selected endpoint
   XioEndpointConfig commonConfig;
-  // Note: iterations is now endpoint-specific (test-ep has --iterations,
-  // nvme-ep uses --read-io + --write-io)
+  // Note: iterations are endpoint-specific (test-ep
+  // has --iterations, nvme-ep derives count from
+  // --read-io + --write-io and controls doorbell
+  // batching via --batch-size)
 
   app
     .add_option("-t,--threads", commonConfig.numThreads,

@@ -190,7 +190,10 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
     seed ^= seed >> 13;
     seed *= 0x9e3779b9;
     seed ^= seed >> 16;
-    return ioParams.baseLba + (seed % ioParams.lbaRangeLbas);
+    uint64_t max_lba = (ioParams.lbaRangeLbas > blocks)
+                         ? (ioParams.lbaRangeLbas - blocks)
+                         : 1;
+    return ioParams.baseLba + (seed % max_lba);
   } else {
     // Sequential access mode
     if (ioParams.lbaRangeLbas > 0) {
@@ -205,58 +208,35 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
                               const nvmeIoParams& ioParams,
                               const nvmeDoorbellParams& doorbellParams,
                               const nvmeBufferParams& bufferParams) {
-  // Extract queue pointers from config
   sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
   cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
 
-  const bool sequential_mode = (ioParams.readIo < 0 || ioParams.writeIo < 0 ||
-                                ioParams.infiniteMode);
-  bool sequential_is_read = false;
-  unsigned num_ops;
-  unsigned num_read_ops = 0;
-  unsigned num_write_ops = 0;
-  if (sequential_mode) {
-    if (ioParams.infiniteMode) {
-      // Infinite mode: determine operation type from which is negative
-      if (ioParams.readIo < 0) {
-        sequential_is_read = true;
-        num_read_ops = 0;
-        num_write_ops = 0;
-        num_ops = 0;
-      } else {
-        sequential_is_read = false;
-        num_read_ops = 0;
-        num_write_ops = 0;
-        num_ops = 0;
-      }
-    } else if (ioParams.readIo < 0 && ioParams.writeIo < 0) {
-      num_read_ops = -ioParams.readIo;
-      num_write_ops = -ioParams.writeIo;
-      num_ops = num_read_ops + num_write_ops;
-    } else if (ioParams.readIo < 0) {
-      num_ops = -ioParams.readIo;
-      sequential_is_read = true;
-      num_read_ops = num_ops;
-    } else {
-      num_ops = -ioParams.writeIo;
-      sequential_is_read = false;
-      num_write_ops = num_ops;
-    }
-  } else {
-    num_ops = config.iterations;
+  const unsigned num_read_ops = (unsigned)ioParams.readIo;
+  const unsigned num_write_ops = (unsigned)ioParams.writeIo;
+  const unsigned total_ops = num_read_ops + num_write_ops;
+  const bool infinite_is_read = (num_read_ops > 0);
+
+  // Resolve effective batch size: 0 means "all at once"
+  uint32_t batch_size = ioParams.batchSize;
+  if (batch_size == 0) {
+    batch_size = ioParams.infiniteMode ? (uint32_t)(ioParams.queueSize - 1)
+                                       : total_ops;
+  }
+  if (batch_size > (uint32_t)(ioParams.queueSize - 1)) {
+    batch_size = ioParams.queueSize - 1;
+  }
+  if (!ioParams.infiniteMode && batch_size > total_ops) {
+    batch_size = total_ops;
   }
 
   const uint32_t nsid = ioParams.nsid;
   const uint32_t blocks = ioParams.lbasPerIo;
-  const size_t transfer_size = blocks * ioParams.lbaSize;
+  const size_t transfer_size = (size_t)blocks * ioParams.lbaSize;
 
   const bool has_write_buffer = (bufferParams.writeBuffer != nullptr &&
                                  bufferParams.bufferSize > 0);
   const bool has_read_buffer = (bufferParams.readBuffer != nullptr &&
                                 bufferParams.bufferSize > 0);
-  const bool write_only_mode = has_write_buffer && !has_read_buffer;
-  const bool read_only_mode = has_read_buffer && !has_write_buffer;
-  const bool alternate_mode = has_write_buffer && has_read_buffer;
 
   if (has_write_buffer) {
     dataPatternParams patternParams;
@@ -269,122 +249,122 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
     dataPattern(false, patternParams);
   }
 
-  // Initialize phase tracking for completion polling
+  // Initialize CQ phase tracking.
+  // The CQ is zeroed on creation (phase=0).  The NVMe
+  // controller writes CQEs with phase=1 on the first
+  // pass and toggles each time the CQ wraps.
   uint16_t cq_head = 0;
-  volatile cqeType* initial_cqe = &cqeAddr[cq_head];
-  nvme_ep::cqeType initial_cqe_data = nvme_ep::cqeRead(
-    (volatile nvme_ep::cqeType*)initial_cqe);
-  uint8_t expected_phase = NVME_CQE_STATUS_PHASE(initial_cqe_data.status) ^ 1;
-  (void)expected_phase; // Used in batch mode, set here for consistency
+  uint8_t expected_phase = 1;
 
-  // Track submission queue tail
   uint16_t sq_tail = 0;
-  uint16_t last_sq_head = 0;
-  // Track last CQE for polling (update after each completion)
-  nvme_ep::cqeType cqe_last = initial_cqe_data;
 
-  if (sequential_mode) {
-    unsigned i = 0;
-    while ((ioParams.infiniteMode || i < num_ops) &&
-           (config.stopRequested == nullptr || !*config.stopRequested)) {
-      // Wrap command ID to avoid overflow (NVMe command IDs are 16-bit)
-      // Use modulo 65535 + 1 to avoid cmd_id = 0
-      uint16_t cmd_id = (uint16_t)((i % 65535) + 1);
+  // Per-batch start times for less-timing / infinite mode
+  unsigned long long int batchStartTimes[256];
+  const bool useBatchTiming = (config.timingStats != nullptr);
+
+  unsigned ops_done = 0;
+  while ((ioParams.infiniteMode || ops_done < total_ops) &&
+         (config.stopRequested == nullptr || !*config.stopRequested)) {
+    unsigned batch_count = batch_size;
+    if (!ioParams.infiniteMode && ops_done + batch_count > total_ops) {
+      batch_count = total_ops - ops_done;
+    }
+
+    // === Submit batch_count SQEs ===
+    for (unsigned b = 0; b < batch_count; b++) {
+      unsigned op_idx = ops_done + b;
+      uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
 
       bool is_read_op;
       if (ioParams.infiniteMode) {
-        is_read_op = sequential_is_read;
-      } else if (num_read_ops > 0 && num_write_ops > 0) {
-        if (i < num_write_ops) {
-          is_read_op = false;
-        } else {
-          is_read_op = true;
-        }
+        is_read_op = infinite_is_read;
+      } else if (num_write_ops > 0 && num_read_ops > 0) {
+        is_read_op = (op_idx >= num_write_ops);
       } else {
-        is_read_op = sequential_is_read;
+        is_read_op = (num_read_ops > 0);
       }
 
-      // Calculate LBA
-      uint64_t lba = getRandomLba(i, cmd_id, blocks, ioParams);
+      uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
 
-      // Setup read or write command
-      nvme_ep::sqeType sqeLocal = {};
+      sqeType sqeLocal = {};
       sqeType* sqe = &sqeLocal;
       sqe->opcode = is_read_op ? nvme_cmd_read : nvme_cmd_write;
       sqe->command_id = cmd_id;
       sqe->nsid = nsid;
 
-      // Calculate PRPs based on command type (read or write)
+      // Each SQE in the batch uses its own buffer
+      // region to avoid data races between in-flight
+      // I/Os
+      uint64_t buf_off = (uint64_t)b * transfer_size;
       bool prp_valid = false;
+
       if (is_read_op && has_read_buffer) {
-        // For sequential reads, reuse the same buffer for every I/O
-        uint64_t buffer_offset = 0;
-        if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          // Must use DMA address - virtual address won't work for NVMe
-          if (bufferParams.readBufferDma == 0) {
-            __builtin_trap(); // DMA address must be set
-          }
-          uint64_t buffer_addr = bufferParams.readBufferDma + buffer_offset;
-          calculatePrps(buffer_addr, transfer_size, sqe);
+        if (buf_off + transfer_size <= bufferParams.bufferSize) {
+          uint64_t addr = bufferParams.readBufferDma
+                            ? (bufferParams.readBufferDma + buf_off)
+                            : (uint64_t)(bufferParams.readBuffer + buf_off);
+          calculatePrps(addr, transfer_size, sqe);
           prp_valid = true;
         }
       } else if (!is_read_op && has_write_buffer) {
-        // For sequential writes, reuse the same buffer for every I/O
-        // (same as reads) to support infinite mode
-        uint64_t buffer_offset = 0;
-        if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          // Must use DMA address - virtual address won't work for NVMe
-          if (bufferParams.writeBufferDma == 0) {
-            __builtin_trap(); // DMA address must be set
-          }
-          uint64_t buffer_addr = bufferParams.writeBufferDma + buffer_offset;
-          calculatePrps(buffer_addr, transfer_size, sqe);
+        if (buf_off + transfer_size <= bufferParams.bufferSize) {
+          uint64_t addr = bufferParams.writeBufferDma
+                            ? (bufferParams.writeBufferDma + buf_off)
+                            : (uint64_t)(bufferParams.writeBuffer + buf_off);
+          calculatePrps(addr, transfer_size, sqe);
           prp_valid = true;
         }
       }
 
-      // Fail if PRPs could not be calculated
       if (!prp_valid) {
         __builtin_trap();
       }
       sqeSetup(sqe, lba, blocks);
 
-      // Record start time (full timing mode) or start tracking (less-timing)
-      // Note: In infinite mode, we only use timingStats (not startTimes array)
-      unsigned long long int startTime = 0;
+      // Record start time
       if (!ioParams.infiniteMode && config.startTimes != nullptr) {
-        config.startTimes[i] = wall_clock64();
-      } else if (config.timingStats != nullptr) {
-        startTime = wall_clock64();
+        config.startTimes[op_idx] = wall_clock64();
+      } else if (useBatchTiming && b < 256) {
+        batchStartTimes[b] = wall_clock64();
       }
 
-      // Write SQE to queue slot
-      // sqeWrite includes memory fence for device code to ensure write
-      // completes
-      volatile sqeType* sqe_slot = &sqeAddr[sq_tail];
-      nvme_ep::sqeWrite(sqeLocal, sqe_slot);
-
-      // Memory fence to ensure SQE is fully visible to
-      // the NVMe controller before incrementing tail and
-      // ringing the doorbell. On host memory paths this
-      // fence orders the GPU's PCIe writes but a
-      // read-back may still see stale write-combine data,
-      // so we do not verify here.
-      __threadfence_system();
-
+      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
       sq_tail = (sq_tail + 1) % ioParams.queueSize;
+    }
 
-      // Ring doorbell
-      nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+    // Fence + doorbell once for the whole batch
+    __threadfence_system();
+    nvme_ep::ringDoorbell(sq_tail, doorbellParams);
 
-      // Wait for completion using cqePoll
+    // === Poll for batch_count completions ===
+    // Use the NVMe phase bit to detect new CQEs.
+    // The controller toggles the phase each time it
+    // wraps the CQ.  A CQE whose phase matches
+    // expected_phase is a new completion; stale or
+    // zeroed slots will have the opposite phase.
+    for (unsigned b = 0; b < batch_count; b++) {
+      unsigned op_idx = ops_done + b;
+
       volatile cqeType* cqe_entry = &cqeAddr[cq_head];
-      uint16_t new_sq_head = 0;
-      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(cqe_last, cqe_entry,
-                                                  last_sq_head, &new_sq_head,
-                                                  config.stopRequested);
 
-      // Check completion status
+      nvme_ep::cqeType cqe_new;
+      unsigned poll_count = 0;
+      while (true) {
+        if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
+            *config.stopRequested) {
+          return;
+        }
+        cqe_new = nvme_ep::cqeRead(cqe_entry);
+        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+        if (phase == expected_phase) {
+          break;
+        }
+        poll_count++;
+        if (poll_count >= NVME_EP_MAX_POLLS) {
+          return;
+        }
+      }
+
       if (!nvme_ep::cqeOk(&cqe_new)) {
         printf("NVMe CQE error: status=0x%04x "
                "sc=0x%02x sct=0x%02x "
@@ -396,176 +376,26 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         __builtin_trap();
       }
 
-      // Update last CQE for next iteration
-      cqe_last = cqe_new;
-
-      // Update tracking variables
-      if (!ioParams.infiniteMode && config.endTimes != nullptr && cmd_id >= 1 &&
-          cmd_id <= num_ops) {
-        unsigned idx = cmd_id - 1;
-        config.endTimes[idx] = wall_clock64();
-      } else if (config.timingStats != nullptr && startTime > 0) {
+      // Record end time
+      if (!ioParams.infiniteMode && config.endTimes != nullptr) {
+        config.endTimes[op_idx] = wall_clock64();
+      } else if (useBatchTiming && b < 256) {
         unsigned long long int endTime = wall_clock64();
-        if (endTime > startTime) {
-          unsigned long long int duration = endTime - startTime;
-          updateTimingStats(config.timingStats, duration);
+        if (endTime > batchStartTimes[b]) {
+          updateTimingStats(config.timingStats, endTime - batchStartTimes[b]);
         }
       }
+
       cq_head = (cq_head + 1) % ioParams.queueSize;
-      // Update CQ doorbell to notify controller we consumed the completion
-      // CQ doorbell is at SQ doorbell offset + doorBellStride (4 bytes)
+      if (cq_head == 0) {
+        expected_phase ^= 1;
+      }
       nvme_ep::ringDoorbell(cq_head, doorbellParams,
                             doorbellParams.doorbellOffset +
                               nvme_ep::doorBellStride);
-      uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-      expected_phase = phase ^ 1;
-      last_sq_head = new_sq_head;
-      i++; // Increment loop counter
-    }
-  } else {
-    // Batch mode: enqueue some number of SQEs, then ring doorbell,
-    // then poll for completions
-
-    sqeType sqeLocal = {};
-    sqeType* sqe = &sqeLocal;
-
-    // For less-timing mode in batch, we need to store start times locally
-    // Allocate on stack (batch size is typically small, max iterations)
-    unsigned long long int batchStartTimes[256]; // Max 256 ops per batch
-    bool useBatchTiming = (config.timingStats != nullptr);
-
-    // Issue a batch of commands
-    for (unsigned i = 0; i < num_ops; i++) {
-      // Wrap command ID to avoid overflow (NVMe command IDs are 16-bit)
-      // Use modulo 65535 + 1 to avoid cmd_id = 0 (which may be reserved)
-      uint16_t cmd_id = (uint16_t)((i % 65535) + 1);
-
-      // Calculate LBA
-      uint64_t lba = getRandomLba(i, cmd_id, blocks, ioParams);
-
-      // Determine command type
-      bool is_read_command = false;
-      if (write_only_mode) {
-        is_read_command = false;
-      } else if (read_only_mode) {
-        is_read_command = true;
-      } else if (alternate_mode) {
-        is_read_command = (i % 2 == 0);
-      } else {
-        is_read_command = (i % 2 == 0);
-      }
-
-      bool is_write = !is_read_command;
-
-      // Setup command
-      sqe->opcode = is_write ? nvme_cmd_write : nvme_cmd_read;
-      sqe->command_id = cmd_id;
-      sqe->nsid = nsid;
-
-      // Calculate PRPs
-      bool prp_valid = false;
-      if (is_read_command && has_read_buffer) {
-        uint64_t buffer_offset = read_only_mode ? (i * transfer_size)
-                                                : ((i / 2) * transfer_size);
-        if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          uint64_t buffer_addr =
-            bufferParams.readBufferDma
-              ? (bufferParams.readBufferDma + buffer_offset)
-              : (uint64_t)(bufferParams.readBuffer + buffer_offset);
-          calculatePrps(buffer_addr, transfer_size, sqe);
-          prp_valid = true;
-        }
-      } else if (is_write && has_write_buffer) {
-        uint64_t buffer_offset = write_only_mode ? (i * transfer_size)
-                                                 : ((i / 2) * transfer_size);
-        if (buffer_offset + transfer_size <= bufferParams.bufferSize) {
-          uint64_t buffer_addr =
-            bufferParams.writeBufferDma
-              ? (bufferParams.writeBufferDma + buffer_offset)
-              : (uint64_t)(bufferParams.writeBuffer + buffer_offset);
-          calculatePrps(buffer_addr, transfer_size, sqe);
-          prp_valid = true;
-        }
-      }
-
-      // Fail if PRPs could not be calculated
-      if (!prp_valid) {
-        __builtin_trap();
-      }
-
-      sqeSetup(sqe, lba, blocks);
-
-      // Record start time (full timing mode) or start tracking (less-timing)
-      unsigned long long int startTime = 0;
-      if (config.startTimes != nullptr) {
-        config.startTimes[i] = wall_clock64();
-      } else if (useBatchTiming && i < 256) {
-        startTime = wall_clock64();
-        batchStartTimes[i] = startTime;
-      }
-
-      // Write SQE
-      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-      sq_tail = (sq_tail + 1) % ioParams.queueSize;
     }
 
-    // Memory fence before doorbell
-    __threadfence_system();
-
-    // Ring doorbell once for all commands
-    nvme_ep::ringDoorbell(sq_tail, doorbellParams);
-
-    // Poll for all completions using cqePoll
-    uint16_t completed_count = 0;
-    nvme_ep::cqeType cqe_last = initial_cqe_data;
-
-    while (completed_count < num_ops &&
-           (config.stopRequested == nullptr || !*config.stopRequested)) {
-      volatile cqeType* cqe_entry = &cqeAddr[cq_head];
-      uint16_t new_sq_head = 0;
-      nvme_ep::cqeType cqe_new = nvme_ep::cqePoll(cqe_last, cqe_entry,
-                                                  last_sq_head, &new_sq_head,
-                                                  config.stopRequested);
-
-      if (new_sq_head > last_sq_head && new_sq_head <= num_ops) {
-        uint16_t new_completions = new_sq_head - last_sq_head;
-        uint64_t end_time = wall_clock64();
-        if (config.endTimes != nullptr) {
-          for (uint16_t i = 0; i < new_completions; i++) {
-            uint16_t completed_cmd_id = last_sq_head + 1 + i;
-            if (completed_cmd_id >= 1 && completed_cmd_id <= num_ops) {
-              unsigned idx = completed_cmd_id - 1;
-              config.endTimes[idx] = end_time;
-            }
-          }
-        } else if (useBatchTiming) {
-          // Update timing stats for each completed command
-          for (uint16_t i = 0; i < new_completions; i++) {
-            uint16_t completed_cmd_id = last_sq_head + 1 + i;
-            if (completed_cmd_id >= 1 && completed_cmd_id <= num_ops) {
-              unsigned idx = completed_cmd_id - 1;
-              if (idx < 256 && batchStartTimes[idx] > 0 &&
-                  end_time > batchStartTimes[idx]) {
-                unsigned long long int duration = end_time -
-                                                  batchStartTimes[idx];
-                updateTimingStats(config.timingStats, duration);
-              }
-            }
-          }
-        }
-        completed_count += new_completions;
-        last_sq_head = new_sq_head;
-        cq_head = (cq_head + 1) % ioParams.queueSize;
-        // Update CQ doorbell to notify controller we consumed the completion
-        // CQ doorbell is at SQ doorbell offset + doorBellStride (4 bytes)
-        nvme_ep::ringDoorbell(cq_head, doorbellParams,
-                              doorbellParams.doorbellOffset +
-                                nvme_ep::doorBellStride);
-        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
-        expected_phase = phase ^ 1;
-        cqe_last = cqe_new;
-      }
-    }
+    ops_done += batch_count;
   }
 }
 
@@ -654,10 +484,10 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
     ->default_val(0)
     ->group(nvme_group);
   app
-    .add_option(
-      "--read-io", config->ioParams.readIo,
-      "Number of read IO to perform. If negative, issues one SQE at a "
-      "time waiting for completion before issuing the next.")
+    .add_option("--read-io", config->ioParams.readIo,
+                "Number of read I/O to perform. Negative values "
+                "accepted for backward compatibility (converted "
+                "to positive).")
     ->default_val(0)
     ->group(nvme_group);
   app
@@ -702,17 +532,24 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
   app
-    .add_option(
-      "--write-io", config->ioParams.writeIo,
-      "Number of write IO to perform. If negative, issues one SQE at a "
-      "time waiting for completion before issuing the next.")
+    .add_option("--write-io", config->ioParams.writeIo,
+                "Number of write I/O to perform. Negative values "
+                "accepted for backward compatibility (converted "
+                "to positive).")
     ->default_val(0)
     ->group(nvme_group);
   app
     .add_flag("--infinite", config->ioParams.infiniteMode,
-              "Infinite mode: run forever in sequential mode. Requires "
-              "exactly one of --read-io or --write-io to be negative, "
-              "the other must be 0.")
+              "Infinite mode: run forever. Requires exactly one "
+              "of --read-io or --write-io to be non-zero.")
+    ->group(nvme_group);
+  app
+    .add_option("--batch-size", config->ioParams.batchSize,
+                "Number of SQEs to submit per doorbell ring. "
+                "1 = sequential (one I/O at a time), "
+                "0 = all at once, N = N SQEs per doorbell.")
+    ->default_val(1)
+    ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
 }
 
@@ -748,28 +585,32 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     return "Access pattern must be 'sequential' or 'random'";
   }
 
+  // Backward compatibility: convert negative readIo/writeIo
+  // to positive. Negative values previously meant "sequential
+  // mode" which is now the default (batch-size 1).
+  if (config->ioParams.readIo < 0) {
+    config->ioParams.readIo = -config->ioParams.readIo;
+  }
+  if (config->ioParams.writeIo < 0) {
+    config->ioParams.writeIo = -config->ioParams.writeIo;
+  }
+
   // Validate infinite mode requirements
   if (config->ioParams.infiniteMode) {
-    bool read_negative = (config->ioParams.readIo < 0);
-    bool write_negative = (config->ioParams.writeIo < 0);
-    if (read_negative && write_negative) {
-      return "--infinite mode requires exactly one of --read-io or "
-             "--write-io to be negative, not both";
+    bool has_read = (config->ioParams.readIo != 0);
+    bool has_write = (config->ioParams.writeIo != 0);
+    if (has_read && has_write) {
+      return "--infinite requires exactly one of --read-io "
+             "or --write-io to be non-zero, not both";
     }
-    if (!read_negative && !write_negative) {
-      return "--infinite mode requires exactly one of --read-io or "
-             "--write-io to be negative";
-    }
-    if ((read_negative && config->ioParams.writeIo != 0) ||
-        (write_negative && config->ioParams.readIo != 0)) {
-      return "--infinite mode requires the non-negative --read-io or "
-             "--write-io to be exactly 0";
+    if (!has_read && !has_write) {
+      return "--infinite requires exactly one of --read-io "
+             "or --write-io to be non-zero";
     }
   } else {
-    // Validate that at least one I/O count is != 0)
     if (config->ioParams.readIo == 0 && config->ioParams.writeIo == 0) {
-      return "At least one of --read-io or --write-io must be specified with "
-             "value != 0 (use negative values for sequential mode)";
+      return "At least one of --read-io or --write-io "
+             "must be non-zero";
     }
   }
 
@@ -1041,10 +882,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
           nvmeConfig->bufferParams.bufferSize);
   fprintf(stdout,
           "Kernel parameters: lbaSize=%u, blocks=%u, "
-          "expected transfer_size=%u, writeBufferDma=0x%llx\n",
+          "expected transfer_size=%u, "
+          "writeBufferDma=0x%llx, batchSize=%u\n",
           nvmeConfig->ioParams.lbaSize, nvmeConfig->ioParams.lbasPerIo,
           nvmeConfig->ioParams.lbasPerIo * nvmeConfig->ioParams.lbaSize,
-          (unsigned long long)writeBufferInfo.dmaAddr);
+          (unsigned long long)writeBufferInfo.dmaAddr,
+          nvmeConfig->ioParams.batchSize);
 
   // Build parameter structs for kernel launch
   nvme_ep::nvmeIoParams ioParams;
@@ -1059,6 +902,34 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.lbasPerIo = nvmeConfig->ioParams.lbasPerIo;
   ioParams.queueSize = queue_size;
   ioParams.infiniteMode = nvmeConfig->ioParams.infiniteMode;
+  ioParams.batchSize = nvmeConfig->ioParams.batchSize;
+
+  // Validate that batch_size * transfer_size fits in the
+  // data buffer. Each in-flight SQE in a batch uses its own
+  // buffer region.
+  {
+    uint32_t eff_batch = ioParams.batchSize;
+    if (eff_batch == 0) {
+      eff_batch = ioParams.infiniteMode
+                    ? (uint32_t)(queue_size - 1)
+                    : (uint32_t)(ioParams.readIo + ioParams.writeIo);
+    }
+    if (eff_batch > (uint32_t)(queue_size - 1)) {
+      eff_batch = queue_size - 1;
+    }
+    uint64_t xfer = (uint64_t)ioParams.lbasPerIo * ioParams.lbaSize;
+    uint64_t needed = (uint64_t)eff_batch * xfer;
+    if (needed > nvmeConfig->bufferParams.bufferSize) {
+      fprintf(stderr,
+              "Error: batch-size %u * transfer-size %llu "
+              "= %llu exceeds data-buffer-size %zu. "
+              "Increase --data-buffer-size or reduce "
+              "--batch-size.\n",
+              eff_batch, (unsigned long long)xfer, (unsigned long long)needed,
+              nvmeConfig->bufferParams.bufferSize);
+      return hipErrorInvalidValue;
+    }
+  }
 
   nvme_ep::nvmeDoorbellParams doorbellParams;
   doorbellParams.doorbellOffset = doorbell_offset;

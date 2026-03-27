@@ -29,6 +29,7 @@ PRP
 prp
 slba
 SQE
+SQEs
 sqe
 sqePoll
 sqeRead

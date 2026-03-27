@@ -260,21 +260,14 @@ public:
 
   __host__ unsigned getIterations(void* endpointConfig) const override {
     if (endpointConfig) {
-      nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
-        endpointConfig);
-      if (nvmeConfig->ioParams.readIo < 0 && nvmeConfig->ioParams.writeIo < 0) {
-        // Sequential mode: both negative, return sum of absolute values
-        return -nvmeConfig->ioParams.readIo + -nvmeConfig->ioParams.writeIo;
+      auto* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(endpointConfig);
+      if (nvmeConfig->ioParams.infiniteMode) {
+        return 0;
       }
-      if (nvmeConfig->ioParams.writeIo < 0) {
-        // Sequential mode: use absolute value of writeIo
-        return -nvmeConfig->ioParams.writeIo;
-      }
-      if (nvmeConfig->ioParams.readIo < 0) {
-        // Sequential mode: use absolute value of readIo
-        return -nvmeConfig->ioParams.readIo;
-      }
-      return nvmeConfig->ioParams.readIo + nvmeConfig->ioParams.writeIo;
+      // After validateConfig, readIo and writeIo are
+      // always non-negative.
+      return (unsigned)(nvmeConfig->ioParams.readIo +
+                        nvmeConfig->ioParams.writeIo);
     }
     return 0;
   }
