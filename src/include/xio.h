@@ -118,6 +118,7 @@ struct rocm_axiio_free_contig_req {
 #define XIO_DEVICE_MEM_COARSE_GRAINED 0x1
 #define XIO_DEVICE_MEM_UNCACHED 0x2
 #define XIO_DEVICE_MEM_VMEM 0x4
+#define XIO_DEVICE_MEM_HIP 0x8
 
 // Host memory allocation flags for allocHostMemory()
 #define XIO_HOST_MEM_MAPPED 0x0
@@ -395,7 +396,14 @@ hipError_t allocateDataBuffer(size_t size, unsigned memoryMode, void** ptr);
 void freeDataBuffer(void* ptr, unsigned memoryMode);
 
 /**
- * @brief Allocate HSA device memory.
+ * @brief Allocate GPU device memory.
+ *
+ * Selects a backend based on flags:
+ *  - FINE_GRAINED / COARSE_GRAINED: HSA region alloc.
+ *  - HIP: hipMalloc (DMA-BUF exportable).
+ *  - UNCACHED: hipExtMallocWithFlags (uncached).
+ *  - VMEM: HIP VMM (reserve + map + access).
+ *
  * @param size Size in bytes.
  * @param ptr Output pointer.
  * @param label Label for logging.
@@ -405,8 +413,7 @@ void freeDataBuffer(void* ptr, unsigned memoryMode);
  *              default: 0).
  * @return HSA status code.
  */
-hsa_status_t allocDeviceMemory(size_t size, void** ptr,
-                               const char* label,
+hsa_status_t allocDeviceMemory(size_t size, void** ptr, const char* label,
                                unsigned flags = XIO_DEVICE_MEM_FINE_GRAINED,
                                int gpuId = 0);
 
@@ -426,8 +433,7 @@ void freeDeviceMemory(void* ptr, unsigned flags);
  * @param flags XIO_HOST_MEM_* flags (default: mapped).
  * @return hipSuccess on success.
  */
-hipError_t allocHostMemory(size_t size, void** ptr,
-                           const char* label,
+hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
                            unsigned flags = XIO_HOST_MEM_MAPPED);
 
 /**
@@ -441,9 +447,9 @@ void freeHostMemory(void* ptr, unsigned flags);
 /**
  * @brief Export memory as DMA-BUF.
  *
- * Uses hsa_amd_portable_export_dmabuf_v2 when available,
- * falling back to v1.  For vmem allocations, uses
- * hsa_amd_vmem_export_shareable_handle instead.
+ * Uses hsa_amd_portable_export_dmabuf (v1) when flags
+ * are zero, and hsa_amd_portable_export_dmabuf_v2 when
+ * explicit flags are requested (ROCm 7.1+).
  *
  * @param ptr Pointer to export.
  * @param size Size in bytes.
@@ -453,15 +459,13 @@ void freeHostMemory(void* ptr, unsigned flags);
  *              (default: NONE).
  * @return HSA status code.
  */
-hsa_status_t exportDmabuf(const void* ptr, size_t size,
-                          int* fd_out, uint64_t* offset_out,
-                          uint64_t flags = 0);
+hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
+                          uint64_t* offset_out, uint64_t flags = 0);
 
 /**
  * @brief Close a dmabuf file descriptor.
  *
- * Uses hsa_amd_portable_close_dmabuf when available,
- * falling back to close(2).
+ * Calls hsa_amd_portable_close_dmabuf (ROCm 7.1+).
  *
  * @param fd dmabuf file descriptor to close.
  * @return HSA status code.

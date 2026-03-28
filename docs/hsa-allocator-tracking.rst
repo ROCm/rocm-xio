@@ -147,8 +147,11 @@ Assessment
 
 **Implemented (this changeset):**
 
-- Centralized ``exportDmabuf()`` wrapper with v2 API
-  support and ``hsa_amd_portable_close_dmabuf`` cleanup.
+- Centralized ``exportDmabuf()`` wrapper using
+  ``hsa_amd_portable_export_dmabuf`` (v1) by default
+  and ``hsa_amd_portable_export_dmabuf_v2`` only when
+  non-zero flags are requested, plus
+  ``hsa_amd_portable_close_dmabuf`` (ROCm 7.1+).
 - Unified ``allocDeviceMemory()`` with flags for
   fine-grained, coarse-grained, uncached, and vmem
   allocation types.

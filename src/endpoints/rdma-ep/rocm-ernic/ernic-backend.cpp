@@ -145,11 +145,19 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
   if (dmabuf_enabled) {
     uint64_t offset = 0;
     int fd = -1;
-    xio::exportDmabuf(hcq->buf, hcq->length, &fd, &offset);
-    hcq->dmabuf_fd = fd;
-    ua.dmabuf_fd = fd;
-    ua.addr = reinterpret_cast<void*>(static_cast<uintptr_t>(offset));
-    ua.comp_mask = ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF;
+    hsa_status_t ds = xio::exportDmabuf(hcq->buf, hcq->length, &fd, &offset);
+    if (ds != HSA_STATUS_SUCCESS || fd < 0) {
+      fprintf(stderr,
+              "rdma_ep::ernic: exportDmabuf %s "
+              "failed (status=%d), falling back "
+              "to non-dmabuf path\n",
+              label, ds);
+    } else {
+      hcq->dmabuf_fd = fd;
+      ua.dmabuf_fd = fd;
+      ua.addr = reinterpret_cast<void*>(static_cast<uintptr_t>(offset));
+      ua.comp_mask = ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF;
+    }
   }
 
   hcq->umem = dv.umem_reg(ctx, &ua);

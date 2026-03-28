@@ -33,7 +33,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 JOB_IDS_FILE = SCRIPT_DIR / ".alola-job-ids"
 
-TESTS = [
+ALL_TESTS = [
     ("single-gpu",
      "rocm-xio-tests.single-gpu.sbatch"),
     ("two-gpu",
@@ -45,6 +45,31 @@ TESTS = [
     ("rdma-ep-2node",
      "rocm-xio-tests.rdma-ep-2node.sbatch"),
 ]
+
+ALL_TEST_NAMES = [t[0] for t in ALL_TESTS]
+
+TESTS = list(ALL_TESTS)
+
+
+def set_test_filter(names):
+    """Restrict TESTS to the given subset.
+
+    Validates each name against ALL_TESTS and
+    exits on unknown names.
+    """
+    global TESTS
+    unknown = [
+        n for n in names if n not in ALL_TEST_NAMES]
+    if unknown:
+        print(red(
+            f"ERROR: unknown test(s): "
+            f"{', '.join(unknown)}"))
+        print(
+            f"Available: "
+            f"{', '.join(ALL_TEST_NAMES)}")
+        sys.exit(1)
+    TESTS = [
+        t for t in ALL_TESTS if t[0] in names]
 
 STATUS_PASS = 0
 STATUS_FAIL = 1
@@ -1272,6 +1297,11 @@ def cmd_run(args):
                 f"(got {val})"))
             sys.exit(1)
 
+    if args.tests:
+        set_test_filter(
+            [t.strip() for t in
+             args.tests.split(",")])
+
     os.chdir(SCRIPT_DIR)
 
     original_handler = signal.getsignal(
@@ -1743,6 +1773,16 @@ def main():
             "distinct nodes by excluding "
             "already-allocated nodes within "
             "each wave."),
+    )
+    p_run.add_argument(
+        "--tests", type=str,
+        default=None, metavar="LIST",
+        help=(
+            "Comma-separated list of tests to "
+            "run (e.g. nvme-ep,single-gpu). "
+            "Available: "
+            + ",".join(ALL_TEST_NAMES)
+            + ". Default: all."),
     )
     p_run.add_argument(
         "--exclude-nodes", type=str,
