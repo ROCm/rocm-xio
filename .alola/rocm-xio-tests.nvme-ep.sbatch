@@ -29,7 +29,7 @@ else
 fi
 
 run_on_host() {
-  ${SSH_LOCALHOST} "sudo env \
+  ssh_with_retry "sudo env \
 LD_LIBRARY_PATH=/opt/rocm/lib \
 HSA_FORCE_FINE_GRAIN_PCIE=1 $*"
 }

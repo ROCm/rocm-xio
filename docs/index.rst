@@ -55,6 +55,7 @@ Quick Start
    endpoints
    kernel-module
    memory-modes
+   hsa-allocator-tracking
 
 .. toctree::
    :maxdepth: 2

@@ -194,7 +194,7 @@ for vendor in ${DETECTED_VENDORS}; do
   for seed in ${LOOPBACK_SEEDS}; do
     test_run \
       "rdma-ep loopback ${vendor} seed=${seed}" \
-      "${SSH_LOCALHOST} \
+      "ssh_with_retry \
         \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
           ${TEST_BIN} \
           --provider ${vendor} \

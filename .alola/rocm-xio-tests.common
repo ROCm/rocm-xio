@@ -5,10 +5,64 @@
 #
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
 
-SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_COMMAND="ssh \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ConnectTimeout=10"
 SSH_LOCALHOST="${SSH_COMMAND} localhost"
 
-SCP_COMMAND="scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SCP_COMMAND="scp \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o ConnectTimeout=10"
+
+# Run a command via SSH to localhost with automatic
+# retry on transient SSH failures.  Retries when SSH
+# returns 255 (connection error) or when the output
+# contains known SSH connection-failure patterns.
+# Usage: ssh_with_retry "command to run"
+ssh_with_retry() {
+  local max_retries=2
+  local retry_delay=5
+  local attempt=0
+  local rc=0
+  local ssh_err=""
+
+  while [ ${attempt} -le ${max_retries} ]; do
+    if [ ${attempt} -gt 0 ]; then
+      echo "SSH retry ${attempt}/${max_retries}" \
+        "after ${retry_delay}s..." >&2
+      sleep ${retry_delay}
+      retry_delay=$((retry_delay * 2))
+    fi
+    ssh_err=$(mktemp)
+    ${SSH_LOCALHOST} "$@" 2> >(tee "${ssh_err}" >&2)
+    rc=$?
+    local is_ssh_failure=0
+    if [ ${rc} -eq 255 ]; then
+      is_ssh_failure=1
+    elif [ ${rc} -ne 0 ] && \
+         grep -qiE \
+           "Broken pipe|closed by remote host|\
+Connection reset|Connection refused|\
+Connection timed out" \
+           "${ssh_err}" 2>/dev/null; then
+      is_ssh_failure=1
+    fi
+    rm -f "${ssh_err}"
+    if [ ${is_ssh_failure} -eq 0 ]; then
+      return ${rc}
+    fi
+    echo "SSH transport failure (rc=${rc})." >&2
+    attempt=$((attempt + 1))
+  done
+
+  echo "SSH failed after $((max_retries + 1))" \
+    "attempts." >&2
+  return ${rc}
+}
 
 # Project directory (repo root). When submitted from .alola, use its parent.
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
@@ -41,6 +95,25 @@ display_job_info() {
   echo "Node(s)   ${SLURM_NODELIST}"
   echo "Working Directory: ${SLURM_SUBMIT_DIR}"
   echo "Start Time:        $(date)"
+  echo "Kernel:            $(uname -r)"
+
+  local rocm_ver=""
+  if [ -f /opt/rocm/.info/version ]; then
+    rocm_ver=$(cat /opt/rocm/.info/version 2>/dev/null)
+  elif command -v apt 2>/dev/null | grep -q apt; then
+    rocm_ver=$(dpkg -l rocm-core 2>/dev/null \
+      | awk '/^ii/{print $3}' | head -1)
+  fi
+  echo "ROCm:              ${rocm_ver:-unknown}"
+
+  local dkms_ver=""
+  dkms_ver=$(dpkg -l amdgpu-dkms 2>/dev/null \
+    | awk '/^ii/{print $3}' | head -1)
+  if [ -z "${dkms_ver}" ]; then
+    dkms_ver=$(modinfo amdgpu 2>/dev/null \
+      | awk '/^version:/{print $2}' | head -1)
+  fi
+  echo "amdgpu driver:     ${dkms_ver:-unknown}"
   echo "======================================================================"
 }
 
