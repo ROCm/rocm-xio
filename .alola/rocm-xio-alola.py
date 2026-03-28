@@ -44,6 +44,8 @@ ALL_TESTS = [
      "rocm-xio-tests.rdma-ep.sbatch"),
     ("rdma-ep-2node",
      "rocm-xio-tests.rdma-ep-2node.sbatch"),
+    ("integration",
+     "rocm-xio-tests.integration.sbatch"),
 ]
 
 ALL_TEST_NAMES = [t[0] for t in ALL_TESTS]
