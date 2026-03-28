@@ -14,6 +14,9 @@
 #                 prefix (passed as CMAKE_PREFIX_PATH).
 #
 # Optional -D arguments:
+#   ROCM_PREFIX - Path to the ROCm installation (added
+#                 to CMAKE_PREFIX_PATH so find_dependency
+#                 can resolve hip and hsa-runtime64).
 #   RUN_BINARY  - Name of the binary to run after building.
 #                 Skipped if empty or unset.
 #   HIP_COMPILER - Path to the HIP compiler to forward.
@@ -28,10 +31,15 @@ foreach(var SOURCE_DIR BUILD_DIR PREFIX)
 endforeach()
 
 # -- Configure ------------------------------------------
+set(_prefix_path "${PREFIX}")
+if(ROCM_PREFIX)
+  set(_prefix_path "${PREFIX}\;${ROCM_PREFIX}")
+endif()
+
 set(_configure_args
   -S ${SOURCE_DIR}
   -B ${BUILD_DIR}
-  -DCMAKE_PREFIX_PATH=${PREFIX}
+  "-DCMAKE_PREFIX_PATH=${_prefix_path}"
 )
 
 if(HIP_COMPILER)

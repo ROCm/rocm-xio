@@ -23,6 +23,18 @@ set(XIO_RUN_INSTALL_EXAMPLE
   CACHE FILEPATH
   "Path to the run-install-example.cmake script")
 
+# Derive the ROCm prefix so examples can resolve
+# find_dependency(hip) and find_dependency(hsa-runtime64)
+# inside the installed rocm-xio-config.cmake.
+if(hip_DIR)
+  cmake_path(GET hip_DIR PARENT_PATH _hip_cmake)
+  cmake_path(GET _hip_cmake PARENT_PATH _hip_lib)
+  cmake_path(GET _hip_lib PARENT_PATH
+    XIO_ROCM_PREFIX)
+else()
+  set(XIO_ROCM_PREFIX "/opt/rocm")
+endif()
+
 # xio_install_test_fixture()
 #
 # Register the CTest fixture that installs rocm-xio into
@@ -99,6 +111,7 @@ function(xio_add_install_test)
       -DSOURCE_DIR=${XIO_IT_SOURCE_DIR}
       -DBUILD_DIR=${_build_dir}
       -DPREFIX=${XIO_INSTALL_TEST_PREFIX}
+      -DROCM_PREFIX=${XIO_ROCM_PREFIX}
     )
 
     if(CMAKE_HIP_COMPILER)
