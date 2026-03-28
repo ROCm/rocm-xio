@@ -936,6 +936,44 @@ udev
 XIODetectGPUs
 XIOTestHelpers
 
+# ===== HSA Allocator Tracking Terms =====
+Allocator
+allocator
+allocDeviceMemory
+allocHostMemory
+allocSize
+changeset
+exportDmabuf
+exportRegVramBuf
+freeHostMemory
+gpuId
+hipDeviceEnablePeerAccess
+hipExtMallocWithFlags
+hipFree
+hipHostRegister
+hipMalloc
+hipMemAccessDesc
+hipMemAccessFlagsProtReadWrite
+hipMemAddressFree
+hipMemAddressReserve
+hipMemAllocationGranularityMinimum
+hipMemAllocationProp
+hipMemAllocationTypePinned
+hipMemCreate
+hipMemGetAllocationGranularity
+hipMemHandleTypePosixFileDescriptor
+hipMemLocationTypeDevice
+hipMemMap
+hipMemRelease
+hipMemSetAccess
+hipMemUnmap
+IBVWrapper
+mr
+PEs
+posix
+requestedHandleTypes
+vmem
+
 # ===== Documentation Infrastructure Terms =====
 Breathe
 breathe

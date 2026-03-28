@@ -232,8 +232,7 @@ struct ibv_mr* IBVWrapper::reg_mr(struct ibv_pd* pd, void* addr, size_t length,
 
     hsa_status_t status = xio::exportDmabuf(addr, length, &fd, &offset);
     if (status != HSA_STATUS_SUCCESS) {
-      fprintf(stderr, "rdma_ep: exportDmabuf failed: %d\n",
-              status);
+      fprintf(stderr, "rdma_ep: exportDmabuf failed: %d\n", status);
       return nullptr;
     }
 

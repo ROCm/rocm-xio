@@ -15,6 +15,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,14 @@
 #endif // __HIP_DEVICE_COMPILE__
 
 namespace xio {
+
+struct VmemAlloc {
+  hipMemGenericAllocationHandle_t handle;
+  size_t size;
+};
+
+static std::mutex vmemMutex;
+static std::map<void*, VmemAlloc> vmemAllocations;
 
 void printDeviceInfo() {
   int deviceCount;
@@ -323,27 +332,31 @@ void printHistogram(const std::vector<double>& durations, unsigned nIterations,
                   writeIterations, verifiedReadsCount);
 }
 
-static hsa_status_t allocDeviceMemoryHsa(
-    size_t size, void** ptr, const char* label,
-    unsigned flags) {
+static hsa_status_t allocDeviceMemoryHsa(size_t size, void** ptr,
+                                         const char* label, unsigned flags) {
   hsa_status_t status;
 
   status = hsa_init();
   if (status != HSA_STATUS_SUCCESS) {
     if (status != 0x1001) {
-      std::cerr << "Error: hsa_init failed: "
-                << status << std::endl;
+      std::cerr << "Error: hsa_init failed: " << status << std::endl;
       return status;
     }
   }
 
-  hsa_region_t device_region = {0};
+  struct RegionSelectCtx {
+    hsa_region_t region;
+    bool want_coarse;
+  };
+
+  bool want_coarse = (flags & XIO_DEVICE_MEM_COARSE_GRAINED) != 0;
+  RegionSelectCtx ctx = {{0}, want_coarse};
 
   hsa_iterate_agents(
     [](hsa_agent_t agent, void* data) -> hsa_status_t {
       hsa_device_type_t device_type;
-      hsa_status_t s = hsa_agent_get_info(
-        agent, HSA_AGENT_INFO_DEVICE, &device_type);
+      hsa_status_t s = hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE,
+                                          &device_type);
       if (s != HSA_STATUS_SUCCESS)
         return s;
       if (device_type != HSA_DEVICE_TYPE_GPU)
@@ -357,54 +370,54 @@ static hsa_status_t allocDeviceMemoryHsa(
 
       hsa_agent_iterate_regions(
         agent,
-        [](hsa_region_t region,
-           void* data) -> hsa_status_t {
+        [](hsa_region_t region, void* data) -> hsa_status_t {
           hsa_region_segment_t segment;
-          hsa_status_t s = hsa_region_get_info(
-            region, HSA_REGION_INFO_SEGMENT,
-            &segment);
+          hsa_status_t s = hsa_region_get_info(region, HSA_REGION_INFO_SEGMENT,
+                                               &segment);
           if (s != HSA_STATUS_SUCCESS)
             return s;
           if (segment != HSA_REGION_SEGMENT_GLOBAL)
             return HSA_STATUS_SUCCESS;
 
           uint32_t alloc_allowed;
-          s = hsa_region_get_info(
-            region,
-            HSA_REGION_INFO_RUNTIME_ALLOC_ALLOWED,
-            &alloc_allowed);
-          if (s != HSA_STATUS_SUCCESS ||
-              !alloc_allowed)
+          s = hsa_region_get_info(region, HSA_REGION_INFO_RUNTIME_ALLOC_ALLOWED,
+                                  &alloc_allowed);
+          if (s != HSA_STATUS_SUCCESS || !alloc_allowed)
             return HSA_STATUS_SUCCESS;
 
           uint32_t gf;
-          s = hsa_region_get_info(
-            region, HSA_REGION_INFO_GLOBAL_FLAGS,
-            &gf);
+          s = hsa_region_get_info(region, HSA_REGION_INFO_GLOBAL_FLAGS, &gf);
           if (s != HSA_STATUS_SUCCESS)
             return HSA_STATUS_SUCCESS;
 
           auto* r = (RegionData*)data;
-          if (gf &
-              HSA_REGION_GLOBAL_FLAG_FINE_GRAINED)
+          if (gf & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED)
             r->fine = region;
-          else if (gf &
-                   HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED)
+          else if (gf & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED)
             r->coarse = region;
 
           return HSA_STATUS_SUCCESS;
         },
         &regions);
 
-      auto* best = (hsa_region_t*)data;
-      if (regions.fine.handle != 0)
-        *best = regions.fine;
-      else if (regions.coarse.handle != 0)
-        *best = regions.coarse;
+      auto* c = (RegionSelectCtx*)data;
+      if (c->want_coarse) {
+        if (regions.coarse.handle != 0)
+          c->region = regions.coarse;
+        else if (regions.fine.handle != 0)
+          c->region = regions.fine;
+      } else {
+        if (regions.fine.handle != 0)
+          c->region = regions.fine;
+        else if (regions.coarse.handle != 0)
+          c->region = regions.coarse;
+      }
 
       return HSA_STATUS_INFO_BREAK;
     },
-    &device_region);
+    &ctx);
+
+  hsa_region_t device_region = ctx.region;
 
   if (device_region.handle == 0) {
     std::cerr << "Error: Could not find allocatable "
@@ -414,29 +427,22 @@ static hsa_status_t allocDeviceMemoryHsa(
   }
 
   uint32_t global_flags = 0;
-  hsa_region_get_info(device_region,
-                      HSA_REGION_INFO_GLOBAL_FLAGS,
+  hsa_region_get_info(device_region, HSA_REGION_INFO_GLOBAL_FLAGS,
                       &global_flags);
 
-  bool want_coarse =
-    (flags & XIO_DEVICE_MEM_COARSE_GRAINED) != 0;
-  if (want_coarse &&
-      (global_flags &
-       HSA_REGION_GLOBAL_FLAG_FINE_GRAINED)) {
+  if (want_coarse && (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED)) {
     std::cout << "  Info: (" << label
               << "): Coarse requested but only "
                  "fine-grained available"
               << std::endl;
   }
 
-  if (global_flags &
-      HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
+  if (global_flags & HSA_REGION_GLOBAL_FLAG_FINE_GRAINED) {
     std::cout << "  Info: (" << label
               << "): Using HSA fine-grained "
                  "global memory region"
               << std::endl;
-  } else if (global_flags &
-             HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
+  } else if (global_flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) {
     std::cout << "  Info: (" << label
               << "): Using HSA coarse-grained "
                  "global memory region"
@@ -447,9 +453,8 @@ static hsa_status_t allocDeviceMemoryHsa(
   return status;
 }
 
-hsa_status_t allocDeviceMemory(
-    size_t size, void** ptr, const char* label,
-    unsigned flags, int gpuId) {
+hsa_status_t allocDeviceMemory(size_t size, void** ptr, const char* label,
+                               unsigned flags, int gpuId) {
   if (!ptr || size == 0)
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
 
@@ -459,13 +464,11 @@ hsa_status_t allocDeviceMemory(
     prop.type = hipMemAllocationTypePinned;
     prop.location.type = hipMemLocationTypeDevice;
     prop.location.id = gpuId;
-    prop.requestedHandleTypes =
-      hipMemHandleTypePosixFileDescriptor;
+    prop.requestedHandleTypes = hipMemHandleTypePosixFileDescriptor;
 
     size_t granularity = 0;
     hipError_t err = hipMemGetAllocationGranularity(
-      &granularity, &prop,
-      hipMemAllocationGranularityMinimum);
+      &granularity, &prop, hipMemAllocationGranularityMinimum);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
                 << "): hipMemGetAllocationGranularity "
@@ -474,34 +477,32 @@ hsa_status_t allocDeviceMemory(
       return HSA_STATUS_ERROR;
     }
 
-    size_t allocSize =
-      ((size + granularity - 1) / granularity) *
-      granularity;
+    size_t allocSize = ((size + granularity - 1) / granularity) * granularity;
 
     err = hipMemCreate(&handle, allocSize, &prop, 0);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
-                << "): hipMemCreate failed: "
-                << hipGetErrorString(err) << std::endl;
+                << "): hipMemCreate failed: " << hipGetErrorString(err)
+                << std::endl;
       return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
     }
 
     err = hipMemAddressReserve(ptr, allocSize, 0, 0, 0);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
-                << "): hipMemAddressReserve failed: "
-                << hipGetErrorString(err) << std::endl;
-      hipMemRelease(handle);
+                << "): hipMemAddressReserve failed: " << hipGetErrorString(err)
+                << std::endl;
+      (void)hipMemRelease(handle);
       return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
     }
 
     err = hipMemMap(*ptr, allocSize, 0, handle, 0);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
-                << "): hipMemMap failed: "
-                << hipGetErrorString(err) << std::endl;
-      hipMemAddressFree(*ptr, allocSize);
-      hipMemRelease(handle);
+                << "): hipMemMap failed: " << hipGetErrorString(err)
+                << std::endl;
+      (void)hipMemAddressFree(*ptr, allocSize);
+      (void)hipMemRelease(handle);
       *ptr = nullptr;
       return HSA_STATUS_ERROR;
     }
@@ -513,25 +514,38 @@ hsa_status_t allocDeviceMemory(
     err = hipMemSetAccess(*ptr, allocSize, &access, 1);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
-                << "): hipMemSetAccess failed: "
-                << hipGetErrorString(err) << std::endl;
-      hipMemUnmap(*ptr, allocSize);
-      hipMemAddressFree(*ptr, allocSize);
-      hipMemRelease(handle);
+                << "): hipMemSetAccess failed: " << hipGetErrorString(err)
+                << std::endl;
+      (void)hipMemUnmap(*ptr, allocSize);
+      (void)hipMemAddressFree(*ptr, allocSize);
+      (void)hipMemRelease(handle);
       *ptr = nullptr;
       return HSA_STATUS_ERROR;
     }
 
-    std::cout << "  Info: (" << label
-              << "): Allocated " << allocSize
-              << " bytes via vmem on GPU " << gpuId
-              << std::endl;
+    {
+      std::lock_guard<std::mutex> lock(vmemMutex);
+      vmemAllocations[*ptr] = {handle, allocSize};
+    }
+
+    std::cout << "  Info: (" << label << "): Allocated " << allocSize
+              << " bytes via vmem on GPU " << gpuId << std::endl;
+    return HSA_STATUS_SUCCESS;
+  }
+
+  if (flags & XIO_DEVICE_MEM_HIP) {
+    hipError_t err = hipMalloc(ptr, size);
+    if (err != hipSuccess) {
+      std::cerr << "Error: (" << label
+                << "): hipMalloc failed: " << hipGetErrorString(err)
+                << std::endl;
+      return HSA_STATUS_ERROR_OUT_OF_RESOURCES;
+    }
     return HSA_STATUS_SUCCESS;
   }
 
   if (flags & XIO_DEVICE_MEM_UNCACHED) {
-    hipError_t err = hipExtMallocWithFlags(
-      ptr, size, hipDeviceMallocUncached);
+    hipError_t err = hipExtMallocWithFlags(ptr, size, hipDeviceMallocUncached);
     if (err != hipSuccess) {
       std::cerr << "Error: (" << label
                 << "): hipExtMallocWithFlags "
@@ -550,8 +564,24 @@ void freeDeviceMemory(void* ptr, unsigned flags) {
     return;
 
   if (flags & XIO_DEVICE_MEM_VMEM) {
-    hipMemUnmap(ptr, 0);
-    hipMemAddressFree(ptr, 0);
+    std::lock_guard<std::mutex> lock(vmemMutex);
+    auto it = vmemAllocations.find(ptr);
+    if (it != vmemAllocations.end()) {
+      (void)hipMemUnmap(ptr, it->second.size);
+      (void)hipMemAddressFree(ptr, it->second.size);
+      (void)hipMemRelease(it->second.handle);
+      vmemAllocations.erase(it);
+    } else {
+      std::cerr << "Warning: VMEM free called for "
+                << "untracked pointer " << ptr << std::endl;
+      (void)hipMemUnmap(ptr, 0);
+      (void)hipMemAddressFree(ptr, 0);
+    }
+    return;
+  }
+
+  if (flags & XIO_DEVICE_MEM_HIP) {
+    (void)hipFree(ptr);
     return;
   }
 
@@ -563,12 +593,10 @@ void freeDeviceMemory(void* ptr, unsigned flags) {
   hsa_memory_free(ptr);
 }
 
-hipError_t allocHostMemory(
-    size_t size, void** ptr, const char* label,
-    unsigned flags) {
+hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
+                           unsigned flags) {
   if (!ptr || size == 0) {
-    std::cerr << "Error: (" << label
-              << "): invalid args to allocHostMemory"
+    std::cerr << "Error: (" << label << "): invalid args to allocHostMemory"
               << std::endl;
     return hipErrorInvalidValue;
   }
@@ -576,8 +604,7 @@ hipError_t allocHostMemory(
   if (flags & XIO_HOST_MEM_PLAIN) {
     *ptr = malloc(size);
     if (!*ptr) {
-      std::cerr << "Error: (" << label
-                << "): malloc failed" << std::endl;
+      std::cerr << "Error: (" << label << "): malloc failed" << std::endl;
       return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
@@ -585,23 +612,23 @@ hipError_t allocHostMemory(
   }
 
   if (flags & XIO_HOST_MEM_PINNED) {
-    size_t pgsz =
-      static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    long pgsz_long = sysconf(_SC_PAGESIZE);
+    if (pgsz_long <= 0)
+      pgsz_long = 4096;
+    size_t pgsz = static_cast<size_t>(pgsz_long);
     int rc = posix_memalign(ptr, pgsz, size);
     if (rc != 0 || !*ptr) {
-      std::cerr << "Error: (" << label
-                << "): posix_memalign failed"
+      std::cerr << "Error: (" << label << "): posix_memalign failed"
                 << std::endl;
       return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);
 
-    hipError_t err = hipHostRegister(
-      *ptr, size, hipHostRegisterDefault);
+    hipError_t err = hipHostRegister(*ptr, size, hipHostRegisterDefault);
     if (err != hipSuccess) {
       std::cerr << "Warning: (" << label
-                << "): hipHostRegister failed: "
-                << hipGetErrorString(err) << std::endl;
+                << "): hipHostRegister failed: " << hipGetErrorString(err)
+                << std::endl;
     }
     return hipSuccess;
   }
@@ -645,18 +672,20 @@ void freeHostMemory(void* ptr, unsigned flags) {
     free(ptr);
 }
 
-hsa_status_t exportDmabuf(
-    const void* ptr, size_t size,
-    int* fd_out, uint64_t* offset_out,
-    uint64_t flags) {
+hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
+                          uint64_t* offset_out, uint64_t flags) {
   if (!ptr || !fd_out || !offset_out || size == 0)
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
 
   *fd_out = -1;
   *offset_out = 0;
 
-  return hsa_amd_portable_export_dmabuf_v2(
-    ptr, size, fd_out, offset_out, flags);
+  if (flags != 0) {
+    return hsa_amd_portable_export_dmabuf_v2(ptr, size, fd_out, offset_out,
+                                             flags);
+  }
+
+  return hsa_amd_portable_export_dmabuf(ptr, size, fd_out, offset_out);
 }
 
 hsa_status_t closeDmabuf(int fd) {
@@ -669,20 +698,16 @@ hsa_status_t closeDmabuf(int fd) {
 hipError_t allocateQueue(size_t size, bool isDeviceMemory,
                          const char* queueName, void** ptr) {
   if (isDeviceMemory) {
-    hsa_status_t s = allocDeviceMemory(
-      size, ptr, queueName, XIO_DEVICE_MEM_FINE_GRAINED);
+    hsa_status_t s = allocDeviceMemory(size, ptr, queueName,
+                                       XIO_DEVICE_MEM_HIP);
     if (s != HSA_STATUS_SUCCESS)
       return hipErrorMemoryAllocation;
     hipError_t memsetErr = hipMemset(*ptr, 0, size);
     if (memsetErr != hipSuccess) {
-      std::cerr << "Warning: hipMemset failed for "
-                << queueName << ": "
-                << hipGetErrorString(memsetErr)
-                << std::endl;
+      memset(*ptr, 0, size);
     }
   } else {
-    hipError_t err = allocHostMemory(
-      size, ptr, queueName, XIO_HOST_MEM_MAPPED);
+    hipError_t err = allocHostMemory(size, ptr, queueName, XIO_HOST_MEM_MAPPED);
     if (err != hipSuccess)
       return err;
   }
@@ -692,7 +717,7 @@ hipError_t allocateQueue(size_t size, bool isDeviceMemory,
 
 void freeQueue(void* ptr, bool isDeviceMemory, const char* queueName) {
   if (isDeviceMemory) {
-    freeDeviceMemory(ptr, XIO_DEVICE_MEM_FINE_GRAINED);
+    freeDeviceMemory(ptr, XIO_DEVICE_MEM_HIP);
   } else {
     freeHostMemory(ptr, XIO_HOST_MEM_MAPPED);
   }
@@ -704,9 +729,8 @@ __host__ bool reallocateQueue(void** ptr, size_t size, const char* queueName) {
   }
 
   void* coherent_ptr = nullptr;
-  hipError_t err = allocHostMemory(
-    size, &coherent_ptr, queueName,
-    XIO_HOST_MEM_COHERENT);
+  hipError_t err = allocHostMemory(size, &coherent_ptr, queueName,
+                                   XIO_HOST_MEM_COHERENT);
   if (err != hipSuccess || !coherent_ptr) {
     fprintf(stdout,
             "Warning: coherent alloc failed for "
@@ -750,23 +774,21 @@ hipError_t allocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
 
   if (dataBufferOnDevice) {
     const size_t host_page_size = sysconf(_SC_PAGESIZE);
-    size_t alignedSize =
-      ((size + host_page_size - 1) / host_page_size) *
-      host_page_size;
+    size_t alignedSize = ((size + host_page_size - 1) / host_page_size) *
+                         host_page_size;
 
-    hsa_status_t s = allocDeviceMemory(
-      alignedSize, ptr, "Data Buffer",
-      XIO_DEVICE_MEM_FINE_GRAINED);
+    hsa_status_t s = allocDeviceMemory(alignedSize, ptr, "Data Buffer",
+                                       XIO_DEVICE_MEM_HIP);
     if (s != HSA_STATUS_SUCCESS) {
       std::cerr << "Error: allocDeviceMemory failed "
                    "for data buffer: "
                 << s << std::endl;
       return hipErrorMemoryAllocation;
     }
-    memset(*ptr, 0, size);
+    hipMemset(*ptr, 0, size);
   } else {
-    hipError_t err = allocHostMemory(
-      size, ptr, "Data Buffer", XIO_HOST_MEM_MAPPED);
+    hipError_t err = allocHostMemory(size, ptr, "Data Buffer",
+                                     XIO_HOST_MEM_MAPPED);
     if (err != hipSuccess)
       return err;
   }
@@ -775,11 +797,10 @@ hipError_t allocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
 }
 
 void freeDataBuffer(void* ptr, unsigned memoryMode) {
-  bool dataBufferOnDevice =
-    (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
+  bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
-    freeDeviceMemory(ptr, XIO_DEVICE_MEM_FINE_GRAINED);
+    freeDeviceMemory(ptr, XIO_DEVICE_MEM_HIP);
   } else {
     freeHostMemory(ptr, XIO_HOST_MEM_MAPPED);
   }
@@ -2297,12 +2318,10 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
           vram_ptr, (void*)aligned_ptr, size, aligned_size,
           (unsigned long long)dmabuf_offset);
 
-  status = exportDmabuf((void*)aligned_ptr, aligned_size,
-                        &dmabuf_fd, &dmabuf_offset);
+  status = exportDmabuf((void*)aligned_ptr, aligned_size, &dmabuf_fd,
+                        &dmabuf_offset);
   if (status != HSA_STATUS_SUCCESS) {
-    fprintf(stdout,
-            "ERROR: exportDmabuf failed (status=%d)\n",
-            status);
+    fprintf(stdout, "ERROR: exportDmabuf failed (status=%d)\n", status);
     fprintf(stdout, "  This requires:\n");
     fprintf(stdout, "  - ROCm 5.3+ with dmabuf support\n");
     fprintf(stdout, "  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
@@ -2403,18 +2422,16 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
-    hsa_status_t s = allocDeviceMemory(
-      size, &bufferInfo->hostPtr,
-      "GPU accessible buffer",
-      XIO_DEVICE_MEM_FINE_GRAINED);
+    hsa_status_t s = allocDeviceMemory(size, &bufferInfo->hostPtr,
+                                       "GPU accessible buffer",
+                                       XIO_DEVICE_MEM_HIP);
     if (s != HSA_STATUS_SUCCESS) {
-      fprintf(stderr,
-              "Error: allocDeviceMemory failed\n");
+      fprintf(stderr, "Error: allocDeviceMemory failed\n");
       return hipErrorMemoryAllocation;
     }
 
     fprintf(stdout, "  VRAM buffer virtual: %p\n", bufferInfo->hostPtr);
-    fprintf(stdout, "  Exporting as DMA-BUF (HSA runtime)...\n");
+    fprintf(stdout, "  Exporting as DMA-BUF...\n");
 
     // Detect if device is emulated (needed for buffer registration flags)
     bool is_emulated = false;
@@ -2431,8 +2448,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
               strerror(-ret));
       fprintf(stderr, "  Device memory was requested but "
                       "dmabuf export is not available\n");
-      freeDeviceMemory(bufferInfo->hostPtr,
-                       XIO_DEVICE_MEM_FINE_GRAINED);
+      freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
     }
@@ -2446,10 +2462,9 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     bufferInfo->gpuPtr = bufferInfo->hostPtr;
     bufferInfo->isDeviceMemory = true;
   } else {
-    hipError_t buf_err = allocHostMemory(
-      size, &bufferInfo->hostPtr,
-      "GPU accessible buffer host",
-      XIO_HOST_MEM_MAPPED);
+    hipError_t buf_err = allocHostMemory(size, &bufferInfo->hostPtr,
+                                         "GPU accessible buffer host",
+                                         XIO_HOST_MEM_MAPPED);
     if (buf_err != hipSuccess)
       return buf_err;
 
@@ -2507,9 +2522,9 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   }
 
   if (bufferInfo->isDeviceMemory) {
-    (void)hipFree(bufferInfo->hostPtr);
+    freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
   } else {
-    (void)hipHostFree(bufferInfo->hostPtr);
+    freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
   }
 
   bufferInfo->hostPtr = nullptr;
