@@ -327,6 +327,10 @@ target_compile_options(rocm-xio PRIVATE
 # HIP-specific compilation flags (relocatable device code)
 target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
 
+# GNUInstallDirs must be included before the INSTALL_INTERFACE
+# generator expression below so CMAKE_INSTALL_INCLUDEDIR is set.
+include(GNUInstallDirs)
+
 # Include directories
 # PUBLIC for headers that consumers need, PRIVATE for internal headers
 target_include_directories(rocm-xio
@@ -455,9 +459,6 @@ endif()
 #-----------------------------------------------------------------------------
 # Install configuration
 #-----------------------------------------------------------------------------
-
-# Include GNUInstallDirs to get CMAKE_INSTALL_INCLUDEDIR, CMAKE_INSTALL_LIBDIR, etc.
-include(GNUInstallDirs)
 
 # Install static library
 install(TARGETS rocm-xio
