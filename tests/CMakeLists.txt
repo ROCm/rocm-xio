@@ -5,11 +5,13 @@
 # Top-level test coordinator for rocm-xio.
 #
 # Label convention (filter with ctest -L):
-#   unit     - CPU-only, no GPU or NIC required
-#   system   - Requires a HIP-capable GPU
-#   hardware - Requires specific NIC/device hardware
-#   stress   - Long-running concurrency tests
-#   rdma     - RDMA-specific tests
+#   unit        - CPU-only, no GPU or NIC required
+#   system      - Requires a HIP-capable GPU
+#   hardware    - Requires specific NIC/device hardware
+#   stress      - Long-running concurrency tests
+#   rdma        - RDMA-specific tests
+#   integration - Install + build examples against prefix
 
 add_subdirectory(unit)
 add_subdirectory(system)
+add_subdirectory(integration)
