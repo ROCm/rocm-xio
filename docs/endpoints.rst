@@ -39,11 +39,26 @@ Key features:
 - Direct GPU-to-NVMe submission via memory-mapped queues
 - Sequential and pseudo-random LBA access patterns
 - Configurable queue depth, IO size, and batch size
-- ``--batch-size`` controls SQEs per doorbell ring:
-  ``1`` (default) submits one SQE at a time,
-  ``0`` submits all at once,
-  any other value ``N`` batches ``N`` SQEs per
-  doorbell
+- Multi-queue parallelism with ``--num-queues``
+
+Doorbell Batching (``--batch-size``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--batch-size`` controls SQEs per doorbell ring:
+``1`` (default) submits one SQE at a time,
+``0`` submits all at once, any other value ``N``
+batches ``N`` SQEs per doorbell.
+
+When ``N > 1``, each SQE is prepared by a separate
+GPU thread.  Thread 0 acts as a coordinator: it rings
+the SQ doorbell, polls CQEs, and rings the CQ
+doorbell.  The kernel launches ``N + 1`` threads,
+which may span multiple wavefronts within a single
+thread block.  The upper bound on ``N`` is
+``maxThreadsPerBlock - 1`` (typically 1023).
+
+Dynamic shared memory is used for per-thread batch
+timing, so there is no fixed array ceiling.
 
 .. code-block:: bash
 
@@ -52,11 +67,51 @@ Key features:
      --controller /dev/nvme0 \
      --read-io 16 --batch-size 4
 
+   # Multi-wavefront: 128 SQEs per doorbell
+   sudo ./build/xio-tester nvme-ep \
+     --controller /dev/nvme0 \
+     --read-io 256 --batch-size 128 \
+     --queue-length 256
+
    # Infinite reads, 8 SQEs per doorbell
    sudo ./build/xio-tester nvme-ep \
      --controller /dev/nvme0 \
      --read-io 1 --batch-size 8 \
      --infinite --less-timing
+
+Multi-Queue Parallelism (``--num-queues``)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--num-queues N`` (default 1) creates ``N``
+independent NVMe I/O queue pairs.  Each queue gets
+its own GPU kernel on a separate HIP stream, its own
+data buffers, and its own doorbell offset.  Queue IDs
+are allocated as a contiguous range ending at the
+auto-detected (or explicit ``--queue-id``) value.
+
+.. code-block:: bash
+
+   # 2 independent queues, each doing 32 reads
+   sudo ./build/xio-tester nvme-ep \
+     --controller /dev/nvme0 \
+     --read-io 32 --num-queues 2
+
+   # 4 queues with batched doorbell writes
+   sudo ./build/xio-tester nvme-ep \
+     --controller /dev/nvme0 \
+     --read-io 64 --num-queues 4 \
+     --batch-size 16
+
+Timing Semantics
+^^^^^^^^^^^^^^^^
+
+When ``--batch-size > 1`` or ``--num-queues > 1``,
+per-operation timing arrays are not meaningful.  The
+endpoint automatically forces lightweight
+``XioTimingStats`` mode (min/max/sum/count).  For
+multi-queue runs, per-queue stats are allocated
+independently and aggregated after all kernels
+finish.
 
 Doorbell Modes
 ^^^^^^^^^^^^^^

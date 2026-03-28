@@ -401,13 +401,13 @@ __device__ static void driveEndpointSingle(
 }
 
 /**
- * Wavefront-cooperative batch path (batch_size > 1).
+ * Cooperative batch path (batch_size > 1).
  *
  * Threads 1..batch_size each prepare one SQE per batch
  * iteration.  Thread 0 is the coordinator: it rings the
  * SQ doorbell, polls CQEs, and rings the CQ doorbell.
- * All threads reside in a single wavefront and
- * synchronize via __syncthreads().
+ * Threads synchronize via __syncthreads() and may span
+ * multiple wavefronts within one thread block.
  */
 __device__ static void driveEndpointWavefront(
   const XioEndpointConfig& config, const nvmeIoParams& ioParams,
@@ -449,7 +449,7 @@ __device__ static void driveEndpointWavefront(
   __shared__ unsigned sh_ops_done;
   __shared__ unsigned sh_batch_count;
   __shared__ bool sh_stop;
-  __shared__ unsigned long long int sh_startTimes[64];
+  extern __shared__ unsigned long long int sh_startTimes[];
 
   if (tid == 0) {
     sh_sq_tail = 0;
@@ -540,7 +540,7 @@ __device__ static void driveEndpointWavefront(
 
         if (!ioParams.infiniteMode && config.startTimes != nullptr) {
           config.startTimes[op_idx] = wall_clock64();
-        } else if (useBatchTiming && b < 64) {
+        } else if (useBatchTiming) {
           sh_startTimes[b] = wall_clock64();
         }
 
@@ -606,7 +606,7 @@ __device__ static void driveEndpointWavefront(
 
         if (!ioParams.infiniteMode && config.endTimes != nullptr) {
           config.endTimes[op_idx] = wall_clock64();
-        } else if (useBatchTiming && b < 64) {
+        } else if (useBatchTiming) {
           unsigned long long int endTime = wall_clock64();
           if (endTime > sh_startTimes[b]) {
             updateTimingStats(config.timingStats, endTime - sh_startTimes[b]);
@@ -768,6 +768,15 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
     })
     ->group(nvme_group);
   app
+    .add_option("--num-queues", config->numQueues,
+                "Number of independent NVMe I/O queues. "
+                "Each queue is driven by its own GPU "
+                "kernel on a separate HIP stream. "
+                "Default: 1.")
+    ->default_val(1)
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+  app
     .add_option("--namespace", config->ioParams.nsid,
                 "NVMe namespace ID (must be > 0, default: 1).")
     ->default_val(1)
@@ -798,9 +807,8 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
                 "1 = sequential (one I/O at a time), "
                 "0 = all at once, N = N SQEs per doorbell. "
                 "When N > 1, each SQE is prepared by a "
-                "separate GPU thread within one wavefront. "
-                "Max value is wavefront_size - 1 "
-                "(63 on CDNA, 31 on RDNA).")
+                "separate GPU thread; may span multiple "
+                "wavefronts. Max is queue_length - 1.")
     ->default_val(1)
     ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
@@ -816,20 +824,45 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
  * @return Empty string if valid, error message otherwise
  */
 __host__ std::string validateConfig(nvmeEpConfig* config) {
-  // Auto-detect maximum queue ID if queueId is 0 (default/unset)
+  // Auto-detect maximum queue ID if queueId is 0 (default)
   if (config->queueId == 0) {
     if (config->controller.empty()) {
-      return "Cannot auto-detect queue ID: --controller not specified";
+      return "Cannot auto-detect queue ID: "
+             "--controller not specified";
     }
     uint16_t max_queue_id = 0;
     int ret = queryMaxQueueId(config->controller.c_str(), &max_queue_id);
     if (ret != 0) {
-      return "Failed to detect maximum queue ID. Please specify --queue-id "
-             "manually.";
+      return "Failed to detect maximum queue ID. "
+             "Please specify --queue-id manually.";
     }
     config->queueId = max_queue_id;
-    fprintf(stdout, "Auto-detected and using last available queue ID: %u\n",
+    fprintf(stdout,
+            "Auto-detected last available queue "
+            "ID: %u\n",
             config->queueId);
+  }
+
+  // Multi-queue validation: ensure enough I/O queues
+  // are available for the requested --num-queues count.
+  // Queue IDs are allocated as a contiguous range
+  // ending at queueId (i.e. queueId - numQueues + 1
+  // through queueId).
+  if (config->numQueues > 1) {
+    if (config->queueId < config->numQueues) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "--num-queues %u requires at least %u "
+               "IO queue IDs but queueId is %u "
+               "(queue 0 is the admin queue)",
+               config->numQueues, config->numQueues, config->queueId);
+      return std::string(buf);
+    }
+    uint16_t baseQid = config->queueId - (config->numQueues - 1);
+    fprintf(stdout,
+            "Multi-queue mode: %u queues "
+            "(IDs %u..%u)\n",
+            config->numQueues, baseQid, config->queueId);
   }
 
   // Validate that access pattern is valid
@@ -905,8 +938,9 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
   // Query wavefront size and validate batch_size.
   // When batch_size > 1 the kernel uses batch_size + 1
   // threads (threads 1..B write SQEs, thread 0 rings the
-  // doorbell and polls CQEs). All threads must fit in a
-  // single wavefront.
+  // doorbell and polls CQEs).  The batch_size is capped
+  // by queueSize - 1 (max in-flight SQEs).  It may span
+  // multiple wavefronts within one thread block.
   if (config->ioParams.batchSize > 1) {
     int deviceId = 0;
     hipError_t hip_err = hipGetDevice(&deviceId);
@@ -919,21 +953,28 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       return "Failed to query HIP device properties";
     }
     uint32_t waveSize = (uint32_t)deviceProp.warpSize;
-    if (config->ioParams.batchSize > waveSize - 1) {
+    uint32_t maxBlockSize = (uint32_t)deviceProp.maxThreadsPerBlock;
+
+    // batch_size + 1 threads must fit in one block
+    if (config->ioParams.batchSize + 1 > maxBlockSize) {
       char buf[256];
       snprintf(buf, sizeof(buf),
-               "--batch-size %u exceeds wavefront limit "
-               "%u (wavefront_size %u - 1 for "
-               "coordinator thread)",
-               config->ioParams.batchSize, waveSize - 1, waveSize);
+               "--batch-size %u + 1 coordinator "
+               "exceeds max block size %u",
+               config->ioParams.batchSize, maxBlockSize);
       return std::string(buf);
     }
+
     config->wavefrontSize = waveSize;
+    unsigned wavefronts = (config->ioParams.batchSize + 1 + waveSize - 1) /
+                          waveSize;
     fprintf(stdout,
             "Wavefront batch mode: batch_size=%u, "
-            "wavefront_size=%u, kernel_threads=%u\n",
+            "wavefront_size=%u, kernel_threads=%u"
+            " (%u wavefront%s)\n",
             config->ioParams.batchSize, waveSize,
-            config->ioParams.batchSize + 1);
+            config->ioParams.batchSize + 1, wavefronts,
+            wavefronts > 1 ? "s" : "");
   }
 
   return std::string();
@@ -942,141 +983,119 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
 /**
  * Run NVMe endpoint operations
  *
- * This function sets up queues, allocates buffers, and launches the GPU
- * kernel to execute NVMe I/O operations.
+ * Sets up queues, allocates buffers, and launches GPU
+ * kernels.  Supports multi-queue mode where each queue
+ * gets its own kernel on a separate HIP stream.
  *
- * @param config Pointer to XioEndpointConfig structure containing queue
- *               pointers and common configuration
+ * @param config Base endpoint configuration
  * @return hipSuccess on success, error code on failure
  */
 __host__ hipError_t run(XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
-    fprintf(stderr, "Error: nvme-ep requires endpoint configuration\n");
+    fprintf(stderr, "Error: nvme-ep requires endpoint "
+                    "configuration\n");
     return hipErrorInvalidValue;
   }
 
   nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
     config->endpointConfig);
 
-  // Queue creation is MANDATORY for nvme-ep - device must be specified
   if (nvmeConfig->controller.empty()) {
-    fprintf(stderr,
-            "Error: NVMe device not specified. --controller is required.\n");
+    fprintf(stderr, "Error: NVMe device not specified. "
+                    "--controller is required.\n");
     return hipErrorInvalidValue;
   }
 
   if (config->numThreads > 1) {
     fprintf(stderr, "Error: nvme-ep does not support "
-                    "--threads > 1. Use --batch-size "
-                    "> 1 for wavefront-cooperative "
-                    "batching.\n");
+                    "--threads > 1. Use --batch-size > 1 "
+                    "for cooperative batching.\n");
     return hipErrorNotSupported;
+  }
+
+  const uint16_t numQueues = nvmeConfig->numQueues;
+
+  // ---- Enforce less-timing mode ----
+  // When batch_size > 1 or num-queues > 1, per-op
+  // timing arrays (startTimes/endTimes) are not
+  // meaningful.  Force the lightweight stats path.
+  bool forcedLessTiming = false;
+  if (nvmeConfig->ioParams.batchSize > 1 || numQueues > 1) {
+    if (config->startTimes != nullptr) {
+      fprintf(stdout,
+              "Info: Forcing less-timing mode "
+              "(batch_size=%u, num_queues=%u)\n",
+              nvmeConfig->ioParams.batchSize, numQueues);
+      forcedLessTiming = true;
+    }
   }
 
   // Compute the kernel thread count locally.  Do NOT
   // mutate config->numThreads -- the caller sized
   // timing arrays based on numThreads=1.
-  unsigned kernelThreads = 1;
-  if (nvmeConfig->ioParams.batchSize > 1) {
-    kernelThreads = nvmeConfig->ioParams.batchSize + 1;
-    fprintf(stdout,
-            "Wavefront batch mode: launching %u "
-            "threads (1 coordinator + %u SQE "
-            "writers)\n",
-            kernelThreads, nvmeConfig->ioParams.batchSize);
-  }
-
-  // Create NVMe queues - MUST succeed before proceeding
-  // Use queue length from CLI configuration (default: 64)
-  // NVMe queues are circular buffers - commands wrap around, so the queue
-  // length must be large enough to handle outstanding commands without
-  // overwriting unprocessed ones.
   uint16_t queue_size = nvmeConfig->queueLength;
 
+  // Compute effective batch size matching the device-side
+  // caps: min(batchSize, queueSize - 1, total_ops).
+  uint32_t effBatch = nvmeConfig->ioParams.batchSize;
+  if (effBatch > 1) {
+    if (effBatch > (uint32_t)(queue_size - 1))
+      effBatch = queue_size - 1;
+    unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
+                         (unsigned)nvmeConfig->ioParams.writeIo;
+    if (!nvmeConfig->ioParams.infiniteMode && effBatch > total_ops)
+      effBatch = total_ops;
+  }
+
+  unsigned kernelThreads = 1;
+  if (effBatch > 1) {
+    kernelThreads = effBatch + 1;
+    fprintf(stdout,
+            "Batch mode: launching %u threads "
+            "(1 coordinator + %u SQE writers)\n",
+            kernelThreads, effBatch);
+  }
   fprintf(stdout, "Using queue length: %u entries\n", queue_size);
 
-  struct nvme_queue_info queue_info;
-  int ret = createQueue(nvmeConfig->controller.c_str(), ROCM_XIO_DEVICE_PATH,
-                        nvmeConfig->queueId, queue_size,
-                        nvmeConfig->doorbellParams.nvmeTargetBdf,
-                        config->memoryMode, // Respect memory mode like
-                                            // test-ep
-                        &queue_info);
-
-  if (ret < 0) {
-    fprintf(stderr, "Error: Failed to create NVMe queues: %s\n",
-            strerror(-ret));
-    fprintf(stderr,
-            "Queue creation failed - cannot proceed with kernel launch.\n");
-    return hipErrorInvalidValue;
-  }
-
-  // Mark queues as created for cleanup on SIGINT
-  nvmeConfig->queuesCreated = true;
-  nvmeConfig->queueInfo = queue_info;
-
-  // Update config with created queue addresses
-  // Use GPU pointers for kernel launch (obtained via hipHostGetDevicePointer)
-  config->submissionQueue = queue_info.sq_gpu ? queue_info.sq_gpu
-                                              : queue_info.sq_virt;
-  config->completionQueue = queue_info.cq_gpu ? queue_info.cq_gpu
-                                              : queue_info.cq_virt;
-  nvmeConfig->sqBaseAddr = queue_info.sq_phys;
-  nvmeConfig->cqBaseAddr = queue_info.cq_phys;
-  nvmeConfig->sqSize = queue_info.sq_size;
-  nvmeConfig->cqSize = queue_info.cq_size;
-
-  fprintf(stdout, "NVMe queues created: SQ=0x%llx, CQ=0x%llx, queue_id=%u\n",
-          (unsigned long long)queue_info.sq_phys,
-          (unsigned long long)queue_info.cq_phys, nvmeConfig->queueId);
-  fprintf(stdout, "Queue GPU pointers: SQ=%p (host=%p), CQ=%p (host=%p)\n",
-          queue_info.sq_gpu, queue_info.sq_virt, queue_info.cq_gpu,
-          queue_info.cq_virt);
-
-  // Verify queues were created successfully
-  if (!config->submissionQueue || !config->completionQueue) {
-    fprintf(stdout,
-            "Error: Queue creation succeeded but queue pointers are null\n");
-    return hipErrorInvalidValue;
-  }
-
-  // Set up PCI MMIO bridge shadow buffer if enabled
+  // ---- Doorbell access setup (shared) ----
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
     void* shadow_virt = nullptr;
     int ret_shadow = mapMmioBridgeShadowBuffer(
       nvmeConfig->doorbellParams.mmioBridgeBdf, &shadow_virt);
     if (ret_shadow < 0) {
-      fprintf(stderr, "Failed to map PCI MMIO bridge shadow buffer.\n");
+      fprintf(stderr, "Failed to map PCI MMIO bridge "
+                      "shadow buffer.\n");
       return hipErrorInvalidValue;
     }
-    fprintf(stdout, "PCI MMIO bridge shadow buffer mapped at %p.\n",
+    fprintf(stdout,
+            "PCI MMIO bridge shadow buffer "
+            "mapped at %p.\n",
             shadow_virt);
-
-    // Register shadow buffer for GPU access
     const size_t shadow_size = 8192;
     void* shadow_gpu_ptr = nullptr;
-    int ret_register = registerMmioBridgeShadowBufferForGpu(shadow_virt,
-                                                            shadow_size,
-                                                            &shadow_gpu_ptr);
-    if (ret_register < 0) {
-      fprintf(stderr, "Failed to register PCI MMIO bridge shadow buffer.\n");
+    int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+                                                       &shadow_gpu_ptr);
+    if (ret_reg < 0) {
+      fprintf(stderr, "Failed to register PCI MMIO bridge "
+                      "shadow buffer.\n");
       return hipErrorInvalidValue;
-    } else {
-      nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
     }
+    nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
   } else {
-    // PCI MMIO bridge is disabled - set up direct doorbell via BAR0
     void* bar0_cpu = nullptr;
     void* bar0_gpu = nullptr;
     int ret_bar0 = mapPciBar(nvmeConfig->doorbellParams.nvmeTargetBdf, 0,
                              &bar0_cpu, &bar0_gpu, 8192);
     if (ret_bar0 < 0) {
       fprintf(stderr,
-              "Warning: Failed to map NVMe BAR0 for direct doorbell: %s\n",
+              "Warning: Failed to map NVMe BAR0 "
+              "for direct doorbell: %s\n",
               strerror(-ret_bar0));
       return hipErrorInvalidValue;
     }
-    fprintf(stdout, "NVMe BAR0 mapped for direct doorbell access at %p.\n",
+    fprintf(stdout,
+            "NVMe BAR0 mapped for direct "
+            "doorbell access at %p.\n",
             bar0_gpu);
     nvmeConfig->doorbellParams.nvmeBar0Gpu = bar0_gpu;
   }
@@ -1084,120 +1103,46 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   bool usePciMmioBridge = nvmeConfig->doorbellParams.usePciMmioBridge;
   void* shadowBufferVirt = nvmeConfig->doorbellParams.shadowBufferVirt;
   void* nvmeBar0Gpu = nvmeConfig->doorbellParams.nvmeBar0Gpu;
-  uint64_t lbaRangeLbas;
 
-  // Query namespace capacity in LBAs
-  uint64_t namespace_capacity = 0;
-  int capacity_ret = queryNamespaceCapacity(nvmeConfig->controller.c_str(),
-                                            nvmeConfig->ioParams.nsid,
-                                            &namespace_capacity);
-  if (capacity_ret == 0 && namespace_capacity > 0) {
-    lbaRangeLbas = namespace_capacity;
-    fprintf(stdout, "Using full namespace capacity: %llu LBAs\n",
-            (unsigned long long)lbaRangeLbas);
-  } else {
-    fprintf(stderr, "Error: Failed to query namespace capacity\n");
-    return hipErrorInvalidValue;
-  }
-
-  // Determine access pattern
-  bool useRandomAccess = (nvmeConfig->ioParams.accessPattern == "random");
-
-  // Calculate SQ doorbell offset
-  const uint32_t doorbell_offset = nvme_ep::doorbellBase +
-                                   (2 * nvmeConfig->queueId *
-                                    nvme_ep::doorBellStride);
-
-  // Allocate data buffers
-  struct xioBufferInfo readBufferInfo = {};
-  struct xioBufferInfo writeBufferInfo = {};
-
-  // Allocate read buffer if read I/O is requested
-  if (nvmeConfig->ioParams.readIo != 0) {
-    hipError_t buf_err = allocateGpuAccessibleBuffer(
-      nvmeConfig->bufferParams.bufferSize, config->memoryMode,
-      nvmeConfig->doorbellParams.nvmeTargetBdf, nvmeConfig->controller.c_str(),
-      &readBufferInfo);
-    if (buf_err != hipSuccess) {
-      fprintf(stderr, "Error: Failed to allocate read buffer: %s\n",
-              hipGetErrorString(buf_err));
-      return buf_err;
-    }
-  }
-
-  // Allocate write buffer if write I/O is requested
-  if (nvmeConfig->ioParams.writeIo != 0) {
-    hipError_t buf_err = allocateGpuAccessibleBuffer(
-      nvmeConfig->bufferParams.bufferSize, config->memoryMode,
-      nvmeConfig->doorbellParams.nvmeTargetBdf, nvmeConfig->controller.c_str(),
-      &writeBufferInfo);
-    if (buf_err != hipSuccess) {
-      fprintf(stderr, "Error: Failed to allocate write buffer: %s\n",
-              hipGetErrorString(buf_err));
-      return buf_err;
-    }
-  }
-
-  // Validate queue pointers
-  if (!config->submissionQueue || !config->completionQueue) {
-    fprintf(stderr, "Error: Invalid queue pointers (sq=%p, cq=%p)\n",
-            config->submissionQueue, config->completionQueue);
-    return hipErrorInvalidValue;
-  }
-
-  // Verify queue pointers are GPU-accessible
-  if (!validateGpuPointer(config->submissionQueue, "SQ", false)) {
-    fprintf(stderr, "Error: Submission queue is not GPU-accessible.\n");
-    return hipErrorInvalidValue;
-  }
-  if (!validateGpuPointer(config->completionQueue, "CQ", false)) {
-    fprintf(stderr, "Error: Completion queue is not GPU-accessible.\n");
-    return hipErrorInvalidValue;
-  }
-
-  // Verify shadowBufferVirt is GPU-accessible if it's non-null
+  // Verify shared GPU pointers
   if (shadowBufferVirt != nullptr) {
     if (!validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
-      fprintf(stderr, "Error: Shadow buffer is not GPU-accessible.\n");
+      fprintf(stderr, "Error: Shadow buffer is not "
+                      "GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
   }
-
-  // Verify nvmeBar0Gpu is GPU-accessible if it's non-null
   if (nvmeBar0Gpu != nullptr) {
     if (!validateGpuPointer(nvmeBar0Gpu, "BAR0", false)) {
-      fprintf(stderr, "Error: NVMeBAR0 is not GPU-accessible.\n");
+      fprintf(stderr, "Error: NVMe BAR0 is not "
+                      "GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
   }
 
-  // Summarize the pointer state before launching kernel
-  fprintf(stdout,
-          "Launching kernel: sq=%p, cq=%p, startTimes=%p, endTimes=%p, "
-          "shadowBuffer=%p, usePciMmioBridge=%d, nvmeBar0Gpu=%p\n",
-          config->submissionQueue, config->completionQueue, config->startTimes,
-          config->endTimes, shadowBufferVirt,
-          nvmeConfig->doorbellParams.usePciMmioBridge, nvmeBar0Gpu);
-  fprintf(stdout,
-          "Data buffers: readBuffer=%p (dma=0x%llx), writeBuffer=%p "
-          "(dma=0x%llx), size=%zu\n",
-          readBufferInfo.gpuPtr ? readBufferInfo.gpuPtr
-                                : readBufferInfo.hostPtr,
-          (unsigned long long)readBufferInfo.dmaAddr,
-          writeBufferInfo.gpuPtr ? writeBufferInfo.gpuPtr
-                                 : writeBufferInfo.hostPtr,
-          (unsigned long long)writeBufferInfo.dmaAddr,
-          nvmeConfig->bufferParams.bufferSize);
-  fprintf(stdout,
-          "Kernel parameters: lbaSize=%u, blocks=%u, "
-          "expected transfer_size=%u, "
-          "writeBufferDma=0x%llx, batchSize=%u\n",
-          nvmeConfig->ioParams.lbaSize, nvmeConfig->ioParams.lbasPerIo,
-          nvmeConfig->ioParams.lbasPerIo * nvmeConfig->ioParams.lbaSize,
-          (unsigned long long)writeBufferInfo.dmaAddr,
-          nvmeConfig->ioParams.batchSize);
+  // ---- Namespace capacity query (shared) ----
+  uint64_t lbaRangeLbas;
+  {
+    uint64_t namespace_capacity = 0;
+    int cap_ret = queryNamespaceCapacity(nvmeConfig->controller.c_str(),
+                                         nvmeConfig->ioParams.nsid,
+                                         &namespace_capacity);
+    if (cap_ret == 0 && namespace_capacity > 0) {
+      lbaRangeLbas = namespace_capacity;
+      fprintf(stdout,
+              "Using full namespace capacity: "
+              "%llu LBAs\n",
+              (unsigned long long)lbaRangeLbas);
+    } else {
+      fprintf(stderr, "Error: Failed to query namespace "
+                      "capacity\n");
+      return hipErrorInvalidValue;
+    }
+  }
 
-  // Build parameter structs for kernel launch
+  bool useRandomAccess = (nvmeConfig->ioParams.accessPattern == "random");
+
+  // ---- Build shared ioParams ----
   nvme_ep::nvmeIoParams ioParams;
   ioParams.lbaSize = nvmeConfig->ioParams.lbaSize;
   ioParams.baseLba = nvmeConfig->ioParams.baseLba;
@@ -1213,9 +1158,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.batchSize = nvmeConfig->ioParams.batchSize;
   ioParams.wavefrontSize = nvmeConfig->wavefrontSize;
 
-  // Validate that batch_size * transfer_size fits in the
-  // data buffer. Each in-flight SQE in a batch uses its own
-  // buffer region.
+  // ---- Validate batch buffer sizing ----
   {
     uint32_t eff_batch = ioParams.batchSize;
     if (eff_batch == 0) {
@@ -1230,9 +1173,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     uint64_t needed = (uint64_t)eff_batch * xfer;
     if (needed > nvmeConfig->bufferParams.bufferSize) {
       fprintf(stderr,
-              "Error: batch-size %u * transfer-size %llu "
-              "= %llu exceeds data-buffer-size %zu. "
-              "Increase --data-buffer-size or reduce "
+              "Error: batch-size %u * "
+              "transfer-size %llu = %llu exceeds "
+              "data-buffer-size %zu. Increase "
+              "--data-buffer-size or reduce "
               "--batch-size.\n",
               eff_batch, (unsigned long long)xfer, (unsigned long long)needed,
               nvmeConfig->bufferParams.bufferSize);
@@ -1240,66 +1184,300 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
   }
 
-  nvme_ep::nvmeDoorbellParams doorbellParams;
-  doorbellParams.doorbellOffset = doorbell_offset;
-  doorbellParams.nvmeTargetBdf = nvmeConfig->doorbellParams.nvmeTargetBdf;
-  doorbellParams.shadowBufferVirt = shadowBufferVirt;
-  doorbellParams.nvmeBar0Gpu = nvmeBar0Gpu;
-  doorbellParams.usePciMmioBridge = usePciMmioBridge;
+  // Dynamic shared memory for batch timing
+  size_t dynShmemBytes = 0;
+  if (effBatch > 1) {
+    dynShmemBytes = effBatch * sizeof(unsigned long long int);
+  }
 
-  nvme_ep::nvmeBufferParams bufferParams;
-  bufferParams.readBuffer = readBufferInfo.gpuPtr
-                              ? static_cast<uint8_t*>(readBufferInfo.gpuPtr)
-                              : static_cast<uint8_t*>(readBufferInfo.hostPtr);
-  bufferParams.writeBuffer = writeBufferInfo.gpuPtr
-                               ? static_cast<uint8_t*>(writeBufferInfo.gpuPtr)
-                               : static_cast<uint8_t*>(writeBufferInfo.hostPtr);
-  bufferParams.bufferSize = nvmeConfig->bufferParams.bufferSize;
-  bufferParams.readBufferDma = readBufferInfo.dmaAddr;
-  bufferParams.writeBufferDma = writeBufferInfo.dmaAddr;
+  // ---- Per-queue state vectors ----
+  if (nvmeConfig->queueId < numQueues) {
+    fprintf(stderr,
+            "Error: queueId %u too low for "
+            "%u queues (need queueId >= numQueues)\n",
+            nvmeConfig->queueId, numQueues);
+    return hipErrorInvalidValue;
+  }
+  uint16_t baseQueueId = nvmeConfig->queueId - (numQueues - 1);
 
-  // Prepare config struct for kernel launch
-  XioEndpointConfig kernelConfig = *config;
-  kernelConfig.endpointConfig = nullptr;
+  nvmeConfig->queueIds.clear();
+  nvmeConfig->queueInfos.clear();
+  nvmeConfig->queueIds.reserve(numQueues);
+  nvmeConfig->queueInfos.reserve(numQueues);
 
-  hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads), 0, 0,
-                     kernelConfig, ioParams, doorbellParams, bufferParams);
+  hipError_t result = hipSuccess;
+  std::vector<struct xioBufferInfo> readBufs(numQueues);
+  std::vector<struct xioBufferInfo> writeBufs(numQueues);
+  std::vector<hipStream_t> streams(numQueues, nullptr);
+  std::vector<XioTimingStats*> perQueueStats(numQueues, nullptr);
 
-  fprintf(stdout, "Info: Kernel launched.\n");
+  // Allocate per-queue timing stats when forcing
+  // less-timing or when the caller already set up
+  // less-timing mode (timingStats != null).
+  bool useLessTiming = forcedLessTiming || config->timingStats != nullptr;
+  if (useLessTiming) {
+    for (uint16_t q = 0; q < numQueues; q++) {
+      hipError_t ts_err = hipHostMalloc((void**)&perQueueStats[q],
+                                        sizeof(XioTimingStats));
+      if (ts_err != hipSuccess) {
+        void* ptr = malloc(sizeof(XioTimingStats));
+        perQueueStats[q] = static_cast<XioTimingStats*>(ptr);
+      }
+      if (!perQueueStats[q]) {
+        fprintf(stderr,
+                "Error: Failed to allocate timing "
+                "stats for queue %u\n",
+                q);
+        result = hipErrorMemoryAllocation;
+        goto cleanup;
+      }
+      perQueueStats[q]->minDuration = ULLONG_MAX;
+      perQueueStats[q]->maxDuration = 0;
+      perQueueStats[q]->sumDuration = 0;
+      perQueueStats[q]->count = 0;
+    }
+  }
 
-  // Wait for GPU kernel to complete
-  hipError_t err = hipDeviceSynchronize();
+  // ---- Create queues and launch kernels ----
+  for (uint16_t q = 0; q < numQueues; q++) {
+    uint16_t qid = baseQueueId + q;
 
-  // Detect if an error occurred
-  if (err != hipSuccess) {
+    struct nvme_queue_info queueInfo = {};
+    int ret = createQueue(nvmeConfig->controller.c_str(), ROCM_XIO_DEVICE_PATH,
+                          qid, queue_size,
+                          nvmeConfig->doorbellParams.nvmeTargetBdf,
+                          config->memoryMode, &queueInfo);
+
+    if (ret < 0) {
+      fprintf(stderr,
+              "Error: Failed to create NVMe "
+              "queue %u: %s\n",
+              qid, strerror(-ret));
+      result = hipErrorInvalidValue;
+      goto cleanup;
+    }
+
+    nvmeConfig->queueIds.push_back(qid);
+    nvmeConfig->queueInfos.push_back(queueInfo);
+    nvmeConfig->queuesCreated = true;
+    struct nvme_queue_info& qi = nvmeConfig->queueInfos.back();
+
+    fprintf(stdout,
+            "Queue %u created: SQ=0x%llx, "
+            "CQ=0x%llx\n",
+            qid, (unsigned long long)qi.sq_phys,
+            (unsigned long long)qi.cq_phys);
+
+    void* sq_ptr = qi.sq_gpu ? qi.sq_gpu : qi.sq_virt;
+    void* cq_ptr = qi.cq_gpu ? qi.cq_gpu : qi.cq_virt;
+    if (!sq_ptr || !cq_ptr) {
+      fprintf(stderr,
+              "Error: Queue %u pointers are "
+              "null\n",
+              qid);
+      result = hipErrorInvalidValue;
+      goto cleanup;
+    }
+    if (!validateGpuPointer(sq_ptr, "SQ", false) ||
+        !validateGpuPointer(cq_ptr, "CQ", false)) {
+      fprintf(stderr,
+              "Error: Queue %u not "
+              "GPU-accessible\n",
+              qid);
+      result = hipErrorInvalidValue;
+      goto cleanup;
+    }
+
+    // Allocate per-queue data buffers
+    if (nvmeConfig->ioParams.readIo != 0) {
+      hipError_t buf_err = allocateGpuAccessibleBuffer(
+        nvmeConfig->bufferParams.bufferSize, config->memoryMode,
+        nvmeConfig->doorbellParams.nvmeTargetBdf,
+        nvmeConfig->controller.c_str(), &readBufs[q]);
+      if (buf_err != hipSuccess) {
+        fprintf(stderr,
+                "Error: Failed to allocate read "
+                "buffer for queue %u: %s\n",
+                qid, hipGetErrorString(buf_err));
+        result = buf_err;
+        goto cleanup;
+      }
+    }
+    if (nvmeConfig->ioParams.writeIo != 0) {
+      hipError_t buf_err = allocateGpuAccessibleBuffer(
+        nvmeConfig->bufferParams.bufferSize, config->memoryMode,
+        nvmeConfig->doorbellParams.nvmeTargetBdf,
+        nvmeConfig->controller.c_str(), &writeBufs[q]);
+      if (buf_err != hipSuccess) {
+        fprintf(stderr,
+                "Error: Failed to allocate write "
+                "buffer for queue %u: %s\n",
+                qid, hipGetErrorString(buf_err));
+        result = buf_err;
+        goto cleanup;
+      }
+    }
+
+    // Create HIP stream for this queue
+    if (numQueues > 1) {
+      hipError_t s_err = hipStreamCreate(&streams[q]);
+      if (s_err != hipSuccess) {
+        fprintf(stderr,
+                "Error: Failed to create HIP "
+                "stream for queue %u: %s\n",
+                qid, hipGetErrorString(s_err));
+        result = s_err;
+        goto cleanup;
+      }
+    }
+
+    // Build per-queue kernel parameters
+    uint32_t qDoorbell = nvme_ep::doorbellBase +
+                         (2 * qid * nvme_ep::doorBellStride);
+
+    nvme_ep::nvmeDoorbellParams qDoorbellParams;
+    qDoorbellParams.doorbellOffset = qDoorbell;
+    qDoorbellParams.nvmeTargetBdf = nvmeConfig->doorbellParams.nvmeTargetBdf;
+    qDoorbellParams.shadowBufferVirt = shadowBufferVirt;
+    qDoorbellParams.nvmeBar0Gpu = nvmeBar0Gpu;
+    qDoorbellParams.usePciMmioBridge = usePciMmioBridge;
+
+    nvme_ep::nvmeBufferParams qBufParams;
+    qBufParams.readBuffer = readBufs[q].gpuPtr
+                              ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
+                              : static_cast<uint8_t*>(readBufs[q].hostPtr);
+    qBufParams.writeBuffer = writeBufs[q].gpuPtr
+                               ? static_cast<uint8_t*>(writeBufs[q].gpuPtr)
+                               : static_cast<uint8_t*>(writeBufs[q].hostPtr);
+    qBufParams.bufferSize = nvmeConfig->bufferParams.bufferSize;
+    qBufParams.readBufferDma = readBufs[q].dmaAddr;
+    qBufParams.writeBufferDma = writeBufs[q].dmaAddr;
+
+    XioEndpointConfig kernelConfig = *config;
+    kernelConfig.endpointConfig = nullptr;
+    kernelConfig.submissionQueue = sq_ptr;
+    kernelConfig.completionQueue = cq_ptr;
+
+    if (forcedLessTiming) {
+      kernelConfig.startTimes = nullptr;
+      kernelConfig.endTimes = nullptr;
+    }
+    if (useLessTiming) {
+      kernelConfig.timingStats = perQueueStats[q];
+    }
+
+    // Keep backward compat: update nvmeConfig
+    // with the first queue's info for single-queue
+    if (q == 0) {
+      nvmeConfig->queueInfo = nvmeConfig->queueInfos[0];
+      nvmeConfig->sqBaseAddr = qi.sq_phys;
+      nvmeConfig->cqBaseAddr = qi.cq_phys;
+      nvmeConfig->sqSize = qi.sq_size;
+      nvmeConfig->cqSize = qi.cq_size;
+      config->submissionQueue = sq_ptr;
+      config->completionQueue = cq_ptr;
+    }
+
+    fprintf(stdout,
+            "Launching kernel for queue %u "
+            "(stream %p)\n",
+            qid, (void*)streams[q]);
+
+    hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads),
+                       dynShmemBytes, streams[q], kernelConfig, ioParams,
+                       qDoorbellParams, qBufParams);
+  }
+
+  fprintf(stdout, "Info: %u kernel%s launched.\n", numQueues,
+          numQueues > 1 ? "s" : "");
+
+  // Wait for all GPU kernels to complete
+  result = hipDeviceSynchronize();
+  if (result != hipSuccess) {
     fprintf(stdout,
             "Info: Device synchronization error: "
             "%s (code: %d).\n",
-            hipGetErrorString(err), err);
+            hipGetErrorString(result), result);
   }
 
-  // Delete NVMe queues before freeing buffers to ensure the
-  // controller stops referencing queue/data memory regions
-  fprintf(stdout, "\nCleaning up NVMe queues (queue_id=%u)...\n",
-          nvmeConfig->queueId);
-  int cleanup_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
-                                       "NVMe device", 3, 50);
-  if (cleanup_fd >= 0) {
-    deleteQueue(cleanup_fd, nvmeConfig->queueId);
-    close(cleanup_fd);
-    nvmeConfig->queuesCreated = false;
-  } else {
-    fprintf(stderr,
-            "Warning: Could not reopen NVMe device "
-            "for queue cleanup: %s\n",
-            strerror(errno));
+  // ---- Aggregate per-queue timing stats ----
+  if (useLessTiming && numQueues > 1 && config->timingStats != nullptr) {
+    XioTimingStats* agg = config->timingStats;
+    agg->minDuration = ULLONG_MAX;
+    agg->maxDuration = 0;
+    agg->sumDuration = 0;
+    agg->count = 0;
+    for (uint16_t q = 0; q < numQueues; q++) {
+      if (!perQueueStats[q])
+        continue;
+      if (perQueueStats[q]->minDuration < agg->minDuration) {
+        agg->minDuration = perQueueStats[q]->minDuration;
+      }
+      if (perQueueStats[q]->maxDuration > agg->maxDuration) {
+        agg->maxDuration = perQueueStats[q]->maxDuration;
+      }
+      agg->sumDuration += perQueueStats[q]->sumDuration;
+      agg->count += perQueueStats[q]->count;
+    }
+    fprintf(stdout,
+            "Aggregated timing across %u queues: "
+            "%llu ops\n",
+            numQueues, (unsigned long long)agg->count);
+  } else if (useLessTiming && numQueues == 1 &&
+             config->timingStats != nullptr && perQueueStats[0] != nullptr) {
+    *config->timingStats = *perQueueStats[0];
+  } else if (useLessTiming && numQueues == 1 &&
+             config->timingStats == nullptr && perQueueStats[0] != nullptr) {
+    config->timingStats = perQueueStats[0];
+    perQueueStats[0] = nullptr;
   }
 
-  // Free data buffers
-  freeGpuAccessibleBuffer(&readBufferInfo);
-  freeGpuAccessibleBuffer(&writeBufferInfo);
+cleanup:
+  // ---- Cleanup: delete successfully created NVMe queues ----
+  if (nvmeConfig->queuesCreated) {
+    uint16_t nCreated = (uint16_t)nvmeConfig->queueIds.size();
+    fprintf(stdout, "\nCleaning up %u NVMe queue%s...\n", nCreated,
+            nCreated > 1 ? "s" : "");
+    int cleanup_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
+                                         "NVMe device", 3, 50);
+    if (cleanup_fd >= 0) {
+      for (uint16_t q = 0; q < nCreated; q++) {
+        deleteQueue(cleanup_fd, nvmeConfig->queueIds[q]);
+      }
+      close(cleanup_fd);
+      nvmeConfig->queuesCreated = false;
+    } else {
+      fprintf(stderr,
+              "Warning: Could not reopen NVMe "
+              "device for queue cleanup: %s\n",
+              strerror(errno));
+    }
+  }
 
-  return err;
+  // Free per-queue data buffers
+  for (uint16_t q = 0; q < numQueues; q++) {
+    freeGpuAccessibleBuffer(&readBufs[q]);
+    freeGpuAccessibleBuffer(&writeBufs[q]);
+  }
+
+  // Destroy non-default HIP streams
+  for (uint16_t q = 0; q < numQueues; q++) {
+    if (streams[q] != nullptr) {
+      (void)hipStreamDestroy(streams[q]);
+    }
+  }
+
+  // Free per-queue timing stats
+  for (uint16_t q = 0; q < numQueues; q++) {
+    if (perQueueStats[q] != nullptr) {
+      hipError_t free_err = hipHostFree(perQueueStats[q]);
+      if (free_err != hipSuccess) {
+        free(perQueueStats[q]);
+      }
+    }
+  }
+
+  return result;
 }
 
 // Host helper function
@@ -2204,104 +2382,120 @@ cleanup:
   return ret;
 }
 
-// C-compatible cleanup function for signal handlers
+// C-compatible cleanup function for signal handlers.
+// Iterates over all queues that were created by run().
 extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
   if (!endpointConfig) {
     return -EINVAL;
   }
 
-  // Cast to nvmeEpConfig - we know this is safe if called for nvme-ep
   nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
     endpointConfig);
 
-  // Only attempt cleanup if queues were actually created
   if (!nvmeConfig->queuesCreated) {
-    return 0; // No queues to clean up
+    return 0;
   }
-
-  // Check if controller path is valid
   if (nvmeConfig->controller.empty()) {
     return -EINVAL;
   }
 
-  // Reopen device (device was closed after queue creation)
   int nvme_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
                                     "NVMe device", 3, 50);
   if (nvme_fd < 0) {
     fprintf(stderr,
-            "Warning: Failed to reopen NVMe device for queue cleanup: %s\n",
+            "Warning: Failed to reopen NVMe "
+            "device for queue cleanup: %s\n",
             strerror(errno));
     return -errno;
   }
 
-  // Attempt to delete queues
-  fprintf(stdout,
-          "\nSIGINT received: Attempting to delete NVMe queues "
-          "(queue_id=%u)...\n",
-          nvmeConfig->queueId);
-  int ret = deleteQueue(nvme_fd, nvmeConfig->queueId);
+  int ret = 0;
+  if (!nvmeConfig->queueIds.empty()) {
+    fprintf(stdout,
+            "\nSIGINT received: Deleting %zu "
+            "NVMe queue%s...\n",
+            nvmeConfig->queueIds.size(),
+            nvmeConfig->queueIds.size() > 1 ? "s" : "");
+    for (size_t q = 0; q < nvmeConfig->queueIds.size(); q++) {
+      int r = deleteQueue(nvme_fd, nvmeConfig->queueIds[q]);
+      if (r != 0)
+        ret = r;
+    }
+  } else {
+    fprintf(stdout,
+            "\nSIGINT received: Deleting NVMe "
+            "queue %u...\n",
+            nvmeConfig->queueId);
+    ret = deleteQueue(nvme_fd, nvmeConfig->queueId);
+  }
   close(nvme_fd);
 
   if (ret == 0) {
     fprintf(stdout, "NVMe queues deleted successfully.\n");
     nvmeConfig->queuesCreated = false;
   } else {
-    fprintf(stderr, "Warning: Failed to delete NVMe queues: %s\n",
+    fprintf(stderr,
+            "Warning: Failed to delete NVMe "
+            "queues: %s\n",
             strerror(-ret));
   }
 
-  // Host-side teardown of PRP lists and contiguous queue mappings.
-  // Idempotent: all pointers/IDs are cleared after use.
 #ifndef __HIP_DEVICE_COMPILE__
   {
-    nvme_queue_info* qinfo = &nvmeConfig->queueInfo;
     long page_sz = sysconf(_SC_PAGESIZE);
+    auto cleanupQinfo = [&](nvme_queue_info* qi) {
+      if (qi->sq_prp_list) {
+        if (page_sz > 0)
+          munlock(qi->sq_prp_list, static_cast<size_t>(page_sz));
+        free(qi->sq_prp_list);
+        qi->sq_prp_list = nullptr;
+      }
+      if (qi->cq_prp_list) {
+        if (page_sz > 0)
+          munlock(qi->cq_prp_list, static_cast<size_t>(page_sz));
+        free(qi->cq_prp_list);
+        qi->cq_prp_list = nullptr;
+      }
+      if (qi->sq_virt && qi->sq_contig_id) {
+        struct xioQueueSetup sq_s = {};
+        sq_s.virt = qi->sq_virt;
+        sq_s.gpu = qi->sq_gpu;
+        sq_s.phys = qi->sq_phys;
+        sq_s.uses_contig = true;
+        sq_s.contig_id = qi->sq_contig_id;
+        freeContigQueue(&sq_s, qi->sq_size, "submission queue");
+        qi->sq_virt = nullptr;
+        qi->sq_gpu = nullptr;
+        qi->sq_contig_id = 0;
+      }
+      if (qi->cq_virt && qi->cq_contig_id) {
+        struct xioQueueSetup cq_s = {};
+        cq_s.virt = qi->cq_virt;
+        cq_s.gpu = qi->cq_gpu;
+        cq_s.phys = qi->cq_phys;
+        cq_s.uses_contig = true;
+        cq_s.contig_id = qi->cq_contig_id;
+        freeContigQueue(&cq_s, qi->cq_size, "completion queue");
+        qi->cq_virt = nullptr;
+        qi->cq_gpu = nullptr;
+        qi->cq_contig_id = 0;
+      }
+      if (qi->sq_dmabuf_fd >= 0) {
+        close(qi->sq_dmabuf_fd);
+        qi->sq_dmabuf_fd = -1;
+      }
+      if (qi->cq_dmabuf_fd >= 0) {
+        close(qi->cq_dmabuf_fd);
+        qi->cq_dmabuf_fd = -1;
+      }
+    };
 
-    if (qinfo->sq_prp_list) {
-      if (page_sz > 0)
-        munlock(qinfo->sq_prp_list, static_cast<size_t>(page_sz));
-      free(qinfo->sq_prp_list);
-      qinfo->sq_prp_list = nullptr;
-    }
-    if (qinfo->cq_prp_list) {
-      if (page_sz > 0)
-        munlock(qinfo->cq_prp_list, static_cast<size_t>(page_sz));
-      free(qinfo->cq_prp_list);
-      qinfo->cq_prp_list = nullptr;
-    }
-
-    if (qinfo->sq_virt && qinfo->sq_contig_id) {
-      struct xioQueueSetup sq_setup = {};
-      sq_setup.virt = qinfo->sq_virt;
-      sq_setup.gpu = qinfo->sq_gpu;
-      sq_setup.phys = qinfo->sq_phys;
-      sq_setup.uses_contig = true;
-      sq_setup.contig_id = qinfo->sq_contig_id;
-      freeContigQueue(&sq_setup, qinfo->sq_size, "submission queue");
-      qinfo->sq_virt = nullptr;
-      qinfo->sq_gpu = nullptr;
-      qinfo->sq_contig_id = 0;
-    }
-    if (qinfo->cq_virt && qinfo->cq_contig_id) {
-      struct xioQueueSetup cq_setup = {};
-      cq_setup.virt = qinfo->cq_virt;
-      cq_setup.gpu = qinfo->cq_gpu;
-      cq_setup.phys = qinfo->cq_phys;
-      cq_setup.uses_contig = true;
-      cq_setup.contig_id = qinfo->cq_contig_id;
-      freeContigQueue(&cq_setup, qinfo->cq_size, "completion queue");
-      qinfo->cq_virt = nullptr;
-      qinfo->cq_gpu = nullptr;
-      qinfo->cq_contig_id = 0;
-    }
-
-    if (qinfo->sq_dmabuf_fd >= 0) {
-      close(qinfo->sq_dmabuf_fd);
-      qinfo->sq_dmabuf_fd = -1;
-    }
-    if (qinfo->cq_dmabuf_fd >= 0) {
-      close(qinfo->cq_dmabuf_fd);
-      qinfo->cq_dmabuf_fd = -1;
+    if (!nvmeConfig->queueInfos.empty()) {
+      for (auto& qi : nvmeConfig->queueInfos) {
+        cleanupQinfo(&qi);
+      }
+    } else {
+      cleanupQinfo(&nvmeConfig->queueInfo);
     }
   }
 #endif // __HIP_DEVICE_COMPILE__

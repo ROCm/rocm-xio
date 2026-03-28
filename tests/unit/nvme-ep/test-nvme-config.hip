@@ -118,7 +118,10 @@ int test_config_defaults() {
   ASSERT_TRUE(cfg.controller.empty());
   ASSERT_EQ(cfg.queueId, 0);
   ASSERT_EQ(cfg.queueLength, 64);
+  ASSERT_EQ(cfg.numQueues, 1);
   ASSERT_TRUE(!cfg.queuesCreated);
+  ASSERT_TRUE(cfg.queueIds.empty());
+  ASSERT_TRUE(cfg.queueInfos.empty());
   ASSERT_EQ(cfg.doorbellAddr, 0u);
   ASSERT_EQ(cfg.sqBaseAddr, 0u);
   ASSERT_EQ(cfg.cqBaseAddr, 0u);
