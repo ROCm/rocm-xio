@@ -1058,7 +1058,10 @@ doxygenunion
 DXIO
 intra
 maxdepth
+maxThreadsPerBlock
+numQueues
 rst
 Sphinx
 toctree
 undoc
+wavefronts

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <hip/hip_runtime.h>
 
@@ -726,11 +727,16 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
 struct nvmeEpConfig {
   // Device and queue configuration (host-side only)
   std::string controller; // NVMe controller device path
-  uint16_t queueId;       // Queue ID to use (0=admin, 1+=IO queues)
-  uint16_t queueLength;   // Queue length in entries (must be power of 2)
-  bool queuesCreated; // Flag indicating queues have been created (for cleanup)
-  uint32_t wavefrontSize; // Hardware wavefront size (set by validateConfig)
-  struct nvme_queue_info queueInfo; // Queue info populated by createQueue()
+  uint16_t queueId;       // Highest queue ID (0=auto-detect, 1+=IO)
+  uint16_t queueLength;   // Queue length in entries (power of 2)
+  uint16_t numQueues;     // Number of queues to use (default 1)
+  bool queuesCreated;     // Flag: queues have been created
+  uint32_t wavefrontSize; // Hardware wavefront size
+
+  // Per-queue state (populated by run() for multi-queue)
+  struct nvme_queue_info queueInfo;
+  std::vector<uint16_t> queueIds;
+  std::vector<struct nvme_queue_info> queueInfos;
 
   // Physical addresses (host-side only)
   uint64_t doorbellAddr; // Physical address of doorbell register
@@ -776,9 +782,9 @@ struct nvmeEpConfig {
   // Note: queueId defaults to 0 (invalid) - will be auto-detected in
   // validateConfig
   nvmeEpConfig()
-    : controller(""), queueId(0), queueLength(64), queuesCreated(false),
-      wavefrontSize(0), queueInfo{}, doorbellAddr(0), sqBaseAddr(0),
-      cqBaseAddr(0), sqSize(0), cqSize(0),
+    : controller(""), queueId(0), queueLength(64), numQueues(1),
+      queuesCreated(false), wavefrontSize(0), queueInfo{}, doorbellAddr(0),
+      sqBaseAddr(0), cqBaseAddr(0), sqSize(0), cqSize(0),
       ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false, 1},
       bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
