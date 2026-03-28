@@ -64,8 +64,13 @@ __host__ __device__ void sqeWrite(sqeType sqeData,
 #endif // __HIP_DEVICE_COMPILE__
 }
 
-__host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress) {
-  *cqeAddress = cqeData;
+__host__ __device__ void cqeWrite(cqeType cqeData,
+                                  volatile cqeType* cqeAddress) {
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(&cqeData);
+  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(cqeAddress);
+  for (size_t i = 0; i < sizeof(cqeType); i++) {
+    dst[i] = src[i];
+  }
 }
 
 // Poll for new SQE - waits for command ID to change
@@ -190,8 +195,9 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
     seed ^= seed >> 13;
     seed *= 0x9e3779b9;
     seed ^= seed >> 16;
-    uint64_t max_lba = (ioParams.lbaRangeLbas > blocks)
-                         ? (ioParams.lbaRangeLbas - blocks)
+    uint64_t max_lba = (blocks > 0 && ioParams.lbaRangeLbas >= blocks)
+                         ? (static_cast<uint64_t>(ioParams.lbaRangeLbas) -
+                            static_cast<uint64_t>(blocks) + 1U)
                          : 1;
     return ioParams.baseLba + (seed % max_lba);
   } else {
@@ -258,9 +264,16 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
 
   uint16_t sq_tail = 0;
 
-  // Per-batch start times for less-timing / infinite mode
-  unsigned long long int batchStartTimes[256];
+  // Per-batch start times for less-timing / infinite mode.
+  // Stack-allocated, so capped at 256 entries.  Clamp the
+  // effective batch size when timing stats are active so
+  // every operation in the batch is accounted for.
+  constexpr unsigned kMaxTimedBatch = 256;
+  unsigned long long int batchStartTimes[kMaxTimedBatch];
   const bool useBatchTiming = (config.timingStats != nullptr);
+  if (useBatchTiming && batch_size > kMaxTimedBatch) {
+    batch_size = kMaxTimedBatch;
+  }
 
   unsigned ops_done = 0;
   while ((ioParams.infiniteMode || ops_done < total_ops) &&
@@ -324,7 +337,7 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       // Record start time
       if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[op_idx] = wall_clock64();
-      } else if (useBatchTiming && b < 256) {
+      } else if (useBatchTiming && b < kMaxTimedBatch) {
         batchStartTimes[b] = wall_clock64();
       }
 
@@ -361,7 +374,10 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         }
         poll_count++;
         if (poll_count >= NVME_EP_MAX_POLLS) {
-          return;
+          printf("NVMe CQ poll timeout after %u polls "
+                 "(cq_head=%u expected_phase=%u)\n",
+                 poll_count, (unsigned)cq_head, (unsigned)expected_phase);
+          __builtin_trap();
         }
       }
 
@@ -379,7 +395,7 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       // Record end time
       if (!ioParams.infiniteMode && config.endTimes != nullptr) {
         config.endTimes[op_idx] = wall_clock64();
-      } else if (useBatchTiming && b < 256) {
+      } else if (useBatchTiming && b < kMaxTimedBatch) {
         unsigned long long int endTime = wall_clock64();
         if (endTime > batchStartTimes[b]) {
           updateTimingStats(config.timingStats, endTime - batchStartTimes[b]);
@@ -676,6 +692,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     fprintf(stderr,
             "Error: NVMe device not specified. --controller is required.\n");
     return hipErrorInvalidValue;
+  }
+
+  if (config->numThreads > 1) {
+    fprintf(stderr, "Error: nvme-ep does not support "
+                    "--threads > 1 at this time. "
+                    "Each thread would share the same "
+                    "NVMe queue pair, causing corruption.\n");
+    return hipErrorNotSupported;
   }
 
   // Create NVMe queues - MUST succeed before proceeding
