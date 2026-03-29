@@ -93,6 +93,20 @@
       }
     },
     {
+      "name": "integration",
+      "displayName": "Integration tests (install + examples)",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "verbose"
+      },
+      "filter": {
+        "include": {
+          "label": "integration"
+        }
+      }
+    },
+    {
       "name": "all",
       "displayName": "All tests",
       "configurePreset": "default",

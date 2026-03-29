@@ -10,8 +10,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
-#SBATCH --constraint=MARKHAM
-#SBATCH --exclude=ctr-halo-b47-02
+#SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gpus-per-node=1
 
 set -xe
