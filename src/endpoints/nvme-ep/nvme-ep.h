@@ -60,18 +60,18 @@ typedef struct nvme_cqe cqeType;
  * device code.
  */
 struct nvmeIoParams {
-  uint32_t lbaSize;      // Logical block size in bytes
-  uint64_t baseLba;      // Starting LBA for I/O operations
-  uint64_t lbaRangeLbas; // LBA range limit (0 = no limit)
-  bool useRandomAccess;  // true for random access, false for sequential
-  int readIo;            // Number of read operations
-  int writeIo;           // Number of write operations
-  uint32_t lfsrSeed;     // Seed for LFSR test pattern (0 = derive from LBA)
-  uint16_t queueSize;    // Queue size in entries
-  uint32_t nsid;         // Namespace ID (must be > 0)
-  uint32_t lbasPerIo;    // Number of LBAs per I/O operation (default: 1)
-  bool infiniteMode;     // Infinite mode: run forever
-  uint32_t batchSize;    // SQEs per doorbell (1=sequential, 0=all)
+  uint32_t lbaSize;       // Logical block size in bytes
+  uint64_t baseLba;       // Starting LBA for I/O operations
+  uint64_t lbaRangeLbas;  // LBA range limit (0 = no limit)
+  bool useRandomAccess;   // true for random access, false for sequential
+  int readIo;             // Number of read operations
+  int writeIo;            // Number of write operations
+  uint32_t lfsrSeed;      // Seed for LFSR test pattern (0 = derive from LBA)
+  uint16_t queueSize;     // Queue size in entries
+  uint32_t nsid;          // Namespace ID (must be > 0)
+  uint32_t lbasPerIo;     // Number of LBAs per I/O operation (default: 1)
+  bool infiniteMode;      // Infinite mode: run forever
+  uint32_t batchSize;     // SQEs per doorbell (1=sequential, 0=all)
   uint32_t wavefrontSize; // Hardware wavefront size (threads per wave)
 };
 
