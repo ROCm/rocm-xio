@@ -170,10 +170,10 @@ build_and_run_example() {
   local prefix="${WORKING_DIR}/_install_example"
   local ex_build="${WORKING_DIR}/_ex_${name}"
 
-  cmake --install build --prefix "${prefix}"
+  cmake --install build --prefix "${prefix}" || return $?
   cmake -S "examples/${name}" -B "${ex_build}" \
-    -DCMAKE_PREFIX_PATH="${prefix};/opt/rocm"
-  cmake --build "${ex_build}"
+    -DCMAKE_PREFIX_PATH="${prefix};/opt/rocm" || return $?
+  cmake --build "${ex_build}" || return $?
 
   if [ "${do_run}" = "run" ]; then
     "${ex_build}/${name}"

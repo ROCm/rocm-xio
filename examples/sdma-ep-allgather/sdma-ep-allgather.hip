@@ -23,6 +23,7 @@
  * transfer size in integers (default: 1024 = 4 KiB).
  */
 
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -107,14 +108,33 @@ int main(int argc, char* argv[]) {
   }
 
   int chunkInts = DEFAULT_CHUNK_INTS;
-  if (argc > 1)
-    chunkInts = atoi(argv[1]);
+  if (argc > 1) {
+    char* endptr = nullptr;
+    long val = strtol(argv[1], &endptr, 10);
+    if (endptr == argv[1] || *endptr != '\0' || val <= 0 || val > INT_MAX / 2) {
+      if (myrank == 0)
+        fprintf(stderr, "ERROR: invalid chunk size '%s'\n", argv[1]);
+      MPI_Finalize();
+      return 1;
+    }
+    chunkInts = static_cast<int>(val);
+  }
   size_t chunkBytes = static_cast<size_t>(chunkInts) * sizeof(int);
 
   if (myrank == 0) {
     printf("sdma-ep allgather: %d ranks, %d ints "
            "(%zu bytes) per rank\n",
            nranks, chunkInts, chunkBytes);
+  }
+
+  int deviceCount = 0;
+  HIP_CHECK(hipGetDeviceCount(&deviceCount));
+  if (myrank >= deviceCount) {
+    fprintf(stderr,
+            "[rank %d] ERROR: need %d GPUs but "
+            "only %d visible\n",
+            myrank, nranks, deviceCount);
+    MPI_Abort(MPI_COMM_WORLD, 1);
   }
 
   HIP_CHECK(hipSetDevice(myrank));
