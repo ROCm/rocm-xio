@@ -15,6 +15,7 @@ on:
       - '**.cc'
       - 'CMakeLists.txt'
       - 'cmake/**'
+      - 'examples/**'
       - 'scripts/**'
       - 'Makefile'
 
@@ -72,3 +73,7 @@ jobs:
       run: |
         cd build
         cmake --install . --prefix /tmp/rocm-xio-test
+    - name: Run integration tests (install + examples).
+      run: |
+        ctest --test-dir build -V -L "integration" \
+          --parallel --output-on-failure
