@@ -17,6 +17,7 @@
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gres=gpu:2
+#SBATCH --exclude=banff-cyxtera-s81-1
 
 set -xe
 
@@ -136,6 +137,9 @@ label="p2p_n${ITERATIONS}_s${TRANSFER_SIZE}"
 
 test_run "sdma-ep P2P (GPU 0 -> GPU 1)" \
   "run_p2p_test ${ITERATIONS} ${TRANSFER_SIZE} ${label}"
+
+test_run "sdma-ep p2p --to-host" \
+  "./build/xio-tester sdma-ep p2p --to-host --verify -n 100"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
