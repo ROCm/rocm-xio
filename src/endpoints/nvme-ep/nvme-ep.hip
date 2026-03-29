@@ -218,27 +218,21 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
  * original code path preserved for backward compat.
  */
 __device__ static void driveEndpointSingle(
-  const XioEndpointConfig& config,
-  const nvmeIoParams& ioParams,
+  const XioEndpointConfig& config, const nvmeIoParams& ioParams,
   const nvmeDoorbellParams& doorbellParams,
   const nvmeBufferParams& bufferParams) {
-
-  sqeType* sqeAddr =
-    static_cast<sqeType*>(config.submissionQueue);
-  cqeType* cqeAddr =
-    static_cast<cqeType*>(config.completionQueue);
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
 
   const unsigned num_read_ops = (unsigned)ioParams.readIo;
-  const unsigned num_write_ops =
-    (unsigned)ioParams.writeIo;
+  const unsigned num_write_ops = (unsigned)ioParams.writeIo;
   const unsigned total_ops = num_read_ops + num_write_ops;
   const bool infinite_is_read = (num_read_ops > 0);
 
   uint32_t batch_size = ioParams.batchSize;
   if (batch_size == 0) {
-    batch_size = ioParams.infiniteMode
-                   ? (uint32_t)(ioParams.queueSize - 1)
-                   : total_ops;
+    batch_size = ioParams.infiniteMode ? (uint32_t)(ioParams.queueSize - 1)
+                                       : total_ops;
   }
   if (batch_size > (uint32_t)(ioParams.queueSize - 1)) {
     batch_size = ioParams.queueSize - 1;
@@ -249,15 +243,12 @@ __device__ static void driveEndpointSingle(
 
   const uint32_t nsid = ioParams.nsid;
   const uint32_t blocks = ioParams.lbasPerIo;
-  const size_t transfer_size =
-    (size_t)blocks * ioParams.lbaSize;
+  const size_t transfer_size = (size_t)blocks * ioParams.lbaSize;
 
-  const bool has_write_buffer =
-    (bufferParams.writeBuffer != nullptr &&
-     bufferParams.bufferSize > 0);
-  const bool has_read_buffer =
-    (bufferParams.readBuffer != nullptr &&
-     bufferParams.bufferSize > 0);
+  const bool has_write_buffer = (bufferParams.writeBuffer != nullptr &&
+                                 bufferParams.bufferSize > 0);
+  const bool has_read_buffer = (bufferParams.readBuffer != nullptr &&
+                                bufferParams.bufferSize > 0);
 
   if (has_write_buffer) {
     dataPatternParams patternParams;
@@ -276,44 +267,37 @@ __device__ static void driveEndpointSingle(
 
   constexpr unsigned kMaxTimedBatch = 256;
   unsigned long long int batchStartTimes[kMaxTimedBatch];
-  const bool useBatchTiming =
-    (config.timingStats != nullptr);
+  const bool useBatchTiming = (config.timingStats != nullptr);
   if (useBatchTiming && batch_size > kMaxTimedBatch) {
     batch_size = kMaxTimedBatch;
   }
 
   unsigned ops_done = 0;
   while ((ioParams.infiniteMode || ops_done < total_ops) &&
-         (config.stopRequested == nullptr ||
-          !*config.stopRequested)) {
+         (config.stopRequested == nullptr || !*config.stopRequested)) {
     unsigned batch_count = batch_size;
-    if (!ioParams.infiniteMode &&
-        ops_done + batch_count > total_ops) {
+    if (!ioParams.infiniteMode && ops_done + batch_count > total_ops) {
       batch_count = total_ops - ops_done;
     }
 
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
-      uint16_t cmd_id =
-        (uint16_t)((op_idx % 65535) + 1);
+      uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
 
       bool is_read_op;
       if (ioParams.infiniteMode) {
         is_read_op = infinite_is_read;
-      } else if (num_write_ops > 0 &&
-                 num_read_ops > 0) {
+      } else if (num_write_ops > 0 && num_read_ops > 0) {
         is_read_op = (op_idx >= num_write_ops);
       } else {
         is_read_op = (num_read_ops > 0);
       }
 
-      uint64_t lba =
-        getRandomLba(op_idx, cmd_id, blocks, ioParams);
+      uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
 
       sqeType sqeLocal = {};
       sqeType* sqe = &sqeLocal;
-      sqe->opcode = is_read_op ? nvme_cmd_read
-                                : nvme_cmd_write;
+      sqe->opcode = is_read_op ? nvme_cmd_read : nvme_cmd_write;
       sqe->command_id = cmd_id;
       sqe->nsid = nsid;
 
@@ -321,24 +305,18 @@ __device__ static void driveEndpointSingle(
       bool prp_valid = false;
 
       if (is_read_op && has_read_buffer) {
-        if (buf_off + transfer_size <=
-            bufferParams.bufferSize) {
-          uint64_t addr =
-            bufferParams.readBufferDma
-              ? (bufferParams.readBufferDma + buf_off)
-              : (uint64_t)(bufferParams.readBuffer +
-                           buf_off);
+        if (buf_off + transfer_size <= bufferParams.bufferSize) {
+          uint64_t addr = bufferParams.readBufferDma
+                            ? (bufferParams.readBufferDma + buf_off)
+                            : (uint64_t)(bufferParams.readBuffer + buf_off);
           calculatePrps(addr, transfer_size, sqe);
           prp_valid = true;
         }
       } else if (!is_read_op && has_write_buffer) {
-        if (buf_off + transfer_size <=
-            bufferParams.bufferSize) {
-          uint64_t addr =
-            bufferParams.writeBufferDma
-              ? (bufferParams.writeBufferDma + buf_off)
-              : (uint64_t)(bufferParams.writeBuffer +
-                           buf_off);
+        if (buf_off + transfer_size <= bufferParams.bufferSize) {
+          uint64_t addr = bufferParams.writeBufferDma
+                            ? (bufferParams.writeBufferDma + buf_off)
+                            : (uint64_t)(bufferParams.writeBuffer + buf_off);
           calculatePrps(addr, transfer_size, sqe);
           prp_valid = true;
         }
@@ -349,18 +327,14 @@ __device__ static void driveEndpointSingle(
       }
       sqeSetup(sqe, lba, blocks);
 
-      if (!ioParams.infiniteMode &&
-          config.startTimes != nullptr) {
+      if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[op_idx] = wall_clock64();
-      } else if (useBatchTiming &&
-                 b < kMaxTimedBatch) {
+      } else if (useBatchTiming && b < kMaxTimedBatch) {
         batchStartTimes[b] = wall_clock64();
       }
 
-      nvme_ep::sqeWrite(
-        sqeLocal, &sqeAddr[sq_tail]);
-      sq_tail =
-        (sq_tail + 1) % ioParams.queueSize;
+      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+      sq_tail = (sq_tail + 1) % ioParams.queueSize;
     }
 
     __threadfence_system();
@@ -369,20 +343,17 @@ __device__ static void driveEndpointSingle(
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
 
-      volatile cqeType* cqe_entry =
-        &cqeAddr[cq_head];
+      volatile cqeType* cqe_entry = &cqeAddr[cq_head];
 
       nvme_ep::cqeType cqe_new;
       unsigned poll_count = 0;
       while (true) {
-        if (config.stopRequested != nullptr &&
-            poll_count % 100 == 0 &&
+        if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
             *config.stopRequested) {
           return;
         }
         cqe_new = nvme_ep::cqeRead(cqe_entry);
-        uint8_t phase =
-          NVME_CQE_STATUS_PHASE(cqe_new.status);
+        uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
         if (phase == expected_phase) {
           break;
         }
@@ -391,8 +362,7 @@ __device__ static void driveEndpointSingle(
           printf("NVMe CQ poll timeout after %u "
                  "polls (cq_head=%u "
                  "expected_phase=%u)\n",
-                 poll_count, (unsigned)cq_head,
-                 (unsigned)expected_phase);
+                 poll_count, (unsigned)cq_head, (unsigned)expected_phase);
           __builtin_trap();
         }
       }
@@ -402,38 +372,28 @@ __device__ static void driveEndpointSingle(
                "sc=0x%02x sct=0x%02x "
                "cmd_id=%u sq_head=%u\n",
                (unsigned)cqe_new.status,
-               (unsigned)nvme_ep::cqeStatusCode(
-                 &cqe_new),
-               (unsigned)nvme_ep::cqeStatusType(
-                 &cqe_new),
-               (unsigned)cqe_new.command_id,
-               (unsigned)cqe_new.sq_head);
+               (unsigned)nvme_ep::cqeStatusCode(&cqe_new),
+               (unsigned)nvme_ep::cqeStatusType(&cqe_new),
+               (unsigned)cqe_new.command_id, (unsigned)cqe_new.sq_head);
         __builtin_trap();
       }
 
-      if (!ioParams.infiniteMode &&
-          config.endTimes != nullptr) {
+      if (!ioParams.infiniteMode && config.endTimes != nullptr) {
         config.endTimes[op_idx] = wall_clock64();
-      } else if (useBatchTiming &&
-                 b < kMaxTimedBatch) {
-        unsigned long long int endTime =
-          wall_clock64();
+      } else if (useBatchTiming && b < kMaxTimedBatch) {
+        unsigned long long int endTime = wall_clock64();
         if (endTime > batchStartTimes[b]) {
-          updateTimingStats(
-            config.timingStats,
-            endTime - batchStartTimes[b]);
+          updateTimingStats(config.timingStats, endTime - batchStartTimes[b]);
         }
       }
 
-      cq_head =
-        (cq_head + 1) % ioParams.queueSize;
+      cq_head = (cq_head + 1) % ioParams.queueSize;
       if (cq_head == 0) {
         expected_phase ^= 1;
       }
-      nvme_ep::ringDoorbell(
-        cq_head, doorbellParams,
-        doorbellParams.doorbellOffset +
-          nvme_ep::doorBellStride);
+      nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                            doorbellParams.doorbellOffset +
+                              nvme_ep::doorBellStride);
     }
 
     ops_done += batch_count;
@@ -450,21 +410,16 @@ __device__ static void driveEndpointSingle(
  * synchronize via __syncthreads().
  */
 __device__ static void driveEndpointWavefront(
-  const XioEndpointConfig& config,
-  const nvmeIoParams& ioParams,
+  const XioEndpointConfig& config, const nvmeIoParams& ioParams,
   const nvmeDoorbellParams& doorbellParams,
   const nvmeBufferParams& bufferParams) {
-
   const unsigned tid = threadIdx.x;
 
-  sqeType* sqeAddr =
-    static_cast<sqeType*>(config.submissionQueue);
-  cqeType* cqeAddr =
-    static_cast<cqeType*>(config.completionQueue);
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
 
   const unsigned num_read_ops = (unsigned)ioParams.readIo;
-  const unsigned num_write_ops =
-    (unsigned)ioParams.writeIo;
+  const unsigned num_write_ops = (unsigned)ioParams.writeIo;
   const unsigned total_ops = num_read_ops + num_write_ops;
   const bool infinite_is_read = (num_read_ops > 0);
 
@@ -478,18 +433,14 @@ __device__ static void driveEndpointWavefront(
 
   const uint32_t nsid = ioParams.nsid;
   const uint32_t blocks = ioParams.lbasPerIo;
-  const size_t transfer_size =
-    (size_t)blocks * ioParams.lbaSize;
+  const size_t transfer_size = (size_t)blocks * ioParams.lbaSize;
 
-  const bool has_write_buffer =
-    (bufferParams.writeBuffer != nullptr &&
-     bufferParams.bufferSize > 0);
-  const bool has_read_buffer =
-    (bufferParams.readBuffer != nullptr &&
-     bufferParams.bufferSize > 0);
+  const bool has_write_buffer = (bufferParams.writeBuffer != nullptr &&
+                                 bufferParams.bufferSize > 0);
+  const bool has_read_buffer = (bufferParams.readBuffer != nullptr &&
+                                bufferParams.bufferSize > 0);
 
-  const bool useBatchTiming =
-    (config.timingStats != nullptr);
+  const bool useBatchTiming = (config.timingStats != nullptr);
 
   // Shared state managed by thread 0, read by all
   __shared__ uint16_t sh_sq_tail;
@@ -524,8 +475,7 @@ __device__ static void driveEndpointWavefront(
     // --- Phase 1: thread 0 computes batch parameters ---
     if (tid == 0) {
       unsigned bc = batch_size;
-      if (!ioParams.infiniteMode &&
-          sh_ops_done + bc > total_ops) {
+      if (!ioParams.infiniteMode && sh_ops_done + bc > total_ops) {
         bc = total_ops - sh_ops_done;
       }
       sh_batch_count = bc;
@@ -543,60 +493,42 @@ __device__ static void driveEndpointWavefront(
       unsigned b = tid - 1;
       if (b < batch_count) {
         unsigned op_idx = ops_done + b;
-        uint16_t cmd_id =
-          (uint16_t)((op_idx % 65535) + 1);
+        uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
 
         bool is_read_op;
         if (ioParams.infiniteMode) {
           is_read_op = infinite_is_read;
-        } else if (num_write_ops > 0 &&
-                   num_read_ops > 0) {
+        } else if (num_write_ops > 0 && num_read_ops > 0) {
           is_read_op = (op_idx >= num_write_ops);
         } else {
           is_read_op = (num_read_ops > 0);
         }
 
-        uint64_t lba = getRandomLba(
-          op_idx, cmd_id, blocks, ioParams);
+        uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
 
         sqeType sqeLocal = {};
         sqeType* sqe = &sqeLocal;
-        sqe->opcode = is_read_op ? nvme_cmd_read
-                                  : nvme_cmd_write;
+        sqe->opcode = is_read_op ? nvme_cmd_read : nvme_cmd_write;
         sqe->command_id = cmd_id;
         sqe->nsid = nsid;
 
-        uint64_t buf_off =
-          (uint64_t)b * transfer_size;
+        uint64_t buf_off = (uint64_t)b * transfer_size;
         bool prp_valid = false;
 
         if (is_read_op && has_read_buffer) {
-          if (buf_off + transfer_size <=
-              bufferParams.bufferSize) {
-            uint64_t addr =
-              bufferParams.readBufferDma
-                ? (bufferParams.readBufferDma +
-                   buf_off)
-                : (uint64_t)(
-                    bufferParams.readBuffer +
-                    buf_off);
-            calculatePrps(
-              addr, transfer_size, sqe);
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.readBufferDma
+                              ? (bufferParams.readBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.readBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe);
             prp_valid = true;
           }
-        } else if (!is_read_op &&
-                   has_write_buffer) {
-          if (buf_off + transfer_size <=
-              bufferParams.bufferSize) {
-            uint64_t addr =
-              bufferParams.writeBufferDma
-                ? (bufferParams.writeBufferDma +
-                   buf_off)
-                : (uint64_t)(
-                    bufferParams.writeBuffer +
-                    buf_off);
-            calculatePrps(
-              addr, transfer_size, sqe);
+        } else if (!is_read_op && has_write_buffer) {
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.writeBufferDma
+                              ? (bufferParams.writeBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.writeBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe);
             prp_valid = true;
           }
         }
@@ -606,32 +538,25 @@ __device__ static void driveEndpointWavefront(
         }
         sqeSetup(sqe, lba, blocks);
 
-        if (!ioParams.infiniteMode &&
-            config.startTimes != nullptr) {
-          config.startTimes[op_idx] =
-            wall_clock64();
+        if (!ioParams.infiniteMode && config.startTimes != nullptr) {
+          config.startTimes[op_idx] = wall_clock64();
         } else if (useBatchTiming && b < 64) {
           sh_startTimes[b] = wall_clock64();
         }
 
-        uint16_t my_slot =
-          (sq_tail_base + b) % ioParams.queueSize;
-        nvme_ep::sqeWrite(
-          sqeLocal, &sqeAddr[my_slot]);
+        uint16_t my_slot = (sq_tail_base + b) % ioParams.queueSize;
+        nvme_ep::sqeWrite(sqeLocal, &sqeAddr[my_slot]);
       }
     }
     __syncthreads();
 
     // --- Phase 3: thread 0 rings doorbell, polls CQEs ---
     if (tid == 0) {
-      uint16_t new_tail =
-        (sq_tail_base + batch_count) %
-        ioParams.queueSize;
+      uint16_t new_tail = (sq_tail_base + batch_count) % ioParams.queueSize;
       sh_sq_tail = new_tail;
 
       __threadfence_system();
-      nvme_ep::ringDoorbell(
-        new_tail, doorbellParams);
+      nvme_ep::ringDoorbell(new_tail, doorbellParams);
 
       uint16_t cq_head = sh_cq_head;
       uint8_t expected_phase = sh_expected_phase;
@@ -639,34 +564,27 @@ __device__ static void driveEndpointWavefront(
       for (unsigned b = 0; b < batch_count; b++) {
         unsigned op_idx = ops_done + b;
 
-        volatile cqeType* cqe_entry =
-          &cqeAddr[cq_head];
+        volatile cqeType* cqe_entry = &cqeAddr[cq_head];
 
         nvme_ep::cqeType cqe_new;
         unsigned poll_count = 0;
         while (true) {
-          if (config.stopRequested != nullptr &&
-              poll_count % 100 == 0 &&
+          if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
               *config.stopRequested) {
             sh_stop = true;
             break;
           }
-          cqe_new =
-            nvme_ep::cqeRead(cqe_entry);
-          uint8_t phase =
-            NVME_CQE_STATUS_PHASE(
-              cqe_new.status);
+          cqe_new = nvme_ep::cqeRead(cqe_entry);
+          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
           if (phase == expected_phase) {
             break;
           }
           poll_count++;
           if (poll_count >= NVME_EP_MAX_POLLS) {
-            printf(
-              "NVMe CQ poll timeout after "
-              "%u polls (cq_head=%u "
-              "expected_phase=%u)\n",
-              poll_count, (unsigned)cq_head,
-              (unsigned)expected_phase);
+            printf("NVMe CQ poll timeout after "
+                   "%u polls (cq_head=%u "
+                   "expected_phase=%u)\n",
+                   poll_count, (unsigned)cq_head, (unsigned)expected_phase);
             __builtin_trap();
           }
         }
@@ -676,55 +594,42 @@ __device__ static void driveEndpointWavefront(
         }
 
         if (!nvme_ep::cqeOk(&cqe_new)) {
-          printf(
-            "NVMe CQE error: status=0x%04x "
-            "sc=0x%02x sct=0x%02x "
-            "cmd_id=%u sq_head=%u\n",
-            (unsigned)cqe_new.status,
-            (unsigned)nvme_ep::cqeStatusCode(
-              &cqe_new),
-            (unsigned)nvme_ep::cqeStatusType(
-              &cqe_new),
-            (unsigned)cqe_new.command_id,
-            (unsigned)cqe_new.sq_head);
+          printf("NVMe CQE error: status=0x%04x "
+                 "sc=0x%02x sct=0x%02x "
+                 "cmd_id=%u sq_head=%u\n",
+                 (unsigned)cqe_new.status,
+                 (unsigned)nvme_ep::cqeStatusCode(&cqe_new),
+                 (unsigned)nvme_ep::cqeStatusType(&cqe_new),
+                 (unsigned)cqe_new.command_id, (unsigned)cqe_new.sq_head);
           __builtin_trap();
         }
 
-        if (!ioParams.infiniteMode &&
-            config.endTimes != nullptr) {
-          config.endTimes[op_idx] =
-            wall_clock64();
+        if (!ioParams.infiniteMode && config.endTimes != nullptr) {
+          config.endTimes[op_idx] = wall_clock64();
         } else if (useBatchTiming && b < 64) {
-          unsigned long long int endTime =
-            wall_clock64();
+          unsigned long long int endTime = wall_clock64();
           if (endTime > sh_startTimes[b]) {
-            updateTimingStats(
-              config.timingStats,
-              endTime - sh_startTimes[b]);
+            updateTimingStats(config.timingStats, endTime - sh_startTimes[b]);
           }
         }
 
-        cq_head =
-          (cq_head + 1) % ioParams.queueSize;
+        cq_head = (cq_head + 1) % ioParams.queueSize;
         if (cq_head == 0) {
           expected_phase ^= 1;
         }
-        nvme_ep::ringDoorbell(
-          cq_head, doorbellParams,
-          doorbellParams.doorbellOffset +
-            nvme_ep::doorBellStride);
+        nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                              doorbellParams.doorbellOffset +
+                                nvme_ep::doorBellStride);
       }
 
       sh_cq_head = cq_head;
       sh_expected_phase = expected_phase;
       sh_ops_done = ops_done + batch_count;
 
-      if (!ioParams.infiniteMode &&
-          sh_ops_done >= total_ops) {
+      if (!ioParams.infiniteMode && sh_ops_done >= total_ops) {
         sh_stop = true;
       }
-      if (config.stopRequested != nullptr &&
-          *config.stopRequested) {
+      if (config.stopRequested != nullptr && *config.stopRequested) {
         sh_stop = true;
       }
     }
@@ -732,18 +637,14 @@ __device__ static void driveEndpointWavefront(
   }
 }
 
-__device__ void driveEndpoint(
-  const XioEndpointConfig& config,
-  const nvmeIoParams& ioParams,
-  const nvmeDoorbellParams& doorbellParams,
-  const nvmeBufferParams& bufferParams) {
-
+__device__ void driveEndpoint(const XioEndpointConfig& config,
+                              const nvmeIoParams& ioParams,
+                              const nvmeDoorbellParams& doorbellParams,
+                              const nvmeBufferParams& bufferParams) {
   if (ioParams.batchSize > 1) {
-    driveEndpointWavefront(
-      config, ioParams, doorbellParams, bufferParams);
+    driveEndpointWavefront(config, ioParams, doorbellParams, bufferParams);
   } else {
-    driveEndpointSingle(
-      config, ioParams, doorbellParams, bufferParams);
+    driveEndpointSingle(config, ioParams, doorbellParams, bufferParams);
   }
 }
 
@@ -1024,8 +925,7 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
                "--batch-size %u exceeds wavefront limit "
                "%u (wavefront_size %u - 1 for "
                "coordinator thread)",
-               config->ioParams.batchSize,
-               waveSize - 1, waveSize);
+               config->ioParams.batchSize, waveSize - 1, waveSize);
       return std::string(buf);
     }
     config->wavefrontSize = waveSize;
@@ -1078,14 +978,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // timing arrays based on numThreads=1.
   unsigned kernelThreads = 1;
   if (nvmeConfig->ioParams.batchSize > 1) {
-    kernelThreads =
-      nvmeConfig->ioParams.batchSize + 1;
+    kernelThreads = nvmeConfig->ioParams.batchSize + 1;
     fprintf(stdout,
             "Wavefront batch mode: launching %u "
             "threads (1 coordinator + %u SQE "
             "writers)\n",
-            kernelThreads,
-            nvmeConfig->ioParams.batchSize);
+            kernelThreads, nvmeConfig->ioParams.batchSize);
   }
 
   // Create NVMe queues - MUST succeed before proceeding
@@ -1364,10 +1262,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   XioEndpointConfig kernelConfig = *config;
   kernelConfig.endpointConfig = nullptr;
 
-  hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1),
-                     dim3(kernelThreads), 0, 0,
-                     kernelConfig, ioParams,
-                     doorbellParams, bufferParams);
+  hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads), 0, 0,
+                     kernelConfig, ioParams, doorbellParams, bufferParams);
 
   fprintf(stdout, "Info: Kernel launched.\n");
 
