@@ -26,11 +26,14 @@ cmake_minimum_required(VERSION 3.21)
 project(sdma-ep-allgather LANGUAGES CXX HIP)
 
 find_package(rocm-xio REQUIRED)
+find_package(hsa-runtime64 CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
 add_executable(sdma-ep-allgather sdma-ep-allgather.hip)
 target_link_libraries(sdma-ep-allgather PRIVATE
   rocm-xio::rocm-xio
+  hsa-runtime64::hsa-runtime64
   MPI::MPI_CXX)
+target_link_options(sdma-ep-allgather PRIVATE -fgpu-rdc)
 target_include_directories(sdma-ep-allgather PRIVATE
   ${MPI_CXX_INCLUDE_DIRS})

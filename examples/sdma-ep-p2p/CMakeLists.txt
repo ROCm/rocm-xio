@@ -16,7 +16,10 @@ cmake_minimum_required(VERSION 3.21)
 project(sdma-ep-p2p LANGUAGES CXX HIP)
 
 find_package(rocm-xio REQUIRED)
+find_package(hsa-runtime64 CONFIG REQUIRED)
 
 add_executable(sdma-ep-p2p sdma-ep-p2p.hip)
 target_link_libraries(sdma-ep-p2p PRIVATE
-  rocm-xio::rocm-xio)
+  rocm-xio::rocm-xio
+  hsa-runtime64::hsa-runtime64)
+target_link_options(sdma-ep-p2p PRIVATE -fgpu-rdc)

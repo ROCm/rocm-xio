@@ -16,7 +16,10 @@ cmake_minimum_required(VERSION 3.21)
 project(nvme-ep-info LANGUAGES CXX HIP)
 
 find_package(rocm-xio REQUIRED)
+find_package(hsa-runtime64 CONFIG REQUIRED)
 
 add_executable(nvme-ep-info nvme-ep-info.hip)
 target_link_libraries(nvme-ep-info PRIVATE
-  rocm-xio::rocm-xio)
+  rocm-xio::rocm-xio
+  hsa-runtime64::hsa-runtime64)
+target_link_options(nvme-ep-info PRIVATE -fgpu-rdc)

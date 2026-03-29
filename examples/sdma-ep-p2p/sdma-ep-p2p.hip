@@ -25,14 +25,14 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
-#include "sdma-ep.h"
+#include "endpoints/sdma-ep/sdma-ep.h"
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
     hipError_t _err = (expr);                                                  \
     if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "HIP error %d (%s) at %s:%d\n", _err,                   \
-              hipGetErrorString(_err), __FILE__, __LINE__);                     \
+      fprintf(stderr, "HIP error %d (%s) at %s:%d\n", _err,                    \
+              hipGetErrorString(_err), __FILE__, __LINE__);                    \
       exit(1);                                                                 \
     }                                                                          \
   } while (0)
@@ -116,10 +116,10 @@ int main() {
 
   HIP_CHECK(hipSetDevice(SRC_GPU));
   printf("Launching P2P kernel...\n");
-  hipLaunchKernelGGL(
-    sdmaP2pKernel, dim3(1), dim3(1), 0, nullptr,
-    static_cast<sdma_ep::SdmaQueueHandle*>(queueInfo.deviceHandle), dstBuf,
-    srcBuf, TRANSFER_SIZE, signalBuf, NUM_ITERATIONS);
+  hipLaunchKernelGGL(sdmaP2pKernel, dim3(1), dim3(1), 0, nullptr,
+                     static_cast<sdma_ep::SdmaQueueHandle*>(
+                       queueInfo.deviceHandle),
+                     dstBuf, srcBuf, TRANSFER_SIZE, signalBuf, NUM_ITERATIONS);
   HIP_CHECK(hipDeviceSynchronize());
   printf("Kernel completed.\n");
 
