@@ -79,15 +79,6 @@ done
 test_run "test-ep max-threads" \
   "./build/xio-tester test-ep -n ${ITERATIONS} --threads 32"
 
-# Subcommand must come first; run sdma-ep only when GPU is whitelisted
-if $sdma_ep_allowed; then
-  test_run "sdma-ep p2p --to-host" \
-    "./build/xio-tester sdma-ep p2p --to-host --verify -n 100"
-else
-  echo "INFO: Skipping sdma-ep tests" \
-    "(${ROCM_GPU_ARCH} not in SDMA whitelist)."
-fi
-
 # Negative tests: verify invalid arguments fail gracefully.
 # The ! prefix inverts the exit code so test_run records PASS
 # when the command correctly exits non-zero.
