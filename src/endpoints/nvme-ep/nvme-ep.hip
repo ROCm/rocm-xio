@@ -210,10 +210,17 @@ static __host__ __device__ uint64_t getRandomLba(unsigned op_index,
   }
 }
 
-__device__ void driveEndpoint(const XioEndpointConfig& config,
-                              const nvmeIoParams& ioParams,
-                              const nvmeDoorbellParams& doorbellParams,
-                              const nvmeBufferParams& bufferParams) {
+/**
+ * Single-thread batch path (batch_size <= 1).
+ *
+ * Thread 0 sequentially prepares all SQEs, rings the
+ * doorbell, and polls for completions.  This is the
+ * original code path preserved for backward compat.
+ */
+__device__ static void driveEndpointSingle(
+  const XioEndpointConfig& config, const nvmeIoParams& ioParams,
+  const nvmeDoorbellParams& doorbellParams,
+  const nvmeBufferParams& bufferParams) {
   sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
   cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
 
@@ -222,7 +229,6 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
   const unsigned total_ops = num_read_ops + num_write_ops;
   const bool infinite_is_read = (num_read_ops > 0);
 
-  // Resolve effective batch size: 0 means "all at once"
   uint32_t batch_size = ioParams.batchSize;
   if (batch_size == 0) {
     batch_size = ioParams.infiniteMode ? (uint32_t)(ioParams.queueSize - 1)
@@ -255,19 +261,10 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
     dataPattern(false, patternParams);
   }
 
-  // Initialize CQ phase tracking.
-  // The CQ is zeroed on creation (phase=0).  The NVMe
-  // controller writes CQEs with phase=1 on the first
-  // pass and toggles each time the CQ wraps.
   uint16_t cq_head = 0;
   uint8_t expected_phase = 1;
-
   uint16_t sq_tail = 0;
 
-  // Per-batch start times for less-timing / infinite mode.
-  // Stack-allocated, so capped at 256 entries.  Clamp the
-  // effective batch size when timing stats are active so
-  // every operation in the batch is accounted for.
   constexpr unsigned kMaxTimedBatch = 256;
   unsigned long long int batchStartTimes[kMaxTimedBatch];
   const bool useBatchTiming = (config.timingStats != nullptr);
@@ -283,7 +280,6 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       batch_count = total_ops - ops_done;
     }
 
-    // === Submit batch_count SQEs ===
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
       uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
@@ -305,9 +301,6 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       sqe->command_id = cmd_id;
       sqe->nsid = nsid;
 
-      // Each SQE in the batch uses its own buffer
-      // region to avoid data races between in-flight
-      // I/Os
       uint64_t buf_off = (uint64_t)b * transfer_size;
       bool prp_valid = false;
 
@@ -334,7 +327,6 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       }
       sqeSetup(sqe, lba, blocks);
 
-      // Record start time
       if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[op_idx] = wall_clock64();
       } else if (useBatchTiming && b < kMaxTimedBatch) {
@@ -345,16 +337,9 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
       sq_tail = (sq_tail + 1) % ioParams.queueSize;
     }
 
-    // Fence + doorbell once for the whole batch
     __threadfence_system();
     nvme_ep::ringDoorbell(sq_tail, doorbellParams);
 
-    // === Poll for batch_count completions ===
-    // Use the NVMe phase bit to detect new CQEs.
-    // The controller toggles the phase each time it
-    // wraps the CQ.  A CQE whose phase matches
-    // expected_phase is a new completion; stale or
-    // zeroed slots will have the opposite phase.
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
 
@@ -374,8 +359,9 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         }
         poll_count++;
         if (poll_count >= NVME_EP_MAX_POLLS) {
-          printf("NVMe CQ poll timeout after %u polls "
-                 "(cq_head=%u expected_phase=%u)\n",
+          printf("NVMe CQ poll timeout after %u "
+                 "polls (cq_head=%u "
+                 "expected_phase=%u)\n",
                  poll_count, (unsigned)cq_head, (unsigned)expected_phase);
           __builtin_trap();
         }
@@ -392,7 +378,6 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
         __builtin_trap();
       }
 
-      // Record end time
       if (!ioParams.infiniteMode && config.endTimes != nullptr) {
         config.endTimes[op_idx] = wall_clock64();
       } else if (useBatchTiming && b < kMaxTimedBatch) {
@@ -412,6 +397,254 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
     }
 
     ops_done += batch_count;
+  }
+}
+
+/**
+ * Wavefront-cooperative batch path (batch_size > 1).
+ *
+ * Threads 1..batch_size each prepare one SQE per batch
+ * iteration.  Thread 0 is the coordinator: it rings the
+ * SQ doorbell, polls CQEs, and rings the CQ doorbell.
+ * All threads reside in a single wavefront and
+ * synchronize via __syncthreads().
+ */
+__device__ static void driveEndpointWavefront(
+  const XioEndpointConfig& config, const nvmeIoParams& ioParams,
+  const nvmeDoorbellParams& doorbellParams,
+  const nvmeBufferParams& bufferParams) {
+  const unsigned tid = threadIdx.x;
+
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+
+  const unsigned num_read_ops = (unsigned)ioParams.readIo;
+  const unsigned num_write_ops = (unsigned)ioParams.writeIo;
+  const unsigned total_ops = num_read_ops + num_write_ops;
+  const bool infinite_is_read = (num_read_ops > 0);
+
+  uint32_t batch_size = ioParams.batchSize;
+  if (batch_size > (uint32_t)(ioParams.queueSize - 1)) {
+    batch_size = ioParams.queueSize - 1;
+  }
+  if (!ioParams.infiniteMode && batch_size > total_ops) {
+    batch_size = total_ops;
+  }
+
+  const uint32_t nsid = ioParams.nsid;
+  const uint32_t blocks = ioParams.lbasPerIo;
+  const size_t transfer_size = (size_t)blocks * ioParams.lbaSize;
+
+  const bool has_write_buffer = (bufferParams.writeBuffer != nullptr &&
+                                 bufferParams.bufferSize > 0);
+  const bool has_read_buffer = (bufferParams.readBuffer != nullptr &&
+                                bufferParams.bufferSize > 0);
+
+  const bool useBatchTiming = (config.timingStats != nullptr);
+
+  // Shared state managed by thread 0, read by all
+  __shared__ uint16_t sh_sq_tail;
+  __shared__ uint16_t sh_cq_head;
+  __shared__ uint8_t sh_expected_phase;
+  __shared__ unsigned sh_ops_done;
+  __shared__ unsigned sh_batch_count;
+  __shared__ bool sh_stop;
+  __shared__ unsigned long long int sh_startTimes[64];
+
+  if (tid == 0) {
+    sh_sq_tail = 0;
+    sh_cq_head = 0;
+    sh_expected_phase = 1;
+    sh_ops_done = 0;
+    sh_stop = false;
+
+    if (has_write_buffer) {
+      dataPatternParams patternParams;
+      patternParams.buffer = bufferParams.writeBuffer;
+      patternParams.size = bufferParams.bufferSize;
+      patternParams.offset = 0;
+      patternParams.lbaSize = ioParams.lbaSize;
+      patternParams.lfsrSeed = ioParams.lfsrSeed;
+      patternParams.errorOffset = nullptr;
+      dataPattern(false, patternParams);
+    }
+  }
+  __syncthreads();
+
+  while (!sh_stop) {
+    // --- Phase 1: thread 0 computes batch parameters ---
+    if (tid == 0) {
+      unsigned bc = batch_size;
+      if (!ioParams.infiniteMode && sh_ops_done + bc > total_ops) {
+        bc = total_ops - sh_ops_done;
+      }
+      sh_batch_count = bc;
+    }
+    __syncthreads();
+
+    const unsigned batch_count = sh_batch_count;
+    const unsigned ops_done = sh_ops_done;
+    const uint16_t sq_tail_base = sh_sq_tail;
+
+    // --- Phase 2: threads 1..B prepare SQEs ---
+    // tid 1 handles SQE index 0, tid 2 handles SQE
+    // index 1, etc.
+    if (tid >= 1) {
+      unsigned b = tid - 1;
+      if (b < batch_count) {
+        unsigned op_idx = ops_done + b;
+        uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
+
+        bool is_read_op;
+        if (ioParams.infiniteMode) {
+          is_read_op = infinite_is_read;
+        } else if (num_write_ops > 0 && num_read_ops > 0) {
+          is_read_op = (op_idx >= num_write_ops);
+        } else {
+          is_read_op = (num_read_ops > 0);
+        }
+
+        uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
+
+        sqeType sqeLocal = {};
+        sqeType* sqe = &sqeLocal;
+        sqe->opcode = is_read_op ? nvme_cmd_read : nvme_cmd_write;
+        sqe->command_id = cmd_id;
+        sqe->nsid = nsid;
+
+        uint64_t buf_off = (uint64_t)b * transfer_size;
+        bool prp_valid = false;
+
+        if (is_read_op && has_read_buffer) {
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.readBufferDma
+                              ? (bufferParams.readBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.readBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe);
+            prp_valid = true;
+          }
+        } else if (!is_read_op && has_write_buffer) {
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.writeBufferDma
+                              ? (bufferParams.writeBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.writeBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe);
+            prp_valid = true;
+          }
+        }
+
+        if (!prp_valid) {
+          __builtin_trap();
+        }
+        sqeSetup(sqe, lba, blocks);
+
+        if (!ioParams.infiniteMode && config.startTimes != nullptr) {
+          config.startTimes[op_idx] = wall_clock64();
+        } else if (useBatchTiming && b < 64) {
+          sh_startTimes[b] = wall_clock64();
+        }
+
+        uint16_t my_slot = (sq_tail_base + b) % ioParams.queueSize;
+        nvme_ep::sqeWrite(sqeLocal, &sqeAddr[my_slot]);
+      }
+    }
+    __syncthreads();
+
+    // --- Phase 3: thread 0 rings doorbell, polls CQEs ---
+    if (tid == 0) {
+      uint16_t new_tail = (sq_tail_base + batch_count) % ioParams.queueSize;
+      sh_sq_tail = new_tail;
+
+      __threadfence_system();
+      nvme_ep::ringDoorbell(new_tail, doorbellParams);
+
+      uint16_t cq_head = sh_cq_head;
+      uint8_t expected_phase = sh_expected_phase;
+
+      for (unsigned b = 0; b < batch_count; b++) {
+        unsigned op_idx = ops_done + b;
+
+        volatile cqeType* cqe_entry = &cqeAddr[cq_head];
+
+        nvme_ep::cqeType cqe_new;
+        unsigned poll_count = 0;
+        while (true) {
+          if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
+              *config.stopRequested) {
+            sh_stop = true;
+            break;
+          }
+          cqe_new = nvme_ep::cqeRead(cqe_entry);
+          uint8_t phase = NVME_CQE_STATUS_PHASE(cqe_new.status);
+          if (phase == expected_phase) {
+            break;
+          }
+          poll_count++;
+          if (poll_count >= NVME_EP_MAX_POLLS) {
+            printf("NVMe CQ poll timeout after "
+                   "%u polls (cq_head=%u "
+                   "expected_phase=%u)\n",
+                   poll_count, (unsigned)cq_head, (unsigned)expected_phase);
+            __builtin_trap();
+          }
+        }
+
+        if (sh_stop) {
+          break;
+        }
+
+        if (!nvme_ep::cqeOk(&cqe_new)) {
+          printf("NVMe CQE error: status=0x%04x "
+                 "sc=0x%02x sct=0x%02x "
+                 "cmd_id=%u sq_head=%u\n",
+                 (unsigned)cqe_new.status,
+                 (unsigned)nvme_ep::cqeStatusCode(&cqe_new),
+                 (unsigned)nvme_ep::cqeStatusType(&cqe_new),
+                 (unsigned)cqe_new.command_id, (unsigned)cqe_new.sq_head);
+          __builtin_trap();
+        }
+
+        if (!ioParams.infiniteMode && config.endTimes != nullptr) {
+          config.endTimes[op_idx] = wall_clock64();
+        } else if (useBatchTiming && b < 64) {
+          unsigned long long int endTime = wall_clock64();
+          if (endTime > sh_startTimes[b]) {
+            updateTimingStats(config.timingStats, endTime - sh_startTimes[b]);
+          }
+        }
+
+        cq_head = (cq_head + 1) % ioParams.queueSize;
+        if (cq_head == 0) {
+          expected_phase ^= 1;
+        }
+        nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                              doorbellParams.doorbellOffset +
+                                nvme_ep::doorBellStride);
+      }
+
+      sh_cq_head = cq_head;
+      sh_expected_phase = expected_phase;
+      sh_ops_done = ops_done + batch_count;
+
+      if (!ioParams.infiniteMode && sh_ops_done >= total_ops) {
+        sh_stop = true;
+      }
+      if (config.stopRequested != nullptr && *config.stopRequested) {
+        sh_stop = true;
+      }
+    }
+    __syncthreads();
+  }
+}
+
+__device__ void driveEndpoint(const XioEndpointConfig& config,
+                              const nvmeIoParams& ioParams,
+                              const nvmeDoorbellParams& doorbellParams,
+                              const nvmeBufferParams& bufferParams) {
+  if (ioParams.batchSize > 1) {
+    driveEndpointWavefront(config, ioParams, doorbellParams, bufferParams);
+  } else {
+    driveEndpointSingle(config, ioParams, doorbellParams, bufferParams);
   }
 }
 
@@ -563,7 +796,11 @@ __host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
     .add_option("--batch-size", config->ioParams.batchSize,
                 "Number of SQEs to submit per doorbell ring. "
                 "1 = sequential (one I/O at a time), "
-                "0 = all at once, N = N SQEs per doorbell.")
+                "0 = all at once, N = N SQEs per doorbell. "
+                "When N > 1, each SQE is prepared by a "
+                "separate GPU thread within one wavefront. "
+                "Max value is wavefront_size - 1 "
+                "(63 on CDNA, 31 on RDNA).")
     ->default_val(1)
     ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
@@ -665,6 +902,40 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
   }
   config->doorbellParams.nvmeTargetBdf = detected_nvme_bdf;
 
+  // Query wavefront size and validate batch_size.
+  // When batch_size > 1 the kernel uses batch_size + 1
+  // threads (threads 1..B write SQEs, thread 0 rings the
+  // doorbell and polls CQEs). All threads must fit in a
+  // single wavefront.
+  if (config->ioParams.batchSize > 1) {
+    int deviceId = 0;
+    hipError_t hip_err = hipGetDevice(&deviceId);
+    if (hip_err != hipSuccess) {
+      return "Failed to query current HIP device";
+    }
+    hipDeviceProp_t deviceProp;
+    hip_err = hipGetDeviceProperties(&deviceProp, deviceId);
+    if (hip_err != hipSuccess) {
+      return "Failed to query HIP device properties";
+    }
+    uint32_t waveSize = (uint32_t)deviceProp.warpSize;
+    if (config->ioParams.batchSize > waveSize - 1) {
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+               "--batch-size %u exceeds wavefront limit "
+               "%u (wavefront_size %u - 1 for "
+               "coordinator thread)",
+               config->ioParams.batchSize, waveSize - 1, waveSize);
+      return std::string(buf);
+    }
+    config->wavefrontSize = waveSize;
+    fprintf(stdout,
+            "Wavefront batch mode: batch_size=%u, "
+            "wavefront_size=%u, kernel_threads=%u\n",
+            config->ioParams.batchSize, waveSize,
+            config->ioParams.batchSize + 1);
+  }
+
   return std::string();
 }
 
@@ -696,10 +967,23 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   if (config->numThreads > 1) {
     fprintf(stderr, "Error: nvme-ep does not support "
-                    "--threads > 1 at this time. "
-                    "Each thread would share the same "
-                    "NVMe queue pair, causing corruption.\n");
+                    "--threads > 1. Use --batch-size "
+                    "> 1 for wavefront-cooperative "
+                    "batching.\n");
     return hipErrorNotSupported;
+  }
+
+  // Compute the kernel thread count locally.  Do NOT
+  // mutate config->numThreads -- the caller sized
+  // timing arrays based on numThreads=1.
+  unsigned kernelThreads = 1;
+  if (nvmeConfig->ioParams.batchSize > 1) {
+    kernelThreads = nvmeConfig->ioParams.batchSize + 1;
+    fprintf(stdout,
+            "Wavefront batch mode: launching %u "
+            "threads (1 coordinator + %u SQE "
+            "writers)\n",
+            kernelThreads, nvmeConfig->ioParams.batchSize);
   }
 
   // Create NVMe queues - MUST succeed before proceeding
@@ -927,6 +1211,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.queueSize = queue_size;
   ioParams.infiniteMode = nvmeConfig->ioParams.infiniteMode;
   ioParams.batchSize = nvmeConfig->ioParams.batchSize;
+  ioParams.wavefrontSize = nvmeConfig->wavefrontSize;
 
   // Validate that batch_size * transfer_size fits in the
   // data buffer. Each in-flight SQE in a batch uses its own
@@ -977,8 +1262,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   XioEndpointConfig kernelConfig = *config;
   kernelConfig.endpointConfig = nullptr;
 
-  hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(config->numThreads), 0,
-                     0, kernelConfig, ioParams, doorbellParams, bufferParams);
+  hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads), 0, 0,
+                     kernelConfig, ioParams, doorbellParams, bufferParams);
 
   fprintf(stdout, "Info: Kernel launched.\n");
 
