@@ -94,17 +94,24 @@ int main(int argc, char** argv) {
             "skipping SMART data.\n",
             rc);
   } else {
+    uint16_t tempK = static_cast<uint16_t>(smartLog.temperature[0]) |
+                     (static_cast<uint16_t>(smartLog.temperature[1]) << 8);
+    uint64_t powerCycles = 0;
+    uint64_t powerOnHours = 0;
+    memcpy(&powerCycles, smartLog.power_cycles, sizeof(powerCycles));
+    memcpy(&powerOnHours, smartLog.power_on_hours, sizeof(powerOnHours));
+
     printf("\nSMART / Health Information:\n");
     printf("  Critical warnings:     0x%02x\n", smartLog.critical_warning);
-    printf("  Temperature:           %u K (%d C)\n", smartLog.temperature,
-           static_cast<int>(smartLog.temperature) - 273);
+    printf("  Temperature:           %u K (%d C)\n", tempK,
+           static_cast<int>(tempK) - 273);
     printf("  Available spare:       %u%%\n", smartLog.avail_spare);
     printf("  Available spare thr:   %u%%\n", smartLog.spare_thresh);
     printf("  Percent used:          %u%%\n", smartLog.percent_used);
     printf("  Power cycles:          %llu\n",
-           static_cast<unsigned long long>(smartLog.power_cycles[0]));
+           static_cast<unsigned long long>(powerCycles));
     printf("  Power on hours:        %llu\n",
-           static_cast<unsigned long long>(smartLog.power_on_hours[0]));
+           static_cast<unsigned long long>(powerOnHours));
   }
 
   printf("\nAll NVMe info queries passed.\n");
