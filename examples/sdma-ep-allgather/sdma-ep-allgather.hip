@@ -255,8 +255,8 @@ int main(int argc, char* argv[]) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == myrank)
       continue;
-    hipIpcCloseMemHandle(args.remoteDst[peer]);
-    hipIpcCloseMemHandle(args.remoteSignals[peer]);
+    (void)hipIpcCloseMemHandle(args.remoteDst[peer]);
+    (void)hipIpcCloseMemHandle(args.remoteSignals[peer]);
     sdma_ep::destroyQueue(&queueInfos[peer]);
   }
 
