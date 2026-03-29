@@ -53,6 +53,7 @@ Quick Start
    testing
    vm-testing
    endpoints
+   examples
    kernel-module
    memory-modes
    hsa-allocator-tracking

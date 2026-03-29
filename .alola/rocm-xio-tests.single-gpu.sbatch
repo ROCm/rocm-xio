@@ -88,6 +88,18 @@ test_run "test-ep invalid memory-mode (expect fail)" \
 test_run "test-ep invalid thread count (expect fail)" \
   "! ./build/xio-tester test-ep --threads 0 -n 1"
 
+test_run "example list-endpoints (install)" \
+  "build_and_run_example list-endpoints run"
+
+test_run "example endpoint-info (install)" \
+  "build_and_run_example endpoint-info run"
+
+test_run "example nvme-ep-info (compile-only)" \
+  "build_and_run_example nvme-ep-info"
+
+test_run "example sdma-ep-p2p (compile-only)" \
+  "build_and_run_example sdma-ep-p2p"
+
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
 

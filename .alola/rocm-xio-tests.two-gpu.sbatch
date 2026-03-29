@@ -145,6 +145,19 @@ test_run "sdma-ep P2P (GPU 0 -> GPU 1)" \
 test_run "sdma-ep p2p --to-host" \
   "./build/xio-tester sdma-ep p2p --to-host --verify -n ${ITERATIONS}"
 
+test_run "example sdma-ep-p2p (install + run)" \
+  "build_and_run_example sdma-ep-p2p run"
+
+if command -v mpirun >/dev/null 2>&1; then
+  test_run "example sdma-ep-allgather (install + run)" \
+    "build_and_run_example sdma-ep-allgather && \
+     mpirun --allow-run-as-root -np 2 \
+       ${WORKING_DIR}/_ex_sdma-ep-allgather/sdma-ep-allgather"
+else
+  echo "INFO: mpirun not found; skipping" \
+    "sdma-ep-allgather example."
+fi
+
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
 

@@ -35,3 +35,29 @@ xio_add_install_test(
     ${CMAKE_SOURCE_DIR}/examples/endpoint-info
   RUN
 )
+
+# Compile-only: SDMA P2P transfer (needs 2 GPUs to run).
+xio_add_install_test(
+  NAME sdma-ep-p2p
+  SOURCE_DIR
+    ${CMAKE_SOURCE_DIR}/examples/sdma-ep-p2p
+)
+
+# Compile-only: NVMe controller info (needs NVMe device
+# and root access to run).
+xio_add_install_test(
+  NAME nvme-ep-info
+  SOURCE_DIR
+    ${CMAKE_SOURCE_DIR}/examples/nvme-ep-info
+)
+
+# Compile-only: MPI allgather via shader-initiated SDMA
+# (needs MPI + N GPUs to run).
+find_package(MPI QUIET)
+if(MPI_FOUND)
+  xio_add_install_test(
+    NAME sdma-ep-allgather
+    SOURCE_DIR
+      ${CMAKE_SOURCE_DIR}/examples/sdma-ep-allgather
+  )
+endif()
