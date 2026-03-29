@@ -151,7 +151,7 @@ test_run "example sdma-ep-p2p (install + run)" \
 if command -v mpirun >/dev/null 2>&1; then
   test_run "example sdma-ep-allgather (install + run)" \
     "build_and_run_example sdma-ep-allgather && \
-     mpirun --allow-run-as-root -np 2 \
+     mpirun --allow-run-as-root --oversubscribe -np 2 \
        ${WORKING_DIR}/_ex_sdma-ep-allgather/sdma-ep-allgather"
 else
   echo "INFO: mpirun not found; skipping" \
