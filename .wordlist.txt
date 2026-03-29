@@ -75,7 +75,9 @@ xgmierr
 # ===== MPI and Collectives =====
 allgather
 IPC
+MPICH
 mpirun
+OpenMPI
 
 # ===== SDMA and Anvil =====
 AnvilLib's
@@ -591,6 +593,7 @@ sqeType
 threadfence
 uint
 xA
+xAB
 xcafe
 xdeadbeef
 xF
@@ -737,6 +740,7 @@ ib
 ibv
 IOCTLs
 KFD
+kfd
 KMOD
 libbnxt
 lladdr
@@ -872,8 +876,11 @@ forceinline
 freeGpuAccessibleBuffer
 freeQueue
 genPciMmioBridgeCmd
+getEndpointName
 getIterations
 initEndpoint
+isValidEndpoint
+listAvailableEndpoints
 loadKernelModule
 mapPciBar
 nvmeBufferParams

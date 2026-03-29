@@ -29,17 +29,18 @@
 
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
+
 #include <mpi.h>
 
-#include "sdma-ep.h"
+#include "endpoints/sdma-ep/sdma-ep.h"
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
     hipError_t _err = (expr);                                                  \
     if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "[rank %d] HIP error %d (%s) at %s:%d\n", g_myrank,     \
+      fprintf(stderr, "[rank %d] HIP error %d (%s) at %s:%d\n", g_myrank,      \
               _err, hipGetErrorString(_err), __FILE__, __LINE__);              \
-      MPI_Abort(MPI_COMM_WORLD, 1);                                           \
+      MPI_Abort(MPI_COMM_WORLD, 1);                                            \
     }                                                                          \
   } while (0)
 
@@ -64,13 +65,11 @@ __global__ void sdmaAllgatherKernel(AllgatherArgs args) {
     if (peer == args.myrank)
       continue;
 
-    char* dst =
-      static_cast<char*>(args.remoteDst[peer]) +
-      static_cast<size_t>(args.myrank) * args.chunkBytes;
+    char* dst = static_cast<char*>(args.remoteDst[peer]) +
+                static_cast<size_t>(args.myrank) * args.chunkBytes;
 
     sdma_ep::putSignal(*args.queues[peer], dst, args.localInput,
-                       args.chunkBytes,
-                       args.remoteSignals[peer] + args.myrank);
+                       args.chunkBytes, args.remoteSignals[peer] + args.myrank);
   }
 
   for (int peer = 0; peer < args.nranks; ++peer) {
@@ -142,16 +141,18 @@ int main(int argc, char* argv[]) {
     sdma_ep::SdmaConnectionInfo connInfo = {};
     rc = sdma_ep::createConnection(myrank, peer, &connInfo);
     if (rc != 0) {
-      fprintf(stderr, "[rank %d] createConnection(%d->%d) "
-                      "failed (%d)\n",
+      fprintf(stderr,
+              "[rank %d] createConnection(%d->%d) "
+              "failed (%d)\n",
               myrank, myrank, peer, rc);
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
     rc = sdma_ep::createQueue(myrank, peer, &queueInfos[peer]);
     if (rc != 0) {
-      fprintf(stderr, "[rank %d] createQueue(%d->%d) "
-                      "failed (%d)\n",
+      fprintf(stderr,
+              "[rank %d] createQueue(%d->%d) "
+              "failed (%d)\n",
               myrank, myrank, peer, rc);
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
@@ -171,8 +172,8 @@ int main(int argc, char* argv[]) {
   HIP_CHECK(
     hipMemcpy(inputBuf, hostPattern, chunkBytes, hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(static_cast<char*>(static_cast<void*>(outputBuf)) +
-                         static_cast<size_t>(myrank) * chunkBytes,
-                       hostPattern, chunkBytes, hipMemcpyHostToDevice));
+                        static_cast<size_t>(myrank) * chunkBytes,
+                      hostPattern, chunkBytes, hipMemcpyHostToDevice));
   free(hostPattern);
   args.localInput = inputBuf;
 
@@ -227,7 +228,7 @@ int main(int argc, char* argv[]) {
 
   int* hostOutput = static_cast<int*>(malloc(chunkBytes * nranks));
   HIP_CHECK(hipMemcpy(hostOutput, outputBuf, chunkBytes * nranks,
-                       hipMemcpyDeviceToHost));
+                      hipMemcpyDeviceToHost));
 
   bool pass = true;
   for (int r = 0; r < nranks; ++r) {
@@ -235,8 +236,9 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < chunkInts; ++i) {
       int idx = r * chunkInts + i;
       if (hostOutput[idx] != expected) {
-        fprintf(stderr, "[rank %d] FAIL: output[%d][%d] = "
-                        "%d (expected %d)\n",
+        fprintf(stderr,
+                "[rank %d] FAIL: output[%d][%d] = "
+                "%d (expected %d)\n",
                 myrank, r, i, hostOutput[idx], expected);
         pass = false;
         break;

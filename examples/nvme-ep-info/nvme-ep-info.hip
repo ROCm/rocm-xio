@@ -25,10 +25,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "nvme-ep.h"
+#include "endpoints/nvme-ep/nvme-ep.h"
 #include "xio.h"
 
 static constexpr int SKIP_EXIT_CODE = 77;
@@ -51,8 +52,9 @@ int main(int argc, char** argv) {
 
   int rc = xio::nvme_ep::checkRootfs(device);
   if (rc != 0) {
-    fprintf(stderr, "WARNING: %s appears to host the root "
-                    "filesystem.\n",
+    fprintf(stderr,
+            "WARNING: %s appears to host the root "
+            "filesystem.\n",
             device);
   }
 
@@ -70,8 +72,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "ERROR: queryNamespaceCapacity failed (%d).\n", rc);
     return 1;
   }
-  double capacityGiB =
-    static_cast<double>(capacityLbas) * lbaSize / (1024.0 * 1024 * 1024);
+  double capacityGiB = static_cast<double>(capacityLbas) * lbaSize /
+                       (1024.0 * 1024 * 1024);
   printf("Namespace 1 capacity: %lu LBAs (%.2f GiB)\n",
          static_cast<unsigned long>(capacityLbas), capacityGiB);
 
@@ -87,8 +89,9 @@ int main(int argc, char** argv) {
   memset(&smartLog, 0, sizeof(smartLog));
   rc = xio::nvme_ep::readSmartLog(device, &smartLog);
   if (rc != 0) {
-    fprintf(stderr, "WARNING: readSmartLog failed (%d), "
-                    "skipping SMART data.\n",
+    fprintf(stderr,
+            "WARNING: readSmartLog failed (%d), "
+            "skipping SMART data.\n",
             rc);
   } else {
     printf("\nSMART / Health Information:\n");
