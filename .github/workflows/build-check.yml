@@ -77,3 +77,23 @@ jobs:
       run: |
         ctest --test-dir build -V -L "integration" \
           --parallel --output-on-failure
+    - name: Build examples against installed prefix.
+      run: |
+        for ex in list-endpoints endpoint-info \
+                  sdma-ep-p2p nvme-ep-info; do
+          echo "=== Building example: ${ex} ==="
+          cmake -S examples/${ex} -B /tmp/ex-${ex} \
+            -DCMAKE_PREFIX_PATH="/tmp/rocm-xio-test;/opt/rocm" \
+            -DOFFLOAD_ARCH=gfx942:xnack+
+          cmake --build /tmp/ex-${ex}
+        done
+    - name: Build MPI example (if MPI available).
+      run: |
+        if cmake -S examples/sdma-ep-allgather \
+             -B /tmp/ex-sdma-ep-allgather \
+             -DCMAKE_PREFIX_PATH="/tmp/rocm-xio-test;/opt/rocm" \
+             -DOFFLOAD_ARCH=gfx942:xnack+ 2>/dev/null; then
+          cmake --build /tmp/ex-sdma-ep-allgather
+        else
+          echo "MPI not found; skipping sdma-ep-allgather."
+        fi

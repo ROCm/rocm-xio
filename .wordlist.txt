@@ -72,6 +72,11 @@ TCP
 XGMI
 xgmierr
 
+# ===== MPI and Collectives =====
+allgather
+IPC
+mpirun
+
 # ===== SDMA and Anvil =====
 AnvilLib's
 destructor

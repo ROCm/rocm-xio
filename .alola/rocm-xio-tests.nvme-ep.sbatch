@@ -142,6 +142,9 @@ if [ -n "${NVME_NAMESPACE}" ]; then
 fi
 echo ""
 
+test_run "example nvme-ep-info (install + run)" \
+  "build_and_run_example nvme-ep-info run"
+
 test_run "nvme-ep hardware unit tests" \
   "run_on_host \
 '${WORKING_DIR}/${HW_TEST_DIR}/test-nvme-hardware \
