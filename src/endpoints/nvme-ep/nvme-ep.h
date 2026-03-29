@@ -72,6 +72,7 @@ struct nvmeIoParams {
   uint32_t lbasPerIo;    // Number of LBAs per I/O operation (default: 1)
   bool infiniteMode;     // Infinite mode: run forever
   uint32_t batchSize;    // SQEs per doorbell (1=sequential, 0=all)
+  uint32_t wavefrontSize; // Hardware wavefront size (threads per wave)
 };
 
 /**
@@ -728,6 +729,7 @@ struct nvmeEpConfig {
   uint16_t queueId;       // Queue ID to use (0=admin, 1+=IO queues)
   uint16_t queueLength;   // Queue length in entries (must be power of 2)
   bool queuesCreated; // Flag indicating queues have been created (for cleanup)
+  uint32_t wavefrontSize; // Hardware wavefront size (set by validateConfig)
   struct nvme_queue_info queueInfo; // Queue info populated by createQueue()
 
   // Physical addresses (host-side only)
@@ -775,8 +777,9 @@ struct nvmeEpConfig {
   // validateConfig
   nvmeEpConfig()
     : controller(""), queueId(0), queueLength(64), queuesCreated(false),
-      queueInfo{}, doorbellAddr(0), sqBaseAddr(0), cqBaseAddr(0), sqSize(0),
-      cqSize(0), ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false, 1},
+      wavefrontSize(0), queueInfo{}, doorbellAddr(0), sqBaseAddr(0),
+      cqBaseAddr(0), sqSize(0), cqSize(0),
+      ioParams{"random", 512, 0, 0, 0, 0, 0, 1, 1, false, 1},
       bufferParams{1024 * 1024},
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
   }
