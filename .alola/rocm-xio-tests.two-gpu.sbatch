@@ -5,10 +5,13 @@
 #
 # usage: sbatch rocm-xio-tests.two-gpu.sbatch
 #
-# Runs on a two-GPU node: builds rocm-xio, runs sdma-ep P2P (GPU 0 -> GPU 1),
-# and captures XGMI metrics (amd-smi xgmi -m -g all --json) before and after
-# each test to compare expected transfer size with counter deltas when
-# parseable.
+# Runs on a two-GPU node: builds rocm-xio and exercises sdma-ep
+# transfers that benefit from a multi-GPU allocation:
+#
+#   1. GPU-to-GPU P2P (GPU 0 -> GPU 1) with XGMI metric capture
+#      (amd-smi xgmi -m -g all --json) before and after each test
+#      to compare expected transfer size with counter deltas.
+#   2. GPU-to-host (--to-host) DMA with LFSR verification.
 #
 #SBATCH --output=logs/%x.%j.out
 #SBATCH --error=logs/%x.%j.err
@@ -17,6 +20,7 @@
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gres=gpu:2
+# MI308X nodes with intermittent SDMA P2P transfer failures
 #SBATCH --exclude=banff-cyxtera-s81-1
 
 set -xe
@@ -139,7 +143,7 @@ test_run "sdma-ep P2P (GPU 0 -> GPU 1)" \
   "run_p2p_test ${ITERATIONS} ${TRANSFER_SIZE} ${label}"
 
 test_run "sdma-ep p2p --to-host" \
-  "./build/xio-tester sdma-ep p2p --to-host --verify -n 100"
+  "./build/xio-tester sdma-ep p2p --to-host --verify -n ${ITERATIONS}"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"
