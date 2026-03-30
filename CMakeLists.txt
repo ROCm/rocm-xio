@@ -177,6 +177,24 @@ endif()
 
 message(STATUS "Building for GPU architecture: ${OFFLOAD_ARCH_MSG}")
 
+# SDMA generation auto-detection from GPU architecture.
+# OSS7.0 SDMA targets use different packet structures than
+# pre-OSS7 (CDNA3 / MI300X).  Extend this list when new
+# OSS7.0 architectures land (e.g. MI450 / CDNA5).
+set(_SDMA_OSS7_TARGETS "gfx950")
+string(REGEX MATCH "gfx[0-9a-f]+" _BARE_ARCH
+       "${OFFLOAD_ARCH}")
+set(_XIO_SDMA_OSS7_DEFAULT OFF)
+if(_BARE_ARCH)
+  list(FIND _SDMA_OSS7_TARGETS "${_BARE_ARCH}" _IDX)
+  if(_IDX GREATER_EQUAL 0)
+    set(_XIO_SDMA_OSS7_DEFAULT ON)
+  endif()
+endif()
+option(XIO_SDMA_OSS7
+  "Use OSS7.0 SDMA packets (auto-detected from arch)"
+  ${_XIO_SDMA_OSS7_DEFAULT})
+
 # Project directories
 set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
 set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
@@ -399,6 +417,16 @@ target_link_libraries(rocm-xio PRIVATE dl)
 
 # Apply endpoint defines per source file
 apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
+
+# OSS7.0 SDMA packet support
+if(XIO_SDMA_OSS7)
+  target_compile_definitions(rocm-xio PRIVATE XIO_SDMA_OSS7=1)
+  target_compile_definitions(xio-tester PRIVATE XIO_SDMA_OSS7=1)
+  message(STATUS "SDMA OSS7.0 packet support enabled"
+    " (arch: ${_BARE_ARCH})")
+else()
+  message(STATUS "SDMA pre-OSS7 packet support (default)")
+endif()
 
 # Dependencies on generated files
 add_dependencies(rocm-xio endpoint-registry-generated)
