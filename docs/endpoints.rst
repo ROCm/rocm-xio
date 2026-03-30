@@ -58,6 +58,60 @@ Key features:
      --read-io 1 --batch-size 8 \
      --infinite --less-timing
 
+Doorbell Modes
+^^^^^^^^^^^^^^
+
+The NVMe endpoint supports two doorbell delivery modes.
+Choosing the right one depends on whether the NVMe
+device is a real PCIe endpoint or an emulated device
+inside a virtual machine.
+
+**Direct BAR0 (default -- use with real hardware)**
+  The GPU writes directly to the NVMe controller's BAR0
+  doorbell registers.  This is the correct mode when the
+  NVMe SSD is passed through to the VM (or bare-metal
+  host) via **vfio-pci** or is otherwise a real PCIe
+  endpoint.  Direct BAR0 avoids the extra latency of the
+  MMIO bridge and is the lowest-overhead path.
+
+  The direct path uses ``__threadfence_system()`` for
+  cross-device ordering, which is sufficient on CDNA
+  (MI-series) GPUs.  On RDNA (consumer Radeon) GPUs,
+  direct BAR0 doorbell writes have been observed to
+  cause coherence issues in independent testing.  If
+  you experience hangs on RDNA hardware, try rebuilding
+  with aggressive ISA-level fencing:
+
+  .. code-block:: bash
+
+     cmake -DXIO_DOORBELL_FENCE_AGGRESSIVE=ON ..
+
+  See :doc:`coherence-prior-art` for background on the
+  coherence investigation.
+
+**PCI MMIO bridge (emulated devices in VMs only)**
+  Routes doorbell writes through a QEMU virtual PCI
+  device that forwards them to the emulated NVMe
+  controller's BAR0.  This mode is **essential** when
+  the NVMe device is emulated by QEMU (e.g. the
+  built-in ``nvme`` device model) because the emulated
+  BAR0 lives in QEMU's address space and cannot be
+  reached by a direct GPU store.  Enable with
+  ``--pci-mmio-bridge``:
+
+  .. code-block:: bash
+
+     sudo ./build/xio-tester nvme-ep \
+       --controller /dev/nvme0 \
+       --read-io 8 --pci-mmio-bridge
+
+  **Do not** use the PCI MMIO bridge with real NVMe
+  endpoints passed through via vfio-pci.  The bridge
+  adds an unnecessary PCIe hop and QEMU processing
+  overhead that hurts latency and throughput with no
+  benefit -- real hardware already exposes its BAR0
+  directly to the GPU.
+
 rdma-ep -- RDMA Endpoint
 -------------------------
 

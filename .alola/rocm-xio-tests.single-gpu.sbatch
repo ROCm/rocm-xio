@@ -44,6 +44,9 @@ setup_and_build_workdir "single-gpu"
 test_run "ctest unit tests" \
   "ctest --test-dir build --preset unit"
 
+test_run "doorbell coherence stress" \
+  "./build/tests/system/coherence/test-doorbell-coherence"
+
 test_run "test-ep --emulate" \
   "./build/xio-tester test-ep --emulate -n ${ITERATIONS}"
 
