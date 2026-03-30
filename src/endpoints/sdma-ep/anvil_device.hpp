@@ -53,8 +53,14 @@ __device__ __forceinline__ SDMA_PKT_FENCE CreateFencePacket(HSAuint64* address,
 
 #if XIO_SDMA_OSS7
 
+// TODO: SDMA_PKT_COPY_LINEAR_PHY_MI4 (sub-op 0x8) could not be found in
+// the OSS 7.0 MAS.  This helper is currently unused; keep it until the
+// packet definition is confirmed or ruled out.
 __device__ __forceinline__ SDMA_PKT_COPY_LINEAR_PHY_MI4
 CreateCopyPacketMI4(void* srcBuf, void* dstBuf, long long int packetSize) {
+  assert(packetSize > 0 && "CreateCopyPacketMI4: packetSize must be > 0");
+  assert(packetSize <= 0x400000LL &&
+         "CreateCopyPacketMI4: packetSize exceeds 22-bit count (4 MiB)");
   SDMA_PKT_COPY_LINEAR_PHY_MI4 pkt = {};
 
   pkt.HEADER_UNION.op_code = SDMA_OP_COPY;
@@ -75,14 +81,19 @@ CreateCopyWaitSignalPacketMI4(void* srcBuf, void* dstBuf,
                               uint64_t signalData, bool enableWait,
                               uint64_t* waitAddr, uint64_t waitRef,
                               uint64_t waitMask) {
+  assert(packetSize > 0 &&
+         "CreateCopyWaitSignalPacketMI4: packetSize must be > 0");
+  assert(packetSize <= 0x40000000LL &&
+         "CreateCopyWaitSignalPacketMI4: packetSize exceeds 30-bit count");
   SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4 pkt = {};
 
   pkt.HEADER_UNION.op = SDMA_OP_COPY;
   pkt.HEADER_UNION.subop = SDMA_SUBOP_COPY_LINEAR_WAIT_SIGNAL_MI4;
   pkt.HEADER_UNION.signal = (signalAddr != nullptr) ? 1 : 0;
-  pkt.HEADER_UNION.wait = enableWait ? 1 : 0;
+  pkt.HEADER_UNION.wait = (enableWait && waitAddr != nullptr) ? 1 : 0;
 
   if (enableWait && waitAddr != nullptr) {
+    pkt.WAIT_CTRL_UNION.wait_function = SDMA_WAIT_FUNC_GEQ_MI4;
     pkt.WAIT_ADDR_LO_UNION.wait_addr_31_3 = (uint32_t)((uintptr_t)waitAddr >>
                                                        3);
     pkt.WAIT_ADDR_HI_UNION.wait_addr_63_32 = (uint32_t)((uintptr_t)waitAddr >>
@@ -127,6 +138,21 @@ CreateFencePacketMI4(HSAuint64* address, uint32_t data = 1) {
   return pkt;
 }
 
+__device__ __forceinline__ SDMA_PKT_FENCE_64B_MI4
+CreateFence64BPacketMI4(uint64_t* address, uint64_t data = 1) {
+  SDMA_PKT_FENCE_64B_MI4 pkt = {};
+
+  pkt.HEADER_UNION.op = SDMA_OP_FENCE;
+  pkt.HEADER_UNION.subop = SDMA_SUBOP_FENCE_64B_MI4;
+
+  pkt.ADDR_LO_UNION.addr_31_3 = (uint32_t)((uintptr_t)address >> 3);
+  pkt.ADDR_HI_UNION.addr_63_32 = (uint32_t)((uintptr_t)address >> 32);
+  pkt.DATA_LO_UNION.data_31_0 = (uint32_t)(data);
+  pkt.DATA_HI_UNION.data_63_32 = (uint32_t)(data >> 32);
+
+  return pkt;
+}
+
 #endif /* XIO_SDMA_OSS7 */
 
 // Original anvil name was poll_until_lt but the semantics
@@ -158,21 +184,25 @@ __device__ __forceinline__ void put_signal_counter_impl(
   uint64_t* signal, uint64_t* counter, uint64_t* put_index = nullptr) {
 #if XIO_SDMA_OSS7
   /*
-   * OSS7 fast path: when copy+signal are both requested, fuse them
-   * into a single COPY_LINEAR_WAIT_SIGNAL_MI4 packet.  A separate
-   * ATOMIC is still needed for the counter (the HW packet only has
-   * one signal slot).
+   * OSS7 fast path: when copy + signal and/or counter are requested,
+   * fuse the copy and one atomic into a single
+   * COPY_LINEAR_WAIT_SIGNAL_MI4 packet.  The HW packet has one
+   * signal slot, so when both signal and counter are active the
+   * signal is fused and the counter falls back to a separate ATOMIC.
+   * When only a counter is requested (putCounter pattern used by
+   * Mori), the counter is routed into the fused signal slot instead.
    */
-  if constexpr (PUT_EN && SIGNAL_EN) {
+  if constexpr (PUT_EN && (SIGNAL_EN || COUNTER_EN)) {
+    constexpr bool both = SIGNAL_EN && COUNTER_EN;
     constexpr size_t space_required = sizeof(
                                         SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4) +
-                                      ((COUNTER_EN) ? sizeof(SDMA_PKT_ATOMIC)
-                                                    : 0);
+                                      ((both) ? sizeof(SDMA_PKT_ATOMIC) : 0);
     uint64_t offset = 0;
     auto base = handle.ReserveQueueSpace(space_required, offset);
     uint64_t pendingWptr = base;
 
-    auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, signal, 1,
+    uint64_t* fused_addr = SIGNAL_EN ? signal : counter;
+    auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, fused_addr, 1,
                                                 false, nullptr, 0, 0);
     handle.placePacket(ws_pkt, pendingWptr, offset);
     if (put_index != nullptr) {
@@ -180,7 +210,7 @@ __device__ __forceinline__ void put_signal_counter_impl(
     }
     offset = 0;
 
-    if constexpr (COUNTER_EN) {
+    if constexpr (both) {
       auto counter_packet = CreateAtomicIncPacket(
         reinterpret_cast<HSAuint64*>(counter));
       handle.placePacket(counter_packet, pendingWptr, offset);

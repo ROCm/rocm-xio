@@ -32,6 +32,7 @@ const unsigned int SDMA_ATOMIC_ADD64 = 47;
 /* ---- OSS7.0 (MI4) sub-opcodes and operations ------------- */
 #if XIO_SDMA_OSS7
 const unsigned int SDMA_SIGNAL_OP_ADD64_MI4 = 111;
+const unsigned int SDMA_WAIT_FUNC_GEQ_MI4 = 5;
 const unsigned int SDMA_SUBOP_COPY_LINEAR_PHY_MI4 = 0x8;
 const unsigned int SDMA_SUBOP_COPY_PAGE_TRANSFER_MI4 = 0xc;
 const unsigned int SDMA_SUBOP_COPY_LINEAR_MULTICAST_MI4 = 0xa;
