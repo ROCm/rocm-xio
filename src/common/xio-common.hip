@@ -1835,13 +1835,19 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
   fprintf(stdout, "PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
 
-  // Register with HIP for GPU access
+  // Register with HIP for GPU access.
+  // hipHostRegisterIoMemory ensures the mapping uses non-cacheable
+  // attributes appropriate for MMIO regions (e.g. NVMe BAR0
+  // doorbells).  hipHostRegisterMapped alone may allow GPU caching
+  // that defeats doorbell write ordering -- an issue observed in
+  // independent GPU-NVMe coherence testing (from-germany repro).
   void* gpu_ptr = nullptr;
-  hipError_t hip_err = hipHostRegister(mapped, bar_size, hipHostRegisterMapped);
+  hipError_t hip_err = hipHostRegister(mapped, bar_size,
+                                       hipHostRegisterIoMemory);
   if (hip_err == hipSuccess) {
     fprintf(stdout,
-            "PCI BAR%u registered with HIP for GPU "
-            "access\n",
+            "PCI BAR%u registered with HIP "
+            "(IoMemory) for GPU access\n",
             bar);
 
     hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);

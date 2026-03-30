@@ -6,3 +6,4 @@
 # HIP-capable GPU and are labelled "system".
 
 add_subdirectory(test-ep)
+add_subdirectory(coherence)

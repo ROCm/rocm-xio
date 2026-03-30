@@ -576,6 +576,53 @@ ol
 svg
 ul
 
+# ===== Coherence and Doorbell Fencing =====
+coherence
+coalesce
+deadlocked
+deadlocks
+doorbell
+doorbells
+fencing
+libnvm
+DLC
+GLC
+GL0
+GL1
+IoMemory
+SLC
+TLB
+ringDoorbell
+ringDoorbellFenced
+hipHostRegisterIoMemory
+hipHostRegisterMapped
+XIO_DOORBELL_FENCE_AGGRESSIVE
+
+sidesteps
+
+# ===== ISA Fencing Instructions =====
+buffer_gl0_inv
+buffer_gl1_inv
+global_store_dword
+s_dcache_inv
+s_gl1_inv
+s_waitcnt
+s_waitcnt_vscnt
+ISA
+cacheable
+dcache
+dword
+gl
+inv
+vscnt
+waitcnt
+
+# ===== from-germany Coherence Study =====
+AMDGPUUsage
+enfiskutensykkel
+germany
+GL
+
 # ===== Code Constants and Types =====
 ADDR
 CMD

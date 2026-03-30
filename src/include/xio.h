@@ -777,17 +777,73 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
 
 /**
  * @brief Ring a doorbell register via direct MMIO write.
+ *
+ * Uses __threadfence_system() for portable cross-device
+ * ordering.  For MMIO coherence debugging on RDNA GPUs,
+ * see ringDoorbellFenced() which adds ISA-level cache
+ * invalidations inspired by from-germany coherence testing.
+ *
+ * When XIO_DOORBELL_FENCE_AGGRESSIVE is defined at compile
+ * time, this function delegates to ringDoorbellFenced().
+ *
  * @param doorbell_addr GPU-accessible doorbell pointer.
  * @param value Value to write (typically queue tail).
  */
 __host__ __device__ static inline void ringDoorbell(
+  volatile uint32_t* doorbell_addr, uint32_t value);
+
+/**
+ * @brief Ring a doorbell with aggressive ISA-level fencing.
+ *
+ * On RDNA GPUs (gfx10xx / gfx11xx), emits explicit
+ * s_waitcnt + s_waitcnt_vscnt drains, a global_store_dword
+ * with GLC|SLC|DLC flags to bypass caches, and full GL0/GL1
+ * cache invalidation.  On CDNA GPUs this falls back to the
+ * same __threadfence_system() path as ringDoorbell().
+ *
+ * Use this variant when debugging doorbell ordering issues
+ * on consumer RDNA hardware.
+ *
+ * @param doorbell_addr GPU-accessible doorbell pointer.
+ * @param value Value to write (typically queue tail).
+ */
+__host__ __device__ static inline void ringDoorbellFenced(
   volatile uint32_t* doorbell_addr, uint32_t value) {
+#ifdef __HIP_DEVICE_COMPILE__
+#if __gfx1010__ || __gfx1030__ || __gfx1031__ || __gfx1032__ || __gfx1100__ || \
+  __gfx1101__ || __gfx1102__ || __gfx1200__ || __gfx1201__
+  asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0) \n"
+               "s_waitcnt_vscnt null, 0x0 \n"
+               "global_store_dword %0, %1, off glc slc dlc \n"
+               "s_waitcnt lgkmcnt(0) vmcnt(0) \n"
+               "s_waitcnt_vscnt null, 0x0 \n"
+               "buffer_gl1_inv \n"
+               "buffer_gl0_inv \n" ::"v"(doorbell_addr),
+               "v"(value)
+               : "memory");
+  __threadfence_system();
+#else
+  __threadfence_system();
+  *doorbell_addr = value;
+  __threadfence_system();
+#endif
+#else
+  *doorbell_addr = value;
+#endif
+}
+
+__host__ __device__ static inline void ringDoorbell(
+  volatile uint32_t* doorbell_addr, uint32_t value) {
+#ifdef XIO_DOORBELL_FENCE_AGGRESSIVE
+  ringDoorbellFenced(doorbell_addr, value);
+#else
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
 #endif
   *doorbell_addr = value;
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
+#endif
 #endif
 }
 
@@ -804,6 +860,23 @@ __host__ __device__ static inline void ringDoorbell(void* base_addr,
     volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
       static_cast<volatile char*>(base_addr) + offset);
     ringDoorbell(doorbell_reg, value);
+  }
+}
+
+/**
+ * @brief Ring a doorbell at base+offset with aggressive
+ *        ISA-level fencing.
+ * @param base_addr Base address (e.g., BAR0).
+ * @param offset Byte offset to the doorbell register.
+ * @param value Value to write.
+ */
+__host__ __device__ static inline void ringDoorbellFenced(void* base_addr,
+                                                          uint32_t offset,
+                                                          uint32_t value) {
+  if (base_addr != nullptr) {
+    volatile uint32_t* doorbell_reg = reinterpret_cast<volatile uint32_t*>(
+      static_cast<volatile char*>(base_addr) + offset);
+    ringDoorbellFenced(doorbell_reg, value);
   }
 }
 
