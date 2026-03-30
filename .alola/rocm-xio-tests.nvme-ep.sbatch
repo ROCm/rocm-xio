@@ -142,6 +142,17 @@ if [ -n "${NVME_NAMESPACE}" ]; then
 fi
 echo ""
 
+test_run "example nvme-ep-info (build)" \
+  "build_and_run_example nvme-ep-info"
+
+${SCP_COMMAND} \
+  ${WORKING_DIR}/_ex_nvme-ep-info/nvme-ep-info \
+  localhost:${WORKING_DIR}/build/nvme-ep-info
+
+test_run "example nvme-ep-info (run)" \
+  "run_on_host '${WORKING_DIR}/build/nvme-ep-info \
+  ${NON_ROOTFS_CTRL}'"
+
 test_run "nvme-ep hardware unit tests" \
   "run_on_host \
 '${WORKING_DIR}/${HW_TEST_DIR}/test-nvme-hardware \

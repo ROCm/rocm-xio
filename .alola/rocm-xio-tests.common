@@ -157,6 +157,29 @@ setup_and_build_workdir() {
   cmake --build build --target all --parallel
 }
 
+# Install rocm-xio to a temp prefix and build a standalone
+# example against it.  Returns 0 on success, non-zero on
+# any cmake configure/build/run failure.
+#
+# Usage: build_and_run_example <name> [run]
+#   name  - directory name under examples/
+#   run   - if "run", execute the built binary after build
+build_and_run_example() {
+  local name=$1
+  local do_run=${2:-""}
+  local prefix="${WORKING_DIR}/_install_example"
+  local ex_build="${WORKING_DIR}/_ex_${name}"
+
+  cmake --install build --prefix "${prefix}" || return $?
+  cmake -S "examples/${name}" -B "${ex_build}" \
+    -DCMAKE_PREFIX_PATH="${prefix};/opt/rocm" || return $?
+  cmake --build "${ex_build}" || return $?
+
+  if [ "${do_run}" = "run" ]; then
+    "${ex_build}/${name}"
+  fi
+}
+
 build_and_load_kernel_module_on_host() {
   echo "Building and loading kernel module on host via ssh localhost ..."
   ${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/kernel/rocm-xio"
