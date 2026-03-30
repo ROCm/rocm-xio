@@ -256,10 +256,11 @@ followed by an `ATOMIC` (8 DWORDs) for the signal increment.
 
 On OSS7.0, the `COPY_LINEAR_WAIT_SIGNAL_MI4` packet fuses
 both operations into a **single 19-DWORD packet**. The
-`put_signal` and `put_signal_counter` helpers in
-`anvil_device.hpp` automatically use this fused path when
-`XIO_SDMA_OSS7` is enabled, eliminating a separate
-reserve/place/submit cycle for the signal.
+`anvil::put_signal_counter_impl` template in
+`anvil_device.hpp` uses this fused path when
+`XIO_SDMA_OSS7` is enabled and a copy is combined with a
+signal and/or counter, eliminating a separate
+reserve/place/submit cycle for one of the atomics.
 
 ### Cache and Scope Fields
 
