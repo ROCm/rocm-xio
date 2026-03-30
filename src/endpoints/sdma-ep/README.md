@@ -9,11 +9,15 @@ on AMD GPUs that can perform memory-to-memory transfers, including peer-to-peer
 
 ## Hardware Requirements
 
-- **AMD MI300X** or similar datacenter GPU with SDMA hardware support
+- **AMD MI300X** (CDNA3 / gfx942) -- default build (pre-OSS7
+  SDMA packets)
+- **AMD MI350X** (CDNA4 / gfx950) and later -- OSS7.0 SDMA
+  packets, auto-detected from `OFFLOAD_ARCH`
 - **ROCm 6.0+** with hsakmt library support
-- **P2P mode**: Multi-GPU system and XGMI/Infinity Fabric for GPU-to-GPU
-- **Single-GPU mode** (`--to-host`): One GPU; destination is pinned host
-  memory
+- **P2P mode**: Multi-GPU system and XGMI/Infinity Fabric for
+  GPU-to-GPU
+- **Single-GPU mode** (`--to-host`): One GPU; destination is pinned
+  host memory
 
 ## Implementation
 
@@ -29,8 +33,13 @@ Thunk) interface.
 - **anvil.hpp / anvil.hip**: Host-side SDMA queue management and
   initialization
 - **anvil_device.hpp**: Device-side SDMA queue primitives for GPU kernels
-- **sdma_pkt_struct.h**: AMD SDMA packet structures and opcodes (source
-  of truth for hardware packet layout)
+- **sdma_opcodes.h**: Shared SDMA opcode and sub-opcode constants
+  for all generations; OSS7.0 sub-opcodes gated by `XIO_SDMA_OSS7`
+- **sdma_pkt_struct.h**: Pre-OSS7 (MI300X) SDMA packet structures
+- **sdma_pkt_struct_mi4.h**: OSS7.0 packet structures, gated by
+  `XIO_SDMA_OSS7` (see [OSS7.0 Support](#oss70-support))
+- **sdma-packet.h**: OSS7.0 SDMA field-level macro definitions
+  (auto-generated from the MAS; reference for struct generation)
 
 ### SDMA Operations
 
@@ -196,9 +205,93 @@ Open the generated Perfetto trace; the XGMI Read Data and XGMI Write
 Data tracks show traffic over time. Only available on multi-GPU systems
 with XGMI links; otherwise values are N/A.
 
+## OSS7.0 Support
+
+The sdma-ep supports OSS7.0 SDMA packet formats used by CDNA4
+(MI350X / gfx950) and later architectures. The correct packet
+generation is **auto-detected** from `OFFLOAD_ARCH` at CMake
+configure time.
+
+### Architecture-Based Auto-Detection
+
+CMake detects the GPU architecture from `OFFLOAD_ARCH` (which
+is itself auto-detected via `rocminfo` or specified manually)
+and enables OSS7.0 packets for architectures in the
+`_SDMA_OSS7_TARGETS` list:
+
+```bash
+# Auto-detected: gfx950 enables OSS7.0 automatically
+cmake -B build -DOFFLOAD_ARCH=gfx950
+
+# Manual override for cross-compilation or pre-silicon
+cmake -B build -DXIO_SDMA_OSS7=ON
+```
+
+When `XIO_SDMA_OSS7` is enabled (auto or manual), the build
+defines `XIO_SDMA_OSS7=1` for all sdma-ep sources. The
+default (pre-OSS7) build targets MI300X hardware.
+
+### OSS7.0 Packet Types
+
+The following OSS7.0 packet structs are defined in
+`sdma_pkt_struct_mi4.h`:
+
+| Struct | DWORDs | Description |
+|--------|--------|-------------|
+| `SDMA_PKT_COPY_LINEAR_PHY_MI4` | 8 | Physical linear copy with scope, mtype, and temporal hints |
+| `SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4` | 19 | Combined copy + poll-wait + atomic-signal in one packet |
+| `SDMA_PKT_WRITE_LINEAR_MI4` | 5 | Linear write with cache attributes |
+| `SDMA_PKT_FENCE_MI4` | 4 | Fence with mtype, scope, and temporal hints |
+| `SDMA_PKT_FENCE_64B_MI4` | 5 | 64-bit fence (8-byte aligned addresses) |
+| `SDMA_PKT_CONSTANT_FILL_MI4` | 5 | Constant fill with cache attributes |
+| `SDMA_PKT_POLL_MEM_64B_MI4` | 8 | 64-bit poll memory with cache policy |
+
+Struct names retain the `_MI4` suffix from the hardware MAS.
+
+### Key Optimization: Combined Copy + Signal
+
+On MI300X (pre-OSS7), a copy-with-signal requires **two
+packets** in the SDMA ring: a `COPY_LINEAR` (7 DWORDs)
+followed by an `ATOMIC` (8 DWORDs) for the signal increment.
+
+On OSS7.0, the `COPY_LINEAR_WAIT_SIGNAL_MI4` packet fuses
+both operations into a **single 19-DWORD packet**. The
+`anvil::put_signal_counter_impl` template in
+`anvil_device.hpp` uses this fused path when
+`XIO_SDMA_OSS7` is enabled and a copy is combined with a
+signal and/or counter, eliminating a separate
+reserve/place/submit cycle for one of the atomics.
+
+### Cache and Scope Fields
+
+OSS7.0 packets expose additional cache-control fields not
+present on pre-OSS7 hardware:
+
+- **scope** -- coherence scope (device, system, etc.)
+- **mtype** -- memory type for cache routing
+- **temporal_hint** -- temporal locality hint for the cache
+  hierarchy
+- **sys / snp / gpa / gcc** -- system, snoop, GPA, and GCC
+  flags for fine-grained cache control
+
+These are zero-initialized by the default packet creation
+helpers. Callers that need non-default cache behaviour can
+set the fields on the returned struct before placing the
+packet.
+
+### Source of Truth
+
+The struct definitions in `sdma_pkt_struct_mi4.h` are
+derived from the field-level macros in `sdma-packet.h`,
+which was auto-generated from the OSS7.0 SDMA MAS
+(`OSS_70-sDMA_MAS.md`). The macro header is kept as the
+canonical reference; regenerating the structs should
+re-derive bit layouts from the `_offset`, `_mask`, and
+`_shift` macros.
+
 ## References
 
-- AMD SDMA specifications
+- AMD SDMA specifications (OSS7.0 MAS)
 - ROCm hsakmt documentation
 - Anvil library (RAD team, commit 6df07028)
 - MI300X OAM topology documentation
