@@ -38,7 +38,9 @@ jobs:
           cmake \
           curl \
           libcli11-dev \
-          libdrm-dev
+          libdrm-dev \
+          libopenmpi-dev \
+          openmpi-bin
     - name: List supported GPUs.
       run: |
         mkdir -p build && cd build
@@ -77,3 +79,14 @@ jobs:
       run: |
         ctest --test-dir build -V -L "integration" \
           --parallel --output-on-failure
+    - name: Build examples against installed prefix.
+      run: |
+        for ex in list-endpoints endpoint-info \
+                  sdma-ep-p2p nvme-ep-info \
+                  sdma-ep-allgather; do
+          echo "=== Building example: ${ex} ==="
+          cmake -S examples/${ex} -B /tmp/ex-${ex} \
+            -DCMAKE_PREFIX_PATH="/tmp/rocm-xio-test;/opt/rocm" \
+            -DOFFLOAD_ARCH=gfx942:xnack+
+          cmake --build /tmp/ex-${ex}
+        done
