@@ -42,6 +42,7 @@ struct BackendConfig {
   bool loopback{true};
   DestInfo remote{};
   const char* hca_list{nullptr};
+  bool pci_mmio_bridge{false};
 };
 
 class Backend {

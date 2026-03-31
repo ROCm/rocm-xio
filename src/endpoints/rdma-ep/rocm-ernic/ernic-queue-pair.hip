@@ -17,6 +17,7 @@
  */
 
 #include "queue-pair.hpp"
+#include "xio.h"
 
 #if defined(GDA_ERNIC)
 
@@ -99,21 +100,57 @@ __device__ static inline void* ernic_get_sq_wqe(ernic_device_sq* sq,
 namespace ernic {
 
 __device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
-  if (!qp.ernic_sq_.uar_ptr)
-    return;
+  if (qp.ernic_sq_.sq_ring_prod_tail) {
+    int32_t cur = *qp.ernic_sq_.sq_ring_prod_tail;
+    int32_t next = (cur + 1) & ((qp.ernic_sq_.depth << 1) - 1);
+    *qp.ernic_sq_.sq_ring_prod_tail = next;
+  }
   uint32_t val = (qp.ernic_sq_.qpn & 0x00FFFFFF) | ERNIC_UAR_QP_SEND;
   __threadfence_system();
-  volatile uint32_t* db = qp.ernic_sq_.uar_ptr +
-                          (qp.ernic_sq_.uar_qp_offset / 4);
-  __hip_atomic_store(const_cast<uint32_t*>(db), val, __ATOMIC_SEQ_CST,
-                     __HIP_MEMORY_SCOPE_SYSTEM);
+
+  if (qp.ernic_sq_.use_mmio_bridge && qp.ernic_sq_.mmio_bridge_shadow) {
+    xio::genPciMmioBridgeCmd(qp.ernic_sq_.mmio_bridge_shadow,
+                             qp.ernic_sq_.ernic_target_bdf, 2,
+                             qp.ernic_sq_.uar_bar_offset, val,
+                             PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+  } else if (qp.ernic_sq_.uar_ptr) {
+    volatile uint32_t* db = qp.ernic_sq_.uar_ptr +
+                            (qp.ernic_sq_.uar_qp_offset / 4);
+    __hip_atomic_store(const_cast<uint32_t*>(db), val, __ATOMIC_SEQ_CST,
+                       __HIP_MEMORY_SCOPE_SYSTEM);
+  }
 }
 
 __device__ void Ops::poll_cq_until(QueuePair& qp, uint32_t requested) {
   uint32_t sq_depth = qp.ernic_sq_.depth;
   do {
-    auto* cqe = (struct ernic_cqe*)qp.ernic_cq_.buf;
-    (void)cqe;
+    /*
+     * Check the CQ ring state to detect completions
+     * written by the emulated device server.  The CQ
+     * ring state lives at the start of the CQ buffer
+     * using the PvrdmaRingState layout (two ring
+     * pairs of {prod_tail, cons_head}).  The CQ uses
+     * the second pair: cq_ring[2] = prod_tail
+     * (server-written) and cq_ring[3] = cons_head
+     * (GPU-advanced).
+     *
+     * Advance sq_head for each new CQ entry consumed.
+     */
+    volatile int32_t* cq_ring = (volatile int32_t*)qp.ernic_cq_.buf;
+    if (cq_ring) {
+      int32_t cq_prod = cq_ring[2];
+      int32_t cq_cons = cq_ring[3];
+      if (cq_prod != cq_cons) {
+        uint32_t cq_mask = (qp.ernic_cq_.depth << 1) - 1;
+        int32_t new_cons = (cq_cons + 1) & cq_mask;
+        cq_ring[3] = new_cons;
+        __threadfence_system();
+        qp.ernic_sq_.head++;
+        if (qp.ernic_sq_.head >= sq_depth)
+          qp.ernic_sq_.head = 0;
+      }
+    }
+
     uint32_t sq_head = qp.ernic_sq_.head;
     uint32_t sq_tail = __hip_atomic_load(&qp.ernic_sq_.tail, __ATOMIC_SEQ_CST,
                                          __HIP_MEMORY_SCOPE_AGENT);
