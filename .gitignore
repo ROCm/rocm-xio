@@ -47,29 +47,17 @@ src/endpoints/rdma-ep/rocm-ernic/rocm-ernic-rdma.h
 # Compilation database
 compile_commands.json
 
-# Test binaries and temporary files
-test_dma_alloc
-test_dma_alloc_v2
-test_nvme_complete
-test_nvme_complete_v2
-test_nvme_complete_v3
-check_ioctl_define
-src/tester/check-nvme-status
-src/tester/dump-queue-test
+# Log files
 *.log
 
 # Emacs temporary files
 \#*\#
 
-# Reference materials (external)
-src/reference/
-gda-experiments/rocSHMEM/
-
-
 # rocprofv3 trace output
 .rocprofv3/
 
-# Python cache
+# Python virtual environment and cache
+.venv/
 __pycache__/
 *.pyc
 *.pyo
