@@ -164,10 +164,10 @@ test_run "nvme-ep reject --threads > 1 (expect fail)" \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --threads 2 -n 1'"
 
-test_run "nvme-ep reject --batch-size > wavefront (expect fail)" \
+test_run "nvme-ep reject --batch-size > max block size (expect fail)" \
   "! run_on_host '${WORKING_DIR}/build/xio-tester \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
---batch-size 128 -n 1'"
+--batch-size 1024 -n 1'"
 
 test_run "NVMe-EP memory-mode 0" \
   "run_on_host '${WORKING_DIR}/build/xio-tester \
@@ -202,6 +202,42 @@ nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --access-pattern random --memory-mode 0 \
 --lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
 --queue-length 128 --batch-size 0'"
+
+sleep 3
+
+test_run "NVMe-EP multi-wavefront batch-size 128" \
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 0 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 256 \
+--queue-length 256 --batch-size 128'"
+
+sleep 3
+
+test_run "NVMe-EP num-queues 2" \
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 0 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
+--queue-length 128 --num-queues 2'"
+
+sleep 3
+
+test_run "NVMe-EP num-queues 4" \
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 0 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
+--queue-length 128 --num-queues 4'"
+
+sleep 3
+
+test_run "NVMe-EP num-queues 2 + batch-size 16" \
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random --memory-mode 0 \
+--lbas-per-io 1 --lfsr-seed 32 --read-io 64 \
+--queue-length 128 --num-queues 2 --batch-size 16'"
 
 sleep 3
 

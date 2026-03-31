@@ -785,7 +785,12 @@ hipError_t allocateDataBuffer(size_t size, unsigned memoryMode, void** ptr) {
                 << s << std::endl;
       return hipErrorMemoryAllocation;
     }
-    hipMemset(*ptr, 0, size);
+    hipError_t memErr = hipMemset(*ptr, 0, size);
+    if (memErr != hipSuccess) {
+      freeDeviceMemory(*ptr, XIO_DEVICE_MEM_HIP);
+      *ptr = nullptr;
+      return memErr;
+    }
   } else {
     hipError_t err = allocHostMemory(size, ptr, "Data Buffer",
                                      XIO_HOST_MEM_MAPPED);
