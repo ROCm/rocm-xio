@@ -25,7 +25,13 @@ instructions.
 ## Documentation
 
 Full documentation lives in the [`docs/`](docs/) directory and covers
-building, endpoints, the kernel module, memory modes, and the API reference.
+building, endpoints, the kernel module, memory modes, and the API
+reference. A hosted version is available at the [documentation
+site][docs-site].
+
+<!-- References -->
+
+[docs-site]: https://rocm.github.io/rocm-xio/
 
 ## License
 
