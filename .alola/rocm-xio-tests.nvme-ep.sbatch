@@ -15,6 +15,7 @@
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
 #   Also ensure a recent ROCm version since we need to run outside enroot.
 #SBATCH --constraint=MARKHAM&NVME&(ROCM7.2.0|ROCM7.3.0|ROCM7.1.1|ROCM7.0.1)
+#SBATCH --exclude=mlse-alola-b39-ws4
 
 set -xe
 
