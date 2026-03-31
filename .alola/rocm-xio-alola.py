@@ -225,6 +225,27 @@ def read_sbatch_constraint(script_path):
     return None
 
 
+def read_sbatch_exclude(script_path):
+    """Parse ``#SBATCH --exclude=`` node list
+    from a sbatch script."""
+    try:
+        for line in Path(
+            script_path
+        ).read_text().splitlines():
+            m = re.match(
+                r"^#SBATCH\s+--exclude=(.+)",
+                line)
+            if m:
+                return [
+                    n.strip()
+                    for n in m.group(1).split(",")
+                    if n.strip()
+                ]
+    except OSError:
+        pass
+    return []
+
+
 # ── Job-IDs file I/O ──────────────────────────────────
 
 
@@ -654,10 +675,14 @@ def submit_jobs(
             cmd.append(
                 "--container-mount-home=no")
 
-        if exclude_list:
+        merged_exclude = list(exclude_list)
+        for n in read_sbatch_exclude(script_path):
+            if n not in merged_exclude:
+                merged_exclude.append(n)
+        if merged_exclude:
             cmd.append(
                 "--exclude="
-                + ",".join(exclude_list))
+                + ",".join(merged_exclude))
 
         if partition:
             cmd.append(

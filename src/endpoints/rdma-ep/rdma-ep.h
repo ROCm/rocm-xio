@@ -2,13 +2,23 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * RDMA Endpoint -- GPU-Direct Access (GDA) for RDMA NICs
+ */
+
+/**
+ * @file rdma-ep.h
+ * @brief RDMA Endpoint -- GPU-Direct Access (GDA) for RDMA NICs.
  *
  * Derived from ROCm/rocSHMEM GDA backend, adapted for rocm-xio.
- * Supports three RDMA vendors:
- *   - BNXT (Broadcom Thor 2) -- primary, tested locally
- *   - MLX5 (Mellanox/NVIDIA ConnectX)
- *   - IONIC (Pensando)
+ * Supports four RDMA vendors:
+ *   - BNXT   (Broadcom Thor 2)
+ *   - MLX5   (Mellanox/NVIDIA ConnectX)
+ *   - IONIC  (Pensando)
+ *   - ERNIC  (AMD ROCm ERNIC)
+ *
+ * Operating modes:
+ *   - Loopback  -- QP connected to itself (default, single node)
+ *   - 2-node    -- server/client over TCP QP exchange, then
+ *                  GPU-initiated RDMA WRITE + ping-pong
  */
 
 #ifndef RDMA_EP_H
@@ -26,21 +36,39 @@
 
 namespace rdma_ep {
 
+/**
+ * @brief Configuration for the RDMA endpoint.
+ *
+ * Populated from CLI flags via registerCliOptions() and validated
+ * by validateConfig().  Controls provider selection, queue sizing,
+ * loopback vs 2-node mode, and optional data-pattern verification.
+ */
 struct RdmaEpConfig {
-  std::string providerStr = "bnxt";
-  Provider provider = Provider::BNXT;
-  unsigned iterations = 128;
-  unsigned sqDepth = 256;
-  unsigned cqDepth = 256;
-  uint32_t transferSize = 4096;
-  uint32_t inlineThreshold = 28;
-  bool pcieRelaxedOrdering = false;
-  int trafficClass = 0;
-  bool loopback = true;
-  int gpuDeviceId = 0;
-  bool verify = false;
-  uint32_t seed = 1;
-  std::string deviceName;
+  std::string providerStr = "bnxt";   /**< Provider name string.    */
+  Provider provider = Provider::BNXT; /**< Resolved provider enum.  */
+  unsigned iterations = 128;          /**< RDMA ops per run.        */
+  unsigned sqDepth = 256;             /**< Send-queue depth.        */
+  unsigned cqDepth = 256;             /**< Completion-queue depth.  */
+  uint32_t transferSize = 4096;       /**< Bytes per RDMA WRITE.    */
+  uint32_t inlineThreshold = 28;      /**< Max inline send bytes.   */
+  bool pcieRelaxedOrdering = false;   /**< PCIe relaxed ordering.   */
+  int trafficClass = 0;               /**< QP address-handle TC.    */
+  bool loopback = true;               /**< Loopback mode (default). */
+  int gpuDeviceId = 0;                /**< HIP GPU device index.    */
+  bool verify = false;                /**< LFSR verification flag.  */
+  uint32_t seed = 1;                  /**< LFSR seed value.         */
+  std::string deviceName;             /**< RDMA device name filter. */
+
+  /** @name 2-Node Mode Fields
+   *  Mutually exclusive with loopback mode.
+   *  @{
+   */
+  bool isServer = false;  /**< Run as 2-node server.    */
+  bool isClient = false;  /**< Run as 2-node client.    */
+  std::string serverHost; /**< Server hostname/IP.      */
+  uint32_t ppSize = 64;   /**< Ping-pong total bytes (seq + payload). */
+  uint32_t ppIters = 100; /**< Ping-pong iterations.    */
+  /** @} */
 };
 
 } // namespace rdma_ep
