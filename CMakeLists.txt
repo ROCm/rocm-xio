@@ -224,6 +224,13 @@ setup_code_generation(
   NVME_EP_GENERATED ${INCLUDE_DIR}/nvme-ep-generated.h
 )
 
+# Doorbell fencing mode for NVMe coherence debugging.
+# When ON, ringDoorbell() uses ISA-level cache
+# invalidations on RDNA GPUs instead of the portable
+# __threadfence_system() path.
+option(XIO_DOORBELL_FENCE_AGGRESSIVE
+  "Use aggressive ISA fencing for doorbell writes" OFF)
+
 # GDA provider options for RDMA endpoint
 option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
 option(GDA_MLX5 "Build MLX5 (Mellanox ConnectX) RDMA provider" OFF)
@@ -394,6 +401,13 @@ if(GDA_IONIC)
 endif()
 if(GDA_ERNIC)
   target_compile_definitions(rocm-xio PRIVATE GDA_ERNIC)
+endif()
+
+# Aggressive doorbell fencing (ISA-level cache
+# invalidations on RDNA; see xio.h ringDoorbellFenced)
+if(XIO_DOORBELL_FENCE_AGGRESSIVE)
+  target_compile_definitions(rocm-xio PUBLIC
+    XIO_DOORBELL_FENCE_AGGRESSIVE)
 endif()
 
 # Pass the custom rdma-core lib dir so DV backends

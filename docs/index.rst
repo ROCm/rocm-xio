@@ -56,6 +56,7 @@ Quick Start
    examples
    kernel-module
    memory-modes
+   coherence-prior-art
    hsa-allocator-tracking
 
 .. toctree::
