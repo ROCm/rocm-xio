@@ -122,43 +122,44 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
   hcq->depth = static_cast<uint32_t>(ncqe);
   hcq->length = hcq->depth * hcq->cqe_size;
 
+  /*
+   * Allocate CQ buffer in system memory so the
+   * emulated device server can DMA-map it.
+   * GPU VRAM CQs (hipExtMallocWithFlags) would
+   * require vfio-user DMA proxy support for GPU
+   * BAR regions -- tracked for future work.
+   */
+  size_t pgsz = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  size_t alloc_len = (hcq->length + pgsz - 1) & ~(pgsz - 1);
+  if (alloc_len < pgsz)
+    alloc_len = pgsz;
+
   void* buf_ptr = nullptr;
-  hipError_t herr = hipExtMallocWithFlags(&buf_ptr, hcq->length,
-                                          hipDeviceMallocUncached);
+  if (posix_memalign(&buf_ptr, pgsz, alloc_len)) {
+    fprintf(stderr,
+            "rdma_ep::ernic: "
+            "posix_memalign %s failed\n",
+            label);
+    return;
+  }
+  memset(buf_ptr, 0, alloc_len);
+  hipError_t herr = hipHostRegister(buf_ptr, alloc_len, hipHostRegisterDefault);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::ernic: "
-            "hipExtMallocWithFlags %s "
-            "failed: %s\n",
+            "hipHostRegister %s failed: %s\n",
             label, hipGetErrorString(herr));
+    free(buf_ptr);
     return;
   }
   hcq->buf = buf_ptr;
-  (void)hipMemset(hcq->buf, 0, hcq->length);
 
   struct rocm_ernic_dv_umem_attr ua {};
   ua.addr = hcq->buf;
-  ua.size = hcq->length;
+  ua.size = alloc_len;
   ua.access_flags = IBV_ACCESS_LOCAL_WRITE;
   ua.dmabuf_fd = -1;
-
-  if (dmabuf_enabled) {
-    uint64_t offset = 0;
-    int fd = -1;
-    hsa_status_t ds = xio::exportDmabuf(hcq->buf, hcq->length, &fd, &offset);
-    if (ds != HSA_STATUS_SUCCESS || fd < 0) {
-      fprintf(stderr,
-              "rdma_ep::ernic: exportDmabuf %s "
-              "failed (status=%d), falling back "
-              "to non-dmabuf path\n",
-              label, ds);
-    } else {
-      hcq->dmabuf_fd = fd;
-      ua.dmabuf_fd = fd;
-      ua.addr = reinterpret_cast<void*>(static_cast<uintptr_t>(offset));
-      ua.comp_mask = ROCM_ERNIC_DV_UMEM_FLAGS_DMABUF;
-    }
-  }
+  (void)dmabuf_enabled;
 
   hcq->umem = dv.umem_reg(ctx, &ua);
   if (!hcq->umem) {
@@ -222,6 +223,7 @@ void Backend::ernic_create_qps(int sq_length) {
   ernic_qp_->sq_len = max_swr * sq_wqe_sz;
   if (ernic_qp_->sq_len < pgsz)
     ernic_qp_->sq_len = static_cast<uint32_t>(pgsz);
+  ernic_qp_->sq_len += static_cast<uint32_t>(pgsz);
 
   uint32_t rq_wqe_sz = 64;
   ernic_qp_->rq_depth = max_rwr ? max_rwr : 1;
@@ -307,6 +309,7 @@ void Backend::ernic_create_qps(int sq_length) {
   struct rocm_ernic_dv_qp_attr qp_attr {};
   ernic_dv.get_qp_attr(qp_, &qp_attr);
   ernic_qp_->uar_ptr = qp_attr.uar_ptr;
+  ernic_qp_->uar_mmap_offset = qp_attr.uar_mmap_offset;
   ernic_qp_->uar_qp_offset = qp_attr.uar_qp_offset;
   ernic_qp_->uar_cq_offset = qp_attr.uar_cq_offset;
 
@@ -329,7 +332,43 @@ void Backend::ernic_initialize_gpu_qp() {
   host_qp_->ernic_cq_.cqe_size = ernic_scq_->cqe_size;
 
   memset(&host_qp_->ernic_sq_, 0, sizeof(ernic_device_sq));
-  host_qp_->ernic_sq_.buf = ernic_qp_->sq_buf;
+  host_qp_->ernic_sq_.buf = (char*)ernic_qp_->sq_buf + sysconf(_SC_PAGESIZE);
+  host_qp_->ernic_sq_.sq_ring_prod_tail = (volatile int32_t*)ernic_qp_->sq_buf;
+
+  {
+    char res_path[256];
+    snprintf(res_path, sizeof(res_path),
+             "/sys/class/infiniband/%s/device/resource",
+             ibv.get_device_name(device_));
+    FILE* rf = fopen(res_path, "r");
+    unsigned long bar2_base = 0;
+    if (rf) {
+      unsigned long s, e, f;
+      fscanf(rf, "%lx %lx %lx", &s, &e, &f);
+      fscanf(rf, "%lx %lx %lx", &s, &e, &f);
+      fscanf(rf, "%lx %lx %lx", &bar2_base, &e, &f);
+      fclose(rf);
+    }
+    if (bar2_base && ernic_qp_->uar_mmap_offset >= bar2_base) {
+      uint64_t bar_off64 = (ernic_qp_->uar_mmap_offset - bar2_base) +
+                           ernic_qp_->uar_qp_offset;
+      if (bar_off64 > UINT32_MAX) {
+        fprintf(stderr,
+                "rdma_ep::ernic: UAR BAR2 offset "
+                "0x%lx exceeds 32-bit range, "
+                "MMIO bridge disabled\n",
+                (unsigned long)bar_off64);
+      } else {
+        host_qp_->ernic_sq_.uar_bar_offset = (uint32_t)bar_off64;
+        fprintf(stderr,
+                "rdma_ep::ernic: UAR BAR2 offset=0x%x "
+                "(mmap=0x%lx, bar2=0x%lx, qp_off=0x%x)\n",
+                host_qp_->ernic_sq_.uar_bar_offset,
+                (unsigned long)ernic_qp_->uar_mmap_offset, bar2_base,
+                ernic_qp_->uar_qp_offset);
+      }
+    }
+  }
   host_qp_->ernic_sq_.depth = ernic_qp_->sq_depth;
   host_qp_->ernic_sq_.wqe_size = ernic_qp_->sq_wqe_size;
   host_qp_->ernic_sq_.qpn = qp_->qp_num;
@@ -358,6 +397,76 @@ void Backend::ernic_initialize_gpu_qp() {
     }
     host_qp_->ernic_sq_.uar_ptr = static_cast<volatile uint32_t*>(dev_uar);
     host_qp_->ernic_sq_.uar_qp_offset = ernic_qp_->uar_qp_offset;
+  }
+
+  if (config_.pci_mmio_bridge) {
+    uint16_t bridge_bdf = 0;
+    int bret = xio::detectPciMmioBridgeBdf(&bridge_bdf);
+    if (bret != 0) {
+      fprintf(stderr,
+              "rdma_ep::ernic: "
+              "xio::detectPciMmioBridgeBdf failed: %d\n",
+              bret);
+    } else {
+      void* shadow_cpu = nullptr;
+      bret = xio::mapMmioBridgeShadowBuffer(bridge_bdf, &shadow_cpu);
+      if (bret != 0 || !shadow_cpu) {
+        fprintf(stderr,
+                "rdma_ep::ernic: "
+                "xio::mapMmioBridgeShadowBuffer failed: %d\n",
+                bret);
+      } else {
+        const size_t shadow_size = 8192;
+        void* shadow_gpu = nullptr;
+        int rreg = xio::registerMmioBridgeShadowBufferForGpu(shadow_cpu,
+                                                             shadow_size,
+                                                             &shadow_gpu);
+        if (rreg != 0 || !shadow_gpu) {
+          fprintf(stderr,
+                  "rdma_ep::ernic: "
+                  "registerMmioBridgeShadowBufferForGpu "
+                  "failed: %d\n",
+                  rreg);
+        } else {
+          char sysfs_link[256];
+          snprintf(sysfs_link, sizeof(sysfs_link),
+                   "/sys/class/infiniband/%s/device",
+                   ibv.get_device_name(device_));
+          char link_buf[256];
+          ssize_t llen = readlink(sysfs_link, link_buf, sizeof(link_buf) - 1);
+          uint16_t ernic_bdf = 0;
+          if (llen > 0) {
+            link_buf[llen] = '\0';
+            const char* p = strrchr(link_buf, '/');
+            if (p)
+              p++;
+            else
+              p = link_buf;
+            unsigned b = 0, d = 0, f = 0;
+            if (sscanf(p, "%*x:%x:%x.%x", &b, &d, &f) == 3)
+              ernic_bdf = (uint16_t)((b << 8) | (d << 3) | f);
+          }
+
+          if (ernic_bdf == 0 || host_qp_->ernic_sq_.uar_bar_offset == 0) {
+            fprintf(stderr,
+                    "rdma_ep::ernic: pci-mmio-bridge "
+                    "cannot enable: ernic_bdf=0x%04x, "
+                    "uar_bar_offset=0x%x "
+                    "(sysfs resolution failed)\n",
+                    ernic_bdf, host_qp_->ernic_sq_.uar_bar_offset);
+          } else {
+            host_qp_->ernic_sq_.use_mmio_bridge = true;
+            host_qp_->ernic_sq_.mmio_bridge_shadow = shadow_gpu;
+            host_qp_->ernic_sq_.ernic_target_bdf = ernic_bdf;
+            fprintf(stderr,
+                    "rdma_ep::ernic: pci-mmio-bridge "
+                    "enabled (bridge=0x%04x, "
+                    "ernic=0x%04x, shadow=%p)\n",
+                    bridge_bdf, ernic_bdf, shadow_gpu);
+          }
+        }
+      }
+    }
   }
 
   host_qp_->lkey_ = 0;
