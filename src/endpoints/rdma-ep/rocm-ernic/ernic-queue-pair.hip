@@ -36,7 +36,8 @@ constexpr uint32_t ERNIC_SEND_INLINE = (1 << 3);
 /* UAR doorbell bits */
 constexpr uint32_t ERNIC_UAR_QP_SEND = (1u << 30);
 
-/* WQE header: matches rocm_ernic_sq_wqe_hdr */
+/* WQE header: must be 80 bytes to match the PVRDMA
+ * pvrdma_sq_wqe_hdr ABI used by the emulated device. */
 struct ernic_wqe_hdr {
   uint64_t wr_id;
   uint32_t num_sge;
@@ -61,8 +62,11 @@ struct ernic_wqe_hdr {
       uint32_t rkey;
       uint32_t pad;
     } atomic;
+    uint8_t _pad[48];
   } wr;
 };
+static_assert(sizeof(ernic_wqe_hdr) == 80,
+              "ernic_wqe_hdr must match PVRDMA 80-byte WQE");
 
 /* SGE: matches rocm_ernic_sge */
 struct ernic_sge {
@@ -105,7 +109,7 @@ __device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
     int32_t next = (cur + 1) & ((qp.ernic_sq_.depth << 1) - 1);
     *qp.ernic_sq_.sq_ring_prod_tail = next;
   }
-  uint32_t val = (qp.ernic_sq_.qpn & 0x00FFFFFF) | ERNIC_UAR_QP_SEND;
+  uint32_t val = (qp.ernic_sq_.qp_handle & 0x00FFFFFF) | ERNIC_UAR_QP_SEND;
   __threadfence_system();
 
   if (qp.ernic_sq_.use_mmio_bridge && qp.ernic_sq_.mmio_bridge_shadow) {

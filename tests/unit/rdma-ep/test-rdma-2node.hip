@@ -12,7 +12,7 @@
  *   Client: ./test-rdma-2node --client --server-host <hostname>
  *           [--provider mlx5] [--device mlx5_0]
  *
- * Supports BNXT, MLX5, and IONIC providers via --provider flag.
+ * Supports BNXT, MLX5, IONIC, and ERNIC providers via --provider flag.
  */
 
 #include <cassert>
@@ -23,18 +23,17 @@
 
 #include <hip/hip_runtime.h>
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
+#include "tcp-exchange.hpp"
 #include "vendor-ops.hpp"
 #include "xio-data-pattern.hpp"
 
-#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && !defined(GDA_IONIC)
+#if !defined(GDA_BNXT) && !defined(GDA_MLX5) && !defined(GDA_IONIC) &&         \
+  !defined(GDA_ERNIC)
 int main() {
   printf("SKIP: no GDA vendor enabled.\n");
   return 77;
@@ -42,136 +41,10 @@ int main() {
 #else
 
 using namespace rdma_ep;
+using xio::ExchangeMsg;
 
-static constexpr uint16_t TCP_PORT = 18515;
 static constexpr uint32_t WRITE_SIZE = 4096;
 static constexpr uint8_t DATA_PATTERN = 0xA5;
-
-// --- Wire protocol for TCP exchange ---
-
-struct ExchangeMsg {
-  uint32_t qpn;
-  uint32_t rkey;
-  uint16_t lid;
-  uint16_t pad;
-  uint64_t remote_addr;
-  uint8_t gid[16];
-} __attribute__((packed));
-
-// --- TCP helpers ---
-
-static int tcp_send_all(int fd, const void* buf, size_t len) {
-  const uint8_t* p = static_cast<const uint8_t*>(buf);
-  while (len > 0) {
-    ssize_t n = send(fd, p, len, 0);
-    if (n <= 0)
-      return -1;
-    p += n;
-    len -= n;
-  }
-  return 0;
-}
-
-static int tcp_recv_all(int fd, void* buf, size_t len) {
-  uint8_t* p = static_cast<uint8_t*>(buf);
-  while (len > 0) {
-    ssize_t n = recv(fd, p, len, 0);
-    if (n <= 0)
-      return -1;
-    p += n;
-    len -= n;
-  }
-  return 0;
-}
-
-static int tcp_server_accept() {
-  int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd < 0) {
-    perror("socket");
-    return -1;
-  }
-
-  int opt = 1;
-  setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  struct sockaddr_in addr {};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = htons(TCP_PORT);
-
-  if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    perror("bind");
-    close(listen_fd);
-    return -1;
-  }
-  if (listen(listen_fd, 1) < 0) {
-    perror("listen");
-    close(listen_fd);
-    return -1;
-  }
-
-  printf("TCP: Listening on port %u...\n", TCP_PORT);
-  int conn_fd = accept(listen_fd, nullptr, nullptr);
-  close(listen_fd);
-  if (conn_fd < 0) {
-    perror("accept");
-    return -1;
-  }
-  printf("TCP: Client connected.\n");
-  return conn_fd;
-}
-
-static int tcp_client_connect(const char* hostname) {
-  struct addrinfo hints {
-  }, *res;
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-
-  char port_str[8];
-  snprintf(port_str, sizeof(port_str), "%u", TCP_PORT);
-
-  int err = getaddrinfo(hostname, port_str, &hints, &res);
-  if (err != 0) {
-    fprintf(stderr, "getaddrinfo(%s): %s\n", hostname, gai_strerror(err));
-    return -1;
-  }
-
-  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-  if (fd < 0) {
-    perror("socket");
-    freeaddrinfo(res);
-    return -1;
-  }
-
-  printf("TCP: Connecting to %s:%u...\n", hostname, TCP_PORT);
-  if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-    perror("connect");
-    close(fd);
-    freeaddrinfo(res);
-    return -1;
-  }
-  freeaddrinfo(res);
-  printf("TCP: Connected.\n");
-  return fd;
-}
-
-static int exchange_info(int tcp_fd, const ExchangeMsg& local,
-                         ExchangeMsg* remote) {
-  if (tcp_send_all(tcp_fd, &local, sizeof(local)) != 0)
-    return -1;
-  if (tcp_recv_all(tcp_fd, remote, sizeof(*remote)) != 0)
-    return -1;
-  return 0;
-}
-
-static int tcp_sync(int tcp_fd) {
-  uint8_t byte = 1;
-  if (tcp_send_all(tcp_fd, &byte, 1) != 0)
-    return -1;
-  if (tcp_recv_all(tcp_fd, &byte, 1) != 0)
-    return -1;
-  return 0;
-}
 
 // --- GPU kernels ---
 
@@ -295,7 +168,7 @@ static void print_usage(const char* prog) {
           " [options]\n"
           "\nOptions:\n"
           "  --provider P          "
-          "bnxt|mlx5|ionic|auto"
+          "bnxt|mlx5|ionic|ernic|auto"
           " (default: auto)\n"
           "  --device DEV          "
           "RDMA device name"
@@ -339,8 +212,14 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (pp_size < 8) {
-    fprintf(stderr, "Pingpong size must be >= 8 bytes\n");
+  if (pp_size < 16) {
+    fprintf(stderr, "Pingpong size must be >= 16 bytes"
+                    " (8-byte seq header + payload)\n");
+    return 1;
+  }
+  if ((pp_size % 8) != 0) {
+    fprintf(stderr, "Pingpong size must be a multiple"
+                    " of 8 (PingPongBuf alignment)\n");
     return 1;
   }
 
@@ -375,6 +254,15 @@ int main(int argc, char** argv) {
     fprintf(stderr, "GDA_IONIC not enabled in build.\n");
     return 1;
 #endif
+  } else if (strcmp(provider_str, "ernic") == 0 ||
+             strcmp(provider_str, "rocm-ernic") == 0 ||
+             strcmp(provider_str, "rocm_ernic") == 0) {
+#if defined(GDA_ERNIC)
+    prov = Provider::ROCM_ERNIC;
+#else
+    fprintf(stderr, "GDA_ERNIC not enabled in build.\n");
+    return 1;
+#endif
   } else if (strcmp(provider_str, "auto") == 0) {
 #if defined(GDA_IONIC)
     if (detect_pci_vendor(VENDOR_ID_PENSANDO)) {
@@ -392,6 +280,15 @@ int main(int argc, char** argv) {
       if (detect_pci_vendor(VENDOR_ID_BROADCOM)) {
       prov = Provider::BNXT;
       printf("Auto-detected: bnxt (0x%04x)\n", VENDOR_ID_BROADCOM);
+    } else
+#endif
+    // ERNIC last: VENDOR_ID_AMD (0x1022) matches many AMD
+    // PCI devices, not just ERNIC.  A more precise check
+    // (device ID or driver name) is a follow-up.
+#if defined(GDA_ERNIC)
+      if (detect_pci_vendor(VENDOR_ID_AMD)) {
+      prov = Provider::ROCM_ERNIC;
+      printf("Auto-detected: ernic (0x%04x)\n", VENDOR_ID_AMD);
     } else
 #endif
     {
@@ -474,9 +371,9 @@ int main(int argc, char** argv) {
   // --- TCP exchange ---
   int tcp_fd;
   if (is_server) {
-    tcp_fd = tcp_server_accept();
+    tcp_fd = xio::tcp_server_accept();
   } else {
-    tcp_fd = tcp_client_connect(server_host);
+    tcp_fd = xio::tcp_client_connect(server_host);
   }
   if (tcp_fd < 0) {
     fprintf(stderr, "TCP setup failed.\n");
@@ -493,7 +390,7 @@ int main(int argc, char** argv) {
   memcpy(local_msg.gid, local_dest.gid.raw, 16);
 
   ExchangeMsg remote_msg{};
-  ret = exchange_info(tcp_fd, local_msg, &remote_msg);
+  ret = xio::exchange_info(tcp_fd, local_msg, &remote_msg);
   if (ret != 0) {
     fprintf(stderr, "TCP exchange failed.\n");
     close(tcp_fd);
@@ -536,8 +433,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Sync before test
-  tcp_sync(tcp_fd);
+  if (xio::tcp_sync(tcp_fd) != 0) {
+    fprintf(stderr, "tcp_sync failed.\n");
+    close(tcp_fd);
+    return 1;
+  }
 
   // ============================================================
   // Test 1: RDMA WRITE correctness
@@ -559,8 +459,11 @@ int main(int argc, char** argv) {
     printf("[CLIENT] RDMA WRITE complete.\n");
   }
 
-  // Sync: client tells server write is done
-  tcp_sync(tcp_fd);
+  if (xio::tcp_sync(tcp_fd) != 0) {
+    fprintf(stderr, "tcp_sync failed.\n");
+    close(tcp_fd);
+    return 1;
+  }
 
   if (is_server) {
     int errors = 0;
@@ -582,7 +485,11 @@ int main(int argc, char** argv) {
     }
   }
 
-  tcp_sync(tcp_fd);
+  if (xio::tcp_sync(tcp_fd) != 0) {
+    fprintf(stderr, "tcp_sync failed.\n");
+    close(tcp_fd);
+    return 1;
+  }
 
   // ============================================================
   // Test 2: Ping-pong with LFSR data verification
@@ -607,7 +514,13 @@ int main(int argc, char** argv) {
   (void)hipMemcpy(d_elapsed, &h_elapsed, sizeof(h_elapsed),
                   hipMemcpyHostToDevice);
 
-  tcp_sync(tcp_fd);
+  if (xio::tcp_sync(tcp_fd) != 0) {
+    fprintf(stderr, "tcp_sync failed.\n");
+    (void)hipFree(d_errors);
+    (void)hipFree(d_elapsed);
+    close(tcp_fd);
+    return 1;
+  }
 
   if (is_client) {
     hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
@@ -677,7 +590,8 @@ int main(int argc, char** argv) {
   (void)hipFree(d_errors);
   (void)hipFree(d_elapsed);
 
-  tcp_sync(tcp_fd);
+  if (xio::tcp_sync(tcp_fd) != 0)
+    fprintf(stderr, "final tcp_sync failed (non-fatal)\n");
 
   // --- Cleanup ---
   close(tcp_fd);
@@ -688,4 +602,4 @@ int main(int argc, char** argv) {
   return 0;
 }
 
-#endif // GDA_BNXT || GDA_MLX5 || GDA_IONIC
+#endif // GDA_BNXT || GDA_MLX5 || GDA_IONIC || GDA_ERNIC
