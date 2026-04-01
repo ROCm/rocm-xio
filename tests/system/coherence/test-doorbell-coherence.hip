@@ -30,16 +30,6 @@
 
 #include "xio.h"
 
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t err = (call);                                                   \
-    if (err != hipSuccess) {                                                   \
-      fprintf(stderr, "HIP error %d (%s) at %s:%d\n", err,                     \
-              hipGetErrorString(err), __FILE__, __LINE__);                     \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
 struct CoherenceCmd {
   volatile uint32_t cmd_id;
   volatile uint32_t payload;
@@ -49,10 +39,6 @@ struct CoherenceCpl {
   volatile uint32_t cpl_id;
   volatile uint32_t status;
 };
-
-static constexpr uint32_t CMD_EMPTY = 0;
-static constexpr uint32_t CPL_PENDING = 0;
-static constexpr uint32_t CPL_DONE = 1;
 
 __global__ void coherence_kernel(volatile CoherenceCmd* sq,
                                  volatile CoherenceCpl* cq,

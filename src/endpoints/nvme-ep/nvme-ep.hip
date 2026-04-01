@@ -450,6 +450,7 @@ __device__ static void driveEndpointWavefront(
   __shared__ unsigned sh_ops_done;
   __shared__ unsigned sh_batch_count;
   __shared__ bool sh_stop;
+  __shared__ bool sh_error;
   extern __shared__ unsigned long long int sh_startTimes[];
 
   if (tid == 0) {
@@ -458,6 +459,7 @@ __device__ static void driveEndpointWavefront(
     sh_expected_phase = 1;
     sh_ops_done = 0;
     sh_stop = false;
+    sh_error = false;
 
     if (has_write_buffer) {
       dataPatternParams patternParams;
@@ -535,21 +537,32 @@ __device__ static void driveEndpointWavefront(
         }
 
         if (!prp_valid) {
-          __builtin_trap();
-        }
-        sqeSetup(sqe, lba, blocks);
-
-        if (!ioParams.infiniteMode && config.startTimes != nullptr) {
-          config.startTimes[op_idx] = wall_clock64();
-        } else if (useBatchTiming) {
-          sh_startTimes[b] = wall_clock64();
+          printf("NVMe PRP setup failed: "
+                 "tid=%u op_idx=%u b=%u\n",
+                 tid, op_idx, b);
+          sh_error = true;
         }
 
-        uint16_t my_slot = (sq_tail_base + b) % ioParams.queueSize;
-        nvme_ep::sqeWrite(sqeLocal, &sqeAddr[my_slot]);
+        if (!sh_error) {
+          sqeSetup(sqe, lba, blocks);
+
+          if (!ioParams.infiniteMode && config.startTimes != nullptr) {
+            config.startTimes[op_idx] = wall_clock64();
+          } else if (useBatchTiming) {
+            sh_startTimes[b] = wall_clock64();
+          }
+
+          uint16_t my_slot = (sq_tail_base + b) % ioParams.queueSize;
+          nvme_ep::sqeWrite(sqeLocal, &sqeAddr[my_slot]);
+        }
       }
     }
     __syncthreads();
+
+    if (sh_error) {
+      sh_stop = true;
+      break;
+    }
 
     // --- Phase 3: thread 0 rings doorbell, polls CQEs ---
     if (tid == 0) {
@@ -586,7 +599,8 @@ __device__ static void driveEndpointWavefront(
                    "%u polls (cq_head=%u "
                    "expected_phase=%u)\n",
                    poll_count, (unsigned)cq_head, (unsigned)expected_phase);
-            __builtin_trap();
+            sh_stop = true;
+            break;
           }
         }
 
@@ -602,7 +616,8 @@ __device__ static void driveEndpointWavefront(
                  (unsigned)nvme_ep::cqeStatusCode(&cqe_new),
                  (unsigned)nvme_ep::cqeStatusType(&cqe_new),
                  (unsigned)cqe_new.command_id, (unsigned)cqe_new.sq_head);
-          __builtin_trap();
+          sh_stop = true;
+          break;
         }
 
         if (!ioParams.infiniteMode && config.endTimes != nullptr) {
@@ -1100,6 +1115,51 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       perQueueStats[q]->maxDuration = 0;
       perQueueStats[q]->sumDuration = 0;
       perQueueStats[q]->count = 0;
+    }
+  }
+
+  // ---- Check GPU lockup timeout for infinite mode ----
+  // Multi-wavefront kernels with __syncthreads() barriers
+  // cannot be preempted by the GPU scheduler. If the
+  // amdgpu lockup_timeout is finite, the driver will
+  // reset the GPU after the timeout expires. The param
+  // is read-only at runtime; set at module load time.
+  if (ioParams.infiniteMode && kernelThreads > nvmeConfig->wavefrontSize) {
+    const char* sysfs_path = "/sys/module/amdgpu/parameters/lockup_timeout";
+    FILE* f = fopen(sysfs_path, "r");
+    if (f) {
+      char buf[64] = {};
+      bool timeout_ok = false;
+      if (fgets(buf, sizeof(buf), f)) {
+        char* comma1 = strchr(buf, ',');
+        if (comma1) {
+          char* compute_str = comma1 + 1;
+          char* comma2 = strchr(compute_str, ',');
+          if (comma2)
+            *comma2 = '\0';
+          int compute_val = atoi(compute_str);
+          timeout_ok = (compute_val < 0);
+        } else {
+          int val = atoi(buf);
+          timeout_ok = (val < 0);
+        }
+      }
+      fclose(f);
+
+      if (!timeout_ok) {
+        fprintf(stderr, "Error: amdgpu lockup_timeout is not "
+                        "set to infinity.\n"
+                        "  Multi-wavefront infinite kernels "
+                        "cannot be preempted and will "
+                        "trigger a GPU reset.\n"
+                        "  Fix: add to /etc/modprobe.d/"
+                        "amdgpu-lockup.conf:\n"
+                        "    options amdgpu "
+                        "lockup_timeout=-1\n"
+                        "  Then: sudo update-initramfs -u "
+                        "&& sudo reboot\n");
+        return hipErrorNotSupported;
+      }
     }
   }
 
