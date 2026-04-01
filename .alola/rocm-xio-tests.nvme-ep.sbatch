@@ -13,9 +13,7 @@
 #SBATCH --gpus-per-node=1
 #   Ensure job only runs on nodes with spare NVMe devices
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
-#   Also ensure a recent ROCm version since we need to run outside enroot.
 #SBATCH --constraint=MARKHAM&NVME
-#SBATCH --exclude=mlse-alola-b39-ws4,mlse-alola-b39-ws6,ctr-cx66-mi300x-13
 
 set -xe
 

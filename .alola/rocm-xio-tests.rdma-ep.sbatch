@@ -20,7 +20,6 @@
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&IB
-#SBATCH --exclude=banff-cyxtera-s81-5
 #SBATCH --gpus-per-node=1
 
 set -xe
