@@ -12,8 +12,6 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
-#include <CLI/CLI.hpp>
-
 #include "anvil.hpp"
 #include "anvil_device.hpp"
 #include "sdma-ep.h"
@@ -132,53 +130,6 @@ void destroyQueue(SdmaQueueInfo* info) {
   if (info) {
     info->deviceHandle = nullptr;
   }
-}
-
-void registerCliOptions(CLI::App& app, SdmaEpConfig* config) {
-  app
-    .add_option("--src-gpu", config->srcDeviceId,
-                "Source HIP device ID (default: 0)")
-    ->default_val(-1)
-    ->group("Endpoint Options");
-  app
-    .add_option("--dst-gpu", config->dstDeviceId,
-                "Destination HIP device ID for P2P "
-                "(default: 1)")
-    ->default_val(-1)
-    ->group("Endpoint Options");
-
-  CLI::App* p2p =
-    app.add_subcommand("p2p", "Simple P2P between GPU -> GPU or GPU -> Host");
-  p2p
-    ->add_flag("--to-host", config->useHostDst,
-               "Use pinned host memory as destination "
-               "(single GPU only)")
-    ->group("Endpoint Options");
-  p2p
-    ->add_flag("--verify", config->verifyData,
-               "Verify destination buffer after transfer")
-    ->group("Endpoint Options");
-
-  CLI::App* pingPong =
-    app.add_subcommand("ping-pong", "Bidirectional ping-pong transfer between "
-                                    "two GPUs");
-  pingPong
-    ->add_flag("--use-counter", config->useCounter,
-               "Use counter-based completion")
-    ->group("Endpoint Options");
-  pingPong
-    ->add_flag("--use-flush", config->useFlush, "Use flush-based completion")
-    ->group("Endpoint Options");
-
-  CLI::App* bufferReuse = app.add_subcommand("buffer-reuse",
-                                             "Test buffer reuse patterns");
-  bufferReuse
-    ->add_flag("--use-counter", config->useCounter,
-               "Use counter-based completion")
-    ->group("Endpoint Options");
-  bufferReuse
-    ->add_flag("--use-flush", config->useFlush, "Use flush-based completion")
-    ->group("Endpoint Options");
 }
 
 std::string validateConfig(SdmaEpConfig* config) {

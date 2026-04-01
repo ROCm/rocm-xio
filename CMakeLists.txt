@@ -279,6 +279,7 @@ list(APPEND LIB_SOURCES
   ${COMMON_DIR}/ibv-wrapper.cpp
   ${COMMON_DIR}/rdma-topology.cpp
   ${COMMON_DIR}/rdma-numa-wrapper.cpp
+  ${COMMON_DIR}/xio-env.cpp
 )
 
 # Add GDA backend for rdma-ep
@@ -335,6 +336,7 @@ set_source_files_properties(
   ${COMMON_DIR}/ibv-wrapper.cpp
   ${COMMON_DIR}/rdma-topology.cpp
   ${COMMON_DIR}/rdma-numa-wrapper.cpp
+  ${COMMON_DIR}/xio-env.cpp
   ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
   PROPERTIES LANGUAGE HIP
 )
@@ -435,7 +437,6 @@ apply_endpoint_defines(rocm-xio ${LIB_SOURCES} ${ENDPOINTS_DIR})
 # OSS7.0 SDMA packet support
 if(XIO_SDMA_OSS7)
   target_compile_definitions(rocm-xio PRIVATE XIO_SDMA_OSS7=1)
-  target_compile_definitions(xio-tester PRIVATE XIO_SDMA_OSS7=1)
   message(STATUS "SDMA OSS7.0 packet support enabled"
     " (arch: ${_BARE_ARCH})")
 else()
@@ -458,9 +459,17 @@ set_source_files_properties(
   "${INCLUDE_DIR}/nvme-ep-generated.h"
 )
 
+option(BUILD_CLIENTS "Build client tools (xio-tester)" ON)
+
+if(BUILD_CLIENTS)
+
 file(GLOB TESTER_SOURCES ${TESTER_DIR}/*.cpp)
 file(GLOB TESTER_HEADERS ${TESTER_DIR}/*.h)
 add_executable(xio-tester ${TESTER_SOURCES})
+
+if(XIO_SDMA_OSS7)
+  target_compile_definitions(xio-tester PRIVATE XIO_SDMA_OSS7=1)
+endif()
 
 # Mark C++ sources as HIP language so they compile with hipcc
 set_source_files_properties(${TESTER_SOURCES}
@@ -476,6 +485,11 @@ target_compile_options(xio-tester PRIVATE
 
 target_include_directories(xio-tester PRIVATE
   ${INCLUDE_DIR}
+  ${TESTER_DIR}
+  ${ENDPOINTS_DIR}/nvme-ep
+  ${ENDPOINTS_DIR}/rdma-ep
+  ${ENDPOINTS_DIR}/sdma-ep
+  ${ENDPOINTS_DIR}/test-ep
 )
 
 target_link_libraries(xio-tester PRIVATE
@@ -497,6 +511,8 @@ if(RDMA_CORE_LIB_DIR)
     INSTALL_RPATH "${RDMA_CORE_LIB_DIR}"
   )
 endif()
+
+endif() # BUILD_CLIENTS
 
 #-----------------------------------------------------------------------------
 # Install configuration
@@ -540,7 +556,7 @@ endforeach()
 
 # Optionally install tester executable
 option(INSTALL_TESTER "Install xio-tester executable" OFF)
-if(INSTALL_TESTER)
+if(INSTALL_TESTER AND BUILD_CLIENTS)
     install(TARGETS xio-tester
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT rocm-xio-tester

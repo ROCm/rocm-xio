@@ -18,8 +18,6 @@
 
 #include <hip/hip_runtime.h>
 
-#include <CLI/CLI.hpp>
-
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
 #include "rdma-ep.h"
@@ -147,127 +145,9 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
 #ifndef __HIP_DEVICE_COMPILE__
 
 #include "tcp-exchange.hpp"
+#include "xio-env.h"
 
 namespace rdma_ep {
-
-__host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config) {
-  const std::string group = "RDMA Endpoint Options";
-
-  app
-    .add_option("-n,--iterations", config->iterations,
-                "Number of RDMA operations")
-    ->default_val(128)
-    ->check(CLI::PositiveNumber)
-    ->group(group);
-
-  app
-    .add_option("--provider", config->providerStr,
-                "RDMA provider: bnxt, mlx5, ionic,"
-                " or ernic")
-    ->default_val("bnxt")
-    ->check(CLI::IsMember({"bnxt", "bnxt_re", "mlx5", "ionic", "pensando",
-                           "ernic", "rocm_ernic", "rocm-ernic"},
-                          CLI::ignore_case))
-    ->group(group);
-
-  app
-    .add_option("--device", config->deviceName,
-                "RDMA device name"
-                " (e.g. rocm-rdma-bnxt0)")
-    ->default_val("")
-    ->group(group);
-
-  app
-    .add_option("--sq-depth", config->sqDepth, "Send queue depth (power of 2)")
-    ->default_val(256)
-    ->group(group);
-
-  app.add_option("--cq-depth", config->cqDepth, "Completion queue depth")
-    ->default_val(256)
-    ->group(group);
-
-  app
-    .add_option("--transfer-size", config->transferSize,
-                "Transfer size per operation"
-                " in bytes")
-    ->default_val(4096)
-    ->check(CLI::PositiveNumber)
-    ->group(group);
-
-  app
-    .add_option("--inline-threshold", config->inlineThreshold,
-                "Max bytes for inline sends")
-    ->default_val(28)
-    ->group(group);
-
-  app
-    .add_flag("--loopback,!--no-loopback", config->loopback,
-              "Connect QP to itself (default: on)")
-    ->group(group);
-
-  const std::string twonode_group = "2-Node Mode";
-
-  auto* server_flag = app
-                        .add_flag("--server", config->isServer,
-                                  "Run as 2-node server (TCP listener)")
-                        ->group(twonode_group);
-
-  auto* client_flag = app
-                        .add_flag("--client", config->isClient,
-                                  "Run as 2-node client (connects to server)")
-                        ->group(twonode_group);
-
-  server_flag->excludes(client_flag);
-  client_flag->excludes(server_flag);
-
-  app
-    .add_option("--server-host", config->serverHost,
-                "Server hostname/IP (required with --client)")
-    ->needs(client_flag)
-    ->group(twonode_group);
-
-  app
-    .add_option("--pingpong-size", config->ppSize,
-                "Ping-pong buffer in bytes"
-                " (min 16: 8-byte seq + payload)")
-    ->default_val(64)
-    ->check(CLI::Range(static_cast<uint32_t>(16),
-                       static_cast<uint32_t>(16 * 1024 * 1024)))
-    ->group(twonode_group);
-
-  app
-    .add_option("--pingpong-iters", config->ppIters,
-                "Number of ping-pong round trips")
-    ->default_val(100)
-    ->check(CLI::PositiveNumber)
-    ->group(twonode_group);
-
-  app.add_option("--gpu-device", config->gpuDeviceId, "HIP GPU device ID")
-    ->default_val(0)
-    ->group(group);
-
-  app
-    .add_flag("--pcie-relaxed-ordering", config->pcieRelaxedOrdering,
-              "Enable PCIe relaxed ordering")
-    ->group(group);
-
-  app
-    .add_option("--traffic-class", config->trafficClass,
-                "Traffic class for QP AH")
-    ->default_val(0)
-    ->group(group);
-
-  app
-    .add_flag("--verify", config->verify,
-              "Verify data with LFSR pattern"
-              " after each run")
-    ->group(group);
-
-  app.add_option("--seed", config->seed, "LFSR seed for data pattern")
-    ->default_val(1)
-    ->check(CLI::PositiveNumber)
-    ->group(group);
-}
 
 __host__ std::string validateConfig(RdmaEpConfig* config) {
   if (!config)
@@ -315,7 +195,7 @@ __host__ unsigned getIterations(void* endpointConfig) {
 
 hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
-    fprintf(stderr, "rdma-ep: Missing endpoint config\n");
+    ROCXIO_LOG_ERROR("rdma-ep: Missing endpoint config\n");
     return hipErrorInvalidValue;
   }
 
@@ -325,11 +205,10 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                          : cfg->isClient ? "client"
                                          : "loopback";
 
-  fprintf(stderr,
-          "rdma-ep: provider=%s mode=%s"
-          " sq_depth=%u iters=%u size=%u\n",
-          rdma_ep::provider_name(cfg->provider), mode_str, cfg->sqDepth,
-          cfg->iterations, cfg->transferSize);
+  ROCXIO_LOG_INFO("rdma-ep: provider=%s mode=%s"
+                  " sq_depth=%u iters=%u size=%u\n",
+                  rdma_ep::provider_name(cfg->provider), mode_str, cfg->sqDepth,
+                  cfg->iterations, cfg->transferSize);
 
   rdma_ep::BackendConfig bcfg;
   bcfg.provider = cfg->provider;
@@ -345,16 +224,16 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   rdma_ep::Backend backend(bcfg);
   int ret = backend.init();
   if (ret != 0) {
-    fprintf(stderr, "rdma-ep: Backend init failed\n");
+    ROCXIO_LOG_ERROR("rdma-ep: Backend init failed\n");
     return hipErrorUnknown;
   }
 
-  fprintf(stderr, "rdma-ep: Backend initialized.\n");
+  ROCXIO_LOG_INFO("rdma-ep: Backend initialized.\n");
 
   rdma_ep::QueuePair* gpu_qp = backend.get_gpu_qp();
 
   if (!gpu_qp) {
-    fprintf(stderr, "rdma-ep: No GPU QueuePair available."
+    ROCXIO_LOG_INFO("rdma-ep: No GPU QueuePair available."
                     " Backend init verified OK.\n");
     backend.shutdown();
     return hipSuccess;
@@ -368,7 +247,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     size_t buf_size = xfer * 2;
     void* buf = nullptr;
     if (posix_memalign(&buf, 4096, buf_size)) {
-      fprintf(stderr, "rdma-ep: posix_memalign failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: posix_memalign failed\n");
       backend.shutdown();
       return hipErrorMemoryAllocation;
     }
@@ -384,18 +263,17 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     ret = backend.register_data_buffer(buf, buf_size);
     if (ret != 0) {
-      fprintf(stderr, "rdma-ep: register_data_buffer failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
       free(buf);
       backend.shutdown();
       return hipErrorUnknown;
     }
 
-    fprintf(stderr,
-            "rdma-ep: Buffer registered:"
-            " lkey=0x%x rkey=0x%x\n",
-            backend.get_lkey(), backend.get_rkey());
-    fprintf(stderr, "rdma-ep: src=%p dst=%p size=%zu\n", (void*)src, (void*)dst,
-            xfer);
+    ROCXIO_LOG_DEBUG("rdma-ep: Buffer registered:"
+                     " lkey=0x%x rkey=0x%x\n",
+                     backend.get_lkey(), backend.get_rkey());
+    ROCXIO_LOG_DEBUG("rdma-ep: src=%p dst=%p size=%zu\n", (void*)src,
+                     (void*)dst, xfer);
 
     hipLaunchKernelGGL(rdma_ep::rdma_ep_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                        (void*)src, (void*)dst, config->startTimes,
@@ -404,8 +282,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
-      fprintf(stderr, "rdma-ep: Kernel launch failed: %s\n",
-              hipGetErrorString(launchErr));
+      ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed: %s\n",
+                       hipGetErrorString(launchErr));
       free(buf);
       backend.shutdown();
       return launchErr;
@@ -413,17 +291,16 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     hipError_t syncErr = hipDeviceSynchronize();
     if (syncErr != hipSuccess) {
-      fprintf(stderr, "rdma-ep: Kernel sync failed: %s\n",
-              hipGetErrorString(syncErr));
+      ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
+                       hipGetErrorString(syncErr));
       free(buf);
       backend.shutdown();
       return syncErr;
     }
 
-    fprintf(stderr,
-            "rdma-ep: Kernel completed"
-            " %u iterations.\n",
-            config->iterations);
+    ROCXIO_LOG_INFO("rdma-ep: Kernel completed"
+                    " %u iterations.\n",
+                    config->iterations);
 
     if (cfg->verify) {
       size_t errOff = 0;
@@ -432,15 +309,13 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                                 cfg->seed, &errOff};
       bool ok = xio::dataPattern(true, vp);
       if (ok) {
-        fprintf(stderr,
-                "rdma-ep: VERIFY PASSED"
-                " (%zu bytes, seed=%u)\n",
-                xfer, cfg->seed);
+        ROCXIO_LOG_INFO("rdma-ep: VERIFY PASSED"
+                        " (%zu bytes, seed=%u)\n",
+                        xfer, cfg->seed);
       } else {
-        fprintf(stderr,
-                "rdma-ep: VERIFY FAILED at"
-                " offset %zu (seed=%u)\n",
-                errOff, cfg->seed);
+        ROCXIO_LOG_ERROR("rdma-ep: VERIFY FAILED at"
+                         " offset %zu (seed=%u)\n",
+                         errOff, cfg->seed);
       }
     }
 
@@ -462,20 +337,18 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     size_t pp_recv_offset = write_size + pp_size;
     size_t total_reg_size = write_size + pp_size * 2 + 4096;
 
-    fprintf(stderr,
-            "rdma-ep: 2-node buffer: total_reg=%zu"
-            " write=%u pp=%u\n",
-            total_reg_size, write_size, pp_size);
+    ROCXIO_LOG_DEBUG("rdma-ep: 2-node buffer: total_reg=%zu"
+                     " write=%u pp=%u\n",
+                     total_reg_size, write_size, pp_size);
 
     void* reg_buf = nullptr;
     hipError_t herr = hipHostMalloc(&reg_buf, total_reg_size,
                                     hipHostMallocMapped |
                                       hipHostMallocCoherent);
     if (herr != hipSuccess) {
-      fprintf(stderr,
-              "rdma-ep: hipHostMalloc(coherent)"
-              " failed: %s\n",
-              hipGetErrorString(herr));
+      ROCXIO_LOG_ERROR("rdma-ep: hipHostMalloc(coherent)"
+                       " failed: %s\n",
+                       hipGetErrorString(herr));
       backend.shutdown();
       return herr;
     }
@@ -494,16 +367,15 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     ret = backend.register_data_buffer(reg_buf, total_reg_size);
     if (ret != 0) {
-      fprintf(stderr, "rdma-ep: register_data_buffer failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
       (void)hipHostFree(reg_buf);
       backend.shutdown();
       return hipErrorUnknown;
     }
 
-    fprintf(stderr,
-            "rdma-ep: Buffer registered:"
-            " lkey=0x%x rkey=0x%x size=%zu\n",
-            backend.get_lkey(), backend.get_rkey(), total_reg_size);
+    ROCXIO_LOG_DEBUG("rdma-ep: Buffer registered:"
+                     " lkey=0x%x rkey=0x%x size=%zu\n",
+                     backend.get_lkey(), backend.get_rkey(), total_reg_size);
 
     // --- TCP QP exchange ---
     int tcp_fd;
@@ -513,7 +385,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       tcp_fd = xio::tcp_client_connect(cfg->serverHost.c_str());
     }
     if (tcp_fd < 0) {
-      fprintf(stderr, "rdma-ep: TCP setup failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: TCP setup failed\n");
       (void)hipHostFree(reg_buf);
       backend.shutdown();
       return hipErrorUnknown;
@@ -531,23 +403,21 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     xio::ExchangeMsg remote_msg{};
     ret = xio::exchange_info(tcp_fd, local_msg, &remote_msg);
     if (ret != 0) {
-      fprintf(stderr, "rdma-ep: TCP exchange failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: TCP exchange failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
       return hipErrorUnknown;
     }
 
-    fprintf(stderr,
-            "rdma-ep: Local  QPN=%u rkey=0x%x"
-            " addr=0x%lx\n",
-            local_msg.qpn, local_msg.rkey,
-            (unsigned long)local_msg.remote_addr);
-    fprintf(stderr,
-            "rdma-ep: Remote QPN=%u rkey=0x%x"
-            " addr=0x%lx\n",
-            remote_msg.qpn, remote_msg.rkey,
-            (unsigned long)remote_msg.remote_addr);
+    ROCXIO_LOG_DEBUG("rdma-ep: Local  QPN=%u rkey=0x%x"
+                     " addr=0x%lx\n",
+                     local_msg.qpn, local_msg.rkey,
+                     (unsigned long)local_msg.remote_addr);
+    ROCXIO_LOG_DEBUG("rdma-ep: Remote QPN=%u rkey=0x%x"
+                     " addr=0x%lx\n",
+                     remote_msg.qpn, remote_msg.rkey,
+                     (unsigned long)remote_msg.remote_addr);
 
     // --- Connect QP to peer ---
     rdma_ep::DestInfo peer{};
@@ -558,26 +428,26 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     ret = backend.connect_to_peer(peer);
     if (ret != 0) {
-      fprintf(stderr, "rdma-ep: connect_to_peer failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: connect_to_peer failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
       return hipErrorUnknown;
     }
-    fprintf(stderr, "rdma-ep: QP connected to peer.\n");
+    ROCXIO_LOG_INFO("rdma-ep: QP connected to peer.\n");
 
     ret = backend.set_remote_rkey(remote_msg.rkey);
     if (ret != 0) {
-      fprintf(stderr, "rdma-ep: set_remote_rkey failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: set_remote_rkey failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
       return hipErrorUnknown;
     }
-    fprintf(stderr, "rdma-ep: Remote rkey set to 0x%x\n", remote_msg.rkey);
+    ROCXIO_LOG_DEBUG("rdma-ep: Remote rkey set to 0x%x\n", remote_msg.rkey);
 
     if (xio::tcp_sync(tcp_fd) != 0) {
-      fprintf(stderr, "rdma-ep: tcp_sync failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
@@ -585,34 +455,32 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
 
     // --- Test 1: RDMA WRITE correctness ---
-    fprintf(stderr, "\nrdma-ep: --- RDMA WRITE Correctness"
+    ROCXIO_LOG_INFO("\nrdma-ep: --- RDMA WRITE Correctness"
                     " ---\n");
 
     if (cfg->isClient) {
       void* remote_data = reinterpret_cast<void*>(remote_msg.remote_addr);
 
-      fprintf(stderr,
-              "rdma-ep: WRITE %u bytes"
-              " to server...\n",
-              write_size);
+      ROCXIO_LOG_INFO("rdma-ep: WRITE %u bytes"
+                      " to server...\n",
+                      write_size);
       hipLaunchKernelGGL(rdma_ep::rdma_write_kernel, dim3(1), dim3(1), 0, 0,
                          gpu_qp, remote_data, data_region, write_size);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
-        fprintf(stderr,
-                "rdma-ep: WRITE kernel failed:"
-                " %s\n",
-                hipGetErrorString(herr));
+        ROCXIO_LOG_ERROR("rdma-ep: WRITE kernel failed:"
+                         " %s\n",
+                         hipGetErrorString(herr));
         close(tcp_fd);
         (void)hipHostFree(reg_buf);
         backend.shutdown();
         return herr;
       }
-      fprintf(stderr, "rdma-ep: WRITE complete.\n");
+      ROCXIO_LOG_INFO("rdma-ep: WRITE complete.\n");
     }
 
     if (xio::tcp_sync(tcp_fd) != 0) {
-      fprintf(stderr, "rdma-ep: tcp_sync failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
@@ -624,24 +492,21 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       for (uint32_t i = 0; i < write_size; i++) {
         if (data_region[i] != DATA_PATTERN) {
           if (errors < 5)
-            fprintf(stderr,
-                    "  MISMATCH at %u:"
-                    " expected 0x%02x,"
-                    " got 0x%02x\n",
-                    i, DATA_PATTERN, data_region[i]);
+            ROCXIO_LOG_ERROR("  MISMATCH at %u:"
+                             " expected 0x%02x,"
+                             " got 0x%02x\n",
+                             i, DATA_PATTERN, data_region[i]);
           errors++;
         }
       }
       if (errors == 0) {
-        fprintf(stderr,
-                "rdma-ep: WRITE PASSED:"
-                " all %u bytes correct.\n",
-                write_size);
+        ROCXIO_LOG_INFO("rdma-ep: WRITE PASSED:"
+                        " all %u bytes correct.\n",
+                        write_size);
       } else {
-        fprintf(stderr,
-                "rdma-ep: WRITE FAILED:"
-                " %d/%u bytes wrong.\n",
-                errors, write_size);
+        ROCXIO_LOG_ERROR("rdma-ep: WRITE FAILED:"
+                         " %d/%u bytes wrong.\n",
+                         errors, write_size);
         close(tcp_fd);
         (void)hipHostFree(reg_buf);
         backend.shutdown();
@@ -650,7 +515,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
 
     if (xio::tcp_sync(tcp_fd) != 0) {
-      fprintf(stderr, "rdma-ep: tcp_sync failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
@@ -658,10 +523,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
 
     // --- Test 2: Ping-pong with LFSR verification ---
-    fprintf(stderr,
-            "\nrdma-ep: --- Ping-Pong LFSR"
-            " (%u iters, %u bytes) ---\n",
-            pp_iters, pp_size);
+    ROCXIO_LOG_INFO("\nrdma-ep: --- Ping-Pong LFSR"
+                    " (%u iters, %u bytes) ---\n",
+                    pp_iters, pp_size);
 
     memset(pp_send_buf, 0, pp_size);
     memset(pp_recv_buf, 0, pp_size);
@@ -673,8 +537,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     unsigned long long* d_elapsed = nullptr;
     herr = hipMalloc(&d_errors, sizeof(uint32_t));
     if (herr != hipSuccess) {
-      fprintf(stderr, "rdma-ep: hipMalloc d_errors: %s\n",
-              hipGetErrorString(herr));
+      ROCXIO_LOG_ERROR("rdma-ep: hipMalloc d_errors: %s\n",
+                       hipGetErrorString(herr));
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
       backend.shutdown();
@@ -682,8 +546,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
     herr = hipMalloc(&d_elapsed, sizeof(unsigned long long));
     if (herr != hipSuccess) {
-      fprintf(stderr, "rdma-ep: hipMalloc d_elapsed: %s\n",
-              hipGetErrorString(herr));
+      ROCXIO_LOG_ERROR("rdma-ep: hipMalloc d_elapsed: %s\n",
+                       hipGetErrorString(herr));
       (void)hipFree(d_errors);
       close(tcp_fd);
       (void)hipHostFree(reg_buf);
@@ -698,7 +562,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                     hipMemcpyHostToDevice);
 
     if (xio::tcp_sync(tcp_fd) != 0) {
-      fprintf(stderr, "rdma-ep: tcp_sync failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       (void)hipFree(d_errors);
       (void)hipFree(d_elapsed);
       close(tcp_fd);
@@ -716,10 +580,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                          remote_recv, pp_size, pp_iters, d_errors, d_elapsed);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
-        fprintf(stderr,
-                "rdma-ep: Pingpong client kernel"
-                " failed: %s\n",
-                hipGetErrorString(herr));
+        ROCXIO_LOG_ERROR("rdma-ep: Pingpong client kernel"
+                         " failed: %s\n",
+                         hipGetErrorString(herr));
         (void)hipFree(d_errors);
         (void)hipFree(d_elapsed);
         close(tcp_fd);
@@ -740,15 +603,13 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       double total_us = (static_cast<double>(h_elapsed) / freq_khz) * 1000.0;
       double per_iter_us = total_us / pp_iters;
 
-      fprintf(stderr,
-              "rdma-ep: %u round-trips, %u bytes:"
-              " %.1f us total = %.2f us/iter\n",
-              pp_iters, pp_size, total_us, per_iter_us);
+      ROCXIO_LOG_INFO("rdma-ep: %u round-trips, %u bytes:"
+                      " %.1f us total = %.2f us/iter\n",
+                      pp_iters, pp_size, total_us, per_iter_us);
       if (h_errors > 0) {
-        fprintf(stderr,
-                "rdma-ep: LFSR FAILED:"
-                " %u errors\n",
-                h_errors);
+        ROCXIO_LOG_ERROR("rdma-ep: LFSR FAILED:"
+                         " %u errors\n",
+                         h_errors);
         (void)hipFree(d_errors);
         (void)hipFree(d_elapsed);
         close(tcp_fd);
@@ -756,10 +617,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         backend.shutdown();
         return hipErrorUnknown;
       }
-      fprintf(stderr,
-              "rdma-ep: LFSR PASSED:"
-              " all %u iterations correct.\n",
-              pp_iters);
+      ROCXIO_LOG_INFO("rdma-ep: LFSR PASSED:"
+                      " all %u iterations correct.\n",
+                      pp_iters);
     } else {
       hipLaunchKernelGGL(rdma_ep::pingpong_server_kernel, dim3(1), dim3(1), 0,
                          0, gpu_qp,
@@ -769,10 +629,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                          remote_recv, pp_size, pp_iters, d_errors);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
-        fprintf(stderr,
-                "rdma-ep: Pingpong server kernel"
-                " failed: %s\n",
-                hipGetErrorString(herr));
+        ROCXIO_LOG_ERROR("rdma-ep: Pingpong server kernel"
+                         " failed: %s\n",
+                         hipGetErrorString(herr));
         (void)hipFree(d_errors);
         (void)hipFree(d_elapsed);
         close(tcp_fd);
@@ -784,10 +643,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       (void)hipMemcpy(&h_errors, d_errors, sizeof(h_errors),
                       hipMemcpyDeviceToHost);
       if (h_errors > 0) {
-        fprintf(stderr,
-                "rdma-ep: LFSR FAILED:"
-                " %u errors\n",
-                h_errors);
+        ROCXIO_LOG_ERROR("rdma-ep: LFSR FAILED:"
+                         " %u errors\n",
+                         h_errors);
         (void)hipFree(d_errors);
         (void)hipFree(d_elapsed);
         close(tcp_fd);
@@ -795,17 +653,16 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         backend.shutdown();
         return hipErrorUnknown;
       }
-      fprintf(stderr,
-              "rdma-ep: Ping-pong complete,"
-              " LFSR verified %u iters.\n",
-              pp_iters);
+      ROCXIO_LOG_INFO("rdma-ep: Ping-pong complete,"
+                      " LFSR verified %u iters.\n",
+                      pp_iters);
     }
 
     (void)hipFree(d_errors);
     (void)hipFree(d_elapsed);
 
     if (xio::tcp_sync(tcp_fd) != 0)
-      fprintf(stderr, "rdma-ep: final tcp_sync failed"
+      ROCXIO_LOG_WARN("rdma-ep: final tcp_sync failed"
                       " (non-fatal)\n");
 
     close(tcp_fd);

@@ -35,7 +35,7 @@ Quick Start
 .. code-block:: bash
 
    sudo apt install rocm-hip-sdk rocminfo \
-     libcli11-dev cmake libdrm-dev libhsa-runtime-dev
+     cmake libdrm-dev libhsa-runtime-dev libcli11-dev
    mkdir -p build
    cmake -S . -B build
    cmake --build build --target all
@@ -56,6 +56,7 @@ Quick Start
    examples
    kernel-module
    memory-modes
+   environment-variables
    coherence-prior-art
    hsa-allocator-tracking
 

@@ -4,6 +4,7 @@
  */
 
 #include "nvme-ep.h"
+#include "xio-env.h"
 #include "xio-timing.h"
 
 // Host-only includes for IOCTL and file operations
@@ -692,129 +693,6 @@ static int ioctlEintrSafe(int fd, unsigned long request, void* arg) {
 //
 
 /**
- * Register NVMe endpoint-specific CLI options
- *
- * This function registers all NVMe-specific command-line options with
- * the CLI11 parser. Options are registered with shorter names (without
- * --nvme- prefix) for cleaner CLI, but backward-compatible aliases
- * are also provided.
- *
- * @param app CLI11 App object to add options to
- * @param config Pointer to nvmeEpConfig structure to populate
- */
-__host__ void registerCliOptions(CLI::App& app, nvme_ep::nvmeEpConfig* config) {
-  const std::string nvme_group = "NVMe Endpoint Options";
-
-  app
-    .add_option("--access-pattern", config->ioParams.accessPattern,
-                "IO access pattern: 'sequential' or 'random'.")
-    ->default_val("random")
-    ->check(CLI::IsMember({"sequential", "random"}))
-    ->group(nvme_group);
-  app
-    .add_option("--data-buffer-size", config->bufferParams.bufferSize,
-                "Size of data buffers for NVMe IO (bytes).")
-    ->default_val(1024 * 1024)
-    ->check(CLI::PositiveNumber)
-    ->group(nvme_group);
-  app
-    .add_option("--controller", config->controller,
-                "NVMe controller device path (required).")
-    ->required()
-    ->group(nvme_group);
-  app
-    .add_option("--base-lba", config->ioParams.baseLba,
-                "Starting LBA for I/O operations (default: 0)")
-    ->default_val(0)
-    ->group(nvme_group);
-  app
-    .add_option("--lfsr-seed", config->ioParams.lfsrSeed,
-                "Seed for LFSR pattern generation (0 = derive from LBA).")
-    ->default_val(0)
-    ->group(nvme_group);
-  app
-    .add_option("--read-io", config->ioParams.readIo,
-                "Number of read I/O to perform. Negative values "
-                "accepted for backward compatibility (converted "
-                "to positive).")
-    ->default_val(0)
-    ->group(nvme_group);
-  app
-    .add_option("--queue-id", config->queueId,
-                "NVMe queue ID to use (0=admin queue, 1+=IO queues). "
-                "If not specified, auto-detects and uses the last available "
-                "I/O queue.")
-    ->default_val(0) // 0 means "auto-detect" - will be set in validateConfig
-    ->check(CLI::Range(0, 65535))
-    ->group(nvme_group);
-  app
-    .add_option("--queue-length", config->queueLength,
-                "NVMe queue length in entries (must be power of 2, max 65536).")
-    ->default_val(1024)
-    ->check([](const std::string& str) {
-      uint16_t val;
-      try {
-        val = static_cast<uint16_t>(std::stoul(str));
-      } catch (...) {
-        return std::string("Invalid number");
-      }
-      if (val == 0 || val > 65535) {
-        return std::string("Queue length must be between 1 and 65535");
-      }
-      if ((val & (val - 1)) != 0) {
-        return std::string("Queue length must be a power of 2");
-      }
-      return std::string();
-    })
-    ->group(nvme_group);
-  app
-    .add_option("--num-queues", config->numQueues,
-                "Number of independent NVMe I/O queues. "
-                "Each queue is driven by its own GPU "
-                "kernel on a separate HIP stream. "
-                "Default: 1.")
-    ->default_val(1)
-    ->check(CLI::PositiveNumber)
-    ->group(nvme_group);
-  app
-    .add_option("--namespace", config->ioParams.nsid,
-                "NVMe namespace ID (must be > 0, default: 1).")
-    ->default_val(1)
-    ->check(CLI::PositiveNumber)
-    ->group(nvme_group);
-
-  app
-    .add_option("--lbas-per-io", config->ioParams.lbasPerIo,
-                "Number of LBAs per I/O operation (default: 1).")
-    ->default_val(1)
-    ->check(CLI::PositiveNumber)
-    ->group(nvme_group);
-  app
-    .add_option("--write-io", config->ioParams.writeIo,
-                "Number of write I/O to perform. Negative values "
-                "accepted for backward compatibility (converted "
-                "to positive).")
-    ->default_val(0)
-    ->group(nvme_group);
-  app
-    .add_flag("--infinite", config->ioParams.infiniteMode,
-              "Infinite mode: run forever. Requires exactly one "
-              "of --read-io or --write-io to be non-zero.")
-    ->group(nvme_group);
-  app
-    .add_option("--batch-size", config->ioParams.batchSize,
-                "Number of SQEs to submit per doorbell ring. "
-                "1 = sequential (one I/O at a time), "
-                "0 = all at once, N = N SQEs per doorbell. "
-                "When N > 1, each SQE is prepared by a "
-                "separate GPU thread; may span multiple "
-                "wavefronts. Max is queue_length - 1.")
-    ->default_val(1)
-    ->check(CLI::NonNegativeNumber)
-    ->group(nvme_group);
-}
-
-/**
  * Validate NVMe endpoint configuration
  *
  * This function also auto-detects LBA size from the controller.
@@ -837,10 +715,9 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
              "Please specify --queue-id manually.";
     }
     config->queueId = max_queue_id;
-    fprintf(stdout,
-            "Auto-detected last available queue "
-            "ID: %u\n",
-            config->queueId);
+    ROCXIO_LOG_INFO("Auto-detected last available queue "
+                    "ID: %u\n",
+                    config->queueId);
   }
 
   // Multi-queue validation: ensure enough I/O queues
@@ -859,10 +736,9 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       return std::string(buf);
     }
     uint16_t baseQid = config->queueId - (config->numQueues - 1);
-    fprintf(stdout,
-            "Multi-queue mode: %u queues "
-            "(IDs %u..%u)\n",
-            config->numQueues, baseQid, config->queueId);
+    ROCXIO_LOG_INFO("Multi-queue mode: %u queues "
+                    "(IDs %u..%u)\n",
+                    config->numQueues, baseQid, config->queueId);
   }
 
   // Validate that access pattern is valid
@@ -968,13 +844,12 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     config->wavefrontSize = waveSize;
     unsigned wavefronts = (config->ioParams.batchSize + 1 + waveSize - 1) /
                           waveSize;
-    fprintf(stdout,
-            "Wavefront batch mode: batch_size=%u, "
-            "wavefront_size=%u, kernel_threads=%u"
-            " (%u wavefront%s)\n",
-            config->ioParams.batchSize, waveSize,
-            config->ioParams.batchSize + 1, wavefronts,
-            wavefronts > 1 ? "s" : "");
+    ROCXIO_LOG_INFO("Wavefront batch mode: batch_size=%u, "
+                    "wavefront_size=%u, kernel_threads=%u"
+                    " (%u wavefront%s)\n",
+                    config->ioParams.batchSize, waveSize,
+                    config->ioParams.batchSize + 1, wavefronts,
+                    wavefronts > 1 ? "s" : "");
   }
 
   return std::string();
@@ -992,8 +867,8 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
  */
 __host__ hipError_t run(XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
-    fprintf(stderr, "Error: nvme-ep requires endpoint "
-                    "configuration\n");
+    ROCXIO_LOG_ERROR("nvme-ep requires endpoint "
+                     "configuration\n");
     return hipErrorInvalidValue;
   }
 
@@ -1001,15 +876,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     config->endpointConfig);
 
   if (nvmeConfig->controller.empty()) {
-    fprintf(stderr, "Error: NVMe device not specified. "
-                    "--controller is required.\n");
+    ROCXIO_LOG_ERROR("NVMe device not specified. "
+                     "--controller is required.\n");
     return hipErrorInvalidValue;
   }
 
   if (config->numThreads > 1) {
-    fprintf(stderr, "Error: nvme-ep does not support "
-                    "--threads > 1. Use --batch-size > 1 "
-                    "for cooperative batching.\n");
+    ROCXIO_LOG_ERROR("nvme-ep does not support "
+                     "--threads > 1. Use --batch-size > 1 "
+                     "for cooperative batching.\n");
     return hipErrorNotSupported;
   }
 
@@ -1022,10 +897,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   bool forcedLessTiming = false;
   if (nvmeConfig->ioParams.batchSize > 1 || numQueues > 1) {
     if (config->startTimes != nullptr) {
-      fprintf(stdout,
-              "Info: Forcing less-timing mode "
-              "(batch_size=%u, num_queues=%u)\n",
-              nvmeConfig->ioParams.batchSize, numQueues);
+      ROCXIO_LOG_INFO("Forcing less-timing mode "
+                      "(batch_size=%u, num_queues=%u)\n",
+                      nvmeConfig->ioParams.batchSize, numQueues);
       forcedLessTiming = true;
     }
   }
@@ -1050,12 +924,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   unsigned kernelThreads = 1;
   if (effBatch > 1) {
     kernelThreads = effBatch + 1;
-    fprintf(stdout,
-            "Batch mode: launching %u threads "
-            "(1 coordinator + %u SQE writers)\n",
-            kernelThreads, effBatch);
+    ROCXIO_LOG_INFO("Batch mode: launching %u threads "
+                    "(1 coordinator + %u SQE writers)\n",
+                    kernelThreads, effBatch);
   }
-  fprintf(stdout, "Using queue length: %u entries\n", queue_size);
+  ROCXIO_LOG_INFO("Using queue length: %u entries\n", queue_size);
 
   // ---- Doorbell access setup (shared) ----
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
@@ -1063,21 +936,20 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     int ret_shadow = mapMmioBridgeShadowBuffer(
       nvmeConfig->doorbellParams.mmioBridgeBdf, &shadow_virt);
     if (ret_shadow < 0) {
-      fprintf(stderr, "Failed to map PCI MMIO bridge "
-                      "shadow buffer.\n");
+      ROCXIO_LOG_ERROR("Failed to map PCI MMIO bridge "
+                       "shadow buffer.\n");
       return hipErrorInvalidValue;
     }
-    fprintf(stdout,
-            "PCI MMIO bridge shadow buffer "
-            "mapped at %p.\n",
-            shadow_virt);
+    ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer "
+                    "mapped at %p.\n",
+                    shadow_virt);
     const size_t shadow_size = 8192;
     void* shadow_gpu_ptr = nullptr;
     int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
                                                        &shadow_gpu_ptr);
     if (ret_reg < 0) {
-      fprintf(stderr, "Failed to register PCI MMIO bridge "
-                      "shadow buffer.\n");
+      ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
+                       "shadow buffer.\n");
       return hipErrorInvalidValue;
     }
     nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
@@ -1087,16 +959,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     int ret_bar0 = mapPciBar(nvmeConfig->doorbellParams.nvmeTargetBdf, 0,
                              &bar0_cpu, &bar0_gpu, 8192);
     if (ret_bar0 < 0) {
-      fprintf(stderr,
-              "Warning: Failed to map NVMe BAR0 "
-              "for direct doorbell: %s\n",
-              strerror(-ret_bar0));
+      ROCXIO_LOG_WARN("Failed to map NVMe BAR0 "
+                      "for direct doorbell: %s\n",
+                      strerror(-ret_bar0));
       return hipErrorInvalidValue;
     }
-    fprintf(stdout,
-            "NVMe BAR0 mapped for direct "
-            "doorbell access at %p.\n",
-            bar0_gpu);
+    ROCXIO_LOG_INFO("NVMe BAR0 mapped for direct "
+                    "doorbell access at %p.\n",
+                    bar0_gpu);
     nvmeConfig->doorbellParams.nvmeBar0Gpu = bar0_gpu;
   }
 
@@ -1107,15 +977,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // Verify shared GPU pointers
   if (shadowBufferVirt != nullptr) {
     if (!validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
-      fprintf(stderr, "Error: Shadow buffer is not "
-                      "GPU-accessible.\n");
+      ROCXIO_LOG_ERROR("Shadow buffer is not "
+                       "GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
   }
   if (nvmeBar0Gpu != nullptr) {
     if (!validateGpuPointer(nvmeBar0Gpu, "BAR0", false)) {
-      fprintf(stderr, "Error: NVMe BAR0 is not "
-                      "GPU-accessible.\n");
+      ROCXIO_LOG_ERROR("NVMe BAR0 is not "
+                       "GPU-accessible.\n");
       return hipErrorInvalidValue;
     }
   }
@@ -1129,13 +999,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                                          &namespace_capacity);
     if (cap_ret == 0 && namespace_capacity > 0) {
       lbaRangeLbas = namespace_capacity;
-      fprintf(stdout,
-              "Using full namespace capacity: "
-              "%llu LBAs\n",
-              (unsigned long long)lbaRangeLbas);
+      ROCXIO_LOG_INFO("Using full namespace capacity: "
+                      "%llu LBAs\n",
+                      (unsigned long long)lbaRangeLbas);
     } else {
-      fprintf(stderr, "Error: Failed to query namespace "
-                      "capacity\n");
+      ROCXIO_LOG_ERROR("Failed to query namespace "
+                       "capacity\n");
       return hipErrorInvalidValue;
     }
   }
@@ -1172,14 +1041,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     uint64_t xfer = (uint64_t)ioParams.lbasPerIo * ioParams.lbaSize;
     uint64_t needed = (uint64_t)eff_batch * xfer;
     if (needed > nvmeConfig->bufferParams.bufferSize) {
-      fprintf(stderr,
-              "Error: batch-size %u * "
-              "transfer-size %llu = %llu exceeds "
-              "data-buffer-size %zu. Increase "
-              "--data-buffer-size or reduce "
-              "--batch-size.\n",
-              eff_batch, (unsigned long long)xfer, (unsigned long long)needed,
-              nvmeConfig->bufferParams.bufferSize);
+      ROCXIO_LOG_ERROR("batch-size %u * "
+                       "transfer-size %llu = %llu exceeds "
+                       "data-buffer-size %zu. Increase "
+                       "--data-buffer-size or reduce "
+                       "--batch-size.\n",
+                       eff_batch, (unsigned long long)xfer,
+                       (unsigned long long)needed,
+                       nvmeConfig->bufferParams.bufferSize);
       return hipErrorInvalidValue;
     }
   }
@@ -1192,10 +1061,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // ---- Per-queue state vectors ----
   if (nvmeConfig->queueId < numQueues) {
-    fprintf(stderr,
-            "Error: queueId %u too low for "
-            "%u queues (need queueId >= numQueues)\n",
-            nvmeConfig->queueId, numQueues);
+    ROCXIO_LOG_ERROR("queueId %u too low for "
+                     "%u queues (need queueId >= numQueues)\n",
+                     nvmeConfig->queueId, numQueues);
     return hipErrorInvalidValue;
   }
   uint16_t baseQueueId = nvmeConfig->queueId - (numQueues - 1);
@@ -1224,10 +1092,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         perQueueStats[q] = static_cast<XioTimingStats*>(ptr);
       }
       if (!perQueueStats[q]) {
-        fprintf(stderr,
-                "Error: Failed to allocate timing "
-                "stats for queue %u\n",
-                q);
+        ROCXIO_LOG_ERROR("Failed to allocate timing "
+                         "stats for queue %u\n",
+                         q);
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
@@ -1249,10 +1116,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                           config->memoryMode, &queueInfo);
 
     if (ret < 0) {
-      fprintf(stderr,
-              "Error: Failed to create NVMe "
-              "queue %u: %s\n",
-              qid, strerror(-ret));
+      ROCXIO_LOG_ERROR("Failed to create NVMe "
+                       "queue %u: %s\n",
+                       qid, strerror(-ret));
       result = hipErrorInvalidValue;
       goto cleanup;
     }
@@ -1262,28 +1128,25 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     nvmeConfig->queuesCreated = true;
     struct nvme_queue_info& qi = nvmeConfig->queueInfos.back();
 
-    fprintf(stdout,
-            "Queue %u created: SQ=0x%llx, "
-            "CQ=0x%llx\n",
-            qid, (unsigned long long)qi.sq_phys,
-            (unsigned long long)qi.cq_phys);
+    ROCXIO_LOG_INFO("Queue %u created: SQ=0x%llx, "
+                    "CQ=0x%llx\n",
+                    qid, (unsigned long long)qi.sq_phys,
+                    (unsigned long long)qi.cq_phys);
 
     void* sq_ptr = qi.sq_gpu ? qi.sq_gpu : qi.sq_virt;
     void* cq_ptr = qi.cq_gpu ? qi.cq_gpu : qi.cq_virt;
     if (!sq_ptr || !cq_ptr) {
-      fprintf(stderr,
-              "Error: Queue %u pointers are "
-              "null\n",
-              qid);
+      ROCXIO_LOG_ERROR("Queue %u pointers are "
+                       "null\n",
+                       qid);
       result = hipErrorInvalidValue;
       goto cleanup;
     }
     if (!validateGpuPointer(sq_ptr, "SQ", false) ||
         !validateGpuPointer(cq_ptr, "CQ", false)) {
-      fprintf(stderr,
-              "Error: Queue %u not "
-              "GPU-accessible\n",
-              qid);
+      ROCXIO_LOG_ERROR("Queue %u not "
+                       "GPU-accessible\n",
+                       qid);
       result = hipErrorInvalidValue;
       goto cleanup;
     }
@@ -1295,10 +1158,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         nvmeConfig->doorbellParams.nvmeTargetBdf,
         nvmeConfig->controller.c_str(), &readBufs[q]);
       if (buf_err != hipSuccess) {
-        fprintf(stderr,
-                "Error: Failed to allocate read "
-                "buffer for queue %u: %s\n",
-                qid, hipGetErrorString(buf_err));
+        ROCXIO_LOG_ERROR("Failed to allocate read "
+                         "buffer for queue %u: %s\n",
+                         qid, hipGetErrorString(buf_err));
         result = buf_err;
         goto cleanup;
       }
@@ -1309,10 +1171,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         nvmeConfig->doorbellParams.nvmeTargetBdf,
         nvmeConfig->controller.c_str(), &writeBufs[q]);
       if (buf_err != hipSuccess) {
-        fprintf(stderr,
-                "Error: Failed to allocate write "
-                "buffer for queue %u: %s\n",
-                qid, hipGetErrorString(buf_err));
+        ROCXIO_LOG_ERROR("Failed to allocate write "
+                         "buffer for queue %u: %s\n",
+                         qid, hipGetErrorString(buf_err));
         result = buf_err;
         goto cleanup;
       }
@@ -1322,10 +1183,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (numQueues > 1) {
       hipError_t s_err = hipStreamCreate(&streams[q]);
       if (s_err != hipSuccess) {
-        fprintf(stderr,
-                "Error: Failed to create HIP "
-                "stream for queue %u: %s\n",
-                qid, hipGetErrorString(s_err));
+        ROCXIO_LOG_ERROR("Failed to create HIP "
+                         "stream for queue %u: %s\n",
+                         qid, hipGetErrorString(s_err));
         result = s_err;
         goto cleanup;
       }
@@ -1378,26 +1238,24 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       config->completionQueue = cq_ptr;
     }
 
-    fprintf(stdout,
-            "Launching kernel for queue %u "
-            "(stream %p)\n",
-            qid, (void*)streams[q]);
+    ROCXIO_LOG_INFO("Launching kernel for queue %u "
+                    "(stream %p)\n",
+                    qid, (void*)streams[q]);
 
     hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads),
                        dynShmemBytes, streams[q], kernelConfig, ioParams,
                        qDoorbellParams, qBufParams);
   }
 
-  fprintf(stdout, "Info: %u kernel%s launched.\n", numQueues,
-          numQueues > 1 ? "s" : "");
+  ROCXIO_LOG_INFO("%u kernel%s launched.\n", numQueues,
+                  numQueues > 1 ? "s" : "");
 
   // Wait for all GPU kernels to complete
   result = hipDeviceSynchronize();
   if (result != hipSuccess) {
-    fprintf(stdout,
-            "Info: Device synchronization error: "
-            "%s (code: %d).\n",
-            hipGetErrorString(result), result);
+    ROCXIO_LOG_INFO("Device synchronization error: "
+                    "%s (code: %d).\n",
+                    hipGetErrorString(result), result);
   }
 
   // ---- Aggregate per-queue timing stats ----
@@ -1419,10 +1277,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       agg->sumDuration += perQueueStats[q]->sumDuration;
       agg->count += perQueueStats[q]->count;
     }
-    fprintf(stdout,
-            "Aggregated timing across %u queues: "
-            "%llu ops\n",
-            numQueues, (unsigned long long)agg->count);
+    ROCXIO_LOG_INFO("Aggregated timing across %u queues: "
+                    "%llu ops\n",
+                    numQueues, (unsigned long long)agg->count);
   } else if (useLessTiming && numQueues == 1 &&
              config->timingStats != nullptr && perQueueStats[0] != nullptr) {
     *config->timingStats = *perQueueStats[0];
@@ -1436,8 +1293,8 @@ cleanup:
   // ---- Cleanup: delete successfully created NVMe queues ----
   if (nvmeConfig->queuesCreated) {
     uint16_t nCreated = (uint16_t)nvmeConfig->queueIds.size();
-    fprintf(stdout, "\nCleaning up %u NVMe queue%s...\n", nCreated,
-            nCreated > 1 ? "s" : "");
+    ROCXIO_LOG_INFO("\nCleaning up %u NVMe queue%s...\n", nCreated,
+                    nCreated > 1 ? "s" : "");
     int cleanup_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
                                          "NVMe device", 3, 50);
     if (cleanup_fd >= 0) {
@@ -1447,10 +1304,9 @@ cleanup:
       close(cleanup_fd);
       nvmeConfig->queuesCreated = false;
     } else {
-      fprintf(stderr,
-              "Warning: Could not reopen NVMe "
-              "device for queue cleanup: %s\n",
-              strerror(errno));
+      ROCXIO_LOG_WARN("Could not reopen NVMe "
+                      "device for queue cleanup: %s\n",
+                      strerror(errno));
     }
   }
 
@@ -1518,7 +1374,7 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
 
     ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
     if (ret < 0) {
-      fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
+      ROCXIO_LOG_INFO("Failed to identify namespace: %s\n", strerror(errno));
       ret = -errno;
       goto cleanup;
     }
@@ -1527,19 +1383,17 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
       uint16_t status = (cmd.result >> 1) & 0xFF;
       if (attempt < 4) {
         int delay_ms = 100 * (1 << attempt);
-        fprintf(stdout,
-                "Identify Namespace returned status "
-                "0x%02x, retrying in %d ms "
-                "(attempt %d/5)...\n",
-                status, delay_ms, attempt + 1);
+        ROCXIO_LOG_INFO("Identify Namespace returned status "
+                        "0x%02x, retrying in %d ms "
+                        "(attempt %d/5)...\n",
+                        status, delay_ms, attempt + 1);
         usleep(delay_ms * 1000);
         memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
         continue;
       }
-      fprintf(stdout,
-              "Identify Namespace failed with status "
-              "0x%02x after 5 attempts\n",
-              status);
+      ROCXIO_LOG_INFO("Identify Namespace failed with status "
+                      "0x%02x after 5 attempts\n",
+                      status);
       ret = -EIO;
       goto cleanup;
     }
@@ -1551,20 +1405,18 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     if (lba_format_idx > id_ns->nlbaf) {
       if (attempt < 4) {
         int delay_ms = 100 * (1 << attempt);
-        fprintf(stdout,
-                "Invalid LBA format index %u "
-                "(max %u), retrying in %d ms "
-                "(attempt %d/5)...\n",
-                lba_format_idx, id_ns->nlbaf, delay_ms, attempt + 1);
+        ROCXIO_LOG_INFO("Invalid LBA format index %u "
+                        "(max %u), retrying in %d ms "
+                        "(attempt %d/5)...\n",
+                        lba_format_idx, id_ns->nlbaf, delay_ms, attempt + 1);
         usleep(delay_ms * 1000);
         memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
         continue;
       }
-      fprintf(stdout,
-              "Invalid LBA format index %u "
-              "(max supported: %u) after "
-              "5 attempts\n",
-              lba_format_idx, id_ns->nlbaf);
+      ROCXIO_LOG_INFO("Invalid LBA format index %u "
+                      "(max supported: %u) after "
+                      "5 attempts\n",
+                      lba_format_idx, id_ns->nlbaf);
       ret = -EINVAL;
       goto cleanup;
     }
@@ -1575,27 +1427,25 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     if (lbads < 9) {
       if (attempt < 4) {
         int delay_ms = 100 * (1 << attempt);
-        fprintf(stdout,
-                "Identify Namespace returned "
-                "lbads=%u (expected >= 9), "
-                "retrying in %d ms "
-                "(attempt %d/5)...\n",
-                lbads, delay_ms, attempt + 1);
+        ROCXIO_LOG_INFO("Identify Namespace returned "
+                        "lbads=%u (expected >= 9), "
+                        "retrying in %d ms "
+                        "(attempt %d/5)...\n",
+                        lbads, delay_ms, attempt + 1);
         usleep(delay_ms * 1000);
         memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
         continue;
       }
-      fprintf(stdout,
-              "Identify Namespace returned invalid "
-              "lbads=%u after 5 attempts\n",
-              lbads);
+      ROCXIO_LOG_INFO("Identify Namespace returned invalid "
+                      "lbads=%u after 5 attempts\n",
+                      lbads);
       ret = -EIO;
       goto cleanup;
     }
 
     *lba_size = 1U << lbads;
-    fprintf(stdout, "Selected LBA size: %u bytes (lbads=%u)\n", *lba_size,
-            lbads);
+    ROCXIO_LOG_INFO("Selected LBA size: %u bytes (lbads=%u)\n", *lba_size,
+                    lbads);
     ret = 0;
     goto cleanup;
   }
@@ -1649,7 +1499,7 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
 
     ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
     if (ret < 0) {
-      fprintf(stdout, "Failed to identify namespace: %s\n", strerror(errno));
+      ROCXIO_LOG_INFO("Failed to identify namespace: %s\n", strerror(errno));
       ret = -errno;
       goto cleanup;
     }
@@ -1658,19 +1508,17 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
       uint16_t status = (cmd.result >> 1) & 0xFF;
       if (attempt < 4) {
         int delay_ms = 100 * (1 << attempt);
-        fprintf(stdout,
-                "Identify Namespace returned status "
-                "0x%02x, retrying in %d ms "
-                "(attempt %d/5)...\n",
-                status, delay_ms, attempt + 1);
+        ROCXIO_LOG_INFO("Identify Namespace returned status "
+                        "0x%02x, retrying in %d ms "
+                        "(attempt %d/5)...\n",
+                        status, delay_ms, attempt + 1);
         usleep(delay_ms * 1000);
         memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
         continue;
       }
-      fprintf(stdout,
-              "Identify Namespace failed with status "
-              "0x%02x after 5 attempts\n",
-              status);
+      ROCXIO_LOG_INFO("Identify Namespace failed with status "
+                      "0x%02x after 5 attempts\n",
+                      status);
       ret = -EIO;
       goto cleanup;
     }
@@ -1679,24 +1527,23 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     if (id_ns->nsze == 0) {
       if (attempt < 4) {
         int delay_ms = 100 * (1 << attempt);
-        fprintf(stdout,
-                "Identify Namespace returned "
-                "nsze=0, retrying in %d ms "
-                "(attempt %d/5)...\n",
-                delay_ms, attempt + 1);
+        ROCXIO_LOG_INFO("Identify Namespace returned "
+                        "nsze=0, retrying in %d ms "
+                        "(attempt %d/5)...\n",
+                        delay_ms, attempt + 1);
         usleep(delay_ms * 1000);
         memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
         continue;
       }
-      fprintf(stdout, "Identify Namespace returned "
+      ROCXIO_LOG_INFO("Identify Namespace returned "
                       "nsze=0 after 5 attempts\n");
       ret = -EIO;
       goto cleanup;
     }
 
     *capacity_lbas = id_ns->nsze;
-    fprintf(stdout, "Namespace capacity: %llu LBAs\n",
-            (unsigned long long)*capacity_lbas);
+    ROCXIO_LOG_INFO("Namespace capacity: %llu LBAs\n",
+                    (unsigned long long)*capacity_lbas);
     ret = 0;
     goto cleanup;
   }
@@ -1720,7 +1567,7 @@ __host__ int checkRootfs(const char* nvme_device) {
   // Check /proc/mounts for root mount
   FILE* f = fopen("/proc/mounts", "r");
   if (!f) {
-    fprintf(stdout, "Warning: Failed to open /proc/mounts\n");
+    ROCXIO_LOG_WARN("Failed to open /proc/mounts\n");
     return 0;
   }
 
@@ -1743,12 +1590,11 @@ __host__ int checkRootfs(const char* nvme_device) {
   fclose(f);
 
   if (is_rootfs) {
-    fprintf(stdout,
-            "ERROR: NVMe device %s appears to be the root filesystem!\n",
-            nvme_device);
-    fprintf(stdout, "This operation will NOT proceed on rootfs to prevent data "
-                    "corruption.\n");
-    fprintf(stdout, "Please specify a different NVMe device.\n");
+    ROCXIO_LOG_ERROR("NVMe device %s appears to be the root filesystem!\n",
+                     nvme_device);
+    ROCXIO_LOG_ERROR("This operation will NOT proceed on rootfs to prevent "
+                     "data corruption.\n");
+    ROCXIO_LOG_ERROR("Please specify a different NVMe device.\n");
     return -1;
   }
 
@@ -1768,7 +1614,7 @@ __host__ int readSmartLog(const char* nvme_device,
   // Stack-allocated buffers might not work with ioctl
   uint8_t* buffer = (uint8_t*)malloc(nvme_ep::nvmeLogPageSize);
   if (!buffer) {
-    fprintf(stdout, "Failed to allocate SMART log buffer\n");
+    ROCXIO_LOG_INFO("Failed to allocate SMART log buffer\n");
     close(nvme_fd);
     return -ENOMEM;
   }
@@ -1788,7 +1634,7 @@ __host__ int readSmartLog(const char* nvme_device,
 
   int ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
   if (ret < 0) {
-    fprintf(stdout, "Failed to read SMART log: %s\n", strerror(errno));
+    ROCXIO_LOG_INFO("Failed to read SMART log: %s\n", strerror(errno));
     free(buffer);
     close(nvme_fd);
     return -errno;
@@ -1797,7 +1643,7 @@ __host__ int readSmartLog(const char* nvme_device,
   // Check completion status
   if (cmd.result & 0xFFFE) {
     uint16_t status = (cmd.result >> 1) & 0xFF;
-    fprintf(stdout, "SMART log read failed with status 0x%02x\n", status);
+    ROCXIO_LOG_INFO("SMART log read failed with status 0x%02x\n", status);
     free(buffer);
     close(nvme_fd);
     return -EIO;
@@ -1831,32 +1677,29 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id) {
 
   FILE* f = fopen(sysfs_path, "r");
   if (!f) {
-    fprintf(stderr,
-            "Error: Failed to open %s: %s\n"
-            "Cannot determine maximum queue ID. Please specify --queue-id "
-            "manually.\n",
-            sysfs_path, strerror(errno));
+    ROCXIO_LOG_ERROR("Failed to open %s: %s\n"
+                     "Cannot determine maximum queue ID. Please specify "
+                     "--queue-id manually.\n",
+                     sysfs_path, strerror(errno));
     return -errno;
   }
 
   unsigned int queue_count = 0;
   if (fscanf(f, "%u", &queue_count) != 1) {
-    fprintf(stderr,
-            "Error: Failed to parse queue count from %s\n"
-            "Cannot determine maximum queue ID. Please specify --queue-id "
-            "manually.\n",
-            sysfs_path);
+    ROCXIO_LOG_ERROR("Failed to parse queue count from %s\n"
+                     "Cannot determine maximum queue ID. Please specify "
+                     "--queue-id manually.\n",
+                     sysfs_path);
     fclose(f);
     return -EIO;
   }
   fclose(f);
 
   if (queue_count == 0) {
-    fprintf(stderr,
-            "Error: Queue count is 0 in %s\n"
-            "Cannot determine maximum queue ID. Please specify --queue-id "
-            "manually.\n",
-            sysfs_path);
+    ROCXIO_LOG_ERROR("Queue count is 0 in %s\n"
+                     "Cannot determine maximum queue ID. Please specify "
+                     "--queue-id manually.\n",
+                     sysfs_path);
     return -EINVAL;
   }
 
@@ -1864,19 +1707,19 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id) {
   // So the last I/O queue ID is queue_count - 1
   // But we need at least 1 I/O queue, so queue_count must be >= 2
   if (queue_count < 2) {
-    fprintf(stderr,
-            "Error: Only %u queue(s) available (need at least 2: 1 admin + 1 "
-            "I/O)\n"
-            "Cannot use any I/O queues. Please check device configuration.\n",
-            queue_count);
+    ROCXIO_LOG_ERROR("Only %u queue(s) available (need at least 2: 1 admin + 1 "
+                     "I/O)\n"
+                     "Cannot use any I/O queues. Please check device "
+                     "configuration.\n",
+                     queue_count);
     return -EINVAL;
   }
 
   *max_queue_id = static_cast<uint16_t>(queue_count - 1);
-  fprintf(stdout,
-          "Detected %u total queues (1 admin + %u I/O). Using last I/O queue "
-          "ID: %u\n",
-          queue_count, queue_count - 1, *max_queue_id);
+  ROCXIO_LOG_INFO(
+    "Detected %u total queues (1 admin + %u I/O). Using last I/O queue "
+    "ID: %u\n",
+    queue_count, queue_count - 1, *max_queue_id);
 
   return 0;
 }
@@ -1899,10 +1742,10 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
   // controller waits for all commands to complete before deletion
   // Also note: DELETE_SQ on a non-existent queue ID may hang - this is
   // expected behavior per NVMe spec
-  fprintf(stdout,
-          "Sending DELETE_SQ command for queue_id=%u (this may take time if "
-          "queue has pending commands or doesn't exist)...\n",
-          queue_id);
+  ROCXIO_LOG_INFO(
+    "Sending DELETE_SQ command for queue_id=%u (this may take time if "
+    "queue has pending commands or doesn't exist)...\n",
+    queue_id);
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_delete_sq;
   cmd.nsid = 0;           // Admin commands use NSID 0
@@ -1912,41 +1755,39 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret == 0) {
-    fprintf(stdout, "DELETE_SQ completed successfully.\n");
+    ROCXIO_LOG_INFO("DELETE_SQ completed successfully.\n");
     // Check status code even if ioctl succeeded
     if (cmd.result & 0xFFFE) {
       uint16_t status_field = cmd.result & 0xFFFF;
       uint8_t sc = NVME_CQE_STATUS_SC(status_field);
-      fprintf(stdout,
-              "Note: DELETE_SQ returned status code 0x%02x (queue may not "
-              "exist)\n",
-              sc);
+      ROCXIO_LOG_INFO("Note: DELETE_SQ returned status code 0x%02x (queue may "
+                      "not exist)\n",
+                      sc);
     }
   } else {
     // ioctl failed - could be timeout or other error
     if (errno == ETIMEDOUT) {
-      fprintf(stderr,
-              "Warning: DELETE_SQ timed out for queue_id=%u. This may "
-              "indicate the queue ID is invalid or the controller is busy. "
-              "The controller may have been reset.\n",
-              queue_id);
+      ROCXIO_LOG_WARN("DELETE_SQ timed out for queue_id=%u. This may "
+                      "indicate the queue ID is invalid or the controller is "
+                      "busy. The controller may have been reset.\n",
+                      queue_id);
       controller_reset_detected = true;
     } else {
-      fprintf(stdout,
-              "Note: DELETE_SQ failed (queue may not exist): %s (errno=%d)\n",
-              strerror(errno), errno);
+      ROCXIO_LOG_INFO("Note: DELETE_SQ failed (queue may not exist): %s "
+                      "(errno=%d)\n",
+                      strerror(errno), errno);
     }
   }
 
   // If controller was reset, wait for it to stabilize before proceeding
   if (controller_reset_detected) {
-    fprintf(stdout,
-            "Waiting 2 seconds for controller to stabilize after reset...\n");
+    ROCXIO_LOG_INFO(
+      "Waiting 2 seconds for controller to stabilize after reset...\n");
     sleep(2);
   }
 
   // Delete Completion Queue (DELETE_CQ)
-  fprintf(stdout, "Sending DELETE_CQ command for queue_id=%u...\n", queue_id);
+  ROCXIO_LOG_INFO("Sending DELETE_CQ command for queue_id=%u...\n", queue_id);
   memset(&cmd, 0, sizeof(cmd));
   cmd.opcode = nvme_admin_delete_cq;
   cmd.nsid = 0;           // Admin commands use NSID 0
@@ -1956,23 +1797,22 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret == 0) {
-    fprintf(stdout, "DELETE_CQ completed successfully.\n");
+    ROCXIO_LOG_INFO("DELETE_CQ completed successfully.\n");
   } else {
-    fprintf(stdout, "DELETE_CQ ioctl returned: %d\n", ret);
+    ROCXIO_LOG_INFO("DELETE_CQ ioctl returned: %d\n", ret);
   }
   if (ret < 0) {
     // Ignore errors - queue may not exist
-    fprintf(stdout, "Note: DELETE_CQ failed (queue may not exist): %s\n",
-            strerror(errno));
+    ROCXIO_LOG_INFO("Note: DELETE_CQ failed (queue may not exist): %s\n",
+                    strerror(errno));
   } else if (cmd.result & 0xFFFE) {
     // Check status code, but don't fail - queue may not exist
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     // Ignore errors - queue may not exist or may have already been deleted
-    fprintf(
-      stderr,
-      "Note: DELETE_CQ returned status code 0x%02x (queue may not exist)\n",
-      sc);
+    ROCXIO_LOG_INFO("Note: DELETE_CQ returned status code 0x%02x (queue may "
+                    "not exist)\n",
+                    sc);
   }
 
   return 0;
@@ -1997,25 +1837,23 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   cmd.addr = reinterpret_cast<uint64_t>(cq_virt);
   cmd.data_len = 0;
 
-  fprintf(stdout,
-          "CREATE_CQ: queue_id=%u, queue_size=%u, "
-          "cdw10=0x%08x, PC=%d\n",
-          queue_id, queue_size, cmd.cdw10, cq_pc ? 1 : 0);
+  ROCXIO_LOG_INFO("CREATE_CQ: queue_id=%u, queue_size=%u, "
+                  "cdw10=0x%08x, PC=%d\n",
+                  queue_id, queue_size, cmd.cdw10, cq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
     if (errno == EACCES || errno == EPERM) {
-      fprintf(stderr, "ERROR: Failed to create completion queue: %s\n",
-              strerror(errno));
-      fprintf(stderr, "Note: CREATE_CQ IOCTL requires root permissions.\n");
-      fprintf(stderr,
-              "Please ensure you have CAP_SYS_ADMIN capability or run with "
-              "sudo.\n");
+      ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
+                       strerror(errno));
+      ROCXIO_LOG_INFO("Note: CREATE_CQ IOCTL requires root permissions.\n");
+      ROCXIO_LOG_ERROR("Please ensure you have CAP_SYS_ADMIN capability or "
+                       "run with sudo.\n");
     } else {
-      fprintf(stderr, "ERROR: Failed to create completion queue: %s\n",
-              strerror(errno));
+      ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
+                       strerror(errno));
     }
-    fprintf(stderr, "ERROR: Cannot proceed - queue creation failed.\n");
+    ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
     return -errno;
   }
 
@@ -2024,32 +1862,29 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
-    fprintf(stderr,
-            "ERROR: CREATE_CQ failed with status code 0x%02x (SCT=%u)\n", sc,
-            sct);
+    ROCXIO_LOG_ERROR("CREATE_CQ failed with status code 0x%02x (SCT=%u)\n", sc,
+                     sct);
     if (sc == NVME_SC_INVALID_FIELD) {
-      fprintf(
-        stderr,
-        "  Error: Invalid field in command (queue_id=%u, queue_size=%u)\n",
-        queue_id, queue_size);
+      ROCXIO_LOG_ERROR("Invalid field in command (queue_id=%u, "
+                       "queue_size=%u)\n",
+                       queue_id, queue_size);
     } else if (sc == NVME_SC_CAP_EXCEEDED) {
-      fprintf(stderr,
-              "  Error: Queue size exceeds controller capabilities "
-              "(queue_size=%u)\n",
-              queue_size);
+      ROCXIO_LOG_ERROR("Queue size exceeds controller capabilities "
+                       "(queue_size=%u)\n",
+                       queue_size);
     }
-    fprintf(stderr, "ERROR: Cannot proceed - queue creation failed.\n");
+    ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
     return -EIO;
   }
 
-  fprintf(stdout,
-          "Successfully created completion queue (queue_id=%u, size=%u)\n",
-          queue_id, queue_size);
+  ROCXIO_LOG_INFO("Successfully created completion queue (queue_id=%u, "
+                  "size=%u)\n",
+                  queue_id, queue_size);
 
   // Re-zero completion queue after creation to clear any stale entries
   // This is especially important after a controller reset
   memset(cq_virt, 0, queue_size * NVME_EP_CQE_SIZE);
-  fprintf(stdout, "Re-zeroed completion queue to clear any stale entries.\n");
+  ROCXIO_LOG_INFO("Re-zeroed completion queue to clear any stale entries.\n");
 
   // Small delay to allow controller to stabilize after CQ creation
   usleep(100000); // 100ms delay
@@ -2063,16 +1898,15 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
   cmd.addr = reinterpret_cast<uint64_t>(sq_virt);
   cmd.data_len = 0;
 
-  fprintf(stdout,
-          "CREATE_SQ: queue_id=%u, queue_size=%u, "
-          "cdw10=0x%08x, cdw11=0x%08x, PC=%d\n",
-          queue_id, queue_size, cmd.cdw10, cmd.cdw11, sq_pc ? 1 : 0);
+  ROCXIO_LOG_INFO("CREATE_SQ: queue_id=%u, queue_size=%u, "
+                  "cdw10=0x%08x, cdw11=0x%08x, PC=%d\n",
+                  queue_id, queue_size, cmd.cdw10, cmd.cdw11, sq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
   if (ret < 0) {
-    fprintf(stderr, "ERROR: Failed to create submission queue: %s\n",
-            strerror(errno));
-    fprintf(stderr, "ERROR: Cannot proceed - queue creation failed.\n");
+    ROCXIO_LOG_ERROR("Failed to create submission queue: %s\n",
+                     strerror(errno));
+    ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
     return -errno;
   }
 
@@ -2081,27 +1915,24 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
     uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
-    fprintf(stderr,
-            "ERROR: CREATE_SQ failed with status code 0x%02x (SCT=%u)\n", sc,
-            sct);
+    ROCXIO_LOG_ERROR("CREATE_SQ failed with status code 0x%02x (SCT=%u)\n", sc,
+                     sct);
     if (sc == NVME_SC_INVALID_FIELD) {
-      fprintf(stderr,
-              "  Error: Invalid field in command (queue_id=%u, queue_size=%u, "
-              "CQID=%u)\n",
-              queue_id, queue_size, queue_id);
+      ROCXIO_LOG_ERROR("Invalid field in command (queue_id=%u, "
+                       "queue_size=%u, CQID=%u)\n",
+                       queue_id, queue_size, queue_id);
     } else if (sc == NVME_SC_CAP_EXCEEDED) {
-      fprintf(stderr,
-              "  Error: Queue size exceeds controller capabilities "
-              "(queue_size=%u)\n",
-              queue_size);
+      ROCXIO_LOG_ERROR("Queue size exceeds controller capabilities "
+                       "(queue_size=%u)\n",
+                       queue_size);
     }
-    fprintf(stderr, "ERROR: Cannot proceed - queue creation failed.\n");
+    ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
     return -EIO;
   }
 
-  fprintf(stdout,
-          "Successfully created submission queue (queue_id=%u, size=%u)\n",
-          queue_id, queue_size);
+  ROCXIO_LOG_INFO("Successfully created submission queue (queue_id=%u, "
+                  "size=%u)\n",
+                  queue_id, queue_size);
 
   return 0;
 }
@@ -2116,13 +1947,12 @@ static void freeQueueSetup(struct xioQueueSetup* s, bool is_device,
     if (page_sz > 0) {
       int rc = munlock(s->prp_list, static_cast<size_t>(page_sz));
       if (rc != 0) {
-        fprintf(stderr, "Warning: munlock failed for PRP list '%s': %s\n",
-                (name != nullptr) ? name : "unknown", strerror(errno));
+        ROCXIO_LOG_WARN("munlock failed for PRP list '%s': %s\n",
+                        (name != nullptr) ? name : "unknown", strerror(errno));
       }
     } else {
-      fprintf(stderr,
-              "Warning: failed to get page size for munlock of PRP list '%s'\n",
-              (name != nullptr) ? name : "unknown");
+      ROCXIO_LOG_WARN("failed to get page size for munlock of PRP list '%s'\n",
+                      (name != nullptr) ? name : "unknown");
     }
 #endif // __HIP_DEVICE_COMPILE__
     free(s->prp_list);
@@ -2167,30 +1997,28 @@ __host__ int createQueue(const char* nvme_device,
 
   kmod_fd = open(kernel_module_device, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stdout,
-            "Failed to open kernel module device "
-            "%s: %s\n",
-            kernel_module_device, strerror(errno));
+    ROCXIO_LOG_INFO("Failed to open kernel module device "
+                    "%s: %s\n",
+                    kernel_module_device, strerror(errno));
     return -errno;
   }
 
   bool is_emulated = false;
   int detect_ret = detectEmulatedNvme(nvme_device, &is_emulated);
   if (detect_ret != 0) {
-    fprintf(stderr,
-            "Error: Failed to detect NVMe type "
-            "for %s: %s.\n",
-            nvme_device, strerror(-detect_ret));
+    ROCXIO_LOG_ERROR("Failed to detect NVMe type "
+                     "for %s: %s.\n",
+                     nvme_device, strerror(-detect_ret));
     close(kmod_fd);
     return -detect_ret;
   }
-  fprintf(stdout, "NVMe device %s detected as: %s.\n", nvme_device,
-          is_emulated ? "EMULATED" : "REAL");
+  ROCXIO_LOG_INFO("NVMe device %s detected as: %s.\n", nvme_device,
+                  is_emulated ? "EMULATED" : "REAL");
 
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
-    fprintf(stderr, "Failed to open NVMe device %s: %s.\n", nvme_device,
-            strerror(errno));
+    ROCXIO_LOG_ERROR("Failed to open NVMe device %s: %s.\n", nvme_device,
+                     strerror(errno));
     close(kmod_fd);
     return -errno;
   }
@@ -2201,7 +2029,7 @@ __host__ int createQueue(const char* nvme_device,
   {
     int cqr_ret = readNvmeCapCqr(nvme_bdf, &cqr);
     if (cqr_ret < 0) {
-      fprintf(stdout, "Warning: Could not read CQR, "
+      ROCXIO_LOG_WARN("Could not read CQR, "
                       "assuming contiguous required "
                       "(PC=1).\n");
       cqr = true;
@@ -2216,19 +2044,17 @@ __host__ int createQueue(const char* nvme_device,
 
   // CQR=1 + multi-page: use contiguous DMA path
   if (cqr && sq_multi_page) {
-    fprintf(stdout,
-            "CQR=1: using contiguous DMA for "
-            "submission queue (%zu bytes)\n",
-            sq_size_bytes);
+    ROCXIO_LOG_INFO("CQR=1: using contiguous DMA for "
+                    "submission queue (%zu bytes)\n",
+                    sq_size_bytes);
     ret = setupContigQueueForGpu(sq_size_bytes, nvme_bdf, "submission queue",
                                  &sq_setup);
     if (ret < 0) {
       size_t max_sq = NVME_PAGE_SIZE / NVME_EP_SQE_SIZE;
-      fprintf(stderr,
-              "Error: Contiguous alloc failed for "
-              "SQ. Try --queue-length %zu or "
-              "smaller.\n",
-              max_sq);
+      ROCXIO_LOG_ERROR("Contiguous alloc failed for "
+                       "SQ. Try --queue-length %zu or "
+                       "smaller.\n",
+                       max_sq);
       goto cleanup;
     }
   } else {
@@ -2240,19 +2066,17 @@ __host__ int createQueue(const char* nvme_device,
   }
 
   if (cqr && cq_multi_page) {
-    fprintf(stdout,
-            "CQR=1: using contiguous DMA for "
-            "completion queue (%zu bytes)\n",
-            cq_size_bytes);
+    ROCXIO_LOG_INFO("CQR=1: using contiguous DMA for "
+                    "completion queue (%zu bytes)\n",
+                    cq_size_bytes);
     ret = setupContigQueueForGpu(cq_size_bytes, nvme_bdf, "completion queue",
                                  &cq_setup);
     if (ret < 0) {
       size_t max_cq = NVME_PAGE_SIZE / NVME_EP_CQE_SIZE;
-      fprintf(stderr,
-              "Error: Contiguous alloc failed for "
-              "CQ. Try --queue-length %zu or "
-              "smaller.\n",
-              max_cq);
+      ROCXIO_LOG_ERROR("Contiguous alloc failed for "
+                       "CQ. Try --queue-length %zu or "
+                       "smaller.\n",
+                       max_cq);
       freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
                      sq_size_bytes);
       goto cleanup;
@@ -2273,13 +2097,13 @@ __host__ int createQueue(const char* nvme_device,
     bool sq_pc = cqr || !sq_multi_page;
     bool cq_pc = cqr || !cq_multi_page;
 
-    fprintf(stdout,
-            "Queue PC flags: SQ PC=%d (%zu bytes, "
-            "%s%s), CQ PC=%d (%zu bytes, %s%s)\n",
-            sq_pc ? 1 : 0, sq_size_bytes, sq_is_device ? "device" : "host",
-            sq_setup.uses_contig ? ", contig" : "", cq_pc ? 1 : 0,
-            cq_size_bytes, cq_is_device ? "device" : "host",
-            cq_setup.uses_contig ? ", contig" : "");
+    ROCXIO_LOG_INFO("Queue PC flags: SQ PC=%d (%zu bytes, "
+                    "%s%s), CQ PC=%d (%zu bytes, %s%s)\n",
+                    sq_pc ? 1 : 0, sq_size_bytes,
+                    sq_is_device ? "device" : "host",
+                    sq_setup.uses_contig ? ", contig" : "", cq_pc ? 1 : 0,
+                    cq_size_bytes, cq_is_device ? "device" : "host",
+                    cq_setup.uses_contig ? ", contig" : "");
 
     // Build PRP lists for multi-page host queues
     // (only when CQR=0 allows non-contiguous)
@@ -2326,21 +2150,19 @@ __host__ int createQueue(const char* nvme_device,
       goto cleanup;
     }
 
-    fprintf(stdout,
-            "Deleting existing queues (queue_id=%u) "
-            "if they exist...\n",
-            queue_id);
+    ROCXIO_LOG_INFO("Deleting existing queues (queue_id=%u) "
+                    "if they exist...\n",
+                    queue_id);
     deleteQueue(nvme_fd, queue_id);
-    fprintf(stdout, "Queue deletion completed.\n");
+    ROCXIO_LOG_INFO("Queue deletion completed.\n");
 
-    fprintf(stdout, "Waiting 500ms before creating "
+    ROCXIO_LOG_INFO("Waiting 500ms before creating "
                     "queues...\n");
     usleep(500000);
 
-    fprintf(stdout,
-            "Creating NVMe queues (queue_id=%u, "
-            "queue_size=%u)...\n",
-            queue_id, queue_size);
+    ROCXIO_LOG_INFO("Creating NVMe queues (queue_id=%u, "
+                    "queue_size=%u)...\n",
+                    queue_id, queue_size);
     ret = createQueueCommands(nvme_fd, queue_id, queue_size, sq_setup.virt,
                               cq_setup.virt, sq_pc, cq_pc);
     if (ret < 0) {
@@ -2402,42 +2224,38 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
   int nvme_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
                                     "NVMe device", 3, 50);
   if (nvme_fd < 0) {
-    fprintf(stderr,
-            "Warning: Failed to reopen NVMe "
-            "device for queue cleanup: %s\n",
-            strerror(errno));
+    ROCXIO_LOG_WARN("Failed to reopen NVMe "
+                    "device for queue cleanup: %s\n",
+                    strerror(errno));
     return -errno;
   }
 
   int ret = 0;
   if (!nvmeConfig->queueIds.empty()) {
-    fprintf(stdout,
-            "\nSIGINT received: Deleting %zu "
-            "NVMe queue%s...\n",
-            nvmeConfig->queueIds.size(),
-            nvmeConfig->queueIds.size() > 1 ? "s" : "");
+    ROCXIO_LOG_INFO("\nSIGINT received: Deleting %zu "
+                    "NVMe queue%s...\n",
+                    nvmeConfig->queueIds.size(),
+                    nvmeConfig->queueIds.size() > 1 ? "s" : "");
     for (size_t q = 0; q < nvmeConfig->queueIds.size(); q++) {
       int r = deleteQueue(nvme_fd, nvmeConfig->queueIds[q]);
       if (r != 0)
         ret = r;
     }
   } else {
-    fprintf(stdout,
-            "\nSIGINT received: Deleting NVMe "
-            "queue %u...\n",
-            nvmeConfig->queueId);
+    ROCXIO_LOG_INFO("\nSIGINT received: Deleting NVMe "
+                    "queue %u...\n",
+                    nvmeConfig->queueId);
     ret = deleteQueue(nvme_fd, nvmeConfig->queueId);
   }
   close(nvme_fd);
 
   if (ret == 0) {
-    fprintf(stdout, "NVMe queues deleted successfully.\n");
+    ROCXIO_LOG_INFO("NVMe queues deleted successfully.\n");
     nvmeConfig->queuesCreated = false;
   } else {
-    fprintf(stderr,
-            "Warning: Failed to delete NVMe "
-            "queues: %s\n",
-            strerror(-ret));
+    ROCXIO_LOG_WARN("Failed to delete NVMe "
+                    "queues: %s\n",
+                    strerror(-ret));
   }
 
 #ifndef __HIP_DEVICE_COMPILE__

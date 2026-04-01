@@ -176,10 +176,8 @@ Device-Side Operations
 
 .. doxygenfunction:: sdma_ep::quiet
 
-CLI and Validation
-^^^^^^^^^^^^^^^^^^
-
-.. doxygenfunction:: sdma_ep::registerCliOptions
+Validation
+^^^^^^^^^^
 
 .. doxygenfunction:: sdma_ep::validateConfig
 
