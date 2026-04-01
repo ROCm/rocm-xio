@@ -8,8 +8,15 @@ the [ROCm quick start installation guide][rocm-install].
 On Ubuntu 24.04, install the required packages:
 
 ```
-sudo apt install rocm-hip-sdk rocminfo libcli11-dev cmake \
+sudo apt install rocm-hip-sdk rocminfo cmake \
   libdrm-dev libhsa-runtime-dev
+```
+
+If you want to build the ``xio-tester`` CLI tool (enabled
+by default via ``BUILD_CLIENTS=ON``), also install:
+
+```
+sudo apt install libcli11-dev
 ```
 
 Then build rocm-xio:
@@ -65,6 +72,7 @@ Supported platforms: Linux
 |--------|---------|---------|
 | OFFLOAD\_ARCH | (auto) | GPU architecture |
 | ROCM\_PATH | /opt/rocm | ROCm installation path |
+| BUILD\_CLIENTS | ON | Build xio-tester (requires libcli11-dev) |
 | XIO\_BUILD\_DOCS | OFF | Build documentation (Sphinx) |
 | XIO\_DOCS\_ONLY | OFF | Docs-only build (no HIP) |
 | INSTALL\_TESTER | OFF | Install xio-tester binary |

@@ -9,6 +9,7 @@
  *
  * Usage:
  *   test-nvme-hardware --controller /dev/nvme2
+ *   ROCXIO_NVME_DEVICE=/dev/nvme2 test-nvme-hardware
  *   NVME_DEVICE=/dev/nvme2 test-nvme-hardware
  *   test-nvme-hardware  (auto-detects /dev/nvme0)
  */
@@ -176,7 +177,9 @@ static std::string find_controller(int argc, char** argv) {
     }
   }
 
-  const char* env = getenv("NVME_DEVICE");
+  const char* env = getenv("ROCXIO_NVME_DEVICE");
+  if (!env || env[0] == '\0')
+    env = getenv("NVME_DEVICE");
   if (env && env[0] != '\0') {
     return env;
   }

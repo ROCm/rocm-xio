@@ -19,6 +19,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "xio-cli-options.h"
 #include "xio.h"
 
 using namespace xio;
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
   // Create subcommands for each endpoint
   std::map<std::string, CLI::App*> endpointSubcommands;
   std::map<std::string, std::unique_ptr<XioEndpoint>> endpoints;
+  std::map<std::string, void*> endpointConfigs;
 
   for (const auto& endpointInfo : registry) {
     // Create endpoint object
@@ -138,8 +140,28 @@ int main(int argc, char** argv) {
     endpoints[endpointInfo.name] = std::move(endpoint);
     endpointSubcommands[endpointInfo.name] = subcmd;
 
-    // Let endpoint configure its own CLI options
-    endpoints[endpointInfo.name]->configureCliOptions(*subcmd);
+    void* epCfg = endpoints[endpointInfo.name]->initializeEndpointConfig();
+    endpointConfigs[endpointInfo.name] = epCfg;
+    switch (endpoints[endpointInfo.name]->getType()) {
+      case EndpointType::TEST_EP:
+        registerTestEpCliOptions(*subcmd,
+                                 static_cast<test_ep::TestEpConfig*>(epCfg));
+        break;
+      case EndpointType::NVME_EP:
+        registerNvmeEpCliOptions(*subcmd,
+                                 static_cast<nvme_ep::nvmeEpConfig*>(epCfg));
+        break;
+      case EndpointType::RDMA_EP:
+        registerRdmaEpCliOptions(*subcmd,
+                                 static_cast<rdma_ep::RdmaEpConfig*>(epCfg));
+        break;
+      case EndpointType::SDMA_EP:
+        registerSdmaEpCliOptions(*subcmd,
+                                 static_cast<sdma_ep::SdmaEpConfig*>(epCfg));
+        break;
+      default:
+        break;
+    }
   }
 
   // Parse command line
@@ -175,8 +197,15 @@ int main(int argc, char** argv) {
   auto& endpoint = endpoints[selectedEndpoint];
   XioEndpointConfig baseConfig = commonConfig;
 
-  // Initialize endpoint-specific configuration
-  baseConfig.endpointConfig = endpoint->initializeEndpointConfig();
+  // Reuse the config pointer obtained before CLI parsing
+  baseConfig.endpointConfig = endpointConfigs[selectedEndpoint];
+
+  // For SDMA, detect which subcommand was selected
+  if (endpoint->getType() == EndpointType::SDMA_EP) {
+    detectSdmaTestType(*endpointSubcommands[selectedEndpoint],
+                       static_cast<sdma_ep::SdmaEpConfig*>(
+                         baseConfig.endpointConfig));
+  }
 
   // Apply common configuration to endpoint-specific config
   if (baseConfig.endpointConfig) {
