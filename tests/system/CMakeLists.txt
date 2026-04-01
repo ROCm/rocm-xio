@@ -7,3 +7,4 @@
 
 add_subdirectory(test-ep)
 add_subdirectory(coherence)
+add_subdirectory(nvme-ep)

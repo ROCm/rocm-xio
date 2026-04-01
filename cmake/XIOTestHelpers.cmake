@@ -150,3 +150,67 @@ function(xio_add_test)
       "LD_LIBRARY_PATH=${_rdma_lib}:$ENV{LD_LIBRARY_PATH}")
   endif()
 endfunction()
+
+# xio_add_script_test()
+#
+# Register a shell script as a CTest entry.
+#
+# Usage:
+#   xio_add_script_test(
+#     NAME nvme-verify-seq-host-mem
+#     SCRIPT ${CMAKE_SOURCE_DIR}/tests/system/nvme-ep/run-nvme-script-test.sh
+#     LABELS hardware nvme verify
+#     TIMEOUT 120
+#     ARGS path/to/real-script.sh /dev/nvme0
+#     ENVIRONMENT "MEMORY_MODE=0" "WRITE_IO=4"
+#   )
+#
+# NAME        - CTest name.
+# SCRIPT      - Path to the shell script to run.
+# LABELS      - CTest labels for filtering.
+# TIMEOUT     - CTest timeout in seconds (default 120).
+# ARGS        - Arguments passed to the script.
+# ENVIRONMENT - Environment variables for the test.
+function(xio_add_script_test)
+  cmake_parse_arguments(XIO_STEST ""
+    "NAME;SCRIPT;TIMEOUT"
+    "LABELS;ARGS;ENVIRONMENT" ${ARGN})
+
+  if(NOT XIO_STEST_NAME)
+    message(FATAL_ERROR
+      "xio_add_script_test: NAME is required")
+  endif()
+  if(NOT XIO_STEST_SCRIPT)
+    message(FATAL_ERROR
+      "xio_add_script_test: SCRIPT is required")
+  endif()
+
+  add_test(
+    NAME ${XIO_STEST_NAME}
+    COMMAND bash ${XIO_STEST_SCRIPT} ${XIO_STEST_ARGS}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+  if(XIO_STEST_LABELS)
+    set_tests_properties(${XIO_STEST_NAME}
+      PROPERTIES LABELS "${XIO_STEST_LABELS}")
+  endif()
+
+  if(XIO_STEST_TIMEOUT)
+    set_tests_properties(${XIO_STEST_NAME}
+      PROPERTIES TIMEOUT ${XIO_STEST_TIMEOUT})
+  else()
+    set_tests_properties(${XIO_STEST_NAME}
+      PROPERTIES TIMEOUT 120)
+  endif()
+
+  set_tests_properties(${XIO_STEST_NAME}
+    PROPERTIES
+      SKIP_RETURN_CODE 77
+      SKIP_REGULAR_EXPRESSION "SKIP:")
+
+  if(XIO_STEST_ENVIRONMENT)
+    set_tests_properties(${XIO_STEST_NAME}
+      PROPERTIES
+        ENVIRONMENT "${XIO_STEST_ENVIRONMENT}")
+  endif()
+endfunction()
