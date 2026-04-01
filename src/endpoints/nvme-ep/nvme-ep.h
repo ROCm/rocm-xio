@@ -13,8 +13,6 @@
 
 #include <hip/hip_runtime.h>
 
-#include <CLI/CLI.hpp>
-
 #include "xio.h"
 /*
  * NVMe Definitions for rocm-xio nvme-ep Endpoint
@@ -790,19 +788,6 @@ struct nvmeEpConfig {
       doorbellParams{false, 0x0020, 0x0030, nullptr, nullptr} {
   }
 };
-
-/**
- * Register NVMe endpoint-specific CLI options
- *
- * This function registers all NVMe-specific command-line options with
- * the CLI11 parser. Options are registered with shorter names (without
- * --nvme- prefix) for cleaner CLI, but backward-compatible aliases
- * are also provided.
- *
- * @param app CLI11 App object to add options to
- * @param config Pointer to nvmeEpConfig structure to populate
- */
-__host__ void registerCliOptions(CLI::App& app, nvmeEpConfig* config);
 
 /**
  * Validate NVMe endpoint configuration

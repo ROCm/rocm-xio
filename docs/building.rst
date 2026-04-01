@@ -4,10 +4,22 @@ Building rocm-xio
 Dependencies
 ------------
 
+Library dependencies:
+
 .. code-block:: bash
 
-   sudo apt install rocm-hip-sdk rocminfo libcli11-dev cmake \
+   sudo apt install rocm-hip-sdk rocminfo cmake \
      libdrm-dev libhsa-runtime-dev
+
+The ``xio-tester`` CLI tool (built by default via
+``BUILD_CLIENTS=ON``) additionally requires CLI11:
+
+.. code-block:: bash
+
+   sudo apt install libcli11-dev
+
+To build the library without the tester (and without
+the CLI11 dependency), pass ``-DBUILD_CLIENTS=OFF``.
 
 Quick Start
 -----------
@@ -33,6 +45,9 @@ CMake Configuration Options
 
    # Specify ROCm installation path (default: /opt/rocm)
    cmake -S . -B build -DROCM_PATH=/opt/rocm-7.1.0
+
+   # Build library only (no tester, no CLI11 dependency)
+   cmake -S . -B build -DBUILD_CLIENTS=OFF
 
    # Build documentation (Sphinx + Breathe + Doxygen)
    cmake -S . -B build -DXIO_BUILD_DOCS=ON

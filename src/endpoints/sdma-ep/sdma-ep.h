@@ -26,10 +26,6 @@
 
 #include "sdma_pkt_struct.h"
 
-namespace CLI {
-class App;
-}
-
 namespace sdma_ep {
 
 /* ================================================================
@@ -40,8 +36,7 @@ namespace sdma_ep {
  * @brief SDMA endpoint test configuration.
  *
  * Contains all user-facing options for the xio-tester
- * sdma-ep subcommand. Populated by registerCliOptions()
- * and validated by validateConfig().
+ * sdma-ep subcommand. Validated by validateConfig().
  */
 struct SdmaEpConfig {
   std::string testType = "";  /**< Test subcommand name:
@@ -65,6 +60,8 @@ struct SdmaEpConfig {
   size_t transferSize = 4096; /**< Per-iteration transfer
                                    size in bytes. Must be a
                                    multiple of 4. */
+  unsigned iterations = 128;  /**< Number of SDMA transfers
+                                    per run. */
 };
 
 /* ================================================================
@@ -940,19 +937,6 @@ __host__ void destroyQueue(SdmaQueueInfo* info);
 /* ================================================================
  * CLI and Validation
  * ================================================================ */
-
-/**
- * @brief Register SDMA endpoint CLI options.
- *
- * Adds subcommands (p2p, ping-pong, buffer-reuse) and
- * options (--to-host, --verify, --src-gpu, --dst-gpu,
- * --transfer-size, --use-counter, --use-flush) to the
- * CLI11 parser.
- *
- * @param app    CLI11 App to register options on.
- * @param config SdmaEpConfig to populate from CLI args.
- */
-__host__ void registerCliOptions(CLI::App& app, SdmaEpConfig* config);
 
 /**
  * @brief Validate SDMA endpoint configuration.

@@ -14,7 +14,7 @@
 #   Ensure job only runs on nodes with spare NVMe devices
 #   To check compatible nodes: sinfo -Na -o "%N %100f" | grep NVME
 #   Also ensure a recent ROCm version since we need to run outside enroot.
-#SBATCH --constraint=MARKHAM&NVME&(ROCM7.2.0|ROCM7.3.0|ROCM7.1.1|ROCM7.0.1)
+#SBATCH --constraint=MARKHAM&NVME
 #SBATCH --exclude=mlse-alola-b39-ws4,mlse-alola-b39-ws6,ctr-cx66-mi300x-13
 
 set -xe
@@ -31,7 +31,8 @@ fi
 
 run_on_host() {
   ssh_with_retry "sudo env \
-LD_LIBRARY_PATH=/opt/rocm/lib \
+LD_LIBRARY_PATH=${ROCM_NFS}/lib \
+PATH=${ROCM_NFS}/bin:\${PATH} \
 HSA_FORCE_FINE_GRAIN_PCIE=1 $*"
 }
 

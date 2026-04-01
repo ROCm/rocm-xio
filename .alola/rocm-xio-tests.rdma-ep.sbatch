@@ -19,7 +19,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
-#SBATCH --constraint=MARKHAM&IB&(ROCM7.2.0|ROCM7.3.0|ROCM7.1.1|ROCM7.0.1)
+#SBATCH --constraint=MARKHAM&IB
 #SBATCH --exclude=banff-cyxtera-s81-5
 #SBATCH --gpus-per-node=1
 
@@ -172,7 +172,7 @@ echo "=========================================="
 echo "Running RDMA-EP loopback tests"
 echo "=========================================="
 
-LIB_PATH="${RDMA_CORE_LIB}:/opt/rocm/lib"
+LIB_PATH="${RDMA_CORE_LIB}:${ROCM_NFS}/lib"
 
 for vendor in ${DETECTED_VENDORS}; do
   RDMA_DEV=""

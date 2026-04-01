@@ -1,0 +1,89 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# Verify the library builds, installs, and examples link
+# without libcli11-dev.  This ensures CLI11 is not a
+# transitive dependency for downstream consumers.
+
+name: build-library-only
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - '**.hip'
+      - '**.cpp'
+      - '**.c'
+      - '**.h'
+      - '**.hpp'
+      - '**.cc'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'examples/**'
+
+jobs:
+  library-no-cli11:
+    name: library without libcli11-dev
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v5.0.0
+
+    - name: Install dependencies (no libcli11-dev)
+      run: |
+        apt-get update
+        apt-get install -y cmake libdrm-dev
+        dpkg -l libcli11-dev 2>/dev/null && \
+          { echo "FAIL: libcli11-dev must not be installed"; exit 1; } || \
+          echo "OK: libcli11-dev is not installed"
+
+    - name: Configure library only (BUILD_CLIENTS=OFF)
+      run: |
+        cmake -S . -B build \
+          -DOFFLOAD_ARCH=gfx942:xnack+ \
+          -DROCM_PATH=/opt/rocm \
+          -DBUILD_CLIENTS=OFF \
+          -DBUILD_TESTING=OFF
+
+    - name: Build library (no tester, no tests)
+      run: cmake --build build --target rocm-xio
+
+    - name: Verify xio-tester was NOT built
+      run: |
+        if [ -f build/xio-tester ]; then
+          echo "FAIL: xio-tester should not exist with BUILD_CLIENTS=OFF"
+          exit 1
+        fi
+        echo "OK: xio-tester not built"
+
+    - name: Install library
+      run: cmake --install build --prefix /tmp/rocm-xio-test
+
+    - name: Verify installed headers are CLI11-free
+      run: |
+        if grep -r 'CLI/CLI.hpp\|namespace CLI' \
+             /tmp/rocm-xio-test/include/; then
+          echo "FAIL: installed headers reference CLI11"
+          exit 1
+        fi
+        echo "OK: installed headers are CLI11-free"
+
+    - name: Build examples against installed library
+      run: |
+        for ex in list-endpoints endpoint-info \
+                  sdma-ep-p2p nvme-ep-info; do
+          echo "=== Building example: ${ex} ==="
+          cmake -S examples/${ex} -B /tmp/ex-${ex} \
+            -DCMAKE_PREFIX_PATH="/tmp/rocm-xio-test;/opt/rocm" \
+            -DOFFLOAD_ARCH=gfx942:xnack+
+          cmake --build /tmp/ex-${ex}
+        done

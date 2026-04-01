@@ -18,6 +18,12 @@ SCP_COMMAND="scp \
   -o UserKnownHostsFile=/dev/null \
   -o ConnectTimeout=10"
 
+# NFS-shared ROCm used for host-side execution so
+# sbatch scripts don't need per-node ROCm version
+# constraints.  Only affects LD_LIBRARY_PATH/PATH
+# in the calling shell -- no impact on other users.
+ROCM_NFS="/cluster/apps/ubuntu-24/rocm/rocm-7.2.70200"
+
 # Run a command via SSH to localhost with automatic
 # retry on transient SSH failures.  Retries when SSH
 # returns 255 (connection error) or when the output

@@ -39,9 +39,9 @@ namespace rdma_ep {
 /**
  * @brief Configuration for the RDMA endpoint.
  *
- * Populated from CLI flags via registerCliOptions() and validated
- * by validateConfig().  Controls provider selection, queue sizing,
- * loopback vs 2-node mode, and optional data-pattern verification.
+ * Validated by validateConfig().  Controls provider selection,
+ * queue sizing, loopback vs 2-node mode, and optional
+ * data-pattern verification.
  */
 struct RdmaEpConfig {
   std::string providerStr = "bnxt";   /**< Provider name string.    */
@@ -73,13 +73,8 @@ struct RdmaEpConfig {
 
 } // namespace rdma_ep
 
-namespace CLI {
-class App;
-}
-
 namespace rdma_ep {
 
-__host__ void registerCliOptions(CLI::App& app, RdmaEpConfig* config);
 __host__ std::string validateConfig(RdmaEpConfig* config);
 __host__ unsigned getIterations(void* endpointConfig);
 

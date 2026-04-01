@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "xio-env.h"
 #include "xio.h"
 
 #ifndef __HIP_DEVICE_COMPILE__
@@ -572,8 +573,8 @@ void freeDeviceMemory(void* ptr, unsigned flags) {
       (void)hipMemRelease(it->second.handle);
       vmemAllocations.erase(it);
     } else {
-      std::cerr << "Warning: VMEM free called for "
-                << "untracked pointer " << ptr << std::endl;
+      std::cerr << "Warning: VMEM free called for " << "untracked pointer "
+                << ptr << std::endl;
       (void)hipMemUnmap(ptr, 0);
       (void)hipMemAddressFree(ptr, 0);
     }
@@ -732,11 +733,10 @@ __host__ bool reallocateQueue(void** ptr, size_t size, const char* queueName) {
   hipError_t err = allocHostMemory(size, &coherent_ptr, queueName,
                                    XIO_HOST_MEM_COHERENT);
   if (err != hipSuccess || !coherent_ptr) {
-    fprintf(stdout,
-            "Warning: coherent alloc failed for "
-            "%s. Falling back to regular allocation "
-            "(may not work on gfx900)\n",
-            queueName);
+    ROCXIO_LOG_WARN("coherent alloc failed for "
+                    "%s. Falling back to regular allocation "
+                    "(may not work on gfx900)\n",
+                    queueName);
     return false;
   }
 
@@ -761,8 +761,8 @@ __host__ void* getGpuPointer(void* host_ptr, bool is_device,
     void* gpu_ptr = nullptr;
     hipError_t err = hipHostGetDevicePointer(&gpu_ptr, host_ptr, 0);
     if (err != hipSuccess) {
-      fprintf(stdout, "Warning: hipHostGetDevicePointer failed for %s: %s\n",
-              queue_name, hipGetErrorString(err));
+      ROCXIO_LOG_WARN("hipHostGetDevicePointer failed for %s: %s\n", queue_name,
+                      hipGetErrorString(err));
       return NULL;
     }
     return gpu_ptr;
@@ -1290,10 +1290,9 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
   if (is_device) {
     // Device memory (HSA) - export as DMA-BUF and get physical address
     if (!kernel_module_device) {
-      fprintf(stderr,
-              "ERROR: kernel_module_device required for device memory "
-              "buffer %s\n",
-              buffer_name);
+      ROCXIO_LOG_ERROR("kernel_module_device required for device memory "
+                       "buffer %s\n",
+                       buffer_name);
       return 0;
     }
 
@@ -1301,24 +1300,22 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
     int ret = exportRegVramBuf(buffer_ptr, size, nvme_bdf, kernel_module_device,
                                &phys_addr, is_emulated);
     if (ret < 0) {
-      fprintf(stderr, "ERROR: Failed to register %s device memory: %s\n",
-              buffer_name, strerror(-ret));
+      ROCXIO_LOG_ERROR("Failed to register %s device memory: %s\n", buffer_name,
+                       strerror(-ret));
       return 0;
     }
-    fprintf(stdout,
-            "%s device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
-            buffer_name,
-            (unsigned long long)reinterpret_cast<uint64_t>(buffer_ptr),
-            (unsigned long long)phys_addr);
+    ROCXIO_LOG_INFO(
+      "%s device memory: virt=0x%016llx, phys=0x%016llx (via DMA-BUF)\n",
+      buffer_name, (unsigned long long)reinterpret_cast<uint64_t>(buffer_ptr),
+      (unsigned long long)phys_addr);
     return phys_addr;
   } else {
     // Host memory - use pagemap to get physical address
     uint64_t phys_addr = getPhysAddr(buffer_ptr);
     if (phys_addr == 0) {
-      fprintf(stdout,
-              "Warning: Failed to get %s physical address, using "
-              "virtual address\n",
-              buffer_name);
+      ROCXIO_LOG_WARN("Failed to get %s physical address, using "
+                      "virtual address\n",
+                      buffer_name);
       return reinterpret_cast<uint64_t>(buffer_ptr);
     }
     return phys_addr;
@@ -1343,8 +1340,8 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
 
   int ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_QUEUE_ADDR, &reg_req);
   if (ret < 0) {
-    fprintf(stdout, "Failed to register %s address: %s\n", queue_name,
-            strerror(errno));
+    ROCXIO_LOG_INFO("Failed to register %s address: %s\n", queue_name,
+                    strerror(errno));
     return -errno;
   }
 
@@ -1363,8 +1360,8 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
   // Step 1: Register with HIP
   hipError_t hip_err = hipHostRegister(host_ptr, size, hipHostRegisterMapped);
   if (hip_err != hipSuccess) {
-    fprintf(stdout, "Warning: Failed to register %s with HIP: %s\n", name,
-            hipGetErrorString(hip_err));
+    ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", name,
+                    hipGetErrorString(hip_err));
     return -1;
   }
 
@@ -1372,19 +1369,17 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
   void* gpu_ptr = nullptr;
   hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, host_ptr, 0);
   if (gpu_ptr_err != hipSuccess) {
-    fprintf(stdout,
-            "Warning: hipHostGetDevicePointer failed for "
-            "%s: %s\n",
-            name, hipGetErrorString(gpu_ptr_err));
+    ROCXIO_LOG_WARN("hipHostGetDevicePointer failed for "
+                    "%s: %s\n",
+                    name, hipGetErrorString(gpu_ptr_err));
     (void)hipHostUnregister(host_ptr);
     return -1;
   }
 
   *gpu_ptr_out = gpu_ptr;
-  fprintf(stdout,
-          "Info: %s registered for GPU access: "
-          "host=%p, gpu=%p\n",
-          name, host_ptr, gpu_ptr);
+  ROCXIO_LOG_INFO("%s registered for GPU access: "
+                  "host=%p, gpu=%p\n",
+                  name, host_ptr, gpu_ptr);
 
   return 0;
 }
@@ -1410,8 +1405,8 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
   // Step 1: Allocate queue memory
   alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
   if (alloc_err != hipSuccess) {
-    fprintf(stdout, "Failed to allocate %s: %s\n", queue_name,
-            hipGetErrorString(alloc_err));
+    ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
+                    hipGetErrorString(alloc_err));
     return -ENOMEM;
   }
 
@@ -1431,8 +1426,8 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     hipError_t hip_err = hipHostRegister(setup->virt, size,
                                          hipHostRegisterMapped);
     if (hip_err != hipSuccess) {
-      fprintf(stdout, "Warning: Failed to register %s with HIP: %s\n",
-              queue_name, hipGetErrorString(hip_err));
+      ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
+                      hipGetErrorString(hip_err));
       // Cleanup
       if (setup->uses_coherent) {
         (void)hipHostFree(setup->virt);
@@ -1463,8 +1458,7 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
 
   // Step 5: Get physical address
   if (!kernel_module_device) {
-    fprintf(stderr, "ERROR: kernel_module_device required for %s\n",
-            queue_name);
+    ROCXIO_LOG_ERROR("kernel_module_device required for %s\n", queue_name);
     // Cleanup
     if (hip_registered) {
       (void)hipHostUnregister(setup->virt);
@@ -1483,10 +1477,9 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
                             kernel_module_device, is_emulated, queue_name);
   if (setup->phys == 0 && is_device) {
     // Device memory requires physical address
-    fprintf(stderr,
-            "ERROR: Failed to get physical address for %s device "
-            "memory\n",
-            queue_name);
+    ROCXIO_LOG_ERROR("Failed to get physical address for %s device "
+                     "memory\n",
+                     queue_name);
     // Cleanup
     if (hip_registered) {
       (void)hipHostUnregister(setup->virt);
@@ -1501,11 +1494,11 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
     return -ENOTSUP;
   }
 
-  fprintf(stdout,
-          "Info: %s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
-          "coherent=%d\n",
-          queue_name, setup->virt, setup->gpu, (unsigned long long)setup->phys,
-          setup->uses_coherent ? 1 : 0);
+  ROCXIO_LOG_INFO("%s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
+                  "coherent=%d\n",
+                  queue_name, setup->virt, setup->gpu,
+                  (unsigned long long)setup->phys,
+                  setup->uses_coherent ? 1 : 0);
 
   return 0;
 }
@@ -1517,10 +1510,10 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
 
   long page_sz_long = sysconf(_SC_PAGESIZE);
   if (page_sz_long <= 0) {
-    fprintf(stderr,
-            "ERROR: Failed to get system page size for queue %s; cannot build "
-            "PRP list\n",
-            queue_name);
+    ROCXIO_LOG_ERROR(
+      "Failed to get system page size for queue %s; cannot build "
+      "PRP list\n",
+      queue_name);
     return -EINVAL;
   }
   size_t page_sz = static_cast<size_t>(page_sz_long);
@@ -1539,19 +1532,17 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   if (!is_device) {
     uintptr_t virt_addr = reinterpret_cast<uintptr_t>(setup->virt);
     if ((virt_addr % page_sz) != 0) {
-      fprintf(stderr,
-              "ERROR: Queue %s virtual address %p is not page-aligned "
-              "(page size: %zu); cannot build PRP list\n",
-              queue_name, setup->virt, page_sz);
+      ROCXIO_LOG_ERROR("Queue %s virtual address %p is not page-aligned "
+                       "(page size: %zu); cannot build PRP list\n",
+                       queue_name, setup->virt, page_sz);
       return -EINVAL;
     }
   }
 
   if (is_device) {
-    fprintf(stderr,
-            "ERROR: PC=0 PRP list not supported "
-            "for device memory %s\n",
-            queue_name);
+    ROCXIO_LOG_ERROR("PC=0 PRP list not supported "
+                     "for device memory %s\n",
+                     queue_name);
     return -ENOTSUP;
   }
 
@@ -1559,20 +1550,18 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   uint64_t phys_addrs[max_pages];
   int ret = getPagePhysAddrs(setup->virt, queue_size, phys_addrs, max_pages);
   if (ret < 0) {
-    fprintf(stderr,
-            "ERROR: Failed to get page physical "
-            "addresses for %s: %s\n",
-            queue_name, strerror(-ret));
+    ROCXIO_LOG_ERROR("Failed to get page physical "
+                     "addresses for %s: %s\n",
+                     queue_name, strerror(-ret));
     return ret;
   }
 
-  fprintf(stdout,
-          "Info: %s spans %zu pages, building "
-          "PRP list (PC=0)\n",
-          queue_name, num_pages);
+  ROCXIO_LOG_INFO("%s spans %zu pages, building "
+                  "PRP list (PC=0)\n",
+                  queue_name, num_pages);
   for (size_t i = 0; i < num_pages; i++) {
-    fprintf(stdout, "  page[%zu]: phys=0x%016llx\n", i,
-            (unsigned long long)phys_addrs[i]);
+    ROCXIO_LOG_INFO("  page[%zu]: phys=0x%016llx\n", i,
+                    (unsigned long long)phys_addrs[i]);
   }
 
   // PC=0 uses standard PRP semantics (NVMe spec 4.4):
@@ -1580,10 +1569,9 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   // or PRP2 = PRP list pointer (>2 pages).
   if (num_pages == 2) {
     setup->prp2 = phys_addrs[1];
-    fprintf(stdout,
-            "Info: %s PRP2 = 0x%016llx "
-            "(direct 2nd page)\n",
-            queue_name, (unsigned long long)setup->prp2);
+    ROCXIO_LOG_INFO("%s PRP2 = 0x%016llx "
+                    "(direct 2nd page)\n",
+                    queue_name, (unsigned long long)setup->prp2);
     return 0;
   }
 
@@ -1592,31 +1580,28 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   size_t prp_list_bytes = prp_entries * sizeof(uint64_t);
 
   if (prp_list_bytes > page_sz) {
-    fprintf(stderr,
-            "ERROR: PRP list for %s requires "
-            "%zu bytes (max %zu). Reduce queue "
-            "size.\n",
-            queue_name, prp_list_bytes, page_sz);
+    ROCXIO_LOG_ERROR("PRP list for %s requires "
+                     "%zu bytes (max %zu). Reduce queue "
+                     "size.\n",
+                     queue_name, prp_list_bytes, page_sz);
     return -E2BIG;
   }
 
   void* prp_list = nullptr;
   int rc = posix_memalign(&prp_list, page_sz, page_sz);
   if (rc != 0 || !prp_list) {
-    fprintf(stderr,
-            "ERROR: Failed to allocate PRP list "
-            "for %s\n",
-            queue_name);
+    ROCXIO_LOG_ERROR("Failed to allocate PRP list "
+                     "for %s\n",
+                     queue_name);
     return -ENOMEM;
   }
   memset(prp_list, 0, page_sz);
 
   if (mlock(prp_list, page_sz) != 0) {
     int err = errno;
-    fprintf(stderr,
-            "ERROR: mlock failed for PRP "
-            "list %s: %s\n",
-            queue_name, strerror(err));
+    ROCXIO_LOG_ERROR("mlock failed for PRP "
+                     "list %s: %s\n",
+                     queue_name, strerror(err));
     free(prp_list);
     return -err;
   }
@@ -1628,10 +1613,9 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
 
   uint64_t prp_list_phys = getPhysAddr(prp_list);
   if (prp_list_phys == 0) {
-    fprintf(stderr,
-            "ERROR: Failed to get PRP list "
-            "physical address for %s\n",
-            queue_name);
+    ROCXIO_LOG_ERROR("Failed to get PRP list "
+                     "physical address for %s\n",
+                     queue_name);
     munlock(prp_list, page_sz);
     free(prp_list);
     return -EIO;
@@ -1641,10 +1625,10 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   setup->prp_list_phys = prp_list_phys;
   setup->prp2 = prp_list_phys;
 
-  fprintf(stdout,
-          "Info: %s PRP list at virt=%p "
-          "phys=0x%016llx (%zu entries)\n",
-          queue_name, prp_list, (unsigned long long)prp_list_phys, prp_entries);
+  ROCXIO_LOG_INFO("%s PRP list at virt=%p "
+                  "phys=0x%016llx (%zu entries)\n",
+                  queue_name, prp_list, (unsigned long long)prp_list_phys,
+                  prp_entries);
 
   return 0;
 }
@@ -1696,9 +1680,9 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   // Open kernel module device
   kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stdout, "Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
-            strerror(errno));
-    fprintf(stdout, "Please ensure the rocm-xio kernel module is loaded\n");
+    ROCXIO_LOG_INFO("Failed to open %s: %s\n", ROCM_XIO_DEVICE_PATH,
+                    strerror(errno));
+    ROCXIO_LOG_INFO("Please ensure the rocm-xio kernel module is loaded\n");
     return -errno;
   }
 
@@ -1707,14 +1691,14 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   req.bridge_bdf = bridge_bdf;
   ret = ioctl(kmod_fd, ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER, &req);
   if (ret < 0) {
-    fprintf(stdout, "Failed to get PCI MMIO bridge shadow buffer info: %s\n",
-            strerror(errno));
+    ROCXIO_LOG_INFO("Failed to get PCI MMIO bridge shadow buffer info: %s\n",
+                    strerror(errno));
     close(kmod_fd);
     return -errno;
   }
 
   if (req.shadow_gpa == 0) {
-    fprintf(stdout, "PCI MMIO bridge shadow GPA is 0 (not configured)\n");
+    ROCXIO_LOG_INFO("PCI MMIO bridge shadow GPA is 0 (not configured)\n");
     close(kmod_fd);
     return -EINVAL;
   }
@@ -1723,8 +1707,8 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   mapped = mmap(nullptr, req.shadow_size, PROT_READ | PROT_WRITE, MAP_SHARED,
                 kmod_fd, 0);
   if (mapped == MAP_FAILED) {
-    fprintf(stdout, "Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
-            strerror(errno));
+    ROCXIO_LOG_INFO("Failed to mmap PCI MMIO bridge shadow buffer: %s\n",
+                    strerror(errno));
     close(kmod_fd);
     return -errno;
   }
@@ -1735,11 +1719,10 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   // The kernel will clean it up when the process exits
 
   *virt_addr = mapped;
-  fprintf(stdout,
-          "PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
-          "size=%llu, vaddr=%p\n",
-          (unsigned long long)req.shadow_gpa,
-          (unsigned long long)req.shadow_size, mapped);
+  ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
+                  "size=%llu, vaddr=%p\n",
+                  (unsigned long long)req.shadow_gpa,
+                  (unsigned long long)req.shadow_size, mapped);
 
   return 0;
 }
@@ -1755,18 +1738,17 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
   hipError_t hip_err = hipHostRegister(shadow_virt, shadow_size,
                                        hipHostRegisterMapped);
   if (hip_err != hipSuccess) {
-    fprintf(stdout,
-            "Warning: Failed to register shadow buffer "
-            "with HIP: %s\n",
-            hipGetErrorString(hip_err));
-    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel "
-                    "will skip doorbell.\n");
+    ROCXIO_LOG_WARN("Failed to register shadow buffer "
+                    "with HIP: %s\n",
+                    hipGetErrorString(hip_err));
+    ROCXIO_LOG_ERROR("Disabling PCI MMIO bridge mode - GPU kernel "
+                     "will skip doorbell.\n");
     munmap(shadow_virt, shadow_size);
     *gpu_ptr_out = nullptr;
     return -1;
   }
 
-  fprintf(stdout, "Shadow buffer registered with HIP for GPU "
+  ROCXIO_LOG_INFO("Shadow buffer registered with HIP for GPU "
                   "access\n");
 
   // Step 2: Get GPU pointer
@@ -1774,22 +1756,20 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
   hipError_t gpu_ptr_err = hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt,
                                                    0);
   if (gpu_ptr_err != hipSuccess) {
-    fprintf(stdout,
-            "Warning: hipHostGetDevicePointer failed: "
-            "%s\n",
-            hipGetErrorString(gpu_ptr_err));
-    fprintf(stderr, "Disabling PCI MMIO bridge mode - GPU kernel "
-                    "will skip doorbell.\n");
+    ROCXIO_LOG_WARN("hipHostGetDevicePointer failed: "
+                    "%s\n",
+                    hipGetErrorString(gpu_ptr_err));
+    ROCXIO_LOG_ERROR("Disabling PCI MMIO bridge mode - GPU kernel "
+                     "will skip doorbell.\n");
     (void)hipHostUnregister(shadow_virt);
     munmap(shadow_virt, shadow_size);
     *gpu_ptr_out = nullptr;
     return -1;
   }
 
-  fprintf(stdout,
-          "Shadow buffer GPU pointer obtained: %p "
-          "(host: %p)\n",
-          shadow_gpu_ptr, shadow_virt);
+  ROCXIO_LOG_INFO("Shadow buffer GPU pointer obtained: %p "
+                  "(host: %p)\n",
+                  shadow_gpu_ptr, shadow_virt);
 
   *gpu_ptr_out = shadow_gpu_ptr;
   return 0;
@@ -1802,7 +1782,7 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   }
 
   if (bar > 5) {
-    fprintf(stderr, "Error: Invalid BAR number %u (must be 0-5)\n", bar);
+    ROCXIO_LOG_ERROR("Invalid BAR number %u (must be 0-5)\n", bar);
     return -EINVAL;
   }
 
@@ -1825,20 +1805,20 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
   bar_fd = open(resource_path, O_RDWR);
   if (bar_fd < 0) {
-    fprintf(stdout, "Failed to open PCI BAR%u resource %s: %s\n", bar,
-            resource_path, strerror(errno));
+    ROCXIO_LOG_INFO("Failed to open PCI BAR%u resource %s: %s\n", bar,
+                    resource_path, strerror(errno));
     return -errno;
   }
 
   mapped = mmap(nullptr, bar_size, PROT_READ | PROT_WRITE, MAP_SHARED, bar_fd,
                 0);
   if (mapped == MAP_FAILED) {
-    fprintf(stdout, "Failed to mmap PCI BAR%u: %s\n", bar, strerror(errno));
+    ROCXIO_LOG_INFO("Failed to mmap PCI BAR%u: %s\n", bar, strerror(errno));
     close(bar_fd);
     return -errno;
   }
 
-  fprintf(stdout, "PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
+  ROCXIO_LOG_INFO("PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
 
   // Register with HIP for GPU access.
   // hipHostRegisterIoMemory ensures the mapping uses non-cacheable
@@ -1850,25 +1830,22 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   hipError_t hip_err = hipHostRegister(mapped, bar_size,
                                        hipHostRegisterIoMemory);
   if (hip_err == hipSuccess) {
-    fprintf(stdout,
-            "PCI BAR%u registered with HIP "
-            "(IoMemory) for GPU access\n",
-            bar);
+    ROCXIO_LOG_INFO("PCI BAR%u registered with HIP "
+                    "(IoMemory) for GPU access\n",
+                    bar);
 
     hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
     if (gpu_ptr_err != hipSuccess) {
-      fprintf(stdout,
-              "Warning: hipHostGetDevicePointer failed "
-              "for BAR%u: %s\n",
-              bar, hipGetErrorString(gpu_ptr_err));
+      ROCXIO_LOG_WARN("hipHostGetDevicePointer failed "
+                      "for BAR%u: %s\n",
+                      bar, hipGetErrorString(gpu_ptr_err));
       (void)hipHostUnregister(mapped);
       gpu_ptr = nullptr;
     }
   } else {
-    fprintf(stdout,
-            "Info: hipHostRegister failed for BAR%u "
-            "(%s), trying hsa_amd_memory_lock\n",
-            bar, hipGetErrorString(hip_err));
+    ROCXIO_LOG_INFO("hipHostRegister failed for BAR%u "
+                    "(%s), trying hsa_amd_memory_lock\n",
+                    bar, hipGetErrorString(hip_err));
   }
 
   // Fallback: use hsa_amd_memory_lock for MMIO pages
@@ -1876,7 +1853,7 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   if (!gpu_ptr) {
     hsa_status_t status = hsa_init();
     if (status != HSA_STATUS_SUCCESS && status != (hsa_status_t)0x1001) {
-      fprintf(stderr, "Error: hsa_init failed for BAR%u: %d\n", bar, status);
+      ROCXIO_LOG_ERROR("hsa_init failed for BAR%u: %d\n", bar, status);
       munmap(mapped, bar_size);
       close(bar_fd);
       return -EIO;
@@ -1897,7 +1874,7 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
       &gpu_agent);
 
     if (gpu_agent.handle == 0) {
-      fprintf(stderr, "Error: No GPU agent found for BAR%u\n", bar);
+      ROCXIO_LOG_ERROR("No GPU agent found for BAR%u\n", bar);
       munmap(mapped, bar_size);
       close(bar_fd);
       return -ENODEV;
@@ -1905,25 +1882,22 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
     status = hsa_amd_memory_lock(mapped, bar_size, &gpu_agent, 1, &gpu_ptr);
     if (status != HSA_STATUS_SUCCESS) {
-      fprintf(stderr,
-              "Error: hsa_amd_memory_lock failed for "
-              "BAR%u: %d\n",
-              bar, status);
+      ROCXIO_LOG_ERROR("hsa_amd_memory_lock failed for "
+                       "BAR%u: %d\n",
+                       bar, status);
       munmap(mapped, bar_size);
       close(bar_fd);
       return -EIO;
     }
 
-    fprintf(stdout,
-            "PCI BAR%u registered via "
-            "hsa_amd_memory_lock\n",
-            bar);
+    ROCXIO_LOG_INFO("PCI BAR%u registered via "
+                    "hsa_amd_memory_lock\n",
+                    bar);
   }
 
-  fprintf(stdout,
-          "PCI BAR%u GPU pointer obtained: %p "
-          "(host: %p)\n",
-          bar, gpu_ptr, mapped);
+  ROCXIO_LOG_INFO("PCI BAR%u GPU pointer obtained: %p "
+                  "(host: %p)\n",
+                  bar, gpu_ptr, mapped);
 
   *bar_cpu = mapped;
   *bar_gpu = gpu_ptr;
@@ -1947,30 +1921,27 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
 
   int fd = open(path, O_RDONLY);
   if (fd < 0) {
-    fprintf(stderr,
-            "Warning: Cannot open %s to read "
-            "NVMe CAP register: %s\n",
-            path, strerror(errno));
+    ROCXIO_LOG_WARN("Cannot open %s to read "
+                    "NVMe CAP register: %s\n",
+                    path, strerror(errno));
     return -errno;
   }
 
   long page_size = sysconf(_SC_PAGESIZE);
   if (page_size <= 0) {
     // Fallback to a reasonable default page size if sysconf fails.
-    fprintf(stderr,
-            "Warning: sysconf(_SC_PAGESIZE) failed when reading "
-            "NVMe CAP register from %s: %s. Falling back to 4096.\n",
-            path, strerror(errno));
+    ROCXIO_LOG_WARN("sysconf(_SC_PAGESIZE) failed when reading "
+                    "NVMe CAP register from %s: %s. Falling back to 4096.\n",
+                    path, strerror(errno));
     page_size = 4096;
   }
 
   size_t map_size = static_cast<size_t>(page_size);
   void* mapped = mmap(nullptr, map_size, PROT_READ, MAP_SHARED, fd, 0);
   if (mapped == MAP_FAILED) {
-    fprintf(stderr,
-            "Warning: Cannot mmap %s to read "
-            "NVMe CAP register: %s\n",
-            path, strerror(errno));
+    ROCXIO_LOG_WARN("Cannot mmap %s to read "
+                    "NVMe CAP register: %s\n",
+                    path, strerror(errno));
     close(fd);
     return -errno;
   }
@@ -1984,11 +1955,10 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
 
   *cqr_out = (cap >> 16) & 1;
 
-  fprintf(stdout,
-          "NVMe CAP register: CQR=%d "
-          "(%s queues %s)\n",
-          *cqr_out ? 1 : 0, *cqr_out ? "contiguous" : "non-contiguous",
-          *cqr_out ? "required" : "supported");
+  ROCXIO_LOG_INFO("NVMe CAP register: CQR=%d "
+                  "(%s queues %s)\n",
+                  *cqr_out ? 1 : 0, *cqr_out ? "contiguous" : "non-contiguous",
+                  *cqr_out ? "required" : "supported");
 
   return 0;
 }
@@ -2008,10 +1978,9 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
   int kmod_fd = openDeviceWithRetry(device_path, O_RDWR, "rocm-xio (contig)", 5,
                                     100);
   if (kmod_fd < 0) {
-    fprintf(stderr,
-            "Error: Cannot open kernel module "
-            "device %s for %s contig alloc\n",
-            device_path, queue_name);
+    ROCXIO_LOG_ERROR("Cannot open kernel module "
+                     "device %s for %s contig alloc\n",
+                     device_path, queue_name);
     return -EIO;
   }
 
@@ -2022,26 +1991,25 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
 
   int ret = ioctl(kmod_fd, ROCM_XIO_ALLOC_CONTIG_QUEUE, &req);
   if (ret < 0) {
-    fprintf(stderr,
-            "Error: ALLOC_CONTIG_QUEUE ioctl "
-            "failed for %s (%zu bytes): %s\n",
-            queue_name, size, strerror(errno));
+    ROCXIO_LOG_ERROR("ALLOC_CONTIG_QUEUE ioctl "
+                     "failed for %s (%zu bytes): %s\n",
+                     queue_name, size, strerror(errno));
     close(kmod_fd);
     return -errno;
   }
 
-  fprintf(stdout,
-          "%s: contig alloc: phys=0x%llx "
-          "mmap_offset=%u size=%zu\n",
-          queue_name, (unsigned long long)req.phys_addr, req.mmap_offset, size);
+  ROCXIO_LOG_INFO("%s: contig alloc: phys=0x%llx "
+                  "mmap_offset=%u size=%zu\n",
+                  queue_name, (unsigned long long)req.phys_addr,
+                  req.mmap_offset, size);
 
   static long page_sz = 0;
   if (page_sz <= 0) {
     long tmp = sysconf(_SC_PAGESIZE);
     if (tmp <= 0) {
-      fprintf(stderr,
-              "Error: sysconf(_SC_PAGESIZE) failed for %s contig buffer: %s\n",
-              queue_name, strerror(errno));
+      ROCXIO_LOG_ERROR(
+        "sysconf(_SC_PAGESIZE) failed for %s contig buffer: %s\n", queue_name,
+        strerror(errno));
 
       struct rocm_axiio_free_contig_req freq;
       memset(&freq, 0, sizeof(freq));
@@ -2059,10 +2027,9 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
                       kmod_fd, mmap_off);
 
   if (mapped == MAP_FAILED) {
-    fprintf(stderr,
-            "Error: mmap failed for %s contig "
-            "buffer: %s\n",
-            queue_name, strerror(errno));
+    ROCXIO_LOG_ERROR("mmap failed for %s contig "
+                     "buffer: %s\n",
+                     queue_name, strerror(errno));
 
     struct rocm_axiio_free_contig_req freq;
     memset(&freq, 0, sizeof(freq));
@@ -2075,26 +2042,24 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
 
   memset(mapped, 0, size);
 
-  fprintf(stdout, "%s: contig buffer mapped at %p\n", queue_name, mapped);
+  ROCXIO_LOG_INFO("%s: contig buffer mapped at %p\n", queue_name, mapped);
 
   void* gpu_ptr = nullptr;
   hipError_t hip_err = hipHostRegister(mapped, size, hipHostRegisterMapped);
   if (hip_err == hipSuccess) {
     hipError_t gp_err = hipHostGetDevicePointer(&gpu_ptr, mapped, 0);
     if (gp_err != hipSuccess) {
-      fprintf(stdout,
-              "Warning: hipHostGetDevicePointer "
-              "failed for %s: %s\n",
-              queue_name, hipGetErrorString(gp_err));
+      ROCXIO_LOG_WARN("hipHostGetDevicePointer "
+                      "failed for %s: %s\n",
+                      queue_name, hipGetErrorString(gp_err));
       (void)hipHostUnregister(mapped);
       gpu_ptr = nullptr;
     }
   } else {
-    fprintf(stdout,
-            "Info: hipHostRegister failed for "
-            "%s (%s), trying "
-            "hsa_amd_memory_lock\n",
-            queue_name, hipGetErrorString(hip_err));
+    ROCXIO_LOG_INFO("hipHostRegister failed for "
+                    "%s (%s), trying "
+                    "hsa_amd_memory_lock\n",
+                    queue_name, hipGetErrorString(hip_err));
   }
 
   if (!gpu_ptr) {
@@ -2103,10 +2068,9 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
 
     hsa_status_t status = hsa_init();
     if (status != HSA_STATUS_SUCCESS && status != (hsa_status_t)0x1001) {
-      fprintf(stderr,
-              "Error: hsa_init failed for %s: "
-              "%d\n",
-              queue_name, status);
+      ROCXIO_LOG_ERROR("hsa_init failed for %s: "
+                       "%d\n",
+                       queue_name, status);
       munmap(mapped, size);
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &free_req);
       close(kmod_fd);
@@ -2128,10 +2092,9 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
       &gpu_agent);
 
     if (gpu_agent.handle == 0) {
-      fprintf(stderr,
-              "Error: No GPU agent found for "
-              "%s\n",
-              queue_name);
+      ROCXIO_LOG_ERROR("No GPU agent found for "
+                       "%s\n",
+                       queue_name);
       munmap(mapped, size);
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &free_req);
       close(kmod_fd);
@@ -2140,24 +2103,22 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
 
     status = hsa_amd_memory_lock(mapped, size, &gpu_agent, 1, &gpu_ptr);
     if (status != HSA_STATUS_SUCCESS) {
-      fprintf(stderr,
-              "Error: hsa_amd_memory_lock "
-              "failed for %s: %d\n",
-              queue_name, status);
+      ROCXIO_LOG_ERROR("hsa_amd_memory_lock "
+                       "failed for %s: %d\n",
+                       queue_name, status);
       munmap(mapped, size);
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &free_req);
       close(kmod_fd);
       return -EIO;
     }
 
-    fprintf(stdout,
-            "%s: registered via "
-            "hsa_amd_memory_lock\n",
-            queue_name);
+    ROCXIO_LOG_INFO("%s: registered via "
+                    "hsa_amd_memory_lock\n",
+                    queue_name);
   }
 
-  fprintf(stdout, "%s: contig GPU ptr: %p (host: %p)\n", queue_name, gpu_ptr,
-          mapped);
+  ROCXIO_LOG_INFO("%s: contig GPU ptr: %p (host: %p)\n", queue_name, gpu_ptr,
+                  mapped);
 
   setup->virt = mapped;
   setup->gpu = gpu_ptr;
@@ -2289,15 +2250,15 @@ __host__ int openDeviceWithRetry(const char* device_path, int flags,
     // Wait before retrying (exponential backoff)
     if (retry < max_retries - 1) {
       int delay = initial_delay_ms * (1 << retry);
-      fprintf(stdout, "%s busy, retrying in %d ms (attempt %d/%d)...\n",
-              display_name, delay, retry + 1, max_retries);
+      ROCXIO_LOG_INFO("%s busy, retrying in %d ms (attempt %d/%d)...\n",
+                      display_name, delay, retry + 1, max_retries);
       usleep(delay * 1000);
     }
   }
 
   // All retries exhausted or non-retryable error
-  fprintf(stdout, "Failed to open %s after %d retries: %s\n", display_name,
-          max_retries, strerror(errno));
+  ROCXIO_LOG_INFO("Failed to open %s after %d retries: %s\n", display_name,
+                  max_retries, strerror(errno));
   return -1;
 }
 
@@ -2323,31 +2284,30 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
   aligned_size = (size + dmabuf_offset + host_page_size - 1) &
                  ~(host_page_size - 1);
 
-  fprintf(stdout,
-          "  Aligning VRAM buffer: ptr=%p -> aligned=%p, "
-          "size=%zu -> %zu, offset=%llu\n",
-          vram_ptr, (void*)aligned_ptr, size, aligned_size,
-          (unsigned long long)dmabuf_offset);
+  ROCXIO_LOG_INFO("  Aligning VRAM buffer: ptr=%p -> aligned=%p, "
+                  "size=%zu -> %zu, offset=%llu\n",
+                  vram_ptr, (void*)aligned_ptr, size, aligned_size,
+                  (unsigned long long)dmabuf_offset);
 
   status = exportDmabuf((void*)aligned_ptr, aligned_size, &dmabuf_fd,
                         &dmabuf_offset);
   if (status != HSA_STATUS_SUCCESS) {
-    fprintf(stdout, "ERROR: exportDmabuf failed (status=%d)\n", status);
-    fprintf(stdout, "  This requires:\n");
-    fprintf(stdout, "  - ROCm 5.3+ with dmabuf support\n");
-    fprintf(stdout, "  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
-    fprintf(stdout, "  - Kernel CONFIG_PCI_P2PDMA=y\n");
+    ROCXIO_LOG_ERROR("exportDmabuf failed (status=%d)\n", status);
+    ROCXIO_LOG_ERROR("  This requires:\n");
+    ROCXIO_LOG_ERROR("  - ROCm 5.3+ with dmabuf support\n");
+    ROCXIO_LOG_ERROR("  - Kernel CONFIG_DMABUF_MOVE_NOTIFY=y\n");
+    ROCXIO_LOG_ERROR("  - Kernel CONFIG_PCI_P2PDMA=y\n");
     return -ENOTSUP;
   }
 
-  fprintf(stdout, "  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
-          (unsigned long long)dmabuf_offset);
+  ROCXIO_LOG_INFO("  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
+                  (unsigned long long)dmabuf_offset);
 
   // Open kernel module device
   kmod_fd = open(kernel_module_device, O_RDWR);
   if (kmod_fd < 0) {
-    fprintf(stderr, "ERROR: Failed to open %s: %s\n", kernel_module_device,
-            strerror(errno));
+    ROCXIO_LOG_ERROR("Failed to open %s: %s\n", kernel_module_device,
+                     strerror(errno));
     closeDmabuf(dmabuf_fd);
     return -errno;
   }
@@ -2362,8 +2322,8 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
 
   ret = ioctl(kmod_fd, ROCM_XIO_REGISTER_BUFFER, &req);
   if (ret < 0) {
-    fprintf(stderr, "ERROR: ROCM_XIO_REGISTER_BUFFER ioctl failed: %s\n",
-            strerror(errno));
+    ROCXIO_LOG_ERROR("ROCM_XIO_REGISTER_BUFFER ioctl failed: %s\n",
+                     strerror(errno));
     closeDmabuf(dmabuf_fd);
     close(kmod_fd);
     return -errno;
@@ -2372,11 +2332,10 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
   // Physical address includes the offset within the dmabuf
   *phys_addr_out = req.phys_addr + dmabuf_offset;
 
-  fprintf(stdout,
-          "  ✅ Registered buffer: virt=0x%016llx, phys=0x%016llx, "
-          "size=%zu\n",
-          (unsigned long long)req.virt_addr, (unsigned long long)*phys_addr_out,
-          size);
+  ROCXIO_LOG_INFO("  ✅ Registered buffer: virt=0x%016llx, phys=0x%016llx, "
+                  "size=%zu\n",
+                  (unsigned long long)req.virt_addr,
+                  (unsigned long long)*phys_addr_out, size);
 
   closeDmabuf(dmabuf_fd);
   close(kmod_fd);
@@ -2437,12 +2396,12 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                        "GPU accessible buffer",
                                        XIO_DEVICE_MEM_HIP);
     if (s != HSA_STATUS_SUCCESS) {
-      fprintf(stderr, "Error: allocDeviceMemory failed\n");
+      ROCXIO_LOG_ERROR("allocDeviceMemory failed\n");
       return hipErrorMemoryAllocation;
     }
 
-    fprintf(stdout, "  VRAM buffer virtual: %p\n", bufferInfo->hostPtr);
-    fprintf(stdout, "  Exporting as DMA-BUF...\n");
+    ROCXIO_LOG_INFO("  VRAM buffer virtual: %p\n", bufferInfo->hostPtr);
+    ROCXIO_LOG_INFO("  Exporting as DMA-BUF...\n");
 
     // Detect if device is emulated (needed for buffer registration flags)
     bool is_emulated = false;
@@ -2455,19 +2414,19 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                ROCM_XIO_DEVICE_PATH, &bufferInfo->dmaAddr,
                                is_emulated);
     if (ret < 0) {
-      fprintf(stderr, "ERROR: DMA-BUF export failed for device memory: %s\n",
-              strerror(-ret));
-      fprintf(stderr, "  Device memory was requested but "
-                      "dmabuf export is not available\n");
+      ROCXIO_LOG_ERROR("DMA-BUF export failed for device memory: %s\n",
+                       strerror(-ret));
+      ROCXIO_LOG_ERROR("  Device memory was requested but "
+                       "dmabuf export is not available\n");
       freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
     }
 
-    fprintf(stdout, "  Data buffer physical: 0x%016llx (VRAM)\n",
-            (unsigned long long)bufferInfo->dmaAddr);
-    fprintf(stdout, "  GPU writes directly to VRAM\n");
-    fprintf(stdout, "  NVMe DMAs from VRAM (P2P)\n");
+    ROCXIO_LOG_INFO("  Data buffer physical: 0x%016llx (VRAM)\n",
+                    (unsigned long long)bufferInfo->dmaAddr);
+    ROCXIO_LOG_INFO("  GPU writes directly to VRAM\n");
+    ROCXIO_LOG_INFO("  NVMe DMAs from VRAM (P2P)\n");
 
     // Device memory - GPU pointer is same as host pointer
     bufferInfo->gpuPtr = bufferInfo->hostPtr;
@@ -2482,24 +2441,24 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     // Get physical address for host memory using /proc/self/pagemap
     bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
     if (!bufferInfo->dmaAddr) {
-      fprintf(stdout, "ERROR: Failed to get buffer physical address\n");
+      ROCXIO_LOG_ERROR("Failed to get buffer physical address\n");
       (void)hipHostFree(bufferInfo->hostPtr);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
     }
 
-    fprintf(stdout, "  Data buffer virtual:  %p\n", bufferInfo->hostPtr);
-    fprintf(stdout, "  Data buffer physical: 0x%016llx\n",
-            (unsigned long long)bufferInfo->dmaAddr);
-    fprintf(stdout, "  GPU can write directly to this buffer\n");
-    fprintf(stdout, "  NVMe can DMA from this buffer\n");
+    ROCXIO_LOG_INFO("  Data buffer virtual:  %p\n", bufferInfo->hostPtr);
+    ROCXIO_LOG_INFO("  Data buffer physical: 0x%016llx\n",
+                    (unsigned long long)bufferInfo->dmaAddr);
+    ROCXIO_LOG_INFO("  GPU can write directly to this buffer\n");
+    ROCXIO_LOG_INFO("  NVMe can DMA from this buffer\n");
 
     // Verify buffer is GPU-accessible and get GPU pointer
     hipPointerAttribute_t attr;
     hipError_t attr_err = hipPointerGetAttributes(&attr, bufferInfo->hostPtr);
     if (attr_err != hipSuccess) {
-      fprintf(stdout, "Warning: Buffer may not be GPU-accessible: %s\n",
-              hipGetErrorString(attr_err));
+      ROCXIO_LOG_WARN("Buffer may not be GPU-accessible: %s\n",
+                      hipGetErrorString(attr_err));
       bufferInfo->gpuPtr = bufferInfo->hostPtr; // Fallback to host pointer
     } else {
       // Get explicit GPU pointer (may be same as host pointer for mapped
@@ -2509,8 +2468,8 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                                        bufferInfo->hostPtr, 0);
       if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
         bufferInfo->gpuPtr = gpu_ptr;
-        fprintf(stdout, "Buffer GPU pointer: %p (host: %p)\n",
-                bufferInfo->gpuPtr, bufferInfo->hostPtr);
+        ROCXIO_LOG_INFO("Buffer GPU pointer: %p (host: %p)\n",
+                        bufferInfo->gpuPtr, bufferInfo->hostPtr);
       } else {
         // Fallback: use host pointer (should work for hipHostMallocMapped)
         bufferInfo->gpuPtr = bufferInfo->hostPtr;
@@ -2519,9 +2478,9 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     bufferInfo->isDeviceMemory = false;
   }
 
-  fprintf(stdout, "Buffer allocated: virt=%p, gpu=%p, phys=0x%llx, size=%zu\n",
-          bufferInfo->hostPtr, bufferInfo->gpuPtr,
-          (unsigned long long)bufferInfo->dmaAddr, size);
+  ROCXIO_LOG_INFO("Buffer allocated: virt=%p, gpu=%p, phys=0x%llx, size=%zu\n",
+                  bufferInfo->hostPtr, bufferInfo->gpuPtr,
+                  (unsigned long long)bufferInfo->dmaAddr, size);
 
   return hipSuccess;
 }
@@ -2554,21 +2513,19 @@ __host__ bool validateGpuPointer(void* ptr, const char* name,
   hipError_t attr_err = hipPointerGetAttributes(&attr, ptr);
   if (attr_err != hipSuccess) {
     if (disableOnFailure) {
-      fprintf(stderr,
-              "Error: Failed to get %s pointer attributes: %s (code: %d)\n",
-              name, hipGetErrorString(attr_err), attr_err);
-      fprintf(stderr, "%s may not be GPU-accessible\n", name);
+      ROCXIO_LOG_ERROR("Failed to get %s pointer attributes: %s (code: %d)\n",
+                       name, hipGetErrorString(attr_err), attr_err);
+      ROCXIO_LOG_ERROR("%s may not be GPU-accessible\n", name);
     } else {
-      fprintf(stdout,
-              "Warning: Failed to get %s pointer attributes: %s (code: %d)\n",
-              name, hipGetErrorString(attr_err), attr_err);
-      fprintf(stdout, "%s pointer may not be GPU-accessible\n", name);
+      ROCXIO_LOG_WARN("Failed to get %s pointer attributes: %s (code: %d)\n",
+                      name, hipGetErrorString(attr_err), attr_err);
+      ROCXIO_LOG_INFO("%s pointer may not be GPU-accessible\n", name);
     }
     return false;
   }
 
-  fprintf(stdout, "%s GPU accessibility verified: type=%d, device=%d\n", name,
-          attr.type, attr.device);
+  ROCXIO_LOG_INFO("%s GPU accessibility verified: type=%d, device=%d\n", name,
+                  attr.type, attr.device);
   return true;
 }
 

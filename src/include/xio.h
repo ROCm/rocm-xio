@@ -19,11 +19,6 @@
 #include <hsa/hsa_ext_amd.h>
 #include <linux/ioctl.h>
 
-// Forward declaration for CLI11
-namespace CLI {
-class App;
-}
-
 #include "xio-endpoint-includes-gen.h"
 #include "xio-endpoint-registry.h"
 
@@ -227,12 +222,6 @@ public:
    * @return hipSuccess on success, error code on failure.
    */
   __host__ virtual hipError_t run(XioEndpointConfig* config) = 0;
-
-  /**
-   * @brief Configure endpoint-specific CLI options.
-   * @param app CLI11 application to add options to.
-   */
-  __host__ virtual void configureCliOptions(CLI::App& app);
 
   /**
    * @brief Initialize endpoint-specific configuration.
