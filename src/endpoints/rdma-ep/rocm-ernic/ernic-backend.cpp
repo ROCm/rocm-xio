@@ -312,6 +312,7 @@ void Backend::ernic_create_qps(int sq_length) {
   ernic_qp_->uar_mmap_offset = qp_attr.uar_mmap_offset;
   ernic_qp_->uar_qp_offset = qp_attr.uar_qp_offset;
   ernic_qp_->uar_cq_offset = qp_attr.uar_cq_offset;
+  ernic_qp_->qp_handle = qp_attr.qp_handle;
 
   fprintf(stderr,
           "rdma_ep::ernic: Created QP via DV "
@@ -372,6 +373,7 @@ void Backend::ernic_initialize_gpu_qp() {
   host_qp_->ernic_sq_.depth = ernic_qp_->sq_depth;
   host_qp_->ernic_sq_.wqe_size = ernic_qp_->sq_wqe_size;
   host_qp_->ernic_sq_.qpn = qp_->qp_num;
+  host_qp_->ernic_sq_.qp_handle = ernic_qp_->qp_handle;
   host_qp_->ernic_sq_.mtu = ibv_mtu_to_int(port_attr_.active_mtu);
 
   if (ernic_qp_->uar_ptr) {
