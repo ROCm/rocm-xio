@@ -20,8 +20,6 @@
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&(GFX942|GFX950)
 #SBATCH --gres=gpu:2
-# MI308X nodes with intermittent SDMA P2P transfer failures
-#SBATCH --exclude=banff-cyxtera-s81-1
 
 set -xe
 

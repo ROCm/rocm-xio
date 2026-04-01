@@ -1,0 +1,35 @@
+# .alola-exclude -- per-node SLURM exclusions
+#
+# Format: node-name [test1,test2,...]
+#
+# If no test list is given the node is excluded from
+# ALL tests.  A comma-separated test list restricts
+# the exclusion to only those tests.
+#
+# Lines starting with # are comments.  Inline # also
+# starts a comment.
+
+# Container launch broken -- enroot prolog runs but
+# container never starts (all tests affected)
+ctr-cx63-mi300x-12
+
+# Stale rocm_xio kernel module stuck loaded; needs
+# node reboot to clear (only affects nvme-ep)
+ctr-cx64-mi300x-4  nvme-ep
+
+# No passwordless sudo -- kernel module install fails
+ctr-cx66-mi300x-13  nvme-ep
+
+# Flaky unsquashfs -- zstd decompression errors on
+# random files during container extraction
+mlse-alola-b39-ws4  nvme-ep
+mlse-alola-b39-ws6  nvme-ep
+
+# RDMA loopback test failures on this node
+banff-cyxtera-s81-5  rdma-ep
+
+# MI308X with intermittent SDMA P2P transfer failures;
+# MLX5 loopback CQE timeout (NIC lacks loopback_mode
+# sysfs, smoke test fails on all seeds);
+# nvme-ep xio-tester hangs after controller probe
+banff-cyxtera-s81-1  two-gpu,rdma-ep,nvme-ep

@@ -32,6 +32,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 JOB_IDS_FILE = SCRIPT_DIR / ".alola-job-ids"
+EXCLUDE_FILE = SCRIPT_DIR / ".alola-exclude"
 
 ALL_TESTS = [
     ("single-gpu",
@@ -244,6 +245,61 @@ def read_sbatch_exclude(script_path):
     except OSError:
         pass
     return []
+
+
+# ── Exclude-file I/O ──────────────────────────────────
+
+
+def load_exclude_file():
+    """Parse ``.alola-exclude`` and return a dict.
+
+    Each non-comment, non-blank line has the form::
+
+        node-name [test1,test2,...]
+
+    If no test list is given the node is excluded from
+    every test (value is ``None``).  Otherwise value is
+    a list of test names.
+
+    Returns ``{node: None | [test, ...], ...}``.
+    """
+    excludes = {}
+    if not EXCLUDE_FILE.is_file():
+        return excludes
+    for raw in EXCLUDE_FILE.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        node = parts[0]
+        if len(parts) > 1:
+            tests = [
+                t.strip()
+                for t in parts[1].split(",")
+                if t.strip()
+            ]
+        else:
+            tests = None
+        if node in excludes:
+            prev = excludes[node]
+            if prev is None or tests is None:
+                excludes[node] = None
+            else:
+                excludes[node] = list(dict.fromkeys(
+                    prev + tests))
+        else:
+            excludes[node] = tests
+    return excludes
+
+
+def excludes_for_test(excludes, test_name):
+    """Return a list of nodes to exclude for
+    *test_name* based on the parsed exclude dict."""
+    nodes = []
+    for node, tests in excludes.items():
+        if tests is None or test_name in tests:
+            nodes.append(node)
+    return nodes
 
 
 # ── Job-IDs file I/O ──────────────────────────────────
@@ -637,6 +693,13 @@ def submit_jobs(
             n for n in extra_exclude
             if n not in exclude_list]
 
+    file_excludes = load_exclude_file()
+    if file_excludes:
+        print(yellow(
+            f"Loaded {len(file_excludes)} node "
+            f"exclusion(s) from {EXCLUDE_FILE}"))
+        print()
+
     job_ids = {}
     out_files = {}
     err_files = {}
@@ -676,6 +739,11 @@ def submit_jobs(
                 "--container-mount-home=no")
 
         merged_exclude = list(exclude_list)
+        for n in excludes_for_test(
+            file_excludes, test_name
+        ):
+            if n not in merged_exclude:
+                merged_exclude.append(n)
         for n in read_sbatch_exclude(script_path):
             if n not in merged_exclude:
                 merged_exclude.append(n)
