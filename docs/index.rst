@@ -58,7 +58,6 @@ Quick Start
    memory-modes
    environment-variables
    coherence-prior-art
-   hsa-allocator-tracking
 
 .. toctree::
    :maxdepth: 2

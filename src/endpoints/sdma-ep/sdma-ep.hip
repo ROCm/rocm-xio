@@ -603,16 +603,16 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
   //   totalSize = transferSize * 10;
   // }
 
-  // Allocate source buffer on source GPU (uncached for P2P to match RAD)
+  unsigned srcMemFlags = useHostDst ? XIO_DEVICE_MEM_HIP
+                                    : XIO_DEVICE_MEM_UNCACHED;
   void* srcBuf = nullptr;
-  if (useHostDst) {
-    err = hipMalloc(&srcBuf, totalSize);
-  } else {
-    err = hipExtMallocWithFlags(&srcBuf, totalSize, hipDeviceMallocUncached);
-  }
-  if (err != hipSuccess) {
-    std::cerr << "Failed to allocate source buffer" << std::endl;
-    return err;
+  {
+    hsa_status_t s = xio::allocDeviceMemory(totalSize, &srcBuf,
+                                            "SDMA source buffer", srcMemFlags);
+    if (s != HSA_STATUS_SUCCESS) {
+      std::cerr << "Failed to allocate source buffer" << std::endl;
+      return hipErrorMemoryAllocation;
+    }
   }
 
   // Initialize source buffer with LFSR pattern (seed advances per iteration)
@@ -624,51 +624,55 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
     err = hipMemcpy(static_cast<char*>(srcBuf) + i * transferSize,
                     hostChunk.data(), transferSize, hipMemcpyHostToDevice);
     if (err != hipSuccess) {
-      ignoreHip(hipFree(srcBuf));
+      xio::freeDeviceMemory(srcBuf, srcMemFlags);
       return err;
     }
   }
 
   void* dstBuf = nullptr;
+  bool dstIsHost = useHostDst;
+  unsigned dstMemFlags = XIO_DEVICE_MEM_UNCACHED;
   if (useHostDst) {
-    err = hipHostMalloc(&dstBuf, totalSize, hipHostMallocDefault);
+    err = xio::allocHostMemory(totalSize, &dstBuf, "SDMA host destination",
+                               XIO_HOST_MEM_DEFAULT);
     if (err != hipSuccess) {
       std::cerr << "Failed to allocate pinned host destination buffer"
                 << std::endl;
-      ignoreHip(hipFree(srcBuf));
+      xio::freeDeviceMemory(srcBuf, srcMemFlags);
       return err;
     }
-    std::memset(dstBuf, 0, totalSize);
   } else {
     err = hipSetDevice(dstGpu);
     if (err != hipSuccess) {
-      ignoreHip(hipFree(srcBuf));
+      xio::freeDeviceMemory(srcBuf, srcMemFlags);
       return err;
     }
-    err = hipExtMallocWithFlags(&dstBuf, totalSize, hipDeviceMallocUncached);
-    if (err != hipSuccess) {
+    hsa_status_t s = xio::allocDeviceMemory(totalSize, &dstBuf,
+                                            "SDMA destination buffer",
+                                            XIO_DEVICE_MEM_UNCACHED);
+    if (s != HSA_STATUS_SUCCESS) {
       std::cerr << "Failed to allocate destination buffer" << std::endl;
-      ignoreHip(hipFree(srcBuf));
-      return err;
+      xio::freeDeviceMemory(srcBuf, srcMemFlags);
+      return hipErrorMemoryAllocation;
     }
     err = hipMemset(dstBuf, 0, totalSize);
     if (err != hipSuccess) {
-      ignoreHip(hipFree(dstBuf));
-      ignoreHip(hipFree(srcBuf));
+      xio::freeDeviceMemory(dstBuf, XIO_DEVICE_MEM_UNCACHED);
+      xio::freeDeviceMemory(srcBuf, srcMemFlags);
       return err;
     }
   }
 
   // Helper lambda for cleanup (defined early so it can be used in error paths)
   auto cleanupBuffers = [&]() {
-    if (useHostDst) {
-      ignoreHip(hipHostFree(dstBuf));
+    if (dstIsHost) {
+      xio::freeHostMemory(dstBuf, XIO_HOST_MEM_DEFAULT);
     } else {
       ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(dstBuf));
+      xio::freeDeviceMemory(dstBuf, dstMemFlags);
     }
     ignoreHip(hipSetDevice(srcGpu));
-    ignoreHip(hipFree(srcBuf));
+    xio::freeDeviceMemory(srcBuf, srcMemFlags);
   };
 
   // Allocate completion signals - use uncached memory for P2P access
@@ -681,111 +685,96 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
   uint64_t* signal1 = nullptr;
 
   auto cleanupSignals = [&]() {
-    // Free device signal arrays
     if (signals.count(0)) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(signals[0]));
+      xio::freeDeviceMemory(signals[0], XIO_DEVICE_MEM_HIP);
     }
     if (signals.count(1)) {
       ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(signals[1]));
+      xio::freeDeviceMemory(signals[1], XIO_DEVICE_MEM_HIP);
     }
-    // Free individual signal memory
     if (signal1 != nullptr) {
       ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(signal1));
+      xio::freeDeviceMemory(signal1, XIO_DEVICE_MEM_UNCACHED);
     }
     if (signal0 != nullptr) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(signal0));
+      xio::freeDeviceMemory(signal0, XIO_DEVICE_MEM_UNCACHED);
     }
   };
 
   // Allocate signal on source GPU (rank 0)
   err = hipSetDevice(srcGpu);
   if (err != hipSuccess) {
-    if (useHostDst) {
-      ignoreHip(hipFree(dstBuf));
-    } else {
-      ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(dstBuf));
-    }
-    ignoreHip(hipFree(srcBuf));
+    cleanupBuffers();
     return err;
   }
 
-  err = hipExtMallocWithFlags((void**)&signal0, sizeof(uint64_t),
-                              hipDeviceMallocUncached);
-  if (err != hipSuccess) {
-    if (useHostDst) {
-      ignoreHip(hipFree(dstBuf));
-    } else {
-      ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(dstBuf));
+  {
+    hsa_status_t s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&signal0,
+                                            "SDMA signal0",
+                                            XIO_DEVICE_MEM_UNCACHED);
+    if (s != HSA_STATUS_SUCCESS) {
+      cleanupBuffers();
+      return hipErrorMemoryAllocation;
     }
-    ignoreHip(hipFree(srcBuf));
-    return err;
   }
 
   err = hipMemset(signal0, 0, sizeof(uint64_t));
   if (err != hipSuccess) {
-    ignoreHip(hipFree(signal0));
+    xio::freeDeviceMemory(signal0, XIO_DEVICE_MEM_UNCACHED);
     cleanupBuffers();
     return err;
   }
 
-  // Allocate signal on destination GPU (rank 1)
   if (!useHostDst) {
     err = hipSetDevice(dstGpu);
     if (err != hipSuccess) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(signal0));
+      xio::freeDeviceMemory(signal0, XIO_DEVICE_MEM_UNCACHED);
       cleanupBuffers();
-
       return err;
     }
 
-    err = hipExtMallocWithFlags((void**)&signal1, sizeof(uint64_t),
-                                hipDeviceMallocUncached);
-    if (err != hipSuccess) {
+    hsa_status_t s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&signal1,
+                                            "SDMA signal1",
+                                            XIO_DEVICE_MEM_UNCACHED);
+    if (s != HSA_STATUS_SUCCESS) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(signal0));
+      xio::freeDeviceMemory(signal0, XIO_DEVICE_MEM_UNCACHED);
       cleanupBuffers();
-      return err;
+      return hipErrorMemoryAllocation;
     }
 
     err = hipMemset(signal1, 0, sizeof(uint64_t));
     if (err != hipSuccess) {
-      ignoreHip(hipFree(signal1));
+      xio::freeDeviceMemory(signal1, XIO_DEVICE_MEM_UNCACHED);
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(signal0));
+      xio::freeDeviceMemory(signal0, XIO_DEVICE_MEM_UNCACHED);
       cleanupBuffers();
       return err;
     }
   }
 
-  // Create host array with signal pointers
   uint64_t* signalsHost[2] = {signal0, signal1};
 
-  // Allocate device array on srcGpu and copy signal pointers
   err = hipSetDevice(srcGpu);
   if (err != hipSuccess) {
-    ignoreHip(hipSetDevice(dstGpu));
-    ignoreHip(hipFree(signal1));
-    ignoreHip(hipSetDevice(srcGpu));
-    ignoreHip(hipFree(signal0));
+    cleanupSignals();
     cleanupBuffers();
     return err;
   }
 
-  err = hipMalloc(&signals[0], 2 * sizeof(uint64_t*));
-  if (err != hipSuccess) {
-    ignoreHip(hipSetDevice(dstGpu));
-    ignoreHip(hipFree(signal1));
-    ignoreHip(hipSetDevice(srcGpu));
-    ignoreHip(hipFree(signal0));
-    cleanupBuffers();
-    return err;
+  {
+    hsa_status_t s = xio::allocDeviceMemory(2 * sizeof(uint64_t*),
+                                            (void**)&signals[0],
+                                            "SDMA signals[0]",
+                                            XIO_DEVICE_MEM_HIP);
+    if (s != HSA_STATUS_SUCCESS) {
+      cleanupSignals();
+      cleanupBuffers();
+      return hipErrorMemoryAllocation;
+    }
   }
 
   err = hipMemcpy(signals[0], signalsHost, 2 * sizeof(uint64_t*),
@@ -805,17 +794,23 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       return err;
     }
 
-    err = hipMalloc(&signals[1], 2 * sizeof(uint64_t*));
-    if (err != hipSuccess) {
-      cleanupSignals();
-      cleanupBuffers();
-      return err;
+    {
+      hsa_status_t s = xio::allocDeviceMemory(2 * sizeof(uint64_t*),
+                                              (void**)&signals[1],
+                                              "SDMA signals[1]",
+                                              XIO_DEVICE_MEM_HIP);
+      if (s != HSA_STATUS_SUCCESS) {
+        cleanupSignals();
+        cleanupBuffers();
+        return hipErrorMemoryAllocation;
+      }
     }
 
     err = hipMemcpy(signals[1], signalsHost, 2 * sizeof(uint64_t*),
                     hipMemcpyHostToDevice);
     if (err != hipSuccess) {
-      ignoreHip(hipFree(signals[1]));
+      xio::freeDeviceMemory(signals[1], XIO_DEVICE_MEM_HIP);
+      signals.erase(1);
       cleanupSignals();
       cleanupBuffers();
       return err;
@@ -835,60 +830,66 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       return err;
     }
 
-    err = hipExtMallocWithFlags((void**)&counter0, sizeof(uint64_t),
-                                hipDeviceMallocUncached);
-    if (err != hipSuccess) {
-      cleanupSignals();
-      cleanupBuffers();
-      return err;
+    {
+      hsa_status_t s = xio::allocDeviceMemory(sizeof(uint64_t),
+                                              (void**)&counter0,
+                                              "SDMA counter0",
+                                              XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS) {
+        cleanupSignals();
+        cleanupBuffers();
+        return hipErrorMemoryAllocation;
+      }
     }
 
     err = hipMemset(counter0, 0, sizeof(uint64_t));
     if (err != hipSuccess) {
-      ignoreHip(hipFree(counter0));
+      xio::freeDeviceMemory(counter0, XIO_DEVICE_MEM_UNCACHED);
       cleanupSignals();
       cleanupBuffers();
       return err;
     }
 
-    // Allocate counter on destination GPU (rank 1)
     err = hipSetDevice(dstGpu);
     if (err != hipSuccess) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(counter0));
+      xio::freeDeviceMemory(counter0, XIO_DEVICE_MEM_UNCACHED);
       cleanupSignals();
       cleanupBuffers();
       return err;
     }
 
-    err = hipExtMallocWithFlags((void**)&counter1, sizeof(uint64_t),
-                                hipDeviceMallocUncached);
-    if (err != hipSuccess) {
-      ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(counter0));
-      cleanupSignals();
-      cleanupBuffers();
-      return err;
+    {
+      hsa_status_t s = xio::allocDeviceMemory(sizeof(uint64_t),
+                                              (void**)&counter1,
+                                              "SDMA counter1",
+                                              XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS) {
+        ignoreHip(hipSetDevice(srcGpu));
+        xio::freeDeviceMemory(counter0, XIO_DEVICE_MEM_UNCACHED);
+        cleanupSignals();
+        cleanupBuffers();
+        return hipErrorMemoryAllocation;
+      }
     }
 
     err = hipMemset(counter1, 0, sizeof(uint64_t));
     if (err != hipSuccess) {
-      ignoreHip(hipFree(counter1));
+      xio::freeDeviceMemory(counter1, XIO_DEVICE_MEM_UNCACHED);
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(counter0));
+      xio::freeDeviceMemory(counter0, XIO_DEVICE_MEM_UNCACHED);
       cleanupSignals();
       cleanupBuffers();
       return err;
     }
   }
 
-  // Helper lambdas for cleanup
   auto cleanupCounters = [&]() {
     if (useCounter) {
       ignoreHip(hipSetDevice(srcGpu));
-      ignoreHip(hipFree(counter0));
+      xio::freeDeviceMemory(counter0, XIO_DEVICE_MEM_UNCACHED);
       ignoreHip(hipSetDevice(dstGpu));
-      ignoreHip(hipFree(counter1));
+      xio::freeDeviceMemory(counter1, XIO_DEVICE_MEM_UNCACHED);
     }
   };
   auto cleanupAll = [&]() {

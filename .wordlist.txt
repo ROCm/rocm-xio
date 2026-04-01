@@ -1013,7 +1013,10 @@ XIOTestHelpers
 Allocator
 allocator
 allocDeviceMemory
+allocDeviceMemoryPair
 allocHostMemory
+allocators
+calloc
 allocSize
 changeset
 exportDmabuf
@@ -1033,6 +1036,7 @@ hipMemAllocationGranularityMinimum
 hipMemAllocationProp
 hipMemAllocationTypePinned
 hipMemCreate
+hipMemcpy
 hipMemGetAllocationGranularity
 hipMemHandleTypePosixFileDescriptor
 hipMemLocationTypeDevice

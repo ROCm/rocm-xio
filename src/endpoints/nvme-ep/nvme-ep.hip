@@ -1085,13 +1085,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   bool useLessTiming = forcedLessTiming || config->timingStats != nullptr;
   if (useLessTiming) {
     for (uint16_t q = 0; q < numQueues; q++) {
-      hipError_t ts_err = hipHostMalloc((void**)&perQueueStats[q],
-                                        sizeof(XioTimingStats));
-      if (ts_err != hipSuccess) {
-        void* ptr = malloc(sizeof(XioTimingStats));
-        perQueueStats[q] = static_cast<XioTimingStats*>(ptr);
-      }
-      if (!perQueueStats[q]) {
+      hipError_t ts_err = xio::allocHostMemory(sizeof(XioTimingStats),
+                                               (void**)&perQueueStats[q],
+                                               "NVMe queue stats",
+                                               XIO_HOST_MEM_MAPPED);
+      if (ts_err != hipSuccess || !perQueueStats[q]) {
         ROCXIO_LOG_ERROR("Failed to allocate timing "
                          "stats for queue %u\n",
                          q);
@@ -1323,14 +1321,9 @@ cleanup:
     }
   }
 
-  // Free per-queue timing stats
   for (uint16_t q = 0; q < numQueues; q++) {
-    if (perQueueStats[q] != nullptr) {
-      hipError_t free_err = hipHostFree(perQueueStats[q]);
-      if (free_err != hipSuccess) {
-        free(perQueueStats[q]);
-      }
-    }
+    if (perQueueStats[q] != nullptr)
+      xio::freeHostMemory(perQueueStats[q], XIO_HOST_MEM_MAPPED);
   }
 
   return result;
@@ -1348,11 +1341,13 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     return -EINVAL;
   }
 
-  id_ns = static_cast<struct nvme_id_ns*>(malloc(nvme_ep::nvmeAdminRespSize));
-  if (!id_ns) {
-    return -ENOMEM;
+  {
+    hipError_t herr = xio::allocHostMemory(nvme_ep::nvmeAdminRespSize,
+                                           (void**)&id_ns, "Identify Namespace",
+                                           XIO_HOST_MEM_PLAIN);
+    if (herr != hipSuccess || !id_ns)
+      return -ENOMEM;
   }
-  memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
@@ -1457,7 +1452,7 @@ cleanup:
     close(nvme_fd);
   }
   if (id_ns) {
-    free(id_ns);
+    xio::freeHostMemory(id_ns, XIO_HOST_MEM_PLAIN);
   }
   return ret;
 }
@@ -1473,11 +1468,14 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     return -EINVAL;
   }
 
-  id_ns = static_cast<struct nvme_id_ns*>(malloc(nvme_ep::nvmeAdminRespSize));
-  if (!id_ns) {
-    return -ENOMEM;
+  {
+    hipError_t herr = xio::allocHostMemory(nvme_ep::nvmeAdminRespSize,
+                                           (void**)&id_ns,
+                                           "Identify Namespace capacity",
+                                           XIO_HOST_MEM_PLAIN);
+    if (herr != hipSuccess || !id_ns)
+      return -ENOMEM;
   }
-  memset(id_ns, 0, nvme_ep::nvmeAdminRespSize);
 
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
@@ -1555,7 +1553,7 @@ cleanup:
     close(nvme_fd);
   }
   if (id_ns) {
-    free(id_ns);
+    xio::freeHostMemory(id_ns, XIO_HOST_MEM_PLAIN);
   }
   return ret;
 }
@@ -1610,15 +1608,17 @@ __host__ int readSmartLog(const char* nvme_device,
     return -errno;
   }
 
-  // Allocate buffer on heap to ensure kernel can access it
-  // Stack-allocated buffers might not work with ioctl
-  uint8_t* buffer = (uint8_t*)malloc(nvme_ep::nvmeLogPageSize);
-  if (!buffer) {
-    ROCXIO_LOG_INFO("Failed to allocate SMART log buffer\n");
-    close(nvme_fd);
-    return -ENOMEM;
+  uint8_t* buffer = nullptr;
+  {
+    hipError_t herr = xio::allocHostMemory(nvme_ep::nvmeLogPageSize,
+                                           (void**)&buffer, "SMART log buffer",
+                                           XIO_HOST_MEM_PLAIN);
+    if (herr != hipSuccess || !buffer) {
+      ROCXIO_LOG_INFO("Failed to allocate SMART log buffer\n");
+      close(nvme_fd);
+      return -ENOMEM;
+    }
   }
-  memset(buffer, 0, nvme_ep::nvmeLogPageSize);
 
   // Use NVME_IOCTL_ADMIN64_CMD with nvme_passthru_cmd64
   struct nvme_passthru_cmd64 cmd;
@@ -1635,7 +1635,7 @@ __host__ int readSmartLog(const char* nvme_device,
   int ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN64_CMD, &cmd);
   if (ret < 0) {
     ROCXIO_LOG_INFO("Failed to read SMART log: %s\n", strerror(errno));
-    free(buffer);
+    xio::freeHostMemory(buffer, XIO_HOST_MEM_PLAIN);
     close(nvme_fd);
     return -errno;
   }
@@ -1644,15 +1644,14 @@ __host__ int readSmartLog(const char* nvme_device,
   if (cmd.result & 0xFFFE) {
     uint16_t status = (cmd.result >> 1) & 0xFF;
     ROCXIO_LOG_INFO("SMART log read failed with status 0x%02x\n", status);
-    free(buffer);
+    xio::freeHostMemory(buffer, XIO_HOST_MEM_PLAIN);
     close(nvme_fd);
     return -EIO;
   }
 
-  // Copy data from buffer to structure
   memcpy(smart_log, buffer, nvme_ep::nvmeLogPageSize);
 
-  free(buffer);
+  xio::freeHostMemory(buffer, XIO_HOST_MEM_PLAIN);
   close(nvme_fd);
   return 0;
 }

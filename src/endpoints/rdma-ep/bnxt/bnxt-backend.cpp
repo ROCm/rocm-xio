@@ -135,14 +135,14 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
   hcq->length = hcq->depth * hcq->cqe_size;
 
   void* buf_ptr = nullptr;
-  hipError_t herr = hipExtMallocWithFlags(&buf_ptr, hcq->length,
-                                          hipDeviceMallocUncached);
-  if (herr != hipSuccess) {
+  hsa_status_t ds = xio::allocDeviceMemory(hcq->length, &buf_ptr, label,
+                                           XIO_DEVICE_MEM_UNCACHED);
+  if (ds != HSA_STATUS_SUCCESS) {
     fprintf(stderr,
             "rdma_ep::bnxt: "
-            "hipExtMallocWithFlags %s "
-            "failed: %s\n",
-            label, hipGetErrorString(herr));
+            "allocDeviceMemory %s "
+            "failed\n",
+            label);
     return;
   }
   hcq->buf = buf_ptr;
@@ -205,8 +205,12 @@ void Backend::bnxt_create_cqs(int cqe) {
 
   cqe = 1; // CQE compression: 1 entry
 
-  bnxt_scq_ = static_cast<bnxt_host_cq*>(calloc(1, sizeof(bnxt_host_cq)));
-  bnxt_rcq_ = static_cast<bnxt_host_cq*>(calloc(1, sizeof(bnxt_host_cq)));
+  (void)xio::allocHostMemory(sizeof(bnxt_host_cq), (void**)&bnxt_scq_,
+                             "BNXT SCQ", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(bnxt_scq_, "allocHostMemory (BNXT SCQ)");
+  (void)xio::allocHostMemory(sizeof(bnxt_host_cq), (void**)&bnxt_rcq_,
+                             "BNXT RCQ", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(bnxt_rcq_, "allocHostMemory (BNXT RCQ)");
 
   create_one_cq(bnxt_scq_, context_, bnxt_re_dv, cqe, dmabuf, "SCQ");
   XIO_CHECK_NNULL(bnxt_scq_->cq, "bnxt_re_dv_create_cq (SCQ)");
@@ -229,7 +233,9 @@ void Backend::bnxt_create_cqs(int cqe) {
 void Backend::bnxt_create_qps(int sq_length) {
   struct bnxt_re_dv_umem_reg_attr umem_attr;
 
-  bnxt_qp_ = static_cast<bnxt_host_qp*>(calloc(1, sizeof(bnxt_host_qp)));
+  (void)xio::allocHostMemory(sizeof(bnxt_host_qp), (void**)&bnxt_qp_, "BNXT QP",
+                             XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(bnxt_qp_, "allocHostMemory (BNXT QP)");
 
   uint32_t max_swr = static_cast<uint32_t>(sq_length);
   uint32_t max_ssge = 1;
@@ -256,21 +262,12 @@ void Backend::bnxt_create_qps(int sq_length) {
   //     ib_umem_get can't pin.  Use posix_memalign
   //     + hipHostRegister instead. ---
   void* sq_ptr = nullptr;
-  size_t pgsz = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-  if (posix_memalign(&sq_ptr, pgsz, bnxt_qp_->sq_len)) {
-    fprintf(stderr, "rdma_ep::bnxt: "
-                    "posix_memalign SQ failed\n");
-    return;
-  }
-  memset(sq_ptr, 0, bnxt_qp_->sq_len);
-  hipError_t herr = hipHostRegister(sq_ptr, bnxt_qp_->sq_len,
-                                    hipHostRegisterDefault);
+  hipError_t herr = xio::allocHostMemory(bnxt_qp_->sq_len, &sq_ptr, "BNXT SQ",
+                                         XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "rdma_ep::bnxt: "
-            "hipHostRegister SQ "
-            "failed: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "rdma_ep::bnxt: "
+                    "allocHostMemory SQ failed\n");
+    return;
   }
   bnxt_qp_->sq_buf = sq_ptr;
 
@@ -294,24 +291,18 @@ void Backend::bnxt_create_qps(int sq_length) {
   // --- RQ buffer: same approach as SQ. ---
   uint32_t rq_alloc = bnxt_qp_->rq_len;
   if (rq_alloc == 0) {
-    rq_alloc = static_cast<uint32_t>(pgsz);
+    long pgsz_long = sysconf(_SC_PAGESIZE);
+    rq_alloc = (pgsz_long > 0) ? static_cast<uint32_t>(pgsz_long) : 4096;
     bnxt_qp_->rq_len = rq_alloc;
   }
 
   void* rq_ptr = nullptr;
-  if (posix_memalign(&rq_ptr, pgsz, rq_alloc)) {
-    fprintf(stderr, "rdma_ep::bnxt: "
-                    "posix_memalign RQ failed\n");
-    return;
-  }
-  memset(rq_ptr, 0, rq_alloc);
-  herr = hipHostRegister(rq_ptr, rq_alloc, hipHostRegisterDefault);
+  herr = xio::allocHostMemory(rq_alloc, &rq_ptr, "BNXT RQ",
+                              XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "rdma_ep::bnxt: "
-            "hipHostRegister RQ "
-            "failed: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "rdma_ep::bnxt: "
+                    "allocHostMemory RQ failed\n");
+    return;
   }
   bnxt_qp_->rq_buf = rq_ptr;
 
@@ -325,13 +316,14 @@ void Backend::bnxt_create_qps(int sq_length) {
   XIO_CHECK_NNULL(rq_umem, "bnxt_re_dv_umem_reg (RQ)");
 
   // Doorbell region -- try default first, then alloc
-  bnxt_qp_->db_region_attr = static_cast<bnxt_re_dv_db_region_attr*>(
-    calloc(1, sizeof(bnxt_re_dv_db_region_attr)));
-  XIO_CHECK_NNULL(bnxt_qp_->db_region_attr, "calloc db_region_attr");
+  (void)xio::allocHostMemory(sizeof(bnxt_re_dv_db_region_attr),
+                             (void**)&bnxt_qp_->db_region_attr,
+                             "BNXT DB region", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(bnxt_qp_->db_region_attr, "alloc db_region_attr");
   int dbr_rc = bnxt_re_dv.get_default_db_region(context_,
                                                 bnxt_qp_->db_region_attr);
   if (dbr_rc != 0) {
-    free(bnxt_qp_->db_region_attr);
+    xio::freeHostMemory(bnxt_qp_->db_region_attr, XIO_HOST_MEM_PLAIN);
     bnxt_qp_->db_region_attr = bnxt_re_dv.alloc_db_region(context_);
     XIO_CHECK_NNULL(bnxt_qp_->db_region_attr, "bnxt_re_dv_alloc_db_region");
   }
@@ -476,33 +468,31 @@ void Backend::bnxt_cleanup() {
     if (bnxt_qp_->db_region_attr) {
       if (bnxt_qp_->db_region_attr->dbr)
         (void)hipHostUnregister(bnxt_qp_->db_region_attr->dbr);
-      free(bnxt_qp_->db_region_attr);
+      xio::freeHostMemory(bnxt_qp_->db_region_attr, XIO_HOST_MEM_PLAIN);
       bnxt_qp_->db_region_attr = nullptr;
     }
     if (bnxt_qp_->sq_buf) {
-      (void)hipHostUnregister(bnxt_qp_->sq_buf);
-      free(bnxt_qp_->sq_buf);
+      xio::freeHostMemory(bnxt_qp_->sq_buf, XIO_HOST_MEM_PINNED);
       bnxt_qp_->sq_buf = nullptr;
     }
     if (bnxt_qp_->rq_buf) {
-      (void)hipHostUnregister(bnxt_qp_->rq_buf);
-      free(bnxt_qp_->rq_buf);
+      xio::freeHostMemory(bnxt_qp_->rq_buf, XIO_HOST_MEM_PINNED);
       bnxt_qp_->rq_buf = nullptr;
     }
-    free(bnxt_qp_);
+    xio::freeHostMemory(bnxt_qp_, XIO_HOST_MEM_PLAIN);
     bnxt_qp_ = nullptr;
   }
 
   if (bnxt_scq_) {
     if (bnxt_scq_->buf)
-      (void)hipFree(bnxt_scq_->buf);
-    free(bnxt_scq_);
+      xio::freeDeviceMemory(bnxt_scq_->buf, XIO_DEVICE_MEM_UNCACHED);
+    xio::freeHostMemory(bnxt_scq_, XIO_HOST_MEM_PLAIN);
     bnxt_scq_ = nullptr;
   }
   if (bnxt_rcq_) {
     if (bnxt_rcq_->buf)
-      (void)hipFree(bnxt_rcq_->buf);
-    free(bnxt_rcq_);
+      xio::freeDeviceMemory(bnxt_rcq_->buf, XIO_DEVICE_MEM_UNCACHED);
+    xio::freeHostMemory(bnxt_rcq_, XIO_HOST_MEM_PLAIN);
     bnxt_rcq_ = nullptr;
   }
 }
