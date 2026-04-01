@@ -12,6 +12,7 @@
 
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
+#include "xio.h"
 
 #if defined(GDA_BNXT)
 #include "bnxt/bnxt-queue-pair.hip"
@@ -38,10 +39,15 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
   int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
                IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC;
 
-  (void)hipMalloc(&nonfetching_atomic_, 8);
-  (void)hipMalloc(&fetching_atomic_, 8 * FETCHING_ATOMIC_CNT);
-  (void)hipMemset(nonfetching_atomic_, 0, 8);
-  (void)hipMemset(fetching_atomic_, 0, 8 * FETCHING_ATOMIC_CNT);
+  (void)xio::allocDeviceMemory(8, (void**)&nonfetching_atomic_,
+                               "nonfetching atomic", XIO_DEVICE_MEM_HIP);
+  (void)xio::allocDeviceMemory(8 * FETCHING_ATOMIC_CNT,
+                               (void**)&fetching_atomic_, "fetching atomic",
+                               XIO_DEVICE_MEM_HIP);
+  if (nonfetching_atomic_)
+    (void)hipMemset(nonfetching_atomic_, 0, 8);
+  if (fetching_atomic_)
+    (void)hipMemset(fetching_atomic_, 0, 8 * FETCHING_ATOMIC_CNT);
 
   mr_nonfetching_atomic_ = ibv.reg_mr(pd, nonfetching_atomic_, 8, access);
   mr_fetching_atomic_ = ibv.reg_mr(pd, fetching_atomic_,
@@ -107,9 +113,9 @@ QueuePair::~QueuePair() {
   if (mr_fetching_atomic_)
     ibv.dereg_mr(mr_fetching_atomic_);
   if (nonfetching_atomic_)
-    (void)hipFree(nonfetching_atomic_);
+    xio::freeDeviceMemory(nonfetching_atomic_, XIO_DEVICE_MEM_HIP);
   if (fetching_atomic_)
-    (void)hipFree(fetching_atomic_);
+    xio::freeDeviceMemory(fetching_atomic_, XIO_DEVICE_MEM_HIP);
 }
 
 #endif // !__HIP_DEVICE_COMPILE__

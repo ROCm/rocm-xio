@@ -367,90 +367,52 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  // Timing buffers are always host-accessible
-  // Allocate full timing arrays if timing is enabled (default mode)
-  // Allocate lightweight stats structure if less-timing mode is enabled
   XioTimingStats* timingStats = nullptr;
   if (!lessTiming && totalTimingSize > 0) {
-    // Try HIP first, but fall back to malloc if HIP is not available (emulate
-    // mode)
-    hipError_t hipErr1 = hipHostMalloc((void**)&hostStartTime, totalTimingSize);
+    hipError_t hipErr1 = allocHostMemory(totalTimingSize,
+                                         (void**)&hostStartTime,
+                                         "start time buffer",
+                                         XIO_HOST_MEM_MAPPED);
     if (hipErr1 != hipSuccess) {
-      // HIP not available (e.g., emulate mode), use regular malloc
-      void* ptr = malloc(totalTimingSize);
-      if (ptr == nullptr) {
-        std::cerr << "Error: Failed to allocate start time buffer" << std::endl;
-        return EXIT_FAILURE;
-      }
-      hostStartTime = static_cast<unsigned long long int*>(ptr);
+      std::cerr << "Error: Failed to allocate start time buffer" << std::endl;
+      return EXIT_FAILURE;
     }
-    hipError_t hipErr2 = hipHostMalloc((void**)&hostEndTime, totalTimingSize);
+    hipError_t hipErr2 = allocHostMemory(totalTimingSize, (void**)&hostEndTime,
+                                         "end time buffer",
+                                         XIO_HOST_MEM_MAPPED);
     if (hipErr2 != hipSuccess) {
-      // HIP not available (e.g., emulate mode), use regular malloc
-      void* ptr = malloc(totalTimingSize);
-      if (ptr == nullptr) {
-        std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
-        return EXIT_FAILURE;
-      }
-      hostEndTime = static_cast<unsigned long long int*>(ptr);
+      std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
+      return EXIT_FAILURE;
     }
-
-    // Initialize timing buffers to zero
-    memset(hostStartTime, 0, totalTimingSize);
-    memset(hostEndTime, 0, totalTimingSize);
   } else if (lessTiming) {
-    // Allocate lightweight timing stats structure for less-timing mode
-    hipError_t hipErr = hipHostMalloc((void**)&timingStats,
-                                      sizeof(XioTimingStats));
+    hipError_t hipErr = allocHostMemory(sizeof(XioTimingStats),
+                                        (void**)&timingStats, "timing stats",
+                                        XIO_HOST_MEM_MAPPED);
     if (hipErr != hipSuccess) {
-      // HIP not available (e.g., emulate mode), use regular malloc
-      void* ptr = malloc(sizeof(XioTimingStats));
-      if (ptr == nullptr) {
-        std::cerr << "Error: Failed to allocate timing stats buffer"
-                  << std::endl;
-        return EXIT_FAILURE;
-      }
-      timingStats = static_cast<XioTimingStats*>(ptr);
+      std::cerr << "Error: Failed to allocate timing stats buffer" << std::endl;
+      return EXIT_FAILURE;
     }
-    // Initialize timing stats
     timingStats->minDuration = ULLONG_MAX;
     timingStats->maxDuration = 0;
     timingStats->sumDuration = 0;
     timingStats->count = 0;
   }
 
-  // Allocate stop flag for SIGINT handling (GPU-accessible)
   volatile bool* stopRequestedFlag = nullptr;
-  hipError_t stopFlagErr = hipHostMalloc((void**)&stopRequestedFlag,
-                                         sizeof(bool), hipHostMallocMapped);
+  hipError_t stopFlagErr = allocHostMemory(sizeof(bool),
+                                           (void**)&stopRequestedFlag,
+                                           "stop flag", XIO_HOST_MEM_MAPPED);
   if (stopFlagErr != hipSuccess) {
-    // Fallback to regular malloc if HIP not available (emulate mode)
-    stopRequestedFlag = static_cast<volatile bool*>(malloc(sizeof(bool)));
-    if (stopRequestedFlag == nullptr) {
-      std::cerr << "Error: Failed to allocate stop flag" << std::endl;
-      // Cleanup and exit
-      if (!lessTiming && hostStartTime != nullptr) {
-        hipError_t hipErrFree1 = hipHostFree(hostStartTime);
-        if (hipErrFree1 != hipSuccess) {
-          free(hostStartTime);
-        }
-      }
-      if (!lessTiming && hostEndTime != nullptr) {
-        hipError_t hipErrFree2 = hipHostFree(hostEndTime);
-        if (hipErrFree2 != hipSuccess) {
-          free(hostEndTime);
-        }
-      }
-      if (lessTiming && timingStats != nullptr) {
-        hipError_t hipErrFree3 = hipHostFree(timingStats);
-        if (hipErrFree3 != hipSuccess) {
-          free(timingStats);
-        }
-      }
-      freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
-      freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-      return EXIT_FAILURE;
-    }
+    std::cerr << "Error: Failed to allocate stop flag" << std::endl;
+    if (!lessTiming && hostStartTime != nullptr)
+      freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+    if (!lessTiming && hostEndTime != nullptr)
+      freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+    if (lessTiming && timingStats != nullptr)
+      freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+    freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+    freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
+    return EXIT_FAILURE;
   }
   *stopRequestedFlag = false;
 
@@ -483,33 +445,14 @@ int main(int argc, char** argv) {
               << " (error code: " << err << ")" << std::endl;
     freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
     freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-    // Free host memory using HIP or regular free (only if allocated)
-    if (!lessTiming && hostStartTime != nullptr) {
-      hipError_t hipErrFree1 = hipHostFree(hostStartTime);
-      if (hipErrFree1 != hipSuccess) {
-        free(hostStartTime);
-      }
-    }
-    if (!lessTiming && hostEndTime != nullptr) {
-      hipError_t hipErrFree2 = hipHostFree(hostEndTime);
-      if (hipErrFree2 != hipSuccess) {
-        free(hostEndTime);
-      }
-    }
-    if (lessTiming && timingStats != nullptr) {
-      hipError_t hipErrFree3 = hipHostFree(timingStats);
-      if (hipErrFree3 != hipSuccess) {
-        free(timingStats);
-      }
-    }
-    // Free stop flag on error
-    if (stopRequestedFlag != nullptr) {
-      hipError_t hipErrFree = hipHostFree(const_cast<bool*>(stopRequestedFlag));
-      if (hipErrFree != hipSuccess) {
-        free(const_cast<bool*>(stopRequestedFlag));
-      }
-    }
-    // Clear signal handler pointers
+    if (!lessTiming && hostStartTime != nullptr)
+      freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+    if (!lessTiming && hostEndTime != nullptr)
+      freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+    if (lessTiming && timingStats != nullptr)
+      freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+    if (stopRequestedFlag != nullptr)
+      freeHostMemory(const_cast<bool*>(stopRequestedFlag), XIO_HOST_MEM_MAPPED);
     g_configForSignalHandler = nullptr;
     g_endpointNameForSignalHandler = nullptr;
     return EXIT_FAILURE;
@@ -663,35 +606,16 @@ int main(int argc, char** argv) {
     std::cout << "\nTest completed successfully!" << std::endl;
   }
 
-  // Free memory
   freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
   freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-  // Free host memory using HIP or regular free (only if allocated)
-  if (!lessTiming && hostStartTime != nullptr) {
-    hipError_t hipErrFree1 = hipHostFree(hostStartTime);
-    if (hipErrFree1 != hipSuccess) {
-      free(hostStartTime);
-    }
-  }
-  if (!lessTiming && hostEndTime != nullptr) {
-    hipError_t hipErrFree2 = hipHostFree(hostEndTime);
-    if (hipErrFree2 != hipSuccess) {
-      free(hostEndTime);
-    }
-  }
-  if (lessTiming && timingStats != nullptr) {
-    hipError_t hipErrFree3 = hipHostFree(timingStats);
-    if (hipErrFree3 != hipSuccess) {
-      free(timingStats);
-    }
-  }
-  // Free stop flag
-  if (stopRequestedFlag != nullptr) {
-    hipError_t hipErrFree = hipHostFree(const_cast<bool*>(stopRequestedFlag));
-    if (hipErrFree != hipSuccess) {
-      free(const_cast<bool*>(stopRequestedFlag));
-    }
-  }
+  if (!lessTiming && hostStartTime != nullptr)
+    freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+  if (!lessTiming && hostEndTime != nullptr)
+    freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+  if (lessTiming && timingStats != nullptr)
+    freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+  if (stopRequestedFlag != nullptr)
+    freeHostMemory(const_cast<bool*>(stopRequestedFlag), XIO_HOST_MEM_MAPPED);
 
   // Clear signal handler pointers
   g_configForSignalHandler = nullptr;
