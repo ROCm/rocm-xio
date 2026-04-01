@@ -85,7 +85,7 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
   endforeach()
 endif()
 
-if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC OR GDA_ERNIC)
   xio_add_test(
     NAME test-rdma-2node
     SOURCE test-rdma-2node.hip
@@ -93,6 +93,7 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
     GPU
     INCLUDE_DIRS
       ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+      ${CMAKE_SOURCE_DIR}/src/common
       ${CMAKE_CURRENT_SOURCE_DIR}
   )
   set_tests_properties(test-rdma-2node PROPERTIES

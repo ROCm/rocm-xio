@@ -43,6 +43,7 @@ struct ernic_device_sq : public ernic_device_wq {
   volatile uint32_t* uar_ptr;
   uint32_t uar_qp_offset;
   uint32_t qpn;
+  uint32_t qp_handle;
   /* pci-mmio-bridge doorbell routing */
   void* mmio_bridge_shadow;
   uint16_t ernic_target_bdf;
@@ -79,6 +80,7 @@ struct ernic_host_qp {
   uint32_t uar_qp_offset;
   uint32_t uar_cq_offset;
   uint64_t uar_mmap_offset;
+  uint32_t qp_handle;
 } __attribute__((packed));
 
 /* DV function table (dlsym'd from librocm_ernic.so) */
