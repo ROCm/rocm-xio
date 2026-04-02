@@ -255,7 +255,8 @@ __device__ void Ops::quiet_single(QueuePair& qp) {
 // --- RMA posting ---
 
 __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t size, uintptr_t laddr,
-                                  uintptr_t raddr, uint8_t opcode) {
+                                  uintptr_t raddr, uint8_t opcode,
+                                  uint32_t imm_data) {
   uint64_t activemask = qp.get_same_qp_lane_mask();
   int lane = get_lane_id();
   int my_logical_lane_id = popcount64(activemask & ((1ULL << lane) - 1));
@@ -273,13 +274,15 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t size, uintptr_t laddr,
   if (lane == last_lane(activemask))
     wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_SIG);
 
-  if (size && !laddr && opcode == qp.op_rdma_write_)
+  bool is_write = opcode == qp.op_rdma_write_ ||
+                  opcode == qp.op_rdma_write_imm_;
+  if (size && !laddr && is_write)
     size = 1;
 
   wqe->base.wqe_idx = my_sq_pos;
   wqe->base.op = opcode;
   wqe->base.num_sge_key = size ? 1 : 0;
-  wqe->base.imm_data_key = byteswap<uint32_t>(0);
+  wqe->base.imm_data_key = byteswap<uint32_t>(imm_data);
 
   wqe->common.rdma.remote_va_high = byteswap<uint32_t>(raddr >> 32);
   wqe->common.rdma.remote_va_low = byteswap<uint32_t>(raddr);
@@ -287,7 +290,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t size, uintptr_t laddr,
   wqe->common.length = byteswap<uint32_t>(size);
 
   if (size) {
-    if (opcode == qp.op_rdma_write_ &&
+    if (is_write &&
         size <= static_cast<int32_t>(qp.inline_threshold_)) {
       wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_INL);
       wqe->base.num_sge_key = 0;
@@ -312,7 +315,8 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t size, uintptr_t laddr,
 
 __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t size,
                                          uintptr_t laddr, uintptr_t raddr,
-                                         uint8_t opcode, bool ring_db) {
+                                         uint8_t opcode, bool ring_db,
+                                         uint32_t imm_data) {
   (void)ring_db;
   uint32_t num_wqes = 1;
   uint32_t my_sq_prod = reserve_sq_single(qp, num_wqes);
@@ -326,13 +330,15 @@ __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t size,
 
   wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_SIG);
 
-  if (size && !laddr && opcode == qp.op_rdma_write_)
+  bool is_write = opcode == qp.op_rdma_write_ ||
+                  opcode == qp.op_rdma_write_imm_;
+  if (size && !laddr && is_write)
     size = 1;
 
   wqe->base.wqe_idx = my_sq_pos;
   wqe->base.op = opcode;
   wqe->base.num_sge_key = size ? 1 : 0;
-  wqe->base.imm_data_key = byteswap<uint32_t>(0);
+  wqe->base.imm_data_key = byteswap<uint32_t>(imm_data);
 
   wqe->common.rdma.remote_va_high = byteswap<uint32_t>(raddr >> 32);
   wqe->common.rdma.remote_va_low = byteswap<uint32_t>(raddr);
@@ -340,7 +346,7 @@ __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t size,
   wqe->common.length = byteswap<uint32_t>(size);
 
   if (size) {
-    if (opcode == qp.op_rdma_write_ &&
+    if (is_write &&
         size <= static_cast<int32_t>(qp.inline_threshold_)) {
       wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_INL);
       wqe->base.num_sge_key = 0;

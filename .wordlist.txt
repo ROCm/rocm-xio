@@ -160,6 +160,8 @@ RDNA
 ROCm
 rocm
 rocminfo
+Ryzen
+Threadripper
 
 # ===== Hardware and System =====
 cpu
@@ -363,6 +365,7 @@ lsblk
 lsmod
 lsmod
 lsof
+LTS
 md
 md
 mem
@@ -389,12 +392,15 @@ ns
 num
 objdump
 offload
+ops
 pageable
 pageable
 PascalCase
 passthrough
 passthrough
 perf
+pipelined
+Pipelined
 pragmas
 prefetchable
 printf
@@ -448,6 +454,7 @@ WD
 wget
 wsl
 WSL
+WX
 www
 XNACK
 xnack
@@ -792,6 +799,7 @@ DBNXT
 DKMS
 DPU
 DSC
+DV
 EFA
 ERNIC
 ernicdv
@@ -801,6 +809,9 @@ HPE
 hsi
 ib
 ibv
+IBV
+IMM
+imm
 IONIC
 ionic
 IOCTLs
@@ -852,7 +863,10 @@ pvrdma
 qp
 recv
 resizable
+responder's
+sge
 src
+WR
 uar
 vmw
 wqe

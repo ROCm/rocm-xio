@@ -52,6 +52,7 @@ struct RmaDescriptor {
   uint32_t rkey;
   uint8_t opcode;
   bool send_inline;
+  uint32_t imm_data;
 };
 
 // Logical AMO descriptor

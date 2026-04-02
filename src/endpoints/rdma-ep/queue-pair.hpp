@@ -76,8 +76,13 @@ public:
   __device__ void atomic_nofetch(void* dest, int64_t value, int64_t cond);
   __device__ int64_t atomic_cas(void* dest, int64_t data, int64_t cmp);
 
+  __device__ void put_nbi_imm(void* dest, const void* source,
+                              size_t nelems, uint32_t imm_data);
   __device__ void put_nbi_single(void* dest, const void* source, size_t nelems,
                                  bool ring_db = true);
+  __device__ void put_nbi_imm_single(void* dest, const void* source,
+                                     size_t nelems, uint32_t imm_data,
+                                     bool ring_db = true);
   __device__ void get_nbi_single(void* dest, const void* source, size_t nelems,
                                  bool ring_db = true);
   __device__ void quiet_single();
@@ -87,10 +92,10 @@ public:
 
   // private:
   __device__ void post_wqe_rma(int32_t size, uintptr_t laddr, uintptr_t raddr,
-                               uint8_t opcode);
+                               uint8_t opcode, uint32_t imm_data = 0);
   __device__ void post_wqe_rma_single(int32_t size, uintptr_t laddr,
                                       uintptr_t raddr, uint8_t opcode,
-                                      bool ring_db);
+                                      bool ring_db, uint32_t imm_data = 0);
   __device__ uint64_t post_wqe_amo(int32_t size, uintptr_t raddr,
                                    uint8_t opcode, int64_t atomic_data,
                                    int64_t atomic_cmp, bool fetching);
@@ -98,6 +103,7 @@ public:
   Provider provider_{Provider::UNKNOWN};
 
   uint8_t op_rdma_write_;
+  uint8_t op_rdma_write_imm_;
   uint8_t op_rdma_read_;
   uint8_t op_atomic_fa_;
   uint8_t op_atomic_cs_;
@@ -166,10 +172,11 @@ class Ops {
 public:
   __device__ static void post_wqe_rma(QueuePair& qp, int32_t length,
                                       uintptr_t laddr, uintptr_t raddr,
-                                      uint8_t opcode);
+                                      uint8_t opcode, uint32_t imm_data = 0);
   __device__ static void post_wqe_rma_single(QueuePair& qp, int32_t length,
                                              uintptr_t laddr, uintptr_t raddr,
-                                             uint8_t opcode, bool ring_db);
+                                             uint8_t opcode, bool ring_db,
+                                             uint32_t imm_data = 0);
   __device__ static uint64_t post_wqe_amo(QueuePair& qp, uintptr_t raddr,
                                           uint8_t opcode, int64_t atomic_data,
                                           int64_t atomic_cmp, bool fetching);
@@ -186,7 +193,8 @@ public:
   __device__ static void poll_cq_until(QueuePair& qp, uint32_t requested);
   __device__ static void write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                        uintptr_t laddr, int32_t length,
-                                       uint8_t opcode);
+                                       uint8_t opcode,
+                                       uint32_t imm_data = 0);
   __device__ static uint32_t write_amo_wqe(QueuePair& qp, uintptr_t raddr,
                                            uint8_t opcode, int64_t atomic_data,
                                            int64_t atomic_cmp, bool fetching);
@@ -202,10 +210,11 @@ class Ops {
 public:
   __device__ static void post_wqe_rma(QueuePair& qp, int32_t length,
                                       uintptr_t laddr, uintptr_t raddr,
-                                      uint8_t opcode);
+                                      uint8_t opcode, uint32_t imm_data = 0);
   __device__ static void post_wqe_rma_single(QueuePair& qp, int32_t length,
                                              uintptr_t laddr, uintptr_t raddr,
-                                             uint8_t opcode, bool ring_db);
+                                             uint8_t opcode, bool ring_db,
+                                             uint32_t imm_data = 0);
   __device__ static uint64_t post_wqe_amo(QueuePair& qp, uintptr_t raddr,
                                           uint8_t opcode, int64_t atomic_data,
                                           int64_t atomic_cmp, bool fetching);
@@ -231,10 +240,11 @@ class Ops {
 public:
   __device__ static void post_wqe_rma(QueuePair& qp, int32_t size,
                                       uintptr_t laddr, uintptr_t raddr,
-                                      uint8_t opcode);
+                                      uint8_t opcode, uint32_t imm_data = 0);
   __device__ static void post_wqe_rma_single(QueuePair& qp, int32_t size,
                                              uintptr_t laddr, uintptr_t raddr,
-                                             uint8_t opcode, bool ring_db);
+                                             uint8_t opcode, bool ring_db,
+                                             uint32_t imm_data = 0);
   __device__ static uint64_t post_wqe_amo(QueuePair& qp, uintptr_t raddr,
                                           uint8_t opcode, int64_t atomic_data,
                                           int64_t atomic_cmp, bool fetching);
@@ -276,10 +286,11 @@ class Ops {
 public:
   __device__ static void post_wqe_rma(QueuePair& qp, int32_t length,
                                       uintptr_t laddr, uintptr_t raddr,
-                                      uint8_t opcode);
+                                      uint8_t opcode, uint32_t imm_data = 0);
   __device__ static void post_wqe_rma_single(QueuePair& qp, int32_t length,
                                              uintptr_t laddr, uintptr_t raddr,
-                                             uint8_t opcode, bool ring_db);
+                                             uint8_t opcode, bool ring_db,
+                                             uint32_t imm_data = 0);
   __device__ static uint64_t post_wqe_amo(QueuePair& qp, uintptr_t raddr,
                                           uint8_t opcode, int64_t atomic_data,
                                           int64_t atomic_cmp, bool fetching);
@@ -295,7 +306,8 @@ public:
   __device__ static void poll_cq_until(QueuePair& qp, uint32_t requested);
   __device__ static void write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                        uintptr_t laddr, int32_t length,
-                                       uint8_t opcode);
+                                       uint8_t opcode,
+                                       uint32_t imm_data = 0);
   __device__ static uint32_t write_amo_wqe(QueuePair& qp, uintptr_t raddr,
                                            uint8_t opcode, int64_t atomic_data,
                                            int64_t atomic_cmp, bool fetching);
