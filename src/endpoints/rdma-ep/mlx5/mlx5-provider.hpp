@@ -48,7 +48,8 @@ static_assert(sizeof(gda_mlx5_wqe_segment) == 16,
 struct gda_mlx5_wqe_ctrl : public mlx5_wqe_ctrl_seg {
   __device__ constexpr inline gda_mlx5_wqe_ctrl(
     uint16_t wqe_idx, uint8_t opcode, uint32_t /* 24-bit */ qpn,
-    uint8_t /* 6-bit */ ds, uint8_t /* [7:5 fm|4|3:2 ce|1 se|0] */ fm_ce_se)
+    uint8_t /* 6-bit */ ds, uint8_t /* [7:5 fm|4|3:2 ce|1 se|0] */ fm_ce_se,
+    uint32_t imm = 0)
     : mlx5_wqe_ctrl_seg{
         .opmod_idx_opcode = endian::to_be<uint32_t>(
           (static_cast<uint32_t>(wqe_idx) << 8) |
@@ -58,7 +59,7 @@ struct gda_mlx5_wqe_ctrl : public mlx5_wqe_ctrl_seg {
         .signature = 0,
         .dci_stream_channel_id = 0,
         .fm_ce_se = fm_ce_se,
-        .imm = 0,
+        .imm = endian::to_be<uint32_t>(imm),
       } {
   }
 } __attribute__((__packed__)) __attribute__((__aligned__(16)));
@@ -136,7 +137,8 @@ union gda_mlx5_wqe_rma {
 
   __device__ static constexpr inline bool can_inline(
     uint8_t opcode, uint32_t byte_count, uint32_t inline_threshold) {
-    return (opcode == MLX5_OPCODE_RDMA_WRITE) &&
+    return (opcode == MLX5_OPCODE_RDMA_WRITE ||
+            opcode == MLX5_OPCODE_RDMA_WRITE_IMM) &&
            (byte_count <= inline_threshold);
   }
 } __attribute__((__packed__)) __attribute__((__aligned__(16)));

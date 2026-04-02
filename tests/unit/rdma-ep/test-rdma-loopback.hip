@@ -24,6 +24,10 @@
 
 #include <unistd.h>
 
+extern "C" {
+#include <infiniband/verbs.h>
+}
+
 #include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
@@ -47,15 +51,17 @@ static constexpr unsigned DEFAULT_ITERATIONS = 1;
 static void print_usage(const char* prog) {
   fprintf(stderr,
           "Usage: %s [OPTIONS]\n"
-          "  --provider P  bnxt|mlx5|ionic|auto"
+          "  --provider P    bnxt|mlx5|ionic|auto"
           " (default auto)\n"
-          "  --device DEV  RDMA device name\n"
-          "  --size   N    Transfer size"
+          "  --device DEV    RDMA device name\n"
+          "  --size   N      Transfer size"
           " (default %u)\n"
-          "  --seed   N    LFSR seed"
+          "  --seed   N      LFSR seed"
           " (default %u)\n"
-          "  -n N          Iterations"
-          " (default %u)\n",
+          "  -n N            Iterations"
+          " (default %u)\n"
+          "  --write-imm     Use RDMA WRITE"
+          " with immediate data\n",
           prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED, DEFAULT_ITERATIONS);
 }
 
@@ -141,6 +147,27 @@ __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
   *result = 0;
 }
 
+__global__ void loopback_write_imm_kernel(QueuePair* qp, void* src_ptr,
+                                          void* dst_ptr, uint32_t length,
+                                          int* result,
+                                          unsigned long long* elapsed,
+                                          unsigned iterations) {
+  if (threadIdx.x != 0)
+    return;
+
+  unsigned long long t0 = wall_clock64();
+
+  for (unsigned i = 0; i < iterations; i++) {
+    uint32_t imm = i + 1;
+    qp->put_nbi_imm_single(dst_ptr, src_ptr, length,
+                           imm, true);
+    qp->quiet_single();
+  }
+
+  *elapsed = wall_clock64() - t0;
+  *result = 0;
+}
+
 int main(int argc, char** argv) {
   uint32_t xfer_size = DEFAULT_XFER_SIZE;
   uint32_t lfsr_seed = DEFAULT_LFSR_SEED;
@@ -148,6 +175,7 @@ int main(int argc, char** argv) {
   const char* provider_str = "auto";
   const char* device_name = nullptr;
   bool diag_mode = false;
+  bool write_imm = false;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
@@ -164,6 +192,8 @@ int main(int argc, char** argv) {
       iterations = static_cast<unsigned>(atoi(argv[++i]));
     } else if (strcmp(argv[i], "--diag") == 0) {
       diag_mode = true;
+    } else if (strcmp(argv[i], "--write-imm") == 0) {
+      write_imm = true;
     } else {
       print_usage(argv[0]);
       return 1;
@@ -267,7 +297,7 @@ int main(int argc, char** argv) {
   }
   printf("GPU QueuePair ready.\n");
 
-  size_t buf_size = xfer_size * 2;
+  size_t buf_size = xfer_size > 0 ? xfer_size * 2 : 4096;
   void* buf = nullptr;
   if (posix_memalign(&buf, 4096, buf_size)) {
     fprintf(stderr, "posix_memalign failed\n");
@@ -275,12 +305,14 @@ int main(int argc, char** argv) {
   }
 
   uint8_t* src = static_cast<uint8_t*>(buf);
-  uint8_t* dst = src + xfer_size;
+  uint8_t* dst = xfer_size > 0 ? src + xfer_size : src;
 
-  xio::DataPatternParams fill_p{src,       xfer_size, 0,
-                                xfer_size, lfsr_seed, nullptr};
-  xio::dataPattern(false, fill_p);
-  memset(dst, 0x00, xfer_size);
+  if (xfer_size > 0) {
+    xio::DataPatternParams fill_p{src,       xfer_size, 0,
+                                  xfer_size, lfsr_seed, nullptr};
+    xio::dataPattern(false, fill_p);
+    memset(dst, 0x00, xfer_size);
+  }
 
   printf("Data buffer allocated: "
          "src=%p, dst=%p, size=%u\n",
@@ -319,10 +351,10 @@ int main(int argc, char** argv) {
   (void)hipMemcpy(d_elapsed, &h_elapsed, sizeof(h_elapsed),
                   hipMemcpyHostToDevice);
 
-  printf("Pre-check: src[0]=0x%02x,"
-         " dst[0]=0x%02x\n",
-         src[0], dst[0]);
-  {
+  if (xfer_size > 0) {
+    printf("Pre-check: src[0]=0x%02x,"
+           " dst[0]=0x%02x\n",
+           src[0], dst[0]);
     xio::DataPatternParams pre_p{src,       xfer_size, 0,
                                  xfer_size, lfsr_seed, nullptr};
     bool src_ok = xio::dataPattern(true, pre_p);
@@ -332,17 +364,66 @@ int main(int argc, char** argv) {
       free(buf);
       return 1;
     }
+    if (dst[0] != 0x00) {
+      fprintf(stderr, "Pre-check dst not zeroed.\n");
+      free(buf);
+      return 1;
+    }
   }
-  if (dst[0] != 0x00) {
-    fprintf(stderr, "Pre-check dst not zeroed.\n");
-    free(buf);
-    return 1;
+
+  if (write_imm) {
+#if defined(GDA_BNXT)
+    if (prov == Provider::BNXT) {
+      fprintf(stderr, "SKIP: WRITE_IMM not supported"
+                      " on BNXT DV path (no"
+                      " ibv_post_recv support).\n");
+      free(buf);
+      backend.shutdown();
+      return 77;
+    }
+#endif
+
+    struct ibv_recv_wr recv_wr = {};
+    recv_wr.wr_id = 0;
+    recv_wr.next = nullptr;
+
+    if (xfer_size == 0) {
+      recv_wr.sg_list = nullptr;
+      recv_wr.num_sge = 0;
+    } else {
+      static struct ibv_sge recv_sge = {};
+      recv_sge.addr =
+        reinterpret_cast<uint64_t>(dst);
+      recv_sge.length = xfer_size;
+      recv_sge.lkey = backend.get_lkey();
+      recv_wr.sg_list = &recv_sge;
+      recv_wr.num_sge = 1;
+    }
+
+    struct ibv_recv_wr* bad_wr = nullptr;
+    int rrc = ibv_post_recv(backend.get_ibv_qp(),
+                            &recv_wr, &bad_wr);
+    if (rrc != 0) {
+      fprintf(stderr, "ibv_post_recv failed: %d\n",
+              rrc);
+      free(buf);
+      return 1;
+    }
+    printf("Posted receive WQE for WRITE_IMM.\n");
   }
 
   if (diag_mode) {
     printf("Launching DIAG kernel...\n");
     hipLaunchKernelGGL(loopback_db_diag_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                        (void*)src, (void*)dst, xfer_size, d_result, d_elapsed);
+  } else if (write_imm) {
+    printf("Launching RDMA WRITE_IMM kernel"
+           " (%u iterations, size=%u,"
+           " imm=1..%u)...\n",
+           iterations, xfer_size, iterations);
+    hipLaunchKernelGGL(loopback_write_imm_kernel, dim3(1), dim3(1), 0, 0,
+                       gpu_qp, (void*)src, (void*)dst, xfer_size, d_result,
+                       d_elapsed, iterations);
   } else {
     printf("Launching RDMA WRITE kernel"
            " (%u iterations)...\n",
@@ -414,35 +495,47 @@ int main(int argc, char** argv) {
   double freq_khz = static_cast<double>(wall_clk_rate);
   double total_us = (static_cast<double>(h_elapsed) / freq_khz) * 1000.0;
   printf("Kernel completed: %.1f us "
-         "(RDMA WRITE + CQE wait).\n",
-         total_us);
+         "(RDMA %s + CQE wait).\n",
+         total_us,
+         write_imm ? "WRITE_IMM" : "WRITE");
 
-  printf("Post-check: dst[0]=0x%02x,"
-         " dst[%u]=0x%02x\n",
-         dst[0], xfer_size - 1, dst[xfer_size - 1]);
+  if (xfer_size > 0) {
+    printf("Post-check: dst[0]=0x%02x,"
+           " dst[%u]=0x%02x\n",
+           dst[0], xfer_size - 1, dst[xfer_size - 1]);
 
-  size_t err_offset = 0;
-  xio::DataPatternParams vfy_p{dst,       xfer_size, 0,
-                               xfer_size, lfsr_seed, &err_offset};
-  bool ok = xio::dataPattern(true, vfy_p);
+    size_t err_offset = 0;
+    xio::DataPatternParams vfy_p{dst,       xfer_size, 0,
+                                 xfer_size, lfsr_seed, &err_offset};
+    bool ok = xio::dataPattern(true, vfy_p);
 
-  if (!ok) {
-    fprintf(stderr,
-            "\nFAILED: LFSR mismatch at "
-            "offset %zu (got 0x%02x).\n",
-            err_offset, dst[err_offset]);
-    free(buf);
-    backend.shutdown();
-    return 1;
+    if (!ok) {
+      fprintf(stderr,
+              "\nFAILED: LFSR mismatch at "
+              "offset %zu (got 0x%02x).\n",
+              err_offset, dst[err_offset]);
+      free(buf);
+      backend.shutdown();
+      return 1;
+    }
   }
 
   free(buf);
   backend.shutdown();
 
-  printf("\nPASSED: All %u bytes LFSR-verified"
-         " via %s RDMA WRITE loopback"
-         " (%u iterations).\n",
-         xfer_size, prov_name, iterations);
+  if (write_imm && xfer_size == 0) {
+    printf("\nPASSED: %u zero-length WRITE_IMM"
+           " (imm=1..%u) completed"
+           " via %s loopback.\n",
+           iterations, iterations, prov_name);
+  } else {
+    printf("\nPASSED: All %u bytes LFSR-verified"
+           " via %s RDMA %s loopback"
+           " (%u iterations).\n",
+           xfer_size, prov_name,
+           write_imm ? "WRITE_IMM" : "WRITE",
+           iterations);
+  }
   return 0;
 }
 
