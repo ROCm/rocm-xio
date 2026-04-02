@@ -16,6 +16,8 @@ Build-Depends:
  libnl-route-3-dev,
  pkg-config,
  python3,
+ python3-msgpack,
+ python3-zstd,
 Standards-Version: 4.6.2
 Homepage: https://github.com/ROCm/rocm-xio
 
@@ -33,13 +35,27 @@ Recommends:
  rocm-xio-bnxt-re-dkms,
  rocm-xio-ernic-eth-rdma-dkms,
  rocm-xio-ionic-eth-rdma-dkms,
+ rocm-xio-kpack,
 Description: ROCm GPU-Initiated IO library
- Static library, headers, CMake package config, bundled
- patched rdma-core (v62.0 with vendor DV support), udev
- rules, and DKMS kernel module for rocm-xio.
+ Library, headers, CMake package config, bundled patched
+ rdma-core (v62.0 with vendor DV support), udev rules,
+ and DKMS kernel module for rocm-xio.
  .
  rocm-xio enables GPU-initiated IO operations including
  RDMA, NVMe, and SDMA endpoint access from AMD GPUs.
+
+Package: rocm-xio-kpack
+Architecture: amd64
+Depends:
+ rocm-xio (= ${binary:Version}),
+ ${misc:Depends},
+Description: rocm-xio per-architecture GPU kernel archives
+ Pre-split kpack archives containing per-GPU-architecture
+ device code (HSACO) for rocm-xio.  Archives are built
+ for all architectures listed in DEB_OFFLOAD_ARCH.
+ .
+ Install this package alongside rocm-xio to avoid fat
+ binaries and enable selective GPU architecture loading.
 
 Package: xio-tester
 Architecture: amd64

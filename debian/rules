@@ -29,6 +29,8 @@ override_dh_auto_configure:
 	  -DCMAKE_BUILD_TYPE=Release \
 	  -DROCM_PATH=$(ROCM_PATH) \
 	  -DOFFLOAD_ARCH="$(DEB_OFFLOAD_ARCH)" \
+	  -DBUILD_SHARED_LIBS=ON \
+	  -DXIO_USE_KPACK=ON \
 	  -DBUILD_CLIENTS=ON \
 	  -DINSTALL_TESTER=ON \
 	  -DBUILD_TESTING=OFF \
@@ -37,6 +39,7 @@ override_dh_auto_configure:
 override_dh_auto_build:
 	dh_auto_build -- all
 	dh_auto_build -- install-rdma-core
+	dh_auto_build -- kpack-split
 
 override_dh_auto_install:
 	dh_auto_install -- DESTDIR=$(CURDIR)/debian/tmp
@@ -67,6 +70,14 @@ override_dh_auto_install:
 	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
 	install -m 0644 udev/99-rocm-xio-nvme.rules \
 	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
+
+	# --- kpack archives ---
+	install -d \
+	  $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack
+	if [ -d $(CURDIR)/obj-x86_64-linux-gnu/kpack ]; then \
+	  cp -a $(CURDIR)/obj-x86_64-linux-gnu/kpack/*.kpack \
+	    $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack/; \
+	fi
 
 	# DKMS source installation is handled by dh_dkms
 	# via debian/rocm-xio.dkms
