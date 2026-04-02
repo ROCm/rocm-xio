@@ -44,6 +44,7 @@ PREDEFINED             = __host__= \
                          __device__= \
                          __global__= \
                          __shared__= \
+                         __forceinline__= \
                          __attribute__(x)= \
                          __HIP_DEVICE_COMPILE__=0
 
