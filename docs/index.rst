@@ -51,6 +51,7 @@ Quick Start
 
    building
    testing
+   performance
    vm-testing
    endpoints
    examples
