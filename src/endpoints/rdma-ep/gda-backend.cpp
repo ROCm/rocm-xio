@@ -23,6 +23,7 @@
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
 #include "rdma-topology.hpp"
+#include "xio-rdma-check.h"
 #include "xio.h"
 
 #if defined(GDA_BNXT)
@@ -44,23 +45,9 @@ int ernic_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
-  do {                                                                         \
-    int _err = (expr);                                                         \
-    if (_err != 0) {                                                           \
-      fprintf(stderr, "rdma_ep: %s failed: %d at %s:%d\n", (msg), _err,        \
-              __FILE__, __LINE__);                                             \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
+  _XIO_CHECK_ZERO("rdma_ep", (expr), (msg), abort())
 #define XIO_CHECK_NNULL(expr, msg)                                             \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      fprintf(stderr, "rdma_ep: %s returned null at %s:%d\n", (msg), __FILE__, \
-              __LINE__);                                                       \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
+  _XIO_CHECK_NNULL("rdma_ep", (expr), (msg), abort())
 
 Backend::Backend(const BackendConfig& config) : config_(config) {
 }

@@ -19,36 +19,9 @@
 #include <hip/hip_runtime.h>
 
 #include "nvme-ep.h"
+#include "xio-test-assert.h"
 
 using namespace xio::nvme_ep;
-
-#define ASSERT_EQ(a, b)                                                        \
-  do {                                                                         \
-    if ((a) != (b)) {                                                          \
-      printf("ASSERT_EQ failed: %s:%d: "                                       \
-             "%s != %s\n",                                                     \
-             __FILE__, __LINE__, #a, #b);                                      \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define ASSERT_TRUE(x)                                                         \
-  do {                                                                         \
-    if (!(x)) {                                                                \
-      printf("ASSERT_TRUE failed: %s:%d: %s\n", __FILE__, __LINE__, #x);       \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define ASSERT_NE(a, b)                                                        \
-  do {                                                                         \
-    if ((a) == (b)) {                                                          \
-      printf("ASSERT_NE failed: %s:%d: "                                       \
-             "%s == %s\n",                                                     \
-             __FILE__, __LINE__, #a, #b);                                      \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
 
 /* ---- sqeSetup tests ---- */
 

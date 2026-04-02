@@ -16,6 +16,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include "xio-rdma-check.h"
 #include "xio.h"
 
 namespace rdma_ep {
@@ -24,26 +25,8 @@ IBVWrapper ibv;
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* prefix,
-               const char* name) {
-  char full_name[256];
-  snprintf(full_name, sizeof(full_name), "%s%s", prefix, name);
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, full_name));
-  if (!out) {
-    fprintf(stderr, "rdma_ep: dlsym failed for %s: %s\n", full_name, dlerror());
-    return -1;
-  }
-  return 0;
-}
-
-template <typename FuncPtr>
-void dlsym_load_optional(FuncPtr& out, void* handle, const char* prefix,
-                         const char* name) {
-  char full_name[256];
-  snprintf(full_name, sizeof(full_name), "%s%s", prefix, name);
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, full_name));
-}
+using xio_rdma::dlsym_load_prefixed;
+using xio_rdma::dlsym_load_prefixed_optional;
 
 } // anonymous namespace
 
@@ -132,10 +115,10 @@ int IBVWrapper::is_dmabuf_supported() {
 
 int IBVWrapper::init_function_table() {
 #define LOAD_SYM(field, prefix, name)                                          \
-  if (dlsym_load(funcs_.field, ibv_handle_, prefix, name) != 0)                \
+  if (dlsym_load_prefixed(funcs_.field, ibv_handle_, prefix, name) != 0)       \
     return -1;
 #define LOAD_SYM_OPT(field, prefix, name)                                      \
-  dlsym_load_optional(funcs_.field, ibv_handle_, prefix, name);
+  dlsym_load_prefixed_optional(funcs_.field, ibv_handle_, prefix, name);
 
   LOAD_SYM(get_device_list, "ibv_", "get_device_list");
   LOAD_SYM(free_device_list, "ibv_", "free_device_list");

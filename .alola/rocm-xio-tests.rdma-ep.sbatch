@@ -61,24 +61,8 @@ cd "${PROJECT_DIR}"
 detect_gpu_arch
 
 # --- Build phase (inside container) ---
-# Cannot use setup_and_build_workdir because we
-# need extra cmake flags and specific build targets.
 WORKING_DIR="/tmp/rocm-xio-tests.rdma-ep.$RANDOM"
-mkdir -p "${WORKING_DIR}"
-rsync -a --exclude='.git' . "${WORKING_DIR}"
-cd "${WORKING_DIR}"
-rm -rf build
-cmake -S . -B build \
-  -DGDA_BNXT=ON -DGDA_MLX5=ON -DGDA_IONIC=ON
-cmake --build build \
-  --target test-rdma-loopback \
-  --target install-rdma-core \
-  --parallel
-
-RDMA_CORE_LIB="${WORKING_DIR}/build/_deps"
-RDMA_CORE_LIB="${RDMA_CORE_LIB}/rdma-core/install/lib"
-TEST_BIN="${WORKING_DIR}/build/tests/unit"
-TEST_BIN="${TEST_BIN}/rdma-ep/test-rdma-loopback"
+rdma_alola_build "${WORKING_DIR}" "test-rdma-loopback"
 SETUP_SCRIPT="${WORKING_DIR}/scripts/test"
 SETUP_SCRIPT="${SETUP_SCRIPT}/setup-rdma-loopback.sh"
 
@@ -112,41 +96,18 @@ resolve_ib_bdf() {
     | xargs basename" 2>/dev/null || echo "unknown"
 }
 
-HAS_BNXT=$(${SSH_LOCALHOST} \
-  "ls -d /sys/class/infiniband/rocm-rdma-bnxt* \
-  /sys/class/infiniband/bnxt_* 2>/dev/null \
-  | head -1" || true)
-if [ -n "${HAS_BNXT}" ]; then
-  BNXT_DEV=$(${SSH_LOCALHOST} \
-    "basename ${HAS_BNXT}")
-  BNXT_BDF=$(resolve_ib_bdf "${BNXT_DEV}")
-  DETECTED_VENDORS="${DETECTED_VENDORS} bnxt"
-  echo "  Found BNXT: ${BNXT_DEV} (PCI ${BNXT_BDF})"
-fi
-
-HAS_MLX5=$(${SSH_LOCALHOST} \
-  "ls -d /sys/class/infiniband/rocm-rdma-mlx5* \
-  /sys/class/infiniband/mlx5_* 2>/dev/null \
-  | head -1" || true)
-if [ -n "${HAS_MLX5}" ]; then
-  MLX5_DEV=$(${SSH_LOCALHOST} \
-    "basename ${HAS_MLX5}")
-  MLX5_BDF=$(resolve_ib_bdf "${MLX5_DEV}")
-  DETECTED_VENDORS="${DETECTED_VENDORS} mlx5"
-  echo "  Found MLX5: ${MLX5_DEV} (PCI ${MLX5_BDF})"
-fi
-
-HAS_IONIC=$(${SSH_LOCALHOST} \
-  "ls -d /sys/class/infiniband/rocm-rdma-ionic* \
-  /sys/class/infiniband/ionic_* 2>/dev/null \
-  | head -1" || true)
-if [ -n "${HAS_IONIC}" ]; then
-  IONIC_DEV=$(${SSH_LOCALHOST} \
-    "basename ${HAS_IONIC}")
-  IONIC_BDF=$(resolve_ib_bdf "${IONIC_DEV}")
-  DETECTED_VENDORS="${DETECTED_VENDORS} ionic"
-  echo "  Found IONIC: ${IONIC_DEV} (PCI ${IONIC_BDF})"
-fi
+for _v in bnxt mlx5 ionic; do
+  _dev=$(detect_rdma_nic "${SSH_LOCALHOST}" \
+    "localhost" "${_v}")
+  if [ -n "${_dev}" ]; then
+    _bdf=$(resolve_ib_bdf "${_dev}")
+    eval "${_v^^}_DEV=\${_dev}"
+    eval "${_v^^}_BDF=\${_bdf}"
+    DETECTED_VENDORS="${DETECTED_VENDORS} ${_v}"
+    echo "  Found ${_v^^}: ${_dev} (PCI ${_bdf})"
+  fi
+done
+unset _v _dev _bdf
 
 if [ -z "${DETECTED_VENDORS}" ]; then
   echo "ERROR: No RDMA NICs detected on host."

@@ -9,6 +9,7 @@
 set(XIO_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
 set(XIO_ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
 set(XIO_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
+set(XIO_TEST_COMMON_DIR ${CMAKE_SOURCE_DIR}/tests/unit/common)
 
 # xio_add_test()
 #
@@ -66,6 +67,7 @@ function(xio_add_test)
   target_include_directories(${XIO_TEST_NAME} PRIVATE
     ${XIO_INCLUDE_DIR}
     ${XIO_COMMON_DIR}
+    ${XIO_TEST_COMMON_DIR}
   )
 
   if(XIO_TEST_INCLUDE_DIRS)
