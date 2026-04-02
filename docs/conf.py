@@ -47,7 +47,7 @@ html_theme_options = {
         "https://github.com/ROCm/rocm-xio"
     ),
     "use_repository_button": True,
-    "show_toc_level": 2,
+    "show_toc_level": 3,
 }
 html_title = f"rocm-xio {version}"
 html_static_path = []
