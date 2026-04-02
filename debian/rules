@@ -1,0 +1,92 @@
+#!/usr/bin/make -f
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+export DH_VERBOSE = 1
+
+DEB_OFFLOAD_ARCH ?= gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+;gfx950:xnack+;gfx1201
+ROCM_PATH        ?= /opt/rocm
+XIO_MAJOR := $(shell sed -n \
+  's/^set(ROCM_XIO_LIBRARY_MAJOR \([0-9]*\))/\1/p' \
+  CMakeLists.txt)
+XIO_MINOR := $(shell sed -n \
+  's/^set(ROCM_XIO_LIBRARY_MINOR \([0-9]*\))/\1/p' \
+  CMakeLists.txt)
+XIO_PATCH := $(shell sed -n \
+  's/^set(ROCM_XIO_LIBRARY_PATCH \([0-9]*\))/\1/p' \
+  CMakeLists.txt)
+XIO_VERSION := $(XIO_MAJOR).$(XIO_MINOR).$(XIO_PATCH)
+
+RDMA_CORE_INSTALL_PATH = $(ROCM_PATH)/lib/rocm-xio/rdma-core
+RDMA_CORE_BUILD_DIR    = $(CURDIR)/obj-x86_64-linux-gnu/_deps/rdma-core/install
+
+%:
+	dh $@ --with dkms
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DROCM_PATH=$(ROCM_PATH) \
+	  -DOFFLOAD_ARCH="$(DEB_OFFLOAD_ARCH)" \
+	  -DBUILD_SHARED_LIBS=ON \
+	  -DXIO_USE_KPACK=ON \
+	  -DBUILD_CLIENTS=ON \
+	  -DINSTALL_TESTER=ON \
+	  -DBUILD_TESTING=OFF \
+	  -DRDMA_CORE_LIB_DIR=$(RDMA_CORE_INSTALL_PATH)
+
+override_dh_auto_build:
+	dh_auto_build -- all
+	dh_auto_build -- install-rdma-core
+	dh_auto_build -- kpack-split
+
+override_dh_auto_install:
+	dh_auto_install -- DESTDIR=$(CURDIR)/debian/tmp
+
+	# --- Bundled rdma-core libraries ---
+	install -d $(CURDIR)/debian/tmp$(RDMA_CORE_INSTALL_PATH)
+	cp -a $(RDMA_CORE_BUILD_DIR)/lib/*.so* \
+	  $(CURDIR)/debian/tmp$(RDMA_CORE_INSTALL_PATH)/
+	# Provider plugins (bnxt, ionic, mlx5, ernic, etc.)
+	if [ -d $(RDMA_CORE_BUILD_DIR)/lib/libibverbs ]; then \
+	  cp -a $(RDMA_CORE_BUILD_DIR)/lib/libibverbs \
+	    $(CURDIR)/debian/tmp$(RDMA_CORE_INSTALL_PATH)/; \
+	fi
+
+	# --- Bundled rdma-core headers ---
+	install -d \
+	  $(CURDIR)/debian/tmp$(ROCM_PATH)/include/rocm-xio/rdma-core
+	cp -a $(RDMA_CORE_BUILD_DIR)/include/* \
+	  $(CURDIR)/debian/tmp$(ROCM_PATH)/include/rocm-xio/rdma-core/
+
+	# --- Udev rules ---
+	install -d $(CURDIR)/debian/tmp/etc/udev/rules.d
+	install -m 0644 udev/99-rocm-xio-char.rules \
+	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
+	install -m 0644 udev/99-rocm-xio-rdma.rules \
+	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
+	install -m 0644 udev/99-rocm-xio-vfio.rules \
+	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
+	install -m 0644 udev/99-rocm-xio-nvme.rules \
+	  $(CURDIR)/debian/tmp/etc/udev/rules.d/
+
+	# --- kpack archives ---
+	install -d \
+	  $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack
+	if [ -d $(CURDIR)/obj-x86_64-linux-gnu/kpack ]; then \
+	  cp -a $(CURDIR)/obj-x86_64-linux-gnu/kpack/*.kpack \
+	    $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack/; \
+	fi
+
+	# DKMS source installation is handled by dh_dkms
+	# via debian/rocm-xio.dkms
+
+override_dh_dkms:
+	dh_dkms -procm-xio -V $(XIO_VERSION)
+
+override_dh_shlibdeps:
+	dh_shlibdeps -l$(ROCM_PATH)/lib:$(RDMA_CORE_INSTALL_PATH)
+
+override_dh_auto_test:
+	@echo "Skipping tests during packaging"

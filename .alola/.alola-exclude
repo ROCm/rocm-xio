@@ -33,3 +33,6 @@ banff-cyxtera-s81-5  rdma-ep
 # sysfs, smoke test fails on all seeds);
 # nvme-ep xio-tester hangs after controller probe
 banff-cyxtera-s81-1  two-gpu,rdma-ep,nvme-ep
+
+# SDMA P2P kernel hang during 1MB GPU-to-GPU transfer
+ctr-cx63-mi300x-21  two-gpu

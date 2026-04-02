@@ -34,6 +34,8 @@ target_link_libraries(sdma-ep-allgather PRIVATE
   rocm-xio::rocm-xio
   hsa-runtime64::hsa-runtime64
   MPI::MPI_CXX)
-target_link_options(sdma-ep-allgather PRIVATE -fgpu-rdc)
+if(NOT ROCM_XIO_SHARED_LIBS)
+  target_link_options(sdma-ep-allgather PRIVATE -fgpu-rdc)
+endif()
 target_include_directories(sdma-ep-allgather PRIVATE
   ${MPI_CXX_INCLUDE_DIRS})
