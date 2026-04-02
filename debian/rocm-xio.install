@@ -1,0 +1,8 @@
+opt/rocm/lib/librocm-xio*
+opt/rocm/lib/cmake/rocm-xio/
+opt/rocm/include/rocm-xio/
+opt/rocm/lib/rocm-xio/rdma-core/
+etc/udev/rules.d/99-rocm-xio-char.rules
+etc/udev/rules.d/99-rocm-xio-rdma.rules
+etc/udev/rules.d/99-rocm-xio-vfio.rules
+etc/udev/rules.d/99-rocm-xio-nvme.rules

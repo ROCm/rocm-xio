@@ -1,0 +1,4 @@
+kernel/rocm-xio/rocm-xio.c usr/src/rocm-xio-#VERSION#/
+kernel/rocm-xio/rocm-xio.h usr/src/rocm-xio-#VERSION#/
+kernel/rocm-xio/Makefile usr/src/rocm-xio-#VERSION#/
+kernel/rocm-xio/dkms.conf usr/src/rocm-xio-#VERSION#/

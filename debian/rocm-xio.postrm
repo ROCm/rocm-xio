@@ -1,0 +1,22 @@
+#!/bin/sh
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Post-remove: reload udev rules after dpkg has removed
+# the rules files from /etc/udev/rules.d/.
+
+set -e
+
+case "$1" in
+  remove|purge)
+    if command -v udevadm >/dev/null 2>&1; then
+      udevadm control --reload-rules || true
+      udevadm trigger || true
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

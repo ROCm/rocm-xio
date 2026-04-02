@@ -1,0 +1,24 @@
+#!/bin/sh
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Pre-remove: unload kernel module before package files
+# are removed. DKMS remove is handled by dh_dkms.
+# Udev rule files are removed by dpkg; reload happens
+# in postrm.
+
+set -e
+
+case "$1" in
+  remove|purge)
+    # Unload kernel module
+    if lsmod | grep -q '^rocm_xio '; then
+      rmmod rocm_xio || true
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
