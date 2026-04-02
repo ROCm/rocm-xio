@@ -1,0 +1,69 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH 8/8] RDMA/bnxt_re: Fix UBSAN shift in alloc_init_hwq for zero depth/stride
+From: Stephen Bates <sbates@raithlin.com>
+Date: Tue, 01 Apr 2026 12:00:00 -0600
+Message-Id: <20260401-bnxt-fix-ubsan-hwq-v1@raithlin.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+After the QP creation refactor (patch 0002), bnxt_re_setup_qp_hwqs()
+calls bnxt_qplib_alloc_init_hwq() for both SQ and RQ unconditionally.
+When the DV path creates a QP without an RQ (qprva==0), it zeroes
+rq.max_wqe so get_depth() returns 0.  The standard verbs path can
+also produce zero depth for certain QP configurations.
+
+roundup_pow_of_two(0) triggers undefined behavior: fls_long(0 - 1)
+returns 64, producing a 1UL << 64 shift. UBSAN reports:
+
+  shift-out-of-bounds in include/linux/log2.h:57:13
+  shift exponent 64 is too large for 64-bit type 'long unsigned int'
+
+Fix by:
+1. Returning 0 (success with empty HWQ) from
+   bnxt_qplib_alloc_init_hwq() when both depth and
+   aux_depth are zero.  The HWQ level is set to
+   PBL_LVL_0 so downstream FW command assembly sees
+   a valid (empty) queue descriptor.
+2. Guarding roundup_pow_of_two() calls for stride
+   and aux_stride which could also be zero.
+3. Defaulting pgsize to PAGE_SIZE when the caller
+   leaves it uninitialized (zero), preventing
+   division-by-zero in the npages calculation.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ drivers/infiniband/hw/bnxt_re/qplib_res.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/infiniband/hw/bnxt_re/qplib_res.c b/drivers/infiniband/hw/bnxt_re/qplib_res.c
+index 1234567..abcdefg 100644
+--- a/drivers/infiniband/hw/bnxt_re/qplib_res.c
++++ b/drivers/infiniband/hw/bnxt_re/qplib_res.c
+@@ -196,11 +196,23 @@ int bnxt_qplib_alloc_init_hwq(struct bnxt_qplib_hwq *hwq,
+ 	pdev = res->pdev;
+ 	pg_size = hwq_attr->sginfo->pgsize;
+ 	hwq->level = PBL_LVL_MAX;
+ 
+-	depth = roundup_pow_of_two(hwq_attr->depth);
+-	stride = roundup_pow_of_two(hwq_attr->stride);
++	if (!hwq_attr->depth && !hwq_attr->aux_depth) {
++		hwq->level = PBL_LVL_0;
++		return 0;
++	}
++
++	if (!pg_size)
++		pg_size = PAGE_SIZE;
++
++	depth = hwq_attr->depth ?
++		roundup_pow_of_two(hwq_attr->depth) : 0;
++	stride = hwq_attr->stride ?
++		roundup_pow_of_two(hwq_attr->stride) : 0;
+ 	if (hwq_attr->aux_depth) {
+ 		aux_slots = hwq_attr->aux_depth;
+-		aux_size = roundup_pow_of_two(hwq_attr->aux_stride);
++		aux_size = hwq_attr->aux_stride ?
++			roundup_pow_of_two(hwq_attr->aux_stride) : 0;
+ 		aux_pages = (aux_slots * aux_size) / pg_size;
+ 		if ((aux_slots * aux_size) % pg_size)
+ 			aux_pages++;
