@@ -135,21 +135,13 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
     alloc_len = pgsz;
 
   void* buf_ptr = nullptr;
-  if (posix_memalign(&buf_ptr, pgsz, alloc_len)) {
-    fprintf(stderr,
-            "rdma_ep::ernic: "
-            "posix_memalign %s failed\n",
-            label);
-    return;
-  }
-  memset(buf_ptr, 0, alloc_len);
-  hipError_t herr = hipHostRegister(buf_ptr, alloc_len, hipHostRegisterDefault);
+  hipError_t herr = xio::allocHostMemory(alloc_len, &buf_ptr, label,
+                                         XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::ernic: "
-            "hipHostRegister %s failed: %s\n",
-            label, hipGetErrorString(herr));
-    free(buf_ptr);
+            "allocHostMemory %s failed\n",
+            label);
     return;
   }
   hcq->buf = buf_ptr;
@@ -186,8 +178,12 @@ static void create_one_cq(ernic_host_cq* hcq, struct ibv_context* ctx,
 void Backend::ernic_create_cqs(int cqe) {
   int dmabuf = ibv.is_dmabuf_supported();
 
-  ernic_scq_ = static_cast<ernic_host_cq*>(calloc(1, sizeof(ernic_host_cq)));
-  ernic_rcq_ = static_cast<ernic_host_cq*>(calloc(1, sizeof(ernic_host_cq)));
+  (void)xio::allocHostMemory(sizeof(ernic_host_cq), (void**)&ernic_scq_,
+                             "ERNIC SCQ", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(ernic_scq_, "allocHostMemory (ERNIC SCQ)");
+  (void)xio::allocHostMemory(sizeof(ernic_host_cq), (void**)&ernic_rcq_,
+                             "ERNIC RCQ", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(ernic_rcq_, "allocHostMemory (ERNIC RCQ)");
 
   create_one_cq(ernic_scq_, context_, ernic_dv, cqe, dmabuf, "SCQ");
   XIO_CHECK_NNULL(ernic_scq_->cq, "ernic_dv_create_cq (SCQ)");
@@ -208,7 +204,9 @@ void Backend::ernic_create_cqs(int cqe) {
 }
 
 void Backend::ernic_create_qps(int sq_length) {
-  ernic_qp_ = static_cast<ernic_host_qp*>(calloc(1, sizeof(ernic_host_qp)));
+  (void)xio::allocHostMemory(sizeof(ernic_host_qp), (void**)&ernic_qp_,
+                             "ERNIC QP", XIO_HOST_MEM_PLAIN);
+  XIO_CHECK_NNULL(ernic_qp_, "allocHostMemory (ERNIC QP)");
 
   uint32_t max_swr = static_cast<uint32_t>(sq_length);
   uint32_t max_ssge = 1;
@@ -233,19 +231,12 @@ void Backend::ernic_create_qps(int sq_length) {
     ernic_qp_->rq_len = static_cast<uint32_t>(pgsz);
 
   void* sq_ptr = nullptr;
-  if (posix_memalign(&sq_ptr, pgsz, ernic_qp_->sq_len)) {
-    fprintf(stderr, "rdma_ep::ernic: "
-                    "posix_memalign SQ failed\n");
-    return;
-  }
-  memset(sq_ptr, 0, ernic_qp_->sq_len);
-  hipError_t herr = hipHostRegister(sq_ptr, ernic_qp_->sq_len,
-                                    hipHostRegisterDefault);
+  hipError_t herr = xio::allocHostMemory(ernic_qp_->sq_len, &sq_ptr, "ERNIC SQ",
+                                         XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "rdma_ep::ernic: "
-            "hipHostRegister SQ failed: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "rdma_ep::ernic: "
+                    "allocHostMemory SQ failed\n");
+    return;
   }
   ernic_qp_->sq_buf = sq_ptr;
 
@@ -259,18 +250,12 @@ void Backend::ernic_create_qps(int sq_length) {
   XIO_CHECK_NNULL(sq_umem, "ernic_dv_umem_reg (SQ)");
 
   void* rq_ptr = nullptr;
-  if (posix_memalign(&rq_ptr, pgsz, ernic_qp_->rq_len)) {
-    fprintf(stderr, "rdma_ep::ernic: "
-                    "posix_memalign RQ failed\n");
-    return;
-  }
-  memset(rq_ptr, 0, ernic_qp_->rq_len);
-  herr = hipHostRegister(rq_ptr, ernic_qp_->rq_len, hipHostRegisterDefault);
+  herr = xio::allocHostMemory(ernic_qp_->rq_len, &rq_ptr, "ERNIC RQ",
+                              XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "rdma_ep::ernic: "
-            "hipHostRegister RQ failed: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "rdma_ep::ernic: "
+                    "allocHostMemory RQ failed\n");
+    return;
   }
   ernic_qp_->rq_buf = rq_ptr;
 

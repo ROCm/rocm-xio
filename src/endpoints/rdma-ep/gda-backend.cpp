@@ -23,6 +23,7 @@
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
 #include "rdma-topology.hpp"
+#include "xio.h"
 
 #if defined(GDA_BNXT)
 #include "bnxt/bnxt-provider.hpp"
@@ -553,6 +554,8 @@ int Backend::ibv_mtu_to_int(enum ibv_mtu mtu) {
   }
 }
 
+// ibv_alloc_parent_domain callbacks -- signature fixed by libibverbs ABI.
+// Equivalent to allocDeviceMemory(XIO_DEVICE_MEM_UNCACHED).
 void* Backend::pd_alloc_device_uncached(struct ibv_pd* pd, void* pd_context,
                                         size_t size, size_t alignment,
                                         uint64_t resource_type) {
@@ -574,6 +577,7 @@ void* Backend::pd_alloc_device_uncached(struct ibv_pd* pd, void* pd_context,
   return dev_ptr;
 }
 
+// Equivalent to allocHostMemory(XIO_HOST_MEM_MAPPED).
 void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
                                     size_t size, size_t alignment,
                                     uint64_t resource_type) {
@@ -592,6 +596,7 @@ void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
   return host_ptr;
 }
 
+// Equivalent to freeDeviceMemory(XIO_DEVICE_MEM_HIP).
 void Backend::pd_release(struct ibv_pd* pd, void* pd_context, void* ptr,
                          uint64_t resource_type) {
   (void)pd;
@@ -600,6 +605,7 @@ void Backend::pd_release(struct ibv_pd* pd, void* pd_context, void* ptr,
   (void)hipFree(ptr);
 }
 
+// Equivalent to freeHostMemory(XIO_HOST_MEM_MAPPED).
 void Backend::pd_release_host(struct ibv_pd* pd, void* pd_context, void* ptr,
                               uint64_t resource_type) {
   (void)pd;
@@ -620,7 +626,7 @@ void Backend::create_parent_domain() {
   if (provider_ == Provider::IONIC) {
     pattr.alloc = Backend::pd_alloc_device_uncached;
   } else {
-    // MLX5 uses host allocation
+    // MLX5 uses host allocation (equivalent to XIO_HOST_MEM_DEFAULT)
     pattr.alloc = [](ibv_pd*, void*, size_t size, size_t, uint64_t) -> void* {
       void* ptr = nullptr;
       hipError_t err = hipHostMalloc(&ptr, size, hipHostMallocDefault);
@@ -644,23 +650,18 @@ void Backend::setup_gpu_qp() {
 
   size_t qp_size = sizeof(QueuePair);
 
-  host_qp_ = static_cast<QueuePair*>(malloc(qp_size));
-  if (!host_qp_) {
-    fprintf(stderr, "rdma_ep: malloc failed"
-                    " for host QueuePair\n");
+  hipError_t err = xio::allocDeviceMemoryPair(qp_size, (void**)&host_qp_,
+                                              (void**)&gpu_qp_,
+                                              "GPU QueuePair");
+  if (err != hipSuccess) {
+    fprintf(stderr, "rdma_ep: allocDeviceMemoryPair failed: %s\n",
+            hipGetErrorString(err));
+    host_qp_ = nullptr;
+    gpu_qp_ = nullptr;
     return;
   }
 
   new (host_qp_) QueuePair(pd_, provider_);
-
-  hipError_t err = hipMalloc(&gpu_qp_, qp_size);
-  if (err != hipSuccess) {
-    fprintf(stderr, "rdma_ep: hipMalloc failed for GPU QueuePair: %s\n",
-            hipGetErrorString(err));
-    free(host_qp_);
-    host_qp_ = nullptr;
-    return;
-  }
 
   initialize_gpu_qp();
 
@@ -668,7 +669,7 @@ void Backend::setup_gpu_qp() {
   if (err != hipSuccess) {
     fprintf(stderr, "rdma_ep: hipMemcpy failed for GPU QueuePair: %s\n",
             hipGetErrorString(err));
-    (void)hipFree(gpu_qp_);
+    xio::freeDeviceMemory(gpu_qp_, XIO_DEVICE_MEM_HIP);
     gpu_qp_ = nullptr;
   }
 
@@ -769,14 +770,9 @@ int Backend::register_data_buffer(void* buf, size_t size) {
 }
 
 void Backend::cleanup_gpu_qp() {
-  if (host_qp_) {
-    free(host_qp_);
-    host_qp_ = nullptr;
-  }
-  if (gpu_qp_) {
-    (void)hipFree(gpu_qp_);
-    gpu_qp_ = nullptr;
-  }
+  xio::freeDeviceMemoryPair(host_qp_, gpu_qp_);
+  host_qp_ = nullptr;
+  gpu_qp_ = nullptr;
 }
 
 void Backend::initialize_gpu_qp() {

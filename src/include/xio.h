@@ -120,6 +120,7 @@ struct rocm_axiio_free_contig_req {
 #define XIO_HOST_MEM_COHERENT 0x1
 #define XIO_HOST_MEM_PINNED 0x2
 #define XIO_HOST_MEM_PLAIN 0x4
+#define XIO_HOST_MEM_DEFAULT 0x8
 
 // PCI MMIO Bridge command types
 #define PCI_MMIO_BRIDGE_CMD_NOP 0
@@ -413,6 +414,31 @@ hsa_status_t allocDeviceMemory(size_t size, void** ptr, const char* label,
  * @param flags Flags used at allocation time.
  */
 void freeDeviceMemory(void* ptr, unsigned flags);
+
+/**
+ * @brief Allocate a mirrored host+device memory pair.
+ *
+ * Allocates host memory with XIO_HOST_MEM_PLAIN and device
+ * memory with XIO_DEVICE_MEM_HIP. The caller can construct
+ * objects into *host_ptr, then call hipMemcpy to sync to
+ * *device_ptr.
+ *
+ * @param size Size in bytes.
+ * @param host_ptr Output host pointer.
+ * @param device_ptr Output device pointer.
+ * @param label Label for logging.
+ * @return hipSuccess on success.
+ */
+hipError_t allocDeviceMemoryPair(size_t size, void** host_ptr,
+                                 void** device_ptr, const char* label);
+
+/**
+ * @brief Free a mirrored host+device pair.
+ * @param host_ptr Host pointer (freed with freeHostMemory).
+ * @param device_ptr Device pointer (freed with
+ *                   freeDeviceMemory).
+ */
+void freeDeviceMemoryPair(void* host_ptr, void* device_ptr);
 
 /**
  * @brief Allocate host memory with consistent semantics.

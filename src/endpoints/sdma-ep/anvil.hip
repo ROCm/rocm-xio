@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "anvil.hpp"
+#include "xio.h"
 
 namespace anvil {
 
@@ -233,12 +234,22 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
 
   // Populate Device Handle
   // TODO uncached
-  CHECK_HIP_ERROR(hipMalloc(&deviceHandle_, sizeof(SdmaQueueDeviceHandle)));
-  CHECK_HIP_ERROR(hipExtMallocWithFlags((void**)&cachedWptr_, sizeof(uint64_t),
-                                        hipDeviceMallocUncached));
-  CHECK_HIP_ERROR(hipExtMallocWithFlags((void**)&committedWptr_,
-                                        sizeof(uint64_t),
-                                        hipDeviceMallocUncached));
+  {
+    hsa_status_t s;
+    s = xio::allocDeviceMemory(sizeof(SdmaQueueDeviceHandle),
+                               (void**)&deviceHandle_, "SDMA queue handle",
+                               XIO_DEVICE_MEM_HIP);
+    if (s != HSA_STATUS_SUCCESS)
+      throw std::runtime_error("allocDeviceMemory(deviceHandle_) failed");
+    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&cachedWptr_,
+                               "SDMA cached wptr", XIO_DEVICE_MEM_UNCACHED);
+    if (s != HSA_STATUS_SUCCESS)
+      throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
+    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
+                               "SDMA committed wptr", XIO_DEVICE_MEM_UNCACHED);
+    if (s != HSA_STATUS_SUCCESS)
+      throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
+  }
 
   uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
     queue_.Queue_write_ptr_aql);
@@ -269,9 +280,9 @@ SdmaQueue::~SdmaQueue() {
   // TODO catch exception?
   CHECK_HSAKMT_SUCCESS(hsaKmtDestroyQueue(queue_.QueueId),
                        "Failed to destroy queue.");
-  CHECK_HIP_ERROR(hipFree(deviceHandle_));
-  CHECK_HIP_ERROR(hipFree(cachedWptr_));
-  CHECK_HIP_ERROR(hipFree(committedWptr_));
+  xio::freeDeviceMemory(deviceHandle_, XIO_DEVICE_MEM_HIP);
+  xio::freeDeviceMemory(cachedWptr_, XIO_DEVICE_MEM_UNCACHED);
+  xio::freeDeviceMemory(committedWptr_, XIO_DEVICE_MEM_UNCACHED);
   CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
   CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, SDMA_QUEUE_SIZE),
                        "Failed");
