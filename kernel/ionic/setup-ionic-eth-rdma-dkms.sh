@@ -84,87 +84,22 @@ done
 
 DKMS_SRC="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
-# -------------------------------------------------------
-# Uninstall
-# -------------------------------------------------------
+# shellcheck source=../dkms-common.sh
+. "$(dirname "${SCRIPT_DIR}")/dkms-common.sh"
 
-if $UNINSTALL; then
-  echo "Removing DKMS module" \
-    "${PKG_NAME}/${PKG_VERSION}..."
-  sudo dkms remove \
-    "${PKG_NAME}/${PKG_VERSION}" \
-    --all 2>/dev/null || true
-  sudo rm -rf "${DKMS_SRC}"
-  echo "Done."
-  exit 0
+dkms_uninstall_guard
+dkms_check_tools curl dkms make patch
+dkms_check_kernel_headers
+
+if [ ! -d "${PATCHES_DIR}" ] || \
+   [ -z "$(ls -A "${PATCHES_DIR}"/*.patch \
+     2>/dev/null)" ]; then
+  echo "ERROR: No patches found in" \
+    "${PATCHES_DIR}/"
+  exit 1
 fi
 
-# -------------------------------------------------------
-# Prerequisites
-# -------------------------------------------------------
-
-check_prereqs() {
-  local missing=()
-  command -v curl &>/dev/null \
-    || missing+=("curl")
-  command -v dkms &>/dev/null \
-    || missing+=("dkms")
-  command -v make &>/dev/null \
-    || missing+=("make")
-  command -v patch &>/dev/null \
-    || missing+=("patch")
-
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "ERROR: Missing required tools:" \
-      "${missing[*]}"
-    echo "Install with:"
-    echo "  sudo apt install ${missing[*]}"
-    exit 1
-  fi
-
-  local kver
-  kver="$(uname -r)"
-  if [ ! -f \
-    "/lib/modules/${kver}/build/Makefile" ]
-  then
-    echo "ERROR: Kernel headers not found" \
-      "for ${kver}."
-    echo "Install with:"
-    echo "  sudo apt install" \
-      "linux-headers-${kver}"
-    exit 1
-  fi
-
-  if [ ! -d "${PATCHES_DIR}" ] || \
-     [ -z "$(ls -A "${PATCHES_DIR}"/*.patch \
-       2>/dev/null)" ]; then
-    echo "ERROR: No patches found in" \
-      "${PATCHES_DIR}/"
-    exit 1
-  fi
-}
-
-check_prereqs
-
-# -------------------------------------------------------
-# Detect kernel tag
-# -------------------------------------------------------
-
-detect_kernel_tag() {
-  if [ -n "${KERNEL_TAG}" ]; then
-    return
-  fi
-  local kver
-  kver="$(uname -r)"
-  local major_minor
-  major_minor="$(echo "${kver}" \
-    | sed 's/\([0-9]*\.[0-9]*\).*/\1/')"
-  KERNEL_TAG="v${major_minor}"
-  echo "Auto-detected kernel tag:" \
-    "${KERNEL_TAG} (from ${kver})"
-}
-
-detect_kernel_tag
+dkms_detect_kernel_tag
 
 echo ""
 echo "=== setup-ionic-eth-rdma-dkms ==="
@@ -175,19 +110,7 @@ echo "  package     :" \
   "${PKG_NAME}/${PKG_VERSION}"
 echo ""
 
-# -------------------------------------------------------
-# Skip if already installed
-# -------------------------------------------------------
-
-if ! $BUILD_ONLY && \
-    dkms status \
-    "${PKG_NAME}/${PKG_VERSION}" \
-    2>/dev/null | grep -q "installed"; then
-  echo "${PKG_NAME}/${PKG_VERSION}" \
-    "already installed."
-  echo "Use --uninstall to remove first."
-  exit 0
-fi
+dkms_skip_if_installed
 
 # -------------------------------------------------------
 # Download kernel source (cached)
@@ -439,53 +362,9 @@ populate_dkms
 # Register and build with DKMS
 # -------------------------------------------------------
 
-build_dkms() {
-  echo ""
-
-  if dkms status \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      2>/dev/null | grep -q .; then
-    echo "Removing stale DKMS registration..."
-    sudo dkms remove \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      --all 2>/dev/null || true
-  fi
-
-  echo "Registering with DKMS..."
-  sudo dkms add \
-    "${PKG_NAME}/${PKG_VERSION}"
-
-  local kver
-  kver="$(uname -r)"
-
-  echo "Building ionic + ionic_rdma" \
-    "for ${kver}..."
-  if ! sudo dkms build \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      -k "${kver}"; then
-    echo ""
-    echo "ERROR: DKMS build failed."
-    echo "Check: /var/lib/dkms/${PKG_NAME}/" \
-      "${PKG_VERSION}/build/make.log"
-    exit 1
-  fi
-
-  echo ""
-  echo "=== ionic RDMA built via DKMS ==="
-  echo "  Module: /var/lib/dkms/${PKG_NAME}/" \
-    "${PKG_VERSION}/${kver}/x86_64/module/"
-  echo ""
-  echo "To install:"
-  echo "  $0  (re-run without --build-only)"
-}
-
-install_dkms() {
-  local kver
-  kver="$(uname -r)"
-
-  echo "Installing ionic + ionic_rdma..."
-  sudo dkms install \
-    "${PKG_NAME}/${PKG_VERSION}" -k "${kver}"
+dkms_build "ionic + ionic_rdma"
+if ! $BUILD_ONLY; then
+  dkms_install "ionic + ionic_rdma"
 
   echo ""
   echo "=== ionic RDMA installed via DKMS ==="
@@ -503,9 +382,4 @@ install_dkms() {
   echo "  $0 --uninstall"
   echo "  sudo depmod -a"
   echo "  sudo modprobe ionic"
-}
-
-build_dkms
-if ! $BUILD_ONLY; then
-  install_dkms
 fi

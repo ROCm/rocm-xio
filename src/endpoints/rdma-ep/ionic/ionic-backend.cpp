@@ -27,46 +27,18 @@
 #include "ibv-wrapper.hpp"
 #include "ionic/ionic-provider.hpp"
 #include "queue-pair.hpp"
+#include "xio-rdma-check.h"
 
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
-  do {                                                                         \
-    int _err = (expr);                                                         \
-    if (_err != 0) {                                                           \
-      fprintf(stderr,                                                          \
-              "rdma_ep::ionic: %s failed: "                                    \
-              "%d at %s:%d\n",                                                 \
-              (msg), _err, __FILE__, __LINE__);                                \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
-
+  _XIO_CHECK_ZERO("rdma_ep::ionic", (expr), (msg), return)
 #define XIO_CHECK_NNULL(expr, msg)                                             \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      fprintf(stderr,                                                          \
-              "rdma_ep::ionic: %s returned "                                   \
-              "null at %s:%d\n",                                               \
-              (msg), __FILE__, __LINE__);                                      \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
+  _XIO_CHECK_NNULL("rdma_ep::ionic", (expr), (msg), return)
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
-  if (!out) {
-    fprintf(stderr,
-            "rdma_ep::ionic: dlsym failed for "
-            "%s: %s\n",
-            name, dlerror());
-    return -1;
-  }
-  return 0;
-}
+using xio_rdma::dlsym_load;
 
 ionicdv_funcs_t ionic_dv{};
 void* ionicdv_lib_handle_ = nullptr;
@@ -79,21 +51,7 @@ qp_set_gda_fn ionic_qp_set_gda_ = nullptr;
 #if defined(GDA_IONIC)
 
 void* Backend::ionic_dv_dlopen() {
-  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
-  void* handle = nullptr;
-#ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/libionic.so", flags);
-#endif
-  if (!handle)
-    handle = dlopen("libionic.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/local/lib/libionic.so", flags);
-  if (!handle)
-    fprintf(stderr,
-            "rdma_ep::ionic: Could not open "
-            "libionic.so: %s\n",
-            dlerror());
-  return handle;
+  return xio_rdma::dv_dlopen("libionic.so", "rdma_ep::ionic");
 }
 
 int Backend::ionic_dv_dl_init() {
@@ -102,7 +60,8 @@ int Backend::ionic_dv_dl_init() {
     return -1;
 
 #define LOAD(field, name)                                                      \
-  if (dlsym_load(ionic_dv.field, ionicdv_lib_handle_, name) != 0)              \
+  if (dlsym_load(ionic_dv.field, ionicdv_lib_handle_, name,                    \
+                 "rdma_ep::ionic") != 0)                                       \
     return -1;
 
   LOAD(get_ctx, "ionic_dv_get_ctx");
@@ -117,7 +76,8 @@ int Backend::ionic_dv_dl_init() {
 #undef LOAD
 
   if (dlsym_load(ionic_qp_set_gda_, ionicdv_lib_handle_,
-                 "ionic_dv_qp_set_gda") != 0)
+                 "ionic_dv_qp_set_gda",
+                 "rdma_ep::ionic") != 0)
     return -1;
 
   ionicdv_handle_ = ionicdv_lib_handle_;

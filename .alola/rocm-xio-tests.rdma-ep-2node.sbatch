@@ -71,21 +71,7 @@ detect_gpu_arch
 
 # --- Build phase (inside container) ---
 WORKING_DIR="/tmp/rocm-xio-tests.rdma-2n.$RANDOM"
-mkdir -p "${WORKING_DIR}"
-rsync -a --exclude='.git' . "${WORKING_DIR}"
-cd "${WORKING_DIR}"
-rm -rf build
-cmake -S . -B build \
-  -DGDA_BNXT=ON -DGDA_MLX5=ON -DGDA_IONIC=ON
-cmake --build build \
-  --target test-rdma-2node \
-  --target install-rdma-core \
-  --parallel
-
-RDMA_CORE_LIB="${WORKING_DIR}/build/_deps"
-RDMA_CORE_LIB="${RDMA_CORE_LIB}/rdma-core/install/lib"
-TEST_BIN="${WORKING_DIR}/build/tests/unit"
-TEST_BIN="${TEST_BIN}/rdma-ep/test-rdma-2node"
+rdma_alola_build "${WORKING_DIR}" "test-rdma-2node"
 
 # --- Copy artifacts to both nodes ---
 echo ""
@@ -108,47 +94,15 @@ echo "Detecting RDMA NICs on ${NODE_SERVER}..."
 
 detect_vendor_on_node() {
   local node="$1"
-  local vendor=""
-  local dev=""
-
-  local has_mlx5
-  has_mlx5=$(${SSH_COMMAND} "${node}" \
-    "ls -d /sys/class/infiniband/rocm-rdma-mlx5* \
-    /sys/class/infiniband/mlx5_* 2>/dev/null \
-    | head -1" || true)
-  if [ -n "${has_mlx5}" ]; then
-    vendor="mlx5"
-    dev=$(${SSH_COMMAND} "${node}" \
-      "basename ${has_mlx5}")
-    echo "${vendor} ${dev}"
-    return
-  fi
-
-  local has_bnxt
-  has_bnxt=$(${SSH_COMMAND} "${node}" \
-    "ls -d /sys/class/infiniband/rocm-rdma-bnxt* \
-    /sys/class/infiniband/bnxt_* 2>/dev/null \
-    | head -1" || true)
-  if [ -n "${has_bnxt}" ]; then
-    vendor="bnxt"
-    dev=$(${SSH_COMMAND} "${node}" \
-      "basename ${has_bnxt}")
-    echo "${vendor} ${dev}"
-    return
-  fi
-
-  local has_ionic
-  has_ionic=$(${SSH_COMMAND} "${node}" \
-    "ls -d /sys/class/infiniband/rocm-rdma-ionic* \
-    /sys/class/infiniband/ionic_* 2>/dev/null \
-    | head -1" || true)
-  if [ -n "${has_ionic}" ]; then
-    vendor="ionic"
-    dev=$(${SSH_COMMAND} "${node}" \
-      "basename ${has_ionic}")
-    echo "${vendor} ${dev}"
-    return
-  fi
+  for _v in mlx5 bnxt ionic; do
+    local _dev
+    _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
+      "${node}" "${_v}")
+    if [ -n "${_dev}" ]; then
+      echo "${_v} ${_dev}"
+      return
+    fi
+  done
 }
 
 read -r SRV_VENDOR SRV_DEV \
