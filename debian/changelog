@@ -1,0 +1,5 @@
+rocm-xio (0.1.0) noble; urgency=low
+
+  * Initial Debian packaging
+
+ -- AMD ROCm Build <rocm-xio@amd.com>  Wed, 02 Apr 2026 00:00:00 +0000

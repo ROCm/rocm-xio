@@ -1,0 +1,13 @@
+# rocm-xio character device permissions
+#
+# Sets /dev/rocm-xio ownership to root:video with 0660
+# so that any user in the video group can use rocm-xio
+# without sudo.
+#
+# The rocm-xio kernel module uses device_create() so
+# udev creates the node automatically on modprobe.
+#
+# Install with:
+#   sudo udev/setup-udev-rules.sh --install
+
+KERNEL=="rocm-xio", SUBSYSTEM=="rocm_axiio", OWNER="root", GROUP="video", MODE="0660"

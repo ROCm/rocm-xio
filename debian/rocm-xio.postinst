@@ -1,0 +1,32 @@
+#!/bin/sh
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Post-install: reload udev rules and create device node
+# after the rocm-xio kernel module is loaded.
+# DKMS add/build/install is handled by dh_dkms.
+
+set -e
+
+case "$1" in
+  configure)
+    # Reload udev rules
+    if command -v udevadm >/dev/null 2>&1; then
+      udevadm control --reload-rules || true
+      udevadm trigger || true
+    fi
+
+    # Load the kernel module if DKMS built it.
+    # The driver uses device_create() so udev will
+    # create /dev/rocm-xio with permissions set by
+    # 99-rocm-xio-char.rules automatically.
+    if modinfo rocm-xio >/dev/null 2>&1; then
+      modprobe rocm-xio || true
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
