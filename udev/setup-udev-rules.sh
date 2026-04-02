@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" \
 DEST="/etc/udev/rules.d"
 
 RULES=(
+  "99-rocm-xio-char.rules"
   "99-rocm-xio-rdma.rules"
   "99-rocm-xio-vfio.rules"
   "99-rocm-xio-nvme.rules"
