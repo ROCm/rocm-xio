@@ -60,8 +60,7 @@ void* Backend::mlx5_dv_dlopen() {
     "/usr/lib/aarch64-linux-gnu",
     "/usr/lib64",
   };
-  return xio_rdma::dv_dlopen("libmlx5.so", "rdma_ep::mlx5",
-                             extra, 3);
+  return xio_rdma::dv_dlopen("libmlx5.so", "rdma_ep::mlx5", extra, 3);
 }
 
 int Backend::mlx5_dv_dl_init() {

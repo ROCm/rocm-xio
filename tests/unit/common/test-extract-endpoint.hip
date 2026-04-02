@@ -12,8 +12,8 @@
 #include <cstdlib>
 #include <string>
 
-#include "xio.h"
 #include "xio-test-assert.h"
+#include "xio.h"
 
 int test_short_flag() {
   const char* argv[] = {"prog", "-e", "nvme"};

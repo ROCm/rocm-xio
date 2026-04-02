@@ -47,8 +47,7 @@ void* ernicdv_handle_ = nullptr;
 #if defined(GDA_ERNIC)
 
 void* Backend::ernic_dv_dlopen() {
-  return xio_rdma::dv_dlopen("librocm_ernic.so",
-                             "rdma_ep::ernic");
+  return xio_rdma::dv_dlopen("librocm_ernic.so", "rdma_ep::ernic");
 }
 
 int Backend::ernic_dv_dl_init() {
@@ -57,8 +56,8 @@ int Backend::ernic_dv_dl_init() {
     return -1;
 
 #define LOAD(field, name)                                                      \
-  if (dlsym_load(ernic_dv.field, ernicdv_handle_, name,                        \
-                 "rdma_ep::ernic") != 0)                                       \
+  if (dlsym_load(ernic_dv.field, ernicdv_handle_, name, "rdma_ep::ernic") !=   \
+      0)                                                                       \
     return -1;
 
   LOAD(create_qp, "rocm_ernic_dv_create_qp");
