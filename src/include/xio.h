@@ -832,30 +832,27 @@ __host__ __device__ static inline void ringDoorbellFenced(
   volatile uint32_t* doorbell_addr, uint32_t value) {
 #ifdef __HIP_DEVICE_COMPILE__
 #if __gfx1200__ || __gfx1201__
-  asm volatile(
-    "s_wait_kmcnt 0x0 \n"
-    "s_wait_loadcnt 0x0 \n"
-    "s_wait_storecnt 0x0 \n"
-    "global_store_b32 %0, %1, off scope:SCOPE_SYS \n"
-    "s_wait_kmcnt 0x0 \n"
-    "s_wait_loadcnt 0x0 \n"
-    "s_wait_storecnt 0x0 \n" ::"v"(doorbell_addr),
-    "v"(value)
-    : "memory");
+  asm volatile("s_wait_kmcnt 0x0 \n"
+               "s_wait_loadcnt 0x0 \n"
+               "s_wait_storecnt 0x0 \n"
+               "global_store_b32 %0, %1, off scope:SCOPE_SYS \n"
+               "s_wait_kmcnt 0x0 \n"
+               "s_wait_loadcnt 0x0 \n"
+               "s_wait_storecnt 0x0 \n" ::"v"(doorbell_addr),
+               "v"(value)
+               : "memory");
   __threadfence_system();
-#elif __gfx1010__ || __gfx1030__ || __gfx1031__ || \
-  __gfx1032__ || __gfx1100__ || __gfx1101__ ||     \
-  __gfx1102__
-  asm volatile(
-    "s_waitcnt lgkmcnt(0) vmcnt(0) \n"
-    "s_waitcnt_vscnt null, 0x0 \n"
-    "global_store_dword %0, %1, off glc slc dlc \n"
-    "s_waitcnt lgkmcnt(0) vmcnt(0) \n"
-    "s_waitcnt_vscnt null, 0x0 \n"
-    "buffer_gl1_inv \n"
-    "buffer_gl0_inv \n" ::"v"(doorbell_addr),
-    "v"(value)
-    : "memory");
+#elif __gfx1010__ || __gfx1030__ || __gfx1031__ || __gfx1032__ ||              \
+  __gfx1100__ || __gfx1101__ || __gfx1102__
+  asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0) \n"
+               "s_waitcnt_vscnt null, 0x0 \n"
+               "global_store_dword %0, %1, off glc slc dlc \n"
+               "s_waitcnt lgkmcnt(0) vmcnt(0) \n"
+               "s_waitcnt_vscnt null, 0x0 \n"
+               "buffer_gl1_inv \n"
+               "buffer_gl0_inv \n" ::"v"(doorbell_addr),
+               "v"(value)
+               : "memory");
   __threadfence_system();
 #else
   __threadfence_system();
