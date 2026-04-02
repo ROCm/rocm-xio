@@ -62,8 +62,8 @@ int Backend::bnxt_dv_dl_init() {
     return -1;
 
 #define LOAD(field, name)                                                      \
-  if (dlsym_load(bnxt_re_dv.field, bnxtdv_handle_, name,                       \
-                 "rdma_ep::bnxt") != 0)                                        \
+  if (dlsym_load(bnxt_re_dv.field, bnxtdv_handle_, name, "rdma_ep::bnxt") !=   \
+      0)                                                                       \
     return -1;
 
   LOAD(create_qp, "bnxt_re_dv_create_qp");

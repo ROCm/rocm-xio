@@ -75,8 +75,7 @@ int Backend::ionic_dv_dl_init() {
 
 #undef LOAD
 
-  if (dlsym_load(ionic_qp_set_gda_, ionicdv_lib_handle_,
-                 "ionic_dv_qp_set_gda",
+  if (dlsym_load(ionic_qp_set_gda_, ionicdv_lib_handle_, "ionic_dv_qp_set_gda",
                  "rdma_ep::ionic") != 0)
     return -1;
 

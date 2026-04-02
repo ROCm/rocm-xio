@@ -65,21 +65,19 @@ int dlsym_load(FuncPtr& out, void* handle, const char* name,
 }
 
 template <typename FuncPtr>
-int dlsym_load_optional(FuncPtr& out, void* handle,
-                        const char* name) {
+int dlsym_load_optional(FuncPtr& out, void* handle, const char* name) {
   out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
   return out ? 0 : -1;
 }
 
 template <typename FuncPtr>
-int dlsym_load_prefixed(FuncPtr& out, void* handle,
-                        const char* prefix, const char* name) {
+int dlsym_load_prefixed(FuncPtr& out, void* handle, const char* prefix,
+                        const char* name) {
   char full_name[256];
   snprintf(full_name, sizeof(full_name), "%s%s", prefix, name);
   out = reinterpret_cast<FuncPtr>(dlsym(handle, full_name));
   if (!out) {
-    fprintf(stderr, "rdma_ep: dlsym failed for %s: %s\n",
-            full_name, dlerror());
+    fprintf(stderr, "rdma_ep: dlsym failed for %s: %s\n", full_name, dlerror());
     return -1;
   }
   return 0;
@@ -87,15 +85,13 @@ int dlsym_load_prefixed(FuncPtr& out, void* handle,
 
 template <typename FuncPtr>
 void dlsym_load_prefixed_optional(FuncPtr& out, void* handle,
-                                  const char* prefix,
-                                  const char* name) {
+                                  const char* prefix, const char* name) {
   char full_name[256];
   snprintf(full_name, sizeof(full_name), "%s%s", prefix, name);
   out = reinterpret_cast<FuncPtr>(dlsym(handle, full_name));
 }
 
-inline void* dv_dlopen(const char* lib_name,
-                       const char* vendor_tag,
+inline void* dv_dlopen(const char* lib_name, const char* vendor_tag,
                        const char* const* extra_paths = nullptr,
                        int n_extra = 0) {
   constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
@@ -104,8 +100,7 @@ inline void* dv_dlopen(const char* lib_name,
 #ifdef RDMA_CORE_LIB_DIR
   {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", RDMA_CORE_LIB_DIR,
-             lib_name);
+    snprintf(path, sizeof(path), "%s/%s", RDMA_CORE_LIB_DIR, lib_name);
     handle = dlopen(path, flags);
   }
 #endif
@@ -115,8 +110,7 @@ inline void* dv_dlopen(const char* lib_name,
 
   for (int i = 0; !handle && i < n_extra; i++) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", extra_paths[i],
-             lib_name);
+    snprintf(path, sizeof(path), "%s/%s", extra_paths[i], lib_name);
     handle = dlopen(path, flags);
   }
 
