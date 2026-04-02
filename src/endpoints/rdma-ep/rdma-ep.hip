@@ -246,8 +246,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     size_t xfer = cfg->transferSize;
     size_t buf_size = xfer * 2;
     void* buf = nullptr;
-    if (posix_memalign(&buf, 4096, buf_size)) {
-      ROCXIO_LOG_ERROR("rdma-ep: posix_memalign failed\n");
+    hipError_t buf_err = xio::allocHostMemory(buf_size, &buf,
+                                              "RDMA loopback buffer",
+                                              XIO_HOST_MEM_PINNED);
+    if (buf_err != hipSuccess) {
+      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory failed\n");
       backend.shutdown();
       return hipErrorMemoryAllocation;
     }
@@ -264,7 +267,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     ret = backend.register_data_buffer(buf, buf_size);
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
-      free(buf);
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -284,7 +287,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (launchErr != hipSuccess) {
       ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed: %s\n",
                        hipGetErrorString(launchErr));
-      free(buf);
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return launchErr;
     }
@@ -293,7 +296,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (syncErr != hipSuccess) {
       ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
                        hipGetErrorString(syncErr));
-      free(buf);
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return syncErr;
     }
@@ -319,7 +322,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       }
     }
 
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
   } else {
     // ==========================================================
     // 2-node path -- TCP QP exchange, RDMA WRITE + ping-pong
@@ -342,17 +345,15 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                      total_reg_size, write_size, pp_size);
 
     void* reg_buf = nullptr;
-    hipError_t herr = hipHostMalloc(&reg_buf, total_reg_size,
-                                    hipHostMallocMapped |
-                                      hipHostMallocCoherent);
+    hipError_t herr = xio::allocHostMemory(total_reg_size, &reg_buf,
+                                           "RDMA 2-node buffer",
+                                           XIO_HOST_MEM_MAPPED |
+                                             XIO_HOST_MEM_COHERENT);
     if (herr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: hipHostMalloc(coherent)"
-                       " failed: %s\n",
-                       hipGetErrorString(herr));
+      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory(coherent) failed\n");
       backend.shutdown();
       return herr;
     }
-    memset(reg_buf, 0, total_reg_size);
 
     auto* data_region = static_cast<uint8_t*>(reg_buf);
     uint8_t* pp_send_buf = data_region + pp_send_offset;
@@ -368,7 +369,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     ret = backend.register_data_buffer(reg_buf, total_reg_size);
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -386,7 +387,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
     if (tcp_fd < 0) {
       ROCXIO_LOG_ERROR("rdma-ep: TCP setup failed\n");
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -405,7 +406,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: TCP exchange failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -430,7 +431,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: connect_to_peer failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -440,7 +441,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: set_remote_rkey failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -449,7 +450,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (xio::tcp_sync(tcp_fd) != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -472,7 +473,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                          " %s\n",
                          hipGetErrorString(herr));
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return herr;
       }
@@ -482,7 +484,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (xio::tcp_sync(tcp_fd) != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -508,7 +510,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                          " %d/%u bytes wrong.\n",
                          errors, write_size);
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return hipErrorUnknown;
       }
@@ -517,7 +520,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     if (xio::tcp_sync(tcp_fd) != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -535,24 +538,29 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     uint32_t* d_errors = nullptr;
     unsigned long long* d_elapsed = nullptr;
-    herr = hipMalloc(&d_errors, sizeof(uint32_t));
-    if (herr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: hipMalloc d_errors: %s\n",
-                       hipGetErrorString(herr));
-      close(tcp_fd);
-      (void)hipHostFree(reg_buf);
-      backend.shutdown();
-      return herr;
-    }
-    herr = hipMalloc(&d_elapsed, sizeof(unsigned long long));
-    if (herr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: hipMalloc d_elapsed: %s\n",
-                       hipGetErrorString(herr));
-      (void)hipFree(d_errors);
-      close(tcp_fd);
-      (void)hipHostFree(reg_buf);
-      backend.shutdown();
-      return herr;
+    {
+      hsa_status_t s;
+      s = xio::allocDeviceMemory(sizeof(uint32_t), (void**)&d_errors,
+                                 "RDMA error counter", XIO_DEVICE_MEM_HIP);
+      if (s != HSA_STATUS_SUCCESS) {
+        ROCXIO_LOG_ERROR("rdma-ep: allocDeviceMemory d_errors failed\n");
+        close(tcp_fd);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
+        backend.shutdown();
+        return hipErrorMemoryAllocation;
+      }
+      s = xio::allocDeviceMemory(sizeof(unsigned long long), (void**)&d_elapsed,
+                                 "RDMA elapsed counter", XIO_DEVICE_MEM_HIP);
+      if (s != HSA_STATUS_SUCCESS) {
+        ROCXIO_LOG_ERROR("rdma-ep: allocDeviceMemory d_elapsed failed\n");
+        xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+        close(tcp_fd);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
+        backend.shutdown();
+        return hipErrorMemoryAllocation;
+      }
     }
     uint32_t h_errors = 0;
     unsigned long long h_elapsed = 0;
@@ -563,10 +571,10 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     if (xio::tcp_sync(tcp_fd) != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: tcp_sync failed\n");
-      (void)hipFree(d_errors);
-      (void)hipFree(d_elapsed);
+      xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+      xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
       close(tcp_fd);
-      (void)hipHostFree(reg_buf);
+      xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -583,10 +591,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("rdma-ep: Pingpong client kernel"
                          " failed: %s\n",
                          hipGetErrorString(herr));
-        (void)hipFree(d_errors);
-        (void)hipFree(d_elapsed);
+        xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+        xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return herr;
       }
@@ -610,10 +619,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("rdma-ep: LFSR FAILED:"
                          " %u errors\n",
                          h_errors);
-        (void)hipFree(d_errors);
-        (void)hipFree(d_elapsed);
+        xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+        xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return hipErrorUnknown;
       }
@@ -632,10 +642,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("rdma-ep: Pingpong server kernel"
                          " failed: %s\n",
                          hipGetErrorString(herr));
-        (void)hipFree(d_errors);
-        (void)hipFree(d_elapsed);
+        xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+        xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return herr;
       }
@@ -646,10 +657,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("rdma-ep: LFSR FAILED:"
                          " %u errors\n",
                          h_errors);
-        (void)hipFree(d_errors);
-        (void)hipFree(d_elapsed);
+        xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+        xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
         close(tcp_fd);
-        (void)hipHostFree(reg_buf);
+        xio::freeHostMemory(reg_buf,
+                            XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
         backend.shutdown();
         return hipErrorUnknown;
       }
@@ -658,15 +670,15 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                       pp_iters);
     }
 
-    (void)hipFree(d_errors);
-    (void)hipFree(d_elapsed);
+    xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
 
     if (xio::tcp_sync(tcp_fd) != 0)
       ROCXIO_LOG_WARN("rdma-ep: final tcp_sync failed"
                       " (non-fatal)\n");
 
     close(tcp_fd);
-    (void)hipHostFree(reg_buf);
+    xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
   }
 
   backend.shutdown();

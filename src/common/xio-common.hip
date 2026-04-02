@@ -594,6 +594,34 @@ void freeDeviceMemory(void* ptr, unsigned flags) {
   hsa_memory_free(ptr);
 }
 
+hipError_t allocDeviceMemoryPair(size_t size, void** host_ptr,
+                                 void** device_ptr, const char* label) {
+  if (!host_ptr || !device_ptr || size == 0)
+    return hipErrorInvalidValue;
+
+  *host_ptr = nullptr;
+  *device_ptr = nullptr;
+
+  hipError_t err = allocHostMemory(size, host_ptr, label, XIO_HOST_MEM_PLAIN);
+  if (err != hipSuccess)
+    return err;
+
+  hsa_status_t s = allocDeviceMemory(size, device_ptr, label,
+                                     XIO_DEVICE_MEM_HIP);
+  if (s != HSA_STATUS_SUCCESS) {
+    freeHostMemory(*host_ptr, XIO_HOST_MEM_PLAIN);
+    *host_ptr = nullptr;
+    return hipErrorMemoryAllocation;
+  }
+
+  return hipSuccess;
+}
+
+void freeDeviceMemoryPair(void* host_ptr, void* device_ptr) {
+  freeHostMemory(host_ptr, XIO_HOST_MEM_PLAIN);
+  freeDeviceMemory(device_ptr, XIO_DEVICE_MEM_HIP);
+}
+
 hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
                            unsigned flags) {
   if (!ptr || size == 0) {
@@ -607,6 +635,22 @@ hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
     if (!*ptr) {
       std::cerr << "Error: (" << label << "): malloc failed" << std::endl;
       return hipErrorMemoryAllocation;
+    }
+    memset(*ptr, 0, size);
+    return hipSuccess;
+  }
+
+  if (flags & XIO_HOST_MEM_DEFAULT) {
+    hipError_t err = hipHostMalloc(ptr, size, hipHostMallocDefault);
+    if (err != hipSuccess) {
+      *ptr = malloc(size);
+      if (!*ptr) {
+        std::cerr << "Error: (" << label
+                  << "): hipHostMalloc(Default) and malloc "
+                     "fallback both failed"
+                  << std::endl;
+        return hipErrorMemoryAllocation;
+      }
     }
     memset(*ptr, 0, size);
     return hipSuccess;
@@ -627,9 +671,12 @@ hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
 
     hipError_t err = hipHostRegister(*ptr, size, hipHostRegisterDefault);
     if (err != hipSuccess) {
-      std::cerr << "Warning: (" << label
+      std::cerr << "Error: (" << label
                 << "): hipHostRegister failed: " << hipGetErrorString(err)
                 << std::endl;
+      free(*ptr);
+      *ptr = nullptr;
+      return err;
     }
     return hipSuccess;
   }
@@ -659,6 +706,13 @@ void freeHostMemory(void* ptr, unsigned flags) {
 
   if (flags & XIO_HOST_MEM_PLAIN) {
     free(ptr);
+    return;
+  }
+
+  if (flags & XIO_HOST_MEM_DEFAULT) {
+    hipError_t err = hipHostFree(ptr);
+    if (err != hipSuccess)
+      free(ptr);
     return;
   }
 

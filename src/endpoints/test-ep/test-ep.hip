@@ -823,20 +823,13 @@ hipError_t run(XioEndpointConfig* config) {
       }
       memset(doorbellAddr, 0, sizeof(uint32_t));
     } else {
-      // Allocate host memory for doorbell
-      // Try HIP first, but fall back to malloc if HIP is not available
-      // (emulate mode)
-      hipError_t hipErr = hipHostMalloc(&doorbellAddr, sizeof(uint32_t),
-                                        hipHostMallocDefault);
+      hipError_t hipErr = xio::allocHostMemory(sizeof(uint32_t),
+                                               (void**)&doorbellAddr,
+                                               "doorbell", XIO_HOST_MEM_MAPPED);
       if (hipErr != hipSuccess) {
-        // HIP not available (e.g., emulate mode), use regular malloc
-        doorbellAddr = static_cast<uint32_t*>(malloc(sizeof(uint32_t)));
-        if (doorbellAddr == nullptr) {
-          std::cerr << "Error: Failed to allocate doorbell memory" << std::endl;
-          return hipErrorMemoryAllocation;
-        }
+        std::cerr << "Error: Failed to allocate doorbell memory" << std::endl;
+        return hipErrorMemoryAllocation;
       }
-      memset(doorbellAddr, 0, sizeof(uint32_t));
     }
   }
 
@@ -929,12 +922,7 @@ hipError_t run(XioEndpointConfig* config) {
     if (doorbellOnDevice) {
       hsa_memory_free(doorbellAddr);
     } else {
-      // Free host memory using HIP or regular free
-      hipError_t hipErr = hipHostFree(doorbellAddr);
-      if (hipErr != hipSuccess) {
-        // HIP not available (e.g., emulate mode), use regular free
-        free(doorbellAddr);
-      }
+      xio::freeHostMemory(doorbellAddr, XIO_HOST_MEM_MAPPED);
     }
   }
 

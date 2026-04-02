@@ -31,6 +31,7 @@
 #include "ibv-wrapper.hpp"
 #include "mlx5/mlx5-provider.hpp"
 #include "queue-pair.hpp"
+#include "xio.h"
 
 namespace rdma_ep {
 
@@ -320,9 +321,12 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
   const size_t test_size = 64;
   const size_t buf_size = test_size * 2;
   void* buf = nullptr;
-  if (posix_memalign(&buf, 4096, buf_size)) {
+  hipError_t herr = xio::allocHostMemory(buf_size, &buf,
+                                         "MLX5 smoke test buffer",
+                                         XIO_HOST_MEM_PINNED);
+  if (herr != hipSuccess) {
     fprintf(stderr, "rdma_ep::mlx5: smoke test: "
-                    "posix_memalign failed\n");
+                    "allocHostMemory failed\n");
     return -1;
   }
 
@@ -337,7 +341,7 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
   if (!mr) {
     fprintf(stderr, "rdma_ep::mlx5: smoke test: "
                     "ibv_reg_mr failed\n");
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return -1;
   }
 
@@ -363,7 +367,7 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
             "ibv_post_send failed: %d\n",
             ret);
     ibv.dereg_mr(mr);
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return -1;
   }
 
@@ -381,7 +385,7 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
               "ibv_poll_cq error: %d\n",
               ne);
       ibv.dereg_mr(mr);
-      free(buf);
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       return -1;
     }
     polls++;
@@ -393,7 +397,7 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
             "CQE timeout after %d polls\n",
             max_polls);
     ibv.dereg_mr(mr);
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return -1;
   }
 
@@ -403,13 +407,13 @@ int Backend::mlx5_cpu_loopback_smoke_test() {
             "WC error status=%d\n",
             wc.status);
     ibv.dereg_mr(mr);
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return -1;
   }
 
   bool data_ok = (memcmp(src, dst, test_size) == 0);
   ibv.dereg_mr(mr);
-  free(buf);
+  xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
 
   if (!data_ok) {
     fprintf(stderr, "rdma_ep::mlx5: smoke test: "
