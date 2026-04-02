@@ -36,6 +36,16 @@ option(XIO_DOCS_ONLY
   "Only configure documentation targets (no HIP/ROCm needed)"
   OFF)
 
+# OFFLOAD_ARCH → CMAKE_HIP_ARCHITECTURES must be set BEFORE
+# project() because enabling LANGUAGES HIP triggers compiler
+# detection which auto-populates CMAKE_HIP_ARCHITECTURES.
+set(OFFLOAD_ARCH "" CACHE STRING
+  "GPU architecture (e.g., gfx942:xnack+ or semicolon-separated list)")
+if(OFFLOAD_ARCH)
+  set(CMAKE_HIP_ARCHITECTURES "${OFFLOAD_ARCH}" CACHE STRING
+    "GPU architectures to compile for (derived from OFFLOAD_ARCH)" FORCE)
+endif()
+
 if(XIO_DOCS_ONLY)
   project(rocm-xio
     VERSION ${ROCM_XIO_LIBRARY_VERSION}
@@ -55,8 +65,8 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 if(NOT XIO_DOCS_ONLY)
 
-# This project uses static libraries by necessity
-option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
+# Default to static; shared is needed for kpack multi-arch packaging
+option(BUILD_SHARED_LIBS "Build shared library (required for kpack)" OFF)
 
 # Use position-independent code everywhere
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -140,14 +150,34 @@ else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
 
+# kpack multi-arch packaging support (optional)
+option(XIO_USE_KPACK
+  "Enable kpack multi-arch packaging (requires BUILD_SHARED_LIBS)" OFF)
+if(XIO_USE_KPACK)
+  if(NOT BUILD_SHARED_LIBS)
+    message(FATAL_ERROR
+      "XIO_USE_KPACK requires BUILD_SHARED_LIBS=ON "
+      "(kpack splits device code from shared libraries)")
+  endif()
+  find_package(rocm-kpack QUIET)
+  if(rocm-kpack_FOUND)
+    message(STATUS "rocm-kpack found @ ${rocm-kpack_DIR}")
+  else()
+    message(STATUS
+      "rocm-kpack C++ runtime not found; "
+      "kpack-split target will use Python tools only")
+  endif()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  message(STATUS "kpack: Python3 interpreter: ${Python3_EXECUTABLE}")
+endif()
+
 # Include build options modules early so options are available
 # This makes XIO_USE_SANITIZERS, XIO_USE_CODE_COVERAGE available as
 # cmake command-line options
 include(XIOCompilerOptions)
 
-# GPU architecture detection
-set(OFFLOAD_ARCH "" CACHE STRING
-  "GPU architecture (e.g., gfx942:xnack+)")
+# GPU architecture detection (OFFLOAD_ARCH cache var declared
+# before project() so it feeds CMAKE_HIP_ARCHITECTURES)
 if(NOT OFFLOAD_ARCH)
   find_program(ROCMINFO rocminfo PATHS ${ROCM_PATH}/bin /opt/rocm/bin ENV PATH)
   if(ROCMINFO)
@@ -176,6 +206,7 @@ else()
 endif()
 
 message(STATUS "Building for GPU architecture: ${OFFLOAD_ARCH_MSG}")
+message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
 
 # SDMA generation auto-detection from GPU architecture.
 # OSS7.0 SDMA targets use different packet structures than
@@ -341,8 +372,8 @@ set_source_files_properties(
   PROPERTIES LANGUAGE HIP
 )
 
-# Create static library
-add_library(rocm-xio STATIC ${LIB_SOURCES})
+# Library type controlled by BUILD_SHARED_LIBS
+add_library(rocm-xio ${LIB_SOURCES})
 
 # Set compile options for HIP files
 target_compile_options(rocm-xio PRIVATE
@@ -353,6 +384,23 @@ target_compile_options(rocm-xio PRIVATE
 
 # HIP-specific compilation flags (relocatable device code)
 target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
+
+# Shared library needs -fgpu-rdc at link time too so
+# the device linker resolves cross-TU device calls and
+# embeds the final HSACO blobs in .hip_fatbin sections.
+if(BUILD_SHARED_LIBS)
+  target_link_options(rocm-xio PRIVATE -fgpu-rdc)
+  set_target_properties(rocm-xio PROPERTIES
+    VERSION   ${ROCM_XIO_LIBRARY_VERSION}
+    SOVERSION ${ROCM_XIO_LIBRARY_SOVERSION}
+  )
+  target_link_libraries(rocm-xio
+    PRIVATE
+      hip::host
+      hip::device
+      hsakmt::hsakmt
+  )
+endif()
 
 # GNUInstallDirs must be included before the INSTALL_INTERFACE
 # generator expression below so CMAKE_INSTALL_INCLUDEDIR is set.
@@ -419,14 +467,16 @@ if(RDMA_CORE_LIB_DIR)
     RDMA_CORE_LIB_DIR="${RDMA_CORE_LIB_DIR}")
 endif()
 
-# Link dependencies that consumers will need
-# These are INTERFACE so consumers get them automatically
-target_link_libraries(rocm-xio
-  INTERFACE
-    hip::host
-    hip::device
-    hsakmt::hsakmt
-)
+# For static builds, consumers need these at link time (INTERFACE).
+# Shared builds link them PRIVATE above.
+if(NOT BUILD_SHARED_LIBS)
+  target_link_libraries(rocm-xio
+    INTERFACE
+      hip::host
+      hip::device
+      hsakmt::hsakmt
+  )
+endif()
 
 # dlopen support for IBV wrapper and vendor DV libs
 target_link_libraries(rocm-xio PRIVATE dl)
@@ -499,8 +549,11 @@ target_link_libraries(xio-tester PRIVATE
   hsa-runtime64::hsa-runtime64
 )
 
-# Required when linking relocatable device code (like TransferBench)
-target_link_options(xio-tester PRIVATE -fgpu-rdc)
+# Static library: consumer performs device linking (-fgpu-rdc).
+# Shared library: device code already resolved in .so.
+if(NOT BUILD_SHARED_LIBS)
+  target_link_options(xio-tester PRIVATE -fgpu-rdc)
+endif()
 
 # Embed the custom rdma-core lib dir in the binary
 # so dlopen'd DV libs can find their libibverbs at
@@ -518,10 +571,11 @@ endif() # BUILD_CLIENTS
 # Install configuration
 #-----------------------------------------------------------------------------
 
-# Install static library
+# Install library (static or shared depending on BUILD_SHARED_LIBS)
 install(TARGETS rocm-xio
     EXPORT rocm-xio-targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     COMPONENT rocm-xio
 )
 
@@ -597,6 +651,11 @@ install(FILES
     DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
     COMPONENT rocm-xio
 )
+
+# kpack multi-arch packaging targets
+if(XIO_USE_KPACK)
+  include(XIOKpack)
+endif()
 
 # Add test subdirectories (unit, system, hardware)
 if(BUILD_TESTING)

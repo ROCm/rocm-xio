@@ -35,10 +35,14 @@ jobs:
     - name: Install build dependencies
       run: |
         apt-get update
-        apt-get install -y devscripts equivs lsb-release
+        apt-get install -y devscripts equivs lsb-release python3-pip
         mk-build-deps --install --remove \
           --tool 'apt-get -y --no-install-recommends' \
           debian/control
+
+    - name: Install rocm-kpack Python tools
+      run: |
+        pip install --break-system-packages rocm-kpack
 
     - name: Generate debian/changelog
       run: debian/gen-changelog.sh

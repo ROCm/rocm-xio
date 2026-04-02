@@ -20,5 +20,15 @@ set(ROCM_XIO_VERSION_MAJOR @PROJECT_VERSION_MAJOR@)
 set(ROCM_XIO_VERSION_MINOR @PROJECT_VERSION_MINOR@)
 set(ROCM_XIO_VERSION_PATCH @PROJECT_VERSION_PATCH@)
 
+# Library type built with
+set(ROCM_XIO_SHARED_LIBS @BUILD_SHARED_LIBS@)
+
+# kpack multi-arch packaging info
+set(ROCM_XIO_KPACK_ENABLED @XIO_USE_KPACK@)
+if(ROCM_XIO_KPACK_ENABLED)
+  set(ROCM_XIO_KPACK_DIR
+    "@PACKAGE_CMAKE_INSTALL_LIBDIR@/rocm-xio/kpack")
+endif()
+
 # Verify required components
 check_required_components(rocm-xio)

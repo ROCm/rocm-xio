@@ -7,6 +7,9 @@ xio
 XIO
 rocm
 ernic
+kpack
+HSACO
+hsaco
 
 # ===== NVMe and Storage =====
 CQE
