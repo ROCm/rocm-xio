@@ -155,12 +155,14 @@ __device__ void Ops::quiet_single(QueuePair& qp) {
 
 __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                    uintptr_t laddr, int32_t length,
-                                   uint8_t opcode) {
+                                   uint8_t opcode, uint32_t imm_data) {
   struct bnxt_re_bsqe hdr;
   struct bnxt_re_rdma rdma;
   struct bnxt_re_sge sge;
+  bool is_write = opcode == qp.op_rdma_write_ ||
+                  opcode == qp.op_rdma_write_imm_;
   uint32_t inline_msg = length <= static_cast<int32_t>(qp.inline_threshold_) &&
-                        opcode == qp.op_rdma_write_;
+                        is_write;
 
   poll_cq_until(qp, GDA_BNXT_WQE_SLOT_COUNT);
 
@@ -177,7 +179,7 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
 
   hdr.rsv_ws_fl_wt = (wqe_size << BNXT_RE_HDR_WS_SHIFT) |
                      (hdr_flags << BNXT_RE_HDR_FLAGS_SHIFT) | wqe_type;
-  hdr.key_immd = 0;
+  hdr.key_immd = (opcode == qp.op_rdma_write_imm_) ? imm_data : 0;
   hdr.lhdr.qkey_len = length;
   rdma.rva = raddr;
   rdma.rkey = qp.rkey_;
@@ -200,7 +202,7 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
 
 __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
                                   uintptr_t laddr, uintptr_t raddr,
-                                  uint8_t opcode) {
+                                  uint8_t opcode, uint32_t imm_data) {
   uint64_t mask = qp.get_same_qp_lane_mask();
   int count = popcount64(mask);
   int lane = get_lane_id();
@@ -214,7 +216,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
   for (int i = 0; i < count; i++) {
     if (i == my_num) {
-      write_rma_wqe(qp, raddr, laddr, length, opcode);
+      write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
       ring_doorbell(qp, qp.bnxt_sq_.tail);
     }
   }
@@ -227,8 +229,9 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
 __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t length,
                                          uintptr_t laddr, uintptr_t raddr,
-                                         uint8_t opcode, bool ring_db) {
-  write_rma_wqe(qp, raddr, laddr, length, opcode);
+                                         uint8_t opcode, bool ring_db,
+                                         uint32_t imm_data) {
+  write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
   if (ring_db)
     ring_doorbell(qp, qp.bnxt_sq_.tail);
 }

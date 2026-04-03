@@ -7,3 +7,8 @@
 
 add_subdirectory(test-ep)
 add_subdirectory(coherence)
+add_subdirectory(nvme-ep)
+
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
+  add_subdirectory(rdma-ep)
+endif()

@@ -24,6 +24,14 @@
 
 #include <unistd.h>
 
+#if defined(GDA_IONIC)
+#ifndef INFINIBAND_VERBS_H
+extern "C" {
+#include <infiniband/verbs.h>
+}
+#endif
+#endif
+
 #include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
@@ -47,15 +55,19 @@ static constexpr unsigned DEFAULT_ITERATIONS = 1;
 static void print_usage(const char* prog) {
   fprintf(stderr,
           "Usage: %s [OPTIONS]\n"
-          "  --provider P  bnxt|mlx5|ionic|auto"
+          "  --provider P    bnxt|mlx5|ionic|auto"
           " (default auto)\n"
-          "  --device DEV  RDMA device name\n"
-          "  --size   N    Transfer size"
+          "  --device DEV    RDMA device name\n"
+          "  --size   N      Transfer size"
           " (default %u)\n"
-          "  --seed   N    LFSR seed"
+          "  --seed   N      LFSR seed"
           " (default %u)\n"
-          "  -n N          Iterations"
-          " (default %u)\n",
+          "  -n N            Iterations"
+          " (default %u)\n"
+          "  --write-imm     Use RDMA WRITE"
+          " with immediate data\n"
+          "  --queue-mem M   host|vram"
+          " (default host)\n",
           prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED, DEFAULT_ITERATIONS);
 }
 
@@ -141,6 +153,83 @@ __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
   *result = 0;
 }
 
+__global__ void loopback_write_imm_kernel(QueuePair* qp, void* src_ptr,
+                                          void* dst_ptr, uint32_t length,
+                                          int* result,
+                                          unsigned long long* elapsed,
+                                          unsigned iterations) {
+  if (threadIdx.x != 0)
+    return;
+
+  unsigned long long t0 = wall_clock64();
+
+  for (unsigned i = 0; i < iterations; i++) {
+    uint32_t imm = i + 1;
+
+#if defined(GDA_IONIC)
+    if (qp->provider_ == Provider::IONIC) {
+      volatile struct ionic_v1_cqe* cqe = &qp->ionic_cq_buf_[0];
+      __hip_atomic_store((uint32_t*)&cqe->send.msg_msn, 0u, __ATOMIC_RELEASE,
+                         __HIP_MEMORY_SCOPE_SYSTEM);
+      __hip_atomic_store((uint32_t*)&cqe->qid_type_flags, 0u, __ATOMIC_RELEASE,
+                         __HIP_MEMORY_SCOPE_SYSTEM);
+      __threadfence_system();
+
+      qp->put_nbi_imm_single(dst_ptr, src_ptr, length, imm, true);
+
+      uint32_t timeout = 0;
+      uint32_t cons = qp->sq_prod_;
+      uint32_t qtf_be = __hip_atomic_load((uint32_t*)&cqe->qid_type_flags,
+                                          __ATOMIC_ACQUIRE,
+                                          __HIP_MEMORY_SCOPE_SYSTEM);
+      uint32_t msn = byteswap<uint32_t>(
+        __hip_atomic_load((uint32_t*)&cqe->send.msg_msn, __ATOMIC_ACQUIRE,
+                          __HIP_MEMORY_SCOPE_SYSTEM));
+
+      while ((msn - cons) & 0x800000) {
+        if (++timeout > 5000000) {
+          uint32_t st_len = __hip_atomic_load((uint32_t*)&cqe->status_length,
+                                              __ATOMIC_ACQUIRE,
+                                              __HIP_MEMORY_SCOPE_SYSTEM);
+          printf("WRITE_IMM TIMEOUT: "
+                 "qtf=0x%08x msn=%u "
+                 "cons=%u st_len=0x%08x "
+                 "sq_prod=%u iter=%u\n",
+                 qtf_be, msn, cons, st_len, qp->sq_prod_, i);
+          *result = -2;
+          *elapsed = wall_clock64() - t0;
+          return;
+        }
+        qtf_be = __hip_atomic_load((uint32_t*)&cqe->qid_type_flags,
+                                   __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
+        msn = byteswap<uint32_t>(
+          __hip_atomic_load((uint32_t*)&cqe->send.msg_msn, __ATOMIC_ACQUIRE,
+                            __HIP_MEMORY_SCOPE_SYSTEM));
+      }
+
+      if (qtf_be & byteswap<uint32_t>(IONIC_V1_CQE_ERROR)) {
+        uint32_t st_len = __hip_atomic_load((uint32_t*)&cqe->status_length,
+                                            __ATOMIC_ACQUIRE,
+                                            __HIP_MEMORY_SCOPE_SYSTEM);
+        printf("WRITE_IMM CQE ERROR: "
+               "qtf=0x%08x msn=%u "
+               "st_len=0x%08x iter=%u\n",
+               qtf_be, msn, st_len, i);
+        *result = -3;
+        *elapsed = wall_clock64() - t0;
+        return;
+      }
+      continue;
+    }
+#endif
+    qp->put_nbi_imm_single(dst_ptr, src_ptr, length, imm, true);
+    qp->quiet_single();
+  }
+
+  *elapsed = wall_clock64() - t0;
+  *result = 0;
+}
+
 int main(int argc, char** argv) {
   uint32_t xfer_size = DEFAULT_XFER_SIZE;
   uint32_t lfsr_seed = DEFAULT_LFSR_SEED;
@@ -148,6 +237,8 @@ int main(int argc, char** argv) {
   const char* provider_str = "auto";
   const char* device_name = nullptr;
   bool diag_mode = false;
+  bool write_imm = false;
+  QueueMemMode queue_mem = QueueMemMode::HOST_COHERENT;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
@@ -164,6 +255,21 @@ int main(int argc, char** argv) {
       iterations = static_cast<unsigned>(atoi(argv[++i]));
     } else if (strcmp(argv[i], "--diag") == 0) {
       diag_mode = true;
+    } else if (strcmp(argv[i], "--write-imm") == 0) {
+      write_imm = true;
+    } else if (strcmp(argv[i], "--queue-mem") == 0 && i + 1 < argc) {
+      const char* m = argv[++i];
+      if (strcmp(m, "vram") == 0)
+        queue_mem = QueueMemMode::DEVICE_VRAM;
+      else if (strcmp(m, "host") == 0)
+        queue_mem = QueueMemMode::HOST_COHERENT;
+      else {
+        fprintf(stderr,
+                "Unknown --queue-mem: %s"
+                " (use host or vram)\n",
+                m);
+        return 1;
+      }
     } else {
       print_usage(argv[0]);
       return 1;
@@ -223,10 +329,12 @@ int main(int argc, char** argv) {
 
   const char* prov_name = provider_name(prov);
 
+  const char* qmem_name = queue_mem == QueueMemMode::DEVICE_VRAM ? "vram"
+                                                                 : "host";
   printf("=== %s Loopback Data Path Test ===\n", prov_name);
   printf("  provider=%s  size=%u  seed=%u"
-         "  iterations=%u\n\n",
-         prov_name, xfer_size, lfsr_seed, iterations);
+         "  iterations=%u  queue-mem=%s\n\n",
+         prov_name, xfer_size, lfsr_seed, iterations, qmem_name);
 
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
@@ -249,6 +357,7 @@ int main(int argc, char** argv) {
   cfg.cq_depth = 256;
   cfg.inline_threshold = 28;
   cfg.loopback = true;
+  cfg.queue_mem = queue_mem;
   if (device_name)
     cfg.hca_list = device_name;
 
@@ -267,7 +376,7 @@ int main(int argc, char** argv) {
   }
   printf("GPU QueuePair ready.\n");
 
-  size_t buf_size = xfer_size * 2;
+  size_t buf_size = xfer_size > 0 ? xfer_size * 2 : 4096;
   void* buf = nullptr;
   if (posix_memalign(&buf, 4096, buf_size)) {
     fprintf(stderr, "posix_memalign failed\n");
@@ -275,12 +384,14 @@ int main(int argc, char** argv) {
   }
 
   uint8_t* src = static_cast<uint8_t*>(buf);
-  uint8_t* dst = src + xfer_size;
+  uint8_t* dst = xfer_size > 0 ? src + xfer_size : src;
 
-  xio::DataPatternParams fill_p{src,       xfer_size, 0,
-                                xfer_size, lfsr_seed, nullptr};
-  xio::dataPattern(false, fill_p);
-  memset(dst, 0x00, xfer_size);
+  if (xfer_size > 0) {
+    xio::DataPatternParams fill_p{src,       xfer_size, 0,
+                                  xfer_size, lfsr_seed, nullptr};
+    xio::dataPattern(false, fill_p);
+    memset(dst, 0x00, xfer_size);
+  }
 
   printf("Data buffer allocated: "
          "src=%p, dst=%p, size=%u\n",
@@ -319,10 +430,10 @@ int main(int argc, char** argv) {
   (void)hipMemcpy(d_elapsed, &h_elapsed, sizeof(h_elapsed),
                   hipMemcpyHostToDevice);
 
-  printf("Pre-check: src[0]=0x%02x,"
-         " dst[0]=0x%02x\n",
-         src[0], dst[0]);
-  {
+  if (xfer_size > 0) {
+    printf("Pre-check: src[0]=0x%02x,"
+           " dst[0]=0x%02x\n",
+           src[0], dst[0]);
     xio::DataPatternParams pre_p{src,       xfer_size, 0,
                                  xfer_size, lfsr_seed, nullptr};
     bool src_ok = xio::dataPattern(true, pre_p);
@@ -332,17 +443,78 @@ int main(int argc, char** argv) {
       free(buf);
       return 1;
     }
+    if (dst[0] != 0x00) {
+      fprintf(stderr, "Pre-check dst not zeroed.\n");
+      free(buf);
+      return 1;
+    }
   }
-  if (dst[0] != 0x00) {
-    fprintf(stderr, "Pre-check dst not zeroed.\n");
-    free(buf);
-    return 1;
+
+  if (write_imm) {
+#if defined(GDA_IONIC)
+    if (prov == Provider::IONIC) {
+      QueuePair* hqp = backend.get_host_qp();
+      if (hqp && hqp->ionic_cq_buf_) {
+        memset(hqp->ionic_cq_buf_, 0, sizeof(struct ionic_v1_cqe));
+        __sync_synchronize();
+        fprintf(stderr,
+                "DBG: zeroed CQ buf[0] at %p"
+                " from CPU\n",
+                (void*)hqp->ionic_cq_buf_);
+      }
+    }
+#endif
+#if defined(GDA_IONIC)
+    if (prov == Provider::IONIC) {
+      struct ibv_recv_wr recv_wr = {};
+      recv_wr.wr_id = 0;
+      recv_wr.next = nullptr;
+
+      if (xfer_size == 0) {
+        recv_wr.sg_list = nullptr;
+        recv_wr.num_sge = 0;
+      } else {
+        static struct ibv_sge recv_sge = {};
+        recv_sge.addr = reinterpret_cast<uint64_t>(dst);
+        recv_sge.length = xfer_size;
+        recv_sge.lkey = backend.get_lkey();
+        recv_wr.sg_list = &recv_sge;
+        recv_wr.num_sge = 1;
+      }
+
+      struct ibv_recv_wr* bad_wr = nullptr;
+      int rrc = ibv_post_recv(backend.get_ibv_qp(), &recv_wr, &bad_wr);
+      if (rrc != 0) {
+        fprintf(stderr, "ibv_post_recv failed: %d\n", rrc);
+        free(buf);
+        return 1;
+      }
+      printf("Posted receive WQE for"
+             " WRITE_IMM.\n");
+    } else
+#endif
+    {
+      fprintf(stderr, "SKIP: WRITE_IMM not supported"
+                      " for this provider (no"
+                      " ibv_post_recv support).\n");
+      free(buf);
+      backend.shutdown();
+      return 77;
+    }
   }
 
   if (diag_mode) {
     printf("Launching DIAG kernel...\n");
     hipLaunchKernelGGL(loopback_db_diag_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                        (void*)src, (void*)dst, xfer_size, d_result, d_elapsed);
+  } else if (write_imm) {
+    printf("Launching RDMA WRITE_IMM kernel"
+           " (%u iterations, size=%u,"
+           " imm=1..%u)...\n",
+           iterations, xfer_size, iterations);
+    hipLaunchKernelGGL(loopback_write_imm_kernel, dim3(1), dim3(1), 0, 0,
+                       gpu_qp, (void*)src, (void*)dst, xfer_size, d_result,
+                       d_elapsed, iterations);
   } else {
     printf("Launching RDMA WRITE kernel"
            " (%u iterations)...\n",
@@ -403,7 +575,31 @@ int main(int argc, char** argv) {
   (void)hipFree(d_result);
 
   if (h_result != 0) {
-    fprintf(stderr, "Kernel reported error: %d\n", h_result);
+    if (h_result == -2) {
+      fprintf(stderr, "Kernel timed out waiting"
+                      " for CQE.\n");
+#if defined(GDA_IONIC)
+      if (prov == Provider::IONIC) {
+        QueuePair* hqp = backend.get_host_qp();
+        volatile struct ionic_v1_cqe* cpu_cqe = hqp->ionic_cq_buf_;
+        uint32_t cpu_qtf = cpu_cqe->qid_type_flags;
+        uint32_t cpu_msn = cpu_cqe->send.msg_msn;
+        uint32_t cpu_st = cpu_cqe->status_length;
+        fprintf(stderr,
+                "CPU CQE[0]: qtf=0x%08x"
+                " msn_raw=0x%08x"
+                " st_len=0x%08x\n",
+                cpu_qtf, cpu_msn, cpu_st);
+      }
+#endif
+    } else if (h_result == -3)
+      fprintf(stderr, "Kernel got CQE error"
+                      " (see GPU printf above).\n");
+    else
+      fprintf(stderr,
+              "Kernel reported error:"
+              " %d\n",
+              h_result);
     free(buf);
     return 1;
   }
@@ -414,35 +610,44 @@ int main(int argc, char** argv) {
   double freq_khz = static_cast<double>(wall_clk_rate);
   double total_us = (static_cast<double>(h_elapsed) / freq_khz) * 1000.0;
   printf("Kernel completed: %.1f us "
-         "(RDMA WRITE + CQE wait).\n",
-         total_us);
+         "(RDMA %s + CQE wait).\n",
+         total_us, write_imm ? "WRITE_IMM" : "WRITE");
 
-  printf("Post-check: dst[0]=0x%02x,"
-         " dst[%u]=0x%02x\n",
-         dst[0], xfer_size - 1, dst[xfer_size - 1]);
+  if (xfer_size > 0) {
+    printf("Post-check: dst[0]=0x%02x,"
+           " dst[%u]=0x%02x\n",
+           dst[0], xfer_size - 1, dst[xfer_size - 1]);
 
-  size_t err_offset = 0;
-  xio::DataPatternParams vfy_p{dst,       xfer_size, 0,
-                               xfer_size, lfsr_seed, &err_offset};
-  bool ok = xio::dataPattern(true, vfy_p);
+    size_t err_offset = 0;
+    xio::DataPatternParams vfy_p{dst,       xfer_size, 0,
+                                 xfer_size, lfsr_seed, &err_offset};
+    bool ok = xio::dataPattern(true, vfy_p);
 
-  if (!ok) {
-    fprintf(stderr,
-            "\nFAILED: LFSR mismatch at "
-            "offset %zu (got 0x%02x).\n",
-            err_offset, dst[err_offset]);
-    free(buf);
-    backend.shutdown();
-    return 1;
+    if (!ok) {
+      fprintf(stderr,
+              "\nFAILED: LFSR mismatch at "
+              "offset %zu (got 0x%02x).\n",
+              err_offset, dst[err_offset]);
+      free(buf);
+      backend.shutdown();
+      return 1;
+    }
   }
 
   free(buf);
   backend.shutdown();
 
-  printf("\nPASSED: All %u bytes LFSR-verified"
-         " via %s RDMA WRITE loopback"
-         " (%u iterations).\n",
-         xfer_size, prov_name, iterations);
+  if (write_imm && xfer_size == 0) {
+    printf("\nPASSED: %u zero-length WRITE_IMM"
+           " (imm=1..%u) completed"
+           " via %s loopback.\n",
+           iterations, iterations, prov_name);
+  } else {
+    printf("\nPASSED: All %u bytes LFSR-verified"
+           " via %s RDMA %s loopback"
+           " (%u iterations).\n",
+           xfer_size, prov_name, write_imm ? "WRITE_IMM" : "WRITE", iterations);
+  }
   return 0;
 }
 

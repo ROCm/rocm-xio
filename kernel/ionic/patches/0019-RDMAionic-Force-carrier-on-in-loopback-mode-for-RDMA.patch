@@ -1,0 +1,95 @@
+From git@z Thu Jan  1 00:00:00 1970
+From: Stephen Bates <sbates@raithlin.com>
+Date: Wed, 02 Apr 2026 12:00:00 -0600
+Subject: [PATCH] RDMAionic: Force carrier on in loopback mode for
+ RDMA port activation
+
+The sysfs loopback_mode attribute (patch 0018) sends the
+IONIC_PORT_ATTR_LOOPBACK command to firmware, but the DSC
+firmware does not synthesize a link-up event when no cable
+is connected.  The kernel link_status_check reads the
+firmware's port status and calls netif_carrier_on/off
+accordingly -- so the link stays DOWN even in loopback
+mode.
+
+The RDMA port state (ionic_ibdev.c query_port) checks
+netif_carrier_ok() to report IB_PORT_ACTIVE.  Without
+carrier, RDMA QP transitions to RTR fail and all RDMA
+loopback testing is blocked.
+
+Fix by:
+- Adding a loopback_mode field to struct ionic to track
+  the current loopback state.
+- Forcing netif_carrier_on() in loopback_mode_store
+  when a non-zero mode is set.
+- Skipping netif_carrier_off() in ionic_link_status_check
+  when loopback_mode is active, preventing the periodic
+  watchdog from overriding the forced carrier.
+- Requesting a normal link status re-evaluation when
+  loopback is disabled (mode 0).
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ .../net/ethernet/pensando/ionic/ionic.h       |  1 +
+ .../ethernet/pensando/ionic/ionic_bus_pci.c   | 19 ++++++++++++++
+ .../net/ethernet/pensando/ionic/ionic_lif.c   |  5 ++++
+ 3 files changed, 25 insertions(+)
+
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic.h b/drivers/net/ethernet/pensando/ionic/ionic.h
+--- a/drivers/net/ethernet/pensando/ionic/ionic.h
++++ b/drivers/net/ethernet/pensando/ionic/ionic.h
+@@ -66,6 +66,7 @@ struct ionic {
+ 	struct timer_list watchdog_timer;
+ 	int watchdog_period;
++	u8 loopback_mode;
+ };
+
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+--- a/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_bus_pci.c
+ static ssize_t loopback_mode_store(...)
+ {
+ 	struct ionic *ionic = ...;
++	struct ionic_lif *lif = ionic->lif;
++	struct net_device *netdev = lif ? lif->netdev : NULL;
+ 	...
+ 	err = ionic_dev_cmd_wait(ionic, DEVCMD_TIMEOUT);
+ 	mutex_unlock(&ionic->dev_cmd_lock);
+
++	if (!err)
++		ionic->loopback_mode = (u8)mode;
++
++	if (!err && netdev) {
++		if (mode) {
++			/* Force carrier on so the RDMA port
++			 * reports IB_PORT_ACTIVE.  Firmware
++			 * does not synthesize a link-up event
++			 * in loopback mode without a cable. */
++			netif_carrier_on(netdev);
++		} else {
++			/* Re-evaluate real link state */
++			ionic_link_status_check_request(lif,
++							true);
++		}
++	}
++
+ 	return err ? err : count;
+ }
+
+diff --git a/drivers/net/ethernet/pensando/ionic/ionic_lif.c b/drivers/net/ethernet/pensando/ionic/ionic_lif.c
+--- a/drivers/net/ethernet/pensando/ionic/ionic_lif.c
++++ b/drivers/net/ethernet/pensando/ionic/ionic_lif.c
+ static void ionic_link_status_check(...)
+ {
+ 	...
+ 	} else {
++		/* Don't take carrier down if loopback mode
++		 * is active -- firmware reports link DOWN
++		 * without a cable even in loopback. */
++		if (lif->ionic->loopback_mode) {
++			clear_bit(IONIC_LIF_F_LINK_CHECK_REQUESTED, lif->state);
++			return;
++		}
++
+ 		if (netif_carrier_ok(netdev)) {
+ 			lif->link_down_count++;

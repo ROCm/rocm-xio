@@ -132,6 +132,10 @@ if(RDMA_CORE_BUILD)
     "${RDMA_CORE_INSTALL_DIR}/include"
     CACHE PATH
     "Unified rdma-core include directory" FORCE)
+  set(RDMA_CORE_BIN_DIR
+    "${RDMA_CORE_INSTALL_DIR}/bin"
+    CACHE PATH
+    "Unified rdma-core tools directory" FORCE)
 
   message(STATUS
     "rdma-core: will install to"

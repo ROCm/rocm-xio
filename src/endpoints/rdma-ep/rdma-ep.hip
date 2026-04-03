@@ -219,6 +219,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
   bcfg.traffic_class = cfg->trafficClass;
   bcfg.loopback = cfg->loopback;
+  bcfg.queue_mem = cfg->queueMem;
   bcfg.pci_mmio_bridge = config->pciMmioBridge;
 
   rdma_ep::Backend backend(bcfg);

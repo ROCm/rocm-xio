@@ -810,11 +810,17 @@ __host__ __device__ static inline void ringDoorbell(
 /**
  * @brief Ring a doorbell with aggressive ISA-level fencing.
  *
- * On RDNA GPUs (gfx10xx / gfx11xx), emits explicit
+ * On RDNA 2/3 GPUs (gfx10xx / gfx11xx), emits explicit
  * s_waitcnt + s_waitcnt_vscnt drains, a global_store_dword
  * with GLC|SLC|DLC flags to bypass caches, and full GL0/GL1
- * cache invalidation.  On CDNA GPUs this falls back to the
- * same __threadfence_system() path as ringDoorbell().
+ * cache invalidation.
+ *
+ * On RDNA 4 GPUs (gfx12xx), uses the restructured GFX12
+ * wait instructions (s_wait_kmcnt, s_wait_loadcnt,
+ * s_wait_storecnt) and global_store_b32 with SCOPE_SYS.
+ *
+ * On CDNA GPUs this falls back to the same
+ * __threadfence_system() path as ringDoorbell().
  *
  * Use this variant when debugging doorbell ordering issues
  * on consumer RDNA hardware.
@@ -825,8 +831,19 @@ __host__ __device__ static inline void ringDoorbell(
 __host__ __device__ static inline void ringDoorbellFenced(
   volatile uint32_t* doorbell_addr, uint32_t value) {
 #ifdef __HIP_DEVICE_COMPILE__
-#if __gfx1010__ || __gfx1030__ || __gfx1031__ || __gfx1032__ || __gfx1100__ || \
-  __gfx1101__ || __gfx1102__ || __gfx1200__ || __gfx1201__
+#if __gfx1200__ || __gfx1201__
+  asm volatile("s_wait_kmcnt 0x0 \n"
+               "s_wait_loadcnt 0x0 \n"
+               "s_wait_storecnt 0x0 \n"
+               "global_store_b32 %0, %1, off scope:SCOPE_SYS \n"
+               "s_wait_kmcnt 0x0 \n"
+               "s_wait_loadcnt 0x0 \n"
+               "s_wait_storecnt 0x0 \n" ::"v"(doorbell_addr),
+               "v"(value)
+               : "memory");
+  __threadfence_system();
+#elif __gfx1010__ || __gfx1030__ || __gfx1031__ || __gfx1032__ ||              \
+  __gfx1100__ || __gfx1101__ || __gfx1102__
   asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0) \n"
                "s_waitcnt_vscnt null, 0x0 \n"
                "global_store_dword %0, %1, off glc slc dlc \n"

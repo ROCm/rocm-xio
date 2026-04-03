@@ -1,0 +1,110 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH 8/8] RDMA/bnxt_re: Fix UBSAN shift and NULL deref for zero-depth RQ
+From: Stephen Bates <sbates@raithlin.com>
+Date: Tue, 01 Apr 2026 12:00:00 -0600
+Message-Id: <20260401-bnxt-fix-ubsan-hwq-v2@raithlin.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+After the QP creation refactor (patch 0002), bnxt_re_setup_qp_hwqs()
+calls bnxt_qplib_alloc_init_hwq() for both SQ and RQ unconditionally.
+When the DV path creates a QP without an RQ (qprva==0), it zeroes
+rq.max_wqe so get_depth() returns 0.
+
+Two bugs result:
+
+1. roundup_pow_of_two(0) in bnxt_qplib_alloc_init_hwq triggers
+   undefined behavior: fls_long(0 - 1) returns 64, producing
+   1UL << 64.  UBSAN reports:
+     shift exponent 64 is too large for 64-bit type 'long unsigned int'
+
+2. bnxt_qplib_create_qp dereferences rq->hwq.pbl[PBL_LVL_0].pg_map_arr
+   unconditionally when !qp->srq, causing a NULL pointer dereference
+   when the RQ HWQ was never allocated.
+
+Fix by:
+- qplib_res.c: return 0 (success, empty HWQ) when both depth and
+  aux_depth are zero; guard all roundup_pow_of_two() calls; default
+  pgsize to PAGE_SIZE when uninitialized.
+- ib_verbs.c: skip RQ HWQ allocation in setup_qp_hwqs when depth
+  is zero.
+- qplib_fp.c: guard the RQ PBL dereference in bnxt_qplib_create_qp
+  with an rq->max_wqe check.
+
+Signed-off-by: Stephen Bates <sbates@raithlin.com>
+---
+ drivers/infiniband/hw/bnxt_re/ib_verbs.c  |  2 ++
+ drivers/infiniband/hw/bnxt_re/qplib_fp.c  |  8 +++++---
+ drivers/infiniband/hw/bnxt_re/qplib_res.c | 14 +++++++++++---
+ 3 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/infiniband/hw/bnxt_re/ib_verbs.c b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+--- a/drivers/infiniband/hw/bnxt_re/ib_verbs.c
++++ b/drivers/infiniband/hw/bnxt_re/ib_verbs.c
+ static int bnxt_re_setup_qp_hwqs(...)
+ {
+ 	...
+ 	/* RQ HWQ -- skip when depth is zero (DV QP
+ 	 * without receive queue). */
++	if (hwq_attr.depth) {
+ 		rc = bnxt_qplib_alloc_init_hwq(&rq->hwq, &hwq_attr);
+ 		...
+ 		rq->hwq.pg_sz_lvl = pg_sz_lvl;
++	}
+ 	...
+ }
+
+diff --git a/drivers/infiniband/hw/bnxt_re/qplib_fp.c b/drivers/infiniband/hw/bnxt_re/qplib_fp.c
+--- a/drivers/infiniband/hw/bnxt_re/qplib_fp.c
++++ b/drivers/infiniband/hw/bnxt_re/qplib_fp.c
+ int bnxt_qplib_create_qp(...)
+ {
+ 	...
+ 	/* RQ */
+ 	if (!qp->srq) {
+ 		rq->dbinfo.flags = 0;
+ 		req.rq_size = cpu_to_le32(rq->max_wqe);
+-		pbl = &rq->hwq.pbl[PBL_LVL_0];
+-		req.rq_pbl = cpu_to_le64(pbl->pg_map_arr[0]);
+-		req.rq_pg_size_rq_lvl = rq->hwq.pg_sz_lvl;
++		if (rq->max_wqe) {
++			pbl = &rq->hwq.pbl[PBL_LVL_0];
++			req.rq_pbl = cpu_to_le64(pbl->pg_map_arr[0]);
++			req.rq_pg_size_rq_lvl = rq->hwq.pg_sz_lvl;
++		}
+ 		...
+ 	}
+ 	...
+ }
+
+diff --git a/drivers/infiniband/hw/bnxt_re/qplib_res.c b/drivers/infiniband/hw/bnxt_re/qplib_res.c
+--- a/drivers/infiniband/hw/bnxt_re/qplib_res.c
++++ b/drivers/infiniband/hw/bnxt_re/qplib_res.c
+ int bnxt_qplib_alloc_init_hwq(...)
+ {
+ 	...
+ 	pg_size = hwq_attr->sginfo->pgsize;
+ 	hwq->level = PBL_LVL_MAX;
+
++	if (!hwq_attr->depth && !hwq_attr->aux_depth)
++		return 0;
++
++	if (!pg_size)
++		pg_size = PAGE_SIZE;
++
+-	depth = roundup_pow_of_two(hwq_attr->depth);
+-	stride = roundup_pow_of_two(hwq_attr->stride);
++	depth = hwq_attr->depth ?
++		roundup_pow_of_two(hwq_attr->depth) : 0;
++	stride = hwq_attr->stride ?
++		roundup_pow_of_two(hwq_attr->stride) : 0;
+ 	if (hwq_attr->aux_depth) {
+ 		aux_slots = hwq_attr->aux_depth;
+-		aux_size = roundup_pow_of_two(hwq_attr->aux_stride);
++		aux_size = hwq_attr->aux_stride ?
++			roundup_pow_of_two(hwq_attr->aux_stride) : 0;
+ 		...
+ 	}
+ 	...
+ }
