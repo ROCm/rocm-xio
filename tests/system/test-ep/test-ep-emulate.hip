@@ -53,11 +53,13 @@ int test_emulate_roundtrip() {
   size_t cqSize = kThreads * sizeof(xio::test_ep::test_cqe);
 
   void *sq = nullptr, *cq = nullptr;
-  sq = calloc(1, sqSize);
-  cq = calloc(1, cqSize);
-  if (!sq || !cq) {
-    free(sq);
-    free(cq);
+  hipError_t sq_err = xio::allocHostMemory(
+    sqSize, &sq, "emulate SQ", XIO_HOST_MEM_PLAIN);
+  hipError_t cq_err = xio::allocHostMemory(
+    cqSize, &cq, "emulate CQ", XIO_HOST_MEM_PLAIN);
+  if (sq_err != hipSuccess || cq_err != hipSuccess) {
+    xio::freeHostMemory(sq, XIO_HOST_MEM_PLAIN);
+    xio::freeHostMemory(cq, XIO_HOST_MEM_PLAIN);
     fprintf(stderr, "Allocation failed\n");
     return 1;
   }
@@ -67,8 +69,8 @@ int test_emulate_roundtrip() {
 
   hipError_t err = xio::test_ep::run(&cfg);
 
-  free(sq);
-  free(cq);
+  xio::freeHostMemory(sq, XIO_HOST_MEM_PLAIN);
+  xio::freeHostMemory(cq, XIO_HOST_MEM_PLAIN);
 
   if (err != hipSuccess) {
     fprintf(stderr, "test-ep emulate run failed: %d\n", static_cast<int>(err));

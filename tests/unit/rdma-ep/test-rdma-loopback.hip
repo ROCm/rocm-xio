@@ -378,8 +378,11 @@ int main(int argc, char** argv) {
 
   size_t buf_size = xfer_size > 0 ? xfer_size * 2 : 4096;
   void* buf = nullptr;
-  if (posix_memalign(&buf, 4096, buf_size)) {
-    fprintf(stderr, "posix_memalign failed\n");
+  herr = xio::allocHostMemory(buf_size, &buf,
+                               "loopback data",
+                               XIO_HOST_MEM_PINNED);
+  if (herr != hipSuccess) {
+    fprintf(stderr, "allocHostMemory failed\n");
     return 1;
   }
 
@@ -400,7 +403,7 @@ int main(int argc, char** argv) {
   ret = backend.register_data_buffer(buf, buf_size);
   if (ret != 0) {
     fprintf(stderr, "register_data_buffer failed.\n");
-    free(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
   printf("Buffer registered: lkey=0x%x,"
@@ -411,17 +414,27 @@ int main(int argc, char** argv) {
 
   int* d_result = nullptr;
   unsigned long long* d_elapsed = nullptr;
-  herr = hipMalloc(&d_result, sizeof(int));
-  if (herr != hipSuccess) {
-    fprintf(stderr, "hipMalloc(result) failed.\n");
-    free(buf);
+  hsa_status_t hsa_ret = xio::allocDeviceMemory(
+    sizeof(int), (void**)&d_result,
+    "loopback result", XIO_DEVICE_MEM_HIP);
+  if (hsa_ret != HSA_STATUS_SUCCESS) {
+    fprintf(stderr,
+            "allocDeviceMemory(result) failed.\n");
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
-  herr = hipMalloc(&d_elapsed, sizeof(unsigned long long));
-  if (herr != hipSuccess) {
-    fprintf(stderr, "hipMalloc(elapsed) failed.\n");
-    (void)hipFree(d_result);
-    free(buf);
+  hsa_ret = xio::allocDeviceMemory(
+    sizeof(unsigned long long),
+    (void**)&d_elapsed, "loopback elapsed",
+    XIO_DEVICE_MEM_HIP);
+  if (hsa_ret != HSA_STATUS_SUCCESS) {
+    fprintf(stderr,
+            "allocDeviceMemory(elapsed) failed.\n");
+    xio::freeDeviceMemory(d_result,
+                          XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
   int h_result = -1;
@@ -440,12 +453,14 @@ int main(int argc, char** argv) {
     if (!src_ok) {
       fprintf(stderr, "Pre-check LFSR failed"
                       " on source buffer.\n");
-      free(buf);
+      backend.shutdown();
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       return 1;
     }
     if (dst[0] != 0x00) {
       fprintf(stderr, "Pre-check dst not zeroed.\n");
-      free(buf);
+      backend.shutdown();
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       return 1;
     }
   }
@@ -486,7 +501,8 @@ int main(int argc, char** argv) {
       int rrc = ibv_post_recv(backend.get_ibv_qp(), &recv_wr, &bad_wr);
       if (rrc != 0) {
         fprintf(stderr, "ibv_post_recv failed: %d\n", rrc);
-        free(buf);
+        backend.shutdown();
+        xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
         return 1;
       }
       printf("Posted receive WQE for"
@@ -497,8 +513,8 @@ int main(int argc, char** argv) {
       fprintf(stderr, "SKIP: WRITE_IMM not supported"
                       " for this provider (no"
                       " ibv_post_recv support).\n");
-      free(buf);
       backend.shutdown();
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       return 77;
     }
   }
@@ -527,18 +543,20 @@ int main(int argc, char** argv) {
   herr = hipGetLastError();
   if (herr != hipSuccess) {
     fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(herr));
-    (void)hipFree(d_elapsed);
-    (void)hipFree(d_result);
-    free(buf);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
 
   herr = hipDeviceSynchronize();
   if (herr != hipSuccess) {
     fprintf(stderr, "Kernel sync failed: %s\n", hipGetErrorString(herr));
-    (void)hipFree(d_elapsed);
-    (void)hipFree(d_result);
-    free(buf);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
 
@@ -571,8 +589,8 @@ int main(int argc, char** argv) {
   (void)hipMemcpy(&h_result, d_result, sizeof(int), hipMemcpyDeviceToHost);
   (void)hipMemcpy(&h_elapsed, d_elapsed, sizeof(h_elapsed),
                   hipMemcpyDeviceToHost);
-  (void)hipFree(d_elapsed);
-  (void)hipFree(d_result);
+  xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+  xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
 
   if (h_result != 0) {
     if (h_result == -2) {
@@ -600,7 +618,8 @@ int main(int argc, char** argv) {
               "Kernel reported error:"
               " %d\n",
               h_result);
-    free(buf);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
 
@@ -628,14 +647,14 @@ int main(int argc, char** argv) {
               "\nFAILED: LFSR mismatch at "
               "offset %zu (got 0x%02x).\n",
               err_offset, dst[err_offset]);
-      free(buf);
       backend.shutdown();
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
       return 1;
     }
   }
 
-  free(buf);
   backend.shutdown();
+  xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
 
   if (write_imm && xfer_size == 0) {
     printf("\nPASSED: %u zero-length WRITE_IMM"
