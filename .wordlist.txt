@@ -12,6 +12,8 @@ HSACO
 hsaco
 
 # ===== NVMe and Storage =====
+MTR
+rootfs
 CQE
 cqe
 cqeGenFromSqe

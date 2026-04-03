@@ -53,10 +53,10 @@ int test_emulate_roundtrip() {
   size_t cqSize = kThreads * sizeof(xio::test_ep::test_cqe);
 
   void *sq = nullptr, *cq = nullptr;
-  hipError_t sq_err = xio::allocHostMemory(
-    sqSize, &sq, "emulate SQ", XIO_HOST_MEM_PLAIN);
-  hipError_t cq_err = xio::allocHostMemory(
-    cqSize, &cq, "emulate CQ", XIO_HOST_MEM_PLAIN);
+  hipError_t sq_err = xio::allocHostMemory(sqSize, &sq, "emulate SQ",
+                                           XIO_HOST_MEM_PLAIN);
+  hipError_t cq_err = xio::allocHostMemory(cqSize, &cq, "emulate CQ",
+                                           XIO_HOST_MEM_PLAIN);
   if (sq_err != hipSuccess || cq_err != hipSuccess) {
     xio::freeHostMemory(sq, XIO_HOST_MEM_PLAIN);
     xio::freeHostMemory(cq, XIO_HOST_MEM_PLAIN);

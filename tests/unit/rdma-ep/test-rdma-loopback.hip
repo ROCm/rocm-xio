@@ -378,9 +378,8 @@ int main(int argc, char** argv) {
 
   size_t buf_size = xfer_size > 0 ? xfer_size * 2 : 4096;
   void* buf = nullptr;
-  herr = xio::allocHostMemory(buf_size, &buf,
-                               "loopback data",
-                               XIO_HOST_MEM_PINNED);
+  herr = xio::allocHostMemory(buf_size, &buf, "loopback data",
+                              XIO_HOST_MEM_PINNED);
   if (herr != hipSuccess) {
     fprintf(stderr, "allocHostMemory failed\n");
     return 1;
@@ -414,25 +413,21 @@ int main(int argc, char** argv) {
 
   int* d_result = nullptr;
   unsigned long long* d_elapsed = nullptr;
-  hsa_status_t hsa_ret = xio::allocDeviceMemory(
-    sizeof(int), (void**)&d_result,
-    "loopback result", XIO_DEVICE_MEM_HIP);
+  hsa_status_t hsa_ret = xio::allocDeviceMemory(sizeof(int), (void**)&d_result,
+                                                "loopback result",
+                                                XIO_DEVICE_MEM_HIP);
   if (hsa_ret != HSA_STATUS_SUCCESS) {
-    fprintf(stderr,
-            "allocDeviceMemory(result) failed.\n");
+    fprintf(stderr, "allocDeviceMemory(result) failed.\n");
     backend.shutdown();
     xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
   }
-  hsa_ret = xio::allocDeviceMemory(
-    sizeof(unsigned long long),
-    (void**)&d_elapsed, "loopback elapsed",
-    XIO_DEVICE_MEM_HIP);
+  hsa_ret = xio::allocDeviceMemory(sizeof(unsigned long long),
+                                   (void**)&d_elapsed, "loopback elapsed",
+                                   XIO_DEVICE_MEM_HIP);
   if (hsa_ret != HSA_STATUS_SUCCESS) {
-    fprintf(stderr,
-            "allocDeviceMemory(elapsed) failed.\n");
-    xio::freeDeviceMemory(d_result,
-                          XIO_DEVICE_MEM_HIP);
+    fprintf(stderr, "allocDeviceMemory(elapsed) failed.\n");
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
     backend.shutdown();
     xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return 1;
