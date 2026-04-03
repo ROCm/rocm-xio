@@ -71,11 +71,38 @@ will achieve higher aggregate IOPS.
    minimum working transfer size for loopback RDMA
    WRITE is 32 bytes.
 
+Queue Memory Placement
+----------------------
+
+The CQ and SQ buffers can reside in either host memory
+or GPU VRAM.  The ``--queue-mem host|vram`` flag on
+``test-rdma-loopback`` (and the ``queueMem`` field in
+``RdmaEpConfig``) selects the placement.
+
+============  ========================================
+Mode          Description
+============  ========================================
+``host``      ``hipHostMallocCoherent`` -- host-pinned,
+              fine-grained coherent memory.  NIC DMA
+              writes are visible to the GPU L2 without
+              explicit cache management.  Default.
+``vram``      ``allocDeviceMemory(UNCACHED)`` -- GPU
+              VRAM.  NIC writes via PCIe DMA; GPU
+              reads are local VRAM accesses with no
+              coherence concern.
+============  ========================================
+
+BNXT always uses VRAM for its CQ (allocated via DMA-BUF
+UMEM in the DV backend) regardless of this setting.
+IONIC uses host coherent memory by default; the IONIC
+kernel driver does not currently support VRAM-backed
+queues through ``ib_umem_get``.
+
 RDMA-EP Loopback Results
 ------------------------
 
-Broadcom (BNXT)
-^^^^^^^^^^^^^^^
+Broadcom (BNXT) -- CQ in VRAM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Latency
 """""""
@@ -89,208 +116,31 @@ Latency
      - Mean (us)
      - Std (us)
      - Max (us)
-   * - 32 B
-     - 35.9
-     - 38.6
-     - 3.1
-     - 43.6
-   * - 64 B
-     - 35.9
-     - 36.9
-     - 1.7
-     - 41.9
-   * - 128 B
-     - 35.8
-     - 37.1
-     - 1.9
-     - 42.5
    * - 256 B
-     - 21.4
-     - 34.9
-     - 4.9
-     - 42.2
-   * - 1 KiB
-     - 34.9
-     - 36.0
-     - 2.3
-     - 43.0
-   * - 4 KiB
-     - 33.9
-     - 36.9
-     - 2.7
-     - 42.4
-   * - 64 KiB
-     - 49.9
-     - 53.8
-     - 2.9
-     - 59.8
-   * - 1 MiB
-     - 163.9
-     - 166.4
-     - 1.6
-     - 168.8
-
-Throughput
-""""""""""
-
-.. list-table::
-   :widths: 15 17 17 17 17
-   :header-rows: 1
-
-   * - Size
-     - Min (MB/s)
-     - Mean (MB/s)
-     - Std (MB/s)
-     - Max (MB/s)
-   * - 32 B
-     - 0.7
-     - 0.8
-     - 0.1
-     - 0.9
-   * - 64 B
-     - 1.5
-     - 1.7
-     - 0.1
-     - 1.8
-   * - 128 B
-     - 3.0
-     - 3.5
-     - 0.2
-     - 3.6
-   * - 256 B
-     - 6.1
-     - 7.3
-     - 1.0
-     - 12.0
-   * - 1 KiB
+     - 21.8
      - 23.8
-     - 28.4
-     - 1.8
-     - 29.3
-   * - 4 KiB
-     - 96.6
-     - 111.0
-     - 8.1
-     - 120.8
-   * - 64 KiB
-     - 1,095.9
-     - 1,218.1
-     - 65.7
-     - 1,313.3
-   * - 1 MiB
-     - 6,211.9
-     - 6,301.5
-     - 60.6
-     - 6,397.7
-
-IOPS
-""""
-
-.. list-table::
-   :widths: 15 17 17 17 17
-   :header-rows: 1
-
-   * - Size
-     - Min
-     - Mean
-     - Std
-     - Max
-   * - 32 B
-     - 22,936
-     - 25,907
-     - 2,081
-     - 27,855
-   * - 64 B
-     - 23,866
-     - 27,100
-     - 1,249
-     - 27,855
-   * - 128 B
-     - 23,529
-     - 26,954
-     - 1,380
-     - 27,933
-   * - 256 B
-     - 23,697
-     - 28,653
-     - 4,023
-     - 46,729
+     - 4.6
+     - 37.4
    * - 1 KiB
-     - 23,256
-     - 27,778
-     - 1,775
-     - 28,653
-   * - 4 KiB
-     - 23,585
-     - 27,100
-     - 1,983
-     - 29,499
-   * - 64 KiB
-     - 16,722
-     - 18,587
-     - 1,002
-     - 20,040
-   * - 1 MiB
-     - 5,924
-     - 6,010
-     - 58
-     - 6,101
-
-Pensando (IONIC)
-^^^^^^^^^^^^^^^^
-
-Latency
-"""""""
-
-.. list-table::
-   :widths: 15 17 17 17 17
-   :header-rows: 1
-
-   * - Size
-     - Min (us)
-     - Mean (us)
-     - Std (us)
-     - Max (us)
-   * - 32 B
-     - 22.2
-     - 26.4
-     - 1.5
-     - 27.4
-   * - 64 B
-     - 26.2
-     - 26.8
+     - 21.6
+     - 22.5
      - 0.5
-     - 27.7
-   * - 128 B
-     - 25.3
-     - 26.4
-     - 0.6
-     - 27.4
-   * - 256 B
-     - 15.1
-     - 19.7
-     - 4.8
-     - 26.9
-   * - 1 KiB
      - 23.2
-     - 26.5
-     - 1.2
-     - 27.7
    * - 4 KiB
-     - 23.8
-     - 28.2
-     - 1.6
-     - 29.7
+     - 22.1
+     - 22.9
+     - 0.7
+     - 24.4
    * - 64 KiB
-     - 29.4
-     - 33.1
-     - 2.1
-     - 35.1
+     - 37.6
+     - 40.2
+     - 1.8
+     - 43.2
    * - 1 MiB
-     - 104.4
-     - 107.8
-     - 1.5
-     - 109.3
+     - 150.3
+     - 153.3
+     - 1.8
+     - 156.6
 
 Throughput
 """"""""""
@@ -304,46 +154,31 @@ Throughput
      - Mean (MB/s)
      - Std (MB/s)
      - Max (MB/s)
-   * - 32 B
-     - 1.2
-     - 1.2
-     - 0.1
-     - 1.4
-   * - 64 B
-     - 2.3
-     - 2.4
-     - 0.0
-     - 2.4
-   * - 128 B
-     - 4.7
-     - 4.8
-     - 0.1
-     - 5.1
    * - 256 B
-     - 9.5
-     - 13.0
-     - 3.2
-     - 17.0
+     - 6.8
+     - 10.8
+     - 2.1
+     - 11.7
    * - 1 KiB
-     - 37.0
-     - 38.6
-     - 1.7
      - 44.1
+     - 45.5
+     - 1.0
+     - 47.4
    * - 4 KiB
-     - 137.9
-     - 145.2
-     - 8.2
-     - 172.1
+     - 167.9
+     - 178.9
+     - 5.5
+     - 185.3
    * - 64 KiB
-     - 1,867.1
-     - 1,979.9
-     - 125.6
-     - 2,229.1
+     - 1,517.0
+     - 1,630.2
+     - 73.0
+     - 1,743.0
    * - 1 MiB
-     - 9,593.6
-     - 9,727.1
-     - 135.3
-     - 10,043.8
+     - 6,695.9
+     - 6,840.0
+     - 80.3
+     - 6,976.6
 
 IOPS
 """"
@@ -357,46 +192,148 @@ IOPS
      - Mean
      - Std
      - Max
-   * - 32 B
-     - 36,496
-     - 37,879
-     - 2,152
-     - 45,045
-   * - 64 B
-     - 36,101
-     - 37,313
-     - 696
-     - 38,168
-   * - 128 B
-     - 36,496
-     - 37,879
-     - 861
-     - 39,526
    * - 256 B
-     - 37,175
-     - 50,761
-     - 12,368
-     - 66,225
-   * - 1 KiB
-     - 36,101
-     - 37,736
-     - 1,709
-     - 43,103
-   * - 4 KiB
-     - 33,670
-     - 35,461
-     - 2,012
+     - 26,738
      - 42,017
+     - 8,121
+     - 45,872
+   * - 1 KiB
+     - 43,103
+     - 44,444
+     - 988
+     - 46,296
+   * - 4 KiB
+     - 40,984
+     - 43,668
+     - 1,335
+     - 45,249
    * - 64 KiB
-     - 28,490
-     - 30,211
-     - 1,917
-     - 34,014
+     - 23,148
+     - 24,876
+     - 1,114
+     - 26,596
    * - 1 MiB
-     - 9,149
-     - 9,276
-     - 129
-     - 9,579
+     - 6,386
+     - 6,523
+     - 77
+     - 6,653
+
+Pensando (IONIC) -- CQ in Host Coherent
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Latency
+"""""""
+
+.. list-table::
+   :widths: 15 17 17 17 17
+   :header-rows: 1
+
+   * - Size
+     - Min (us)
+     - Mean (us)
+     - Std (us)
+     - Max (us)
+   * - 256 B
+     - 14.6
+     - 15.5
+     - 0.7
+     - 17.1
+   * - 1 KiB
+     - 14.0
+     - 15.0
+     - 0.5
+     - 15.9
+   * - 4 KiB
+     - 16.3
+     - 16.7
+     - 0.3
+     - 17.2
+   * - 64 KiB
+     - 22.2
+     - 22.7
+     - 0.4
+     - 23.2
+   * - 1 MiB
+     - 96.7
+     - 97.9
+     - 0.5
+     - 98.6
+
+Throughput
+""""""""""
+
+.. list-table::
+   :widths: 15 17 17 17 17
+   :header-rows: 1
+
+   * - Size
+     - Min (MB/s)
+     - Mean (MB/s)
+     - Std (MB/s)
+     - Max (MB/s)
+   * - 256 B
+     - 15.0
+     - 16.5
+     - 0.7
+     - 17.5
+   * - 1 KiB
+     - 64.4
+     - 68.3
+     - 2.3
+     - 73.1
+   * - 4 KiB
+     - 238.1
+     - 245.3
+     - 4.4
+     - 251.3
+   * - 64 KiB
+     - 2,824.8
+     - 2,887.0
+     - 50.9
+     - 2,952.1
+   * - 1 MiB
+     - 10,634.6
+     - 10,710.7
+     - 54.7
+     - 10,843.6
+
+IOPS
+""""
+
+.. list-table::
+   :widths: 15 17 17 17 17
+   :header-rows: 1
+
+   * - Size
+     - Min
+     - Mean
+     - Std
+     - Max
+   * - 256 B
+     - 58,480
+     - 64,516
+     - 2,914
+     - 68,493
+   * - 1 KiB
+     - 62,893
+     - 66,667
+     - 2,222
+     - 71,429
+   * - 4 KiB
+     - 58,140
+     - 59,880
+     - 1,076
+     - 61,350
+   * - 64 KiB
+     - 43,103
+     - 44,053
+     - 776
+     - 45,045
+   * - 1 MiB
+     - 10,142
+     - 10,215
+     - 52
+     - 10,341
 
 RDMA WRITE with Immediate
 -------------------------
@@ -416,26 +353,28 @@ the immediate value by consuming a receive WQE from the
 responder's RQ and generating a completion with the
 immediate data.
 
-Current limitations:
+Current status:
+
+- **IONIC**: Functional with ``hipHostMallocCoherent``
+  queue buffers.  Zero-length WRITE_IMM completes in
+  ~14--16 us (loopback).  Occasional failures (~2/10)
+  on rapid QP number reuse are a firmware timing issue,
+  not a coherence problem.
 
 - **BNXT**: The DV-created QP does not expose
-  ``ibv_post_recv``. Posting receive WQEs (required for
-  WRITE_IMM) is not supported through the current DV
-  path. WRITE_IMM is skipped on BNXT (exit code 77).
+  ``ibv_post_recv``.  Posting receive WQEs (required
+  for WRITE_IMM) is not supported through the current
+  DV path.  WRITE_IMM is skipped on BNXT (exit 77).
 
-- **IONIC**: The GDA mode sets ``recv=false`` in
-  ``ionic_dv_qp_set_gda()``, so ``ibv_post_recv``
-  should use the standard verbs doorbell path. However,
-  loopback WRITE_IMM completions are unreliable in
-  testing -- the send CQE is not consistently generated,
-  likely due to a firmware interaction between the RQ
-  receive WQE delivery and the GDA send CQ polling in
-  loopback configuration.
+.. note::
 
-WRITE_IMM performance results will be added once these
-receive-side limitations are resolved. The send-side
-WQE construction (opcode, immediate data field) is
-verified correct for both vendors.
+   The ``hipHostMallocCoherent`` fix for the IONIC
+   parent domain allocator was critical for reliable
+   CQ polling.  Without the coherent flag, the GPU L2
+   cache served stale CQE data from previous QP
+   allocations, causing ~60% of WRITE_IMM operations
+   to time out.  This matches the nvme-ep queue
+   allocation path which also uses coherent memory.
 
 Reproducing These Results
 -------------------------
@@ -477,6 +416,18 @@ for each vendor and transfer size:
      --provider ionic \
      --device rocm-rdma-ionic0 \
      --size 4096 --seed 1
+
+Queue memory placement can be selected per-run:
+
+.. code-block:: bash
+
+   # Host coherent (default, used by IONIC)
+   sudo env LD_LIBRARY_PATH="${LIB}" \
+     build/tests/unit/rdma-ep/test-rdma-loopback \
+     --provider ionic \
+     --device rocm-rdma-ionic0 \
+     --size 4096 --seed 1 \
+     --queue-mem host
 
 Or use the convenience script which iterates over
 multiple seeds and computes statistics automatically:

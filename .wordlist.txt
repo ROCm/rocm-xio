@@ -41,6 +41,7 @@ SSDs
 # ===== RDMA and Networking =====
 DMA
 dma
+BUF
 DMABUF
 dmabuf
 DMAs
@@ -847,6 +848,7 @@ uapi
 UAR
 udata
 umem
+UMEM
 VAs
 VMware
 WQE
@@ -861,6 +863,7 @@ mlx
 natively
 pvrdma
 qp
+queueMem
 recv
 resizable
 responder's
@@ -984,6 +987,7 @@ signalCounter
 TestEpConfig
 validateConfig
 vram
+VRAM
 waitCounter
 waitSignal
 XioEndpoint

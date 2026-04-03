@@ -70,8 +70,8 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_rdma_write_ = 0x08;     // MLX5_OPCODE_RDMA_WRITE
       op_rdma_write_imm_ = 0x09; // MLX5_OPCODE_RDMA_WRITE_IMM
       op_rdma_read_ = 0x10;      // MLX5_OPCODE_RDMA_READ
-      op_atomic_fa_ = 0x13;  // MLX5_OPCODE_ATOMIC_FA
-      op_atomic_cs_ = 0x12;  // MLX5_OPCODE_ATOMIC_CS
+      op_atomic_fa_ = 0x13;      // MLX5_OPCODE_ATOMIC_FA
+      op_atomic_cs_ = 0x12;      // MLX5_OPCODE_ATOMIC_CS
       nonfetching_atomic_lkey_ = htobe32(mr_nonfetching_atomic_->lkey);
       fetching_atomic_lkey_ = htobe32(mr_fetching_atomic_->lkey);
       break;
@@ -160,8 +160,7 @@ __device__ void QueuePair::put_nbi_imm_single(void* dest, const void* source,
                                               bool ring_db) {
   uintptr_t src = reinterpret_cast<uintptr_t>(source);
   uintptr_t dst = reinterpret_cast<uintptr_t>(dest);
-  post_wqe_rma_single(nelems, src, dst, op_rdma_write_imm_, ring_db,
-                      imm_data);
+  post_wqe_rma_single(nelems, src, dst, op_rdma_write_imm_, ring_db, imm_data);
 }
 
 __device__ void QueuePair::get_nbi(void* dest, const void* source,
@@ -235,29 +234,29 @@ __device__ void QueuePair::post_wqe_rma_single(int32_t size, uintptr_t laddr,
                                                uint32_t imm_data) {
 #if defined(GDA_BNXT)
   if (provider_ == Provider::BNXT) {
-    bnxt::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode,
-                                   ring_db, imm_data);
+    bnxt::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db,
+                                   imm_data);
     return;
   }
 #endif
 #if defined(GDA_MLX5)
   if (provider_ == Provider::MLX5) {
-    mlx5::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode,
-                                   ring_db, imm_data);
+    mlx5::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db,
+                                   imm_data);
     return;
   }
 #endif
 #if defined(GDA_IONIC)
   if (provider_ == Provider::IONIC) {
-    ionic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode,
-                                   ring_db, imm_data);
+    ionic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db,
+                                    imm_data);
     return;
   }
 #endif
 #if defined(GDA_ERNIC)
   if (provider_ == Provider::ROCM_ERNIC) {
-    ernic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode,
-                                   ring_db, imm_data);
+    ernic::Ops::post_wqe_rma_single(*this, size, laddr, raddr, opcode, ring_db,
+                                    imm_data);
     return;
   }
 #endif

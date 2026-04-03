@@ -24,9 +24,13 @@
 
 #include <unistd.h>
 
+#if defined(GDA_IONIC)
+#ifndef INFINIBAND_VERBS_H
 extern "C" {
 #include <infiniband/verbs.h>
 }
+#endif
+#endif
 
 #include "detect-pci-vendor.hpp"
 #include "gda-backend.hpp"
@@ -61,7 +65,9 @@ static void print_usage(const char* prog) {
           "  -n N            Iterations"
           " (default %u)\n"
           "  --write-imm     Use RDMA WRITE"
-          " with immediate data\n",
+          " with immediate data\n"
+          "  --queue-mem M   host|vram"
+          " (default host)\n",
           prog, DEFAULT_XFER_SIZE, DEFAULT_LFSR_SEED, DEFAULT_ITERATIONS);
 }
 
@@ -159,8 +165,64 @@ __global__ void loopback_write_imm_kernel(QueuePair* qp, void* src_ptr,
 
   for (unsigned i = 0; i < iterations; i++) {
     uint32_t imm = i + 1;
-    qp->put_nbi_imm_single(dst_ptr, src_ptr, length,
-                           imm, true);
+
+#if defined(GDA_IONIC)
+    if (qp->provider_ == Provider::IONIC) {
+      volatile struct ionic_v1_cqe* cqe = &qp->ionic_cq_buf_[0];
+      __hip_atomic_store((uint32_t*)&cqe->send.msg_msn, 0u, __ATOMIC_RELEASE,
+                         __HIP_MEMORY_SCOPE_SYSTEM);
+      __hip_atomic_store((uint32_t*)&cqe->qid_type_flags, 0u, __ATOMIC_RELEASE,
+                         __HIP_MEMORY_SCOPE_SYSTEM);
+      __threadfence_system();
+
+      qp->put_nbi_imm_single(dst_ptr, src_ptr, length, imm, true);
+
+      uint32_t timeout = 0;
+      uint32_t cons = qp->sq_prod_;
+      uint32_t qtf_be = __hip_atomic_load((uint32_t*)&cqe->qid_type_flags,
+                                          __ATOMIC_ACQUIRE,
+                                          __HIP_MEMORY_SCOPE_SYSTEM);
+      uint32_t msn = byteswap<uint32_t>(
+        __hip_atomic_load((uint32_t*)&cqe->send.msg_msn, __ATOMIC_ACQUIRE,
+                          __HIP_MEMORY_SCOPE_SYSTEM));
+
+      while ((msn - cons) & 0x800000) {
+        if (++timeout > 5000000) {
+          uint32_t st_len = __hip_atomic_load((uint32_t*)&cqe->status_length,
+                                              __ATOMIC_ACQUIRE,
+                                              __HIP_MEMORY_SCOPE_SYSTEM);
+          printf("WRITE_IMM TIMEOUT: "
+                 "qtf=0x%08x msn=%u "
+                 "cons=%u st_len=0x%08x "
+                 "sq_prod=%u iter=%u\n",
+                 qtf_be, msn, cons, st_len, qp->sq_prod_, i);
+          *result = -2;
+          *elapsed = wall_clock64() - t0;
+          return;
+        }
+        qtf_be = __hip_atomic_load((uint32_t*)&cqe->qid_type_flags,
+                                   __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
+        msn = byteswap<uint32_t>(
+          __hip_atomic_load((uint32_t*)&cqe->send.msg_msn, __ATOMIC_ACQUIRE,
+                            __HIP_MEMORY_SCOPE_SYSTEM));
+      }
+
+      if (qtf_be & byteswap<uint32_t>(IONIC_V1_CQE_ERROR)) {
+        uint32_t st_len = __hip_atomic_load((uint32_t*)&cqe->status_length,
+                                            __ATOMIC_ACQUIRE,
+                                            __HIP_MEMORY_SCOPE_SYSTEM);
+        printf("WRITE_IMM CQE ERROR: "
+               "qtf=0x%08x msn=%u "
+               "st_len=0x%08x iter=%u\n",
+               qtf_be, msn, st_len, i);
+        *result = -3;
+        *elapsed = wall_clock64() - t0;
+        return;
+      }
+      continue;
+    }
+#endif
+    qp->put_nbi_imm_single(dst_ptr, src_ptr, length, imm, true);
     qp->quiet_single();
   }
 
@@ -176,6 +238,7 @@ int main(int argc, char** argv) {
   const char* device_name = nullptr;
   bool diag_mode = false;
   bool write_imm = false;
+  QueueMemMode queue_mem = QueueMemMode::HOST_COHERENT;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
@@ -194,6 +257,19 @@ int main(int argc, char** argv) {
       diag_mode = true;
     } else if (strcmp(argv[i], "--write-imm") == 0) {
       write_imm = true;
+    } else if (strcmp(argv[i], "--queue-mem") == 0 && i + 1 < argc) {
+      const char* m = argv[++i];
+      if (strcmp(m, "vram") == 0)
+        queue_mem = QueueMemMode::DEVICE_VRAM;
+      else if (strcmp(m, "host") == 0)
+        queue_mem = QueueMemMode::HOST_COHERENT;
+      else {
+        fprintf(stderr,
+                "Unknown --queue-mem: %s"
+                " (use host or vram)\n",
+                m);
+        return 1;
+      }
     } else {
       print_usage(argv[0]);
       return 1;
@@ -253,10 +329,12 @@ int main(int argc, char** argv) {
 
   const char* prov_name = provider_name(prov);
 
+  const char* qmem_name = queue_mem == QueueMemMode::DEVICE_VRAM ? "vram"
+                                                                 : "host";
   printf("=== %s Loopback Data Path Test ===\n", prov_name);
   printf("  provider=%s  size=%u  seed=%u"
-         "  iterations=%u\n\n",
-         prov_name, xfer_size, lfsr_seed, iterations);
+         "  iterations=%u  queue-mem=%s\n\n",
+         prov_name, xfer_size, lfsr_seed, iterations, qmem_name);
 
   hipError_t herr = hipInit(0);
   if (herr != hipSuccess) {
@@ -279,6 +357,7 @@ int main(int argc, char** argv) {
   cfg.cq_depth = 256;
   cfg.inline_threshold = 28;
   cfg.loopback = true;
+  cfg.queue_mem = queue_mem;
   if (device_name)
     cfg.hca_list = device_name;
 
@@ -372,44 +451,56 @@ int main(int argc, char** argv) {
   }
 
   if (write_imm) {
-#if defined(GDA_BNXT)
-    if (prov == Provider::BNXT) {
+#if defined(GDA_IONIC)
+    if (prov == Provider::IONIC) {
+      QueuePair* hqp = backend.get_host_qp();
+      if (hqp && hqp->ionic_cq_buf_) {
+        memset(hqp->ionic_cq_buf_, 0, sizeof(struct ionic_v1_cqe));
+        __sync_synchronize();
+        fprintf(stderr,
+                "DBG: zeroed CQ buf[0] at %p"
+                " from CPU\n",
+                (void*)hqp->ionic_cq_buf_);
+      }
+    }
+#endif
+#if defined(GDA_IONIC)
+    if (prov == Provider::IONIC) {
+      struct ibv_recv_wr recv_wr = {};
+      recv_wr.wr_id = 0;
+      recv_wr.next = nullptr;
+
+      if (xfer_size == 0) {
+        recv_wr.sg_list = nullptr;
+        recv_wr.num_sge = 0;
+      } else {
+        static struct ibv_sge recv_sge = {};
+        recv_sge.addr = reinterpret_cast<uint64_t>(dst);
+        recv_sge.length = xfer_size;
+        recv_sge.lkey = backend.get_lkey();
+        recv_wr.sg_list = &recv_sge;
+        recv_wr.num_sge = 1;
+      }
+
+      struct ibv_recv_wr* bad_wr = nullptr;
+      int rrc = ibv_post_recv(backend.get_ibv_qp(), &recv_wr, &bad_wr);
+      if (rrc != 0) {
+        fprintf(stderr, "ibv_post_recv failed: %d\n", rrc);
+        free(buf);
+        return 1;
+      }
+      printf("Posted receive WQE for"
+             " WRITE_IMM.\n");
+    } else
+#endif
+    {
       fprintf(stderr, "SKIP: WRITE_IMM not supported"
-                      " on BNXT DV path (no"
+                      " for this provider (no"
                       " ibv_post_recv support).\n");
       free(buf);
       backend.shutdown();
       return 77;
     }
-#endif
-
-    struct ibv_recv_wr recv_wr = {};
-    recv_wr.wr_id = 0;
-    recv_wr.next = nullptr;
-
-    if (xfer_size == 0) {
-      recv_wr.sg_list = nullptr;
-      recv_wr.num_sge = 0;
-    } else {
-      static struct ibv_sge recv_sge = {};
-      recv_sge.addr =
-        reinterpret_cast<uint64_t>(dst);
-      recv_sge.length = xfer_size;
-      recv_sge.lkey = backend.get_lkey();
-      recv_wr.sg_list = &recv_sge;
-      recv_wr.num_sge = 1;
-    }
-
-    struct ibv_recv_wr* bad_wr = nullptr;
-    int rrc = ibv_post_recv(backend.get_ibv_qp(),
-                            &recv_wr, &bad_wr);
-    if (rrc != 0) {
-      fprintf(stderr, "ibv_post_recv failed: %d\n",
-              rrc);
-      free(buf);
-      return 1;
-    }
-    printf("Posted receive WQE for WRITE_IMM.\n");
   }
 
   if (diag_mode) {
@@ -484,7 +575,31 @@ int main(int argc, char** argv) {
   (void)hipFree(d_result);
 
   if (h_result != 0) {
-    fprintf(stderr, "Kernel reported error: %d\n", h_result);
+    if (h_result == -2) {
+      fprintf(stderr, "Kernel timed out waiting"
+                      " for CQE.\n");
+#if defined(GDA_IONIC)
+      if (prov == Provider::IONIC) {
+        QueuePair* hqp = backend.get_host_qp();
+        volatile struct ionic_v1_cqe* cpu_cqe = hqp->ionic_cq_buf_;
+        uint32_t cpu_qtf = cpu_cqe->qid_type_flags;
+        uint32_t cpu_msn = cpu_cqe->send.msg_msn;
+        uint32_t cpu_st = cpu_cqe->status_length;
+        fprintf(stderr,
+                "CPU CQE[0]: qtf=0x%08x"
+                " msn_raw=0x%08x"
+                " st_len=0x%08x\n",
+                cpu_qtf, cpu_msn, cpu_st);
+      }
+#endif
+    } else if (h_result == -3)
+      fprintf(stderr, "Kernel got CQE error"
+                      " (see GPU printf above).\n");
+    else
+      fprintf(stderr,
+              "Kernel reported error:"
+              " %d\n",
+              h_result);
     free(buf);
     return 1;
   }
@@ -496,8 +611,7 @@ int main(int argc, char** argv) {
   double total_us = (static_cast<double>(h_elapsed) / freq_khz) * 1000.0;
   printf("Kernel completed: %.1f us "
          "(RDMA %s + CQE wait).\n",
-         total_us,
-         write_imm ? "WRITE_IMM" : "WRITE");
+         total_us, write_imm ? "WRITE_IMM" : "WRITE");
 
   if (xfer_size > 0) {
     printf("Post-check: dst[0]=0x%02x,"
@@ -532,9 +646,7 @@ int main(int argc, char** argv) {
     printf("\nPASSED: All %u bytes LFSR-verified"
            " via %s RDMA %s loopback"
            " (%u iterations).\n",
-           xfer_size, prov_name,
-           write_imm ? "WRITE_IMM" : "WRITE",
-           iterations);
+           xfer_size, prov_name, write_imm ? "WRITE_IMM" : "WRITE", iterations);
   }
   return 0;
 }

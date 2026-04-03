@@ -67,7 +67,11 @@ struct AmoDescriptor {
   uint32_t fetch_lkey;
 };
 
-// Provider ID enum (replaces rocshmem GDAProvider)
+enum class QueueMemMode : uint8_t {
+  HOST_COHERENT = 0,
+  DEVICE_VRAM = 1,
+};
+
 enum class Provider : uint8_t {
   BNXT = 0,
   MLX5 = 1,

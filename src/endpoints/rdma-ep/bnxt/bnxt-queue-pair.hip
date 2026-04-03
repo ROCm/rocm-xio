@@ -179,8 +179,7 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
 
   hdr.rsv_ws_fl_wt = (wqe_size << BNXT_RE_HDR_WS_SHIFT) |
                      (hdr_flags << BNXT_RE_HDR_FLAGS_SHIFT) | wqe_type;
-  hdr.key_immd = (opcode == qp.op_rdma_write_imm_)
-               ? imm_data : 0;
+  hdr.key_immd = (opcode == qp.op_rdma_write_imm_) ? imm_data : 0;
   hdr.lhdr.qkey_len = length;
   rdma.rva = raddr;
   rdma.rkey = qp.rkey_;
@@ -217,8 +216,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
   for (int i = 0; i < count; i++) {
     if (i == my_num) {
-      write_rma_wqe(qp, raddr, laddr, length, opcode,
-                    imm_data);
+      write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
       ring_doorbell(qp, qp.bnxt_sq_.tail);
     }
   }
