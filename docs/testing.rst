@@ -218,6 +218,137 @@ features:
    # Quick CTest-only run (no profiling/stats)
    ctest --preset sweep
 
+GPU Configuration for Multi-Wavefront Kernels
+----------------------------------------------
+
+Any endpoint kernel that spans multiple wavefronts
+(i.e., the thread block contains more threads than the
+hardware wavefront size) uses ``__syncthreads()``
+barriers to coordinate work across wavefronts. These
+barriers prevent the GPU scheduler from preempting the
+workgroup mid-execution. Two amdgpu driver behaviours
+interact badly with non-preemptible workgroups and
+must be configured before running long or infinite
+multi-wavefront kernels.
+
+For ``nvme-ep`` this applies when ``--batch-size``
+exceeds the wavefront size (typically 32 on RDNA or 64
+on CDNA). Other endpoints are similarly affected
+whenever their GPU kernels launch thread blocks larger
+than one wavefront.
+
+Background on GPU preemption and reset is documented in
+the `amdgpu module parameters`_ section of the Linux
+kernel documentation. The ``cwsr_enable`` parameter
+(Compute Wave Store and Resume) controls mid-wave
+preemption support. When a workgroup holds a
+``__syncthreads()`` barrier, CWSR cannot save and
+restore individual waves, so the entire workgroup
+becomes non-preemptible. See also the `ROCm system
+debugging guide`_ for related environment variables.
+
+.. _amdgpu module parameters:
+   https://www.kernel.org/doc/html/next/gpu/amdgpu/module-parameters.html
+.. _ROCm system debugging guide:
+   https://rocm.docs.amd.com/en/latest/how-to/system-debugging.html
+
+Disable GPU power management
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+On headless systems the amdgpu driver periodically
+suspends and resumes the GPU (every ~20 seconds) via
+two independent mechanisms: DPM (Dynamic Power
+Management) level switching and PCI runtime power
+management (``runpm``). Both are described in the
+`amdgpu module parameters`_ documentation.
+
+Single-wavefront kernels survive these suspend/resume
+cycles because CWSR can preempt and restore them.
+Multi-wavefront kernels that hold ``__syncthreads()``
+barriers cannot be preempted, so a power-gate cycle
+terminates the kernel and resets the GPU. A GPU reset
+can cause system-wide instability including crashes
+in unrelated processes.
+
+Both DPM and PCI runtime PM must be disabled. Set
+them at runtime before launching kernels:
+
+.. code-block:: bash
+
+   # Set DPM to high performance
+   echo high | sudo tee \
+     /sys/class/drm/card1/device/\
+   power_dpm_force_performance_level
+
+   # Disable PCI runtime power management
+   echo on | sudo tee \
+     /sys/class/drm/card1/device/power/control
+
+To make ``runpm`` persist across reboots, add it to
+the modprobe configuration alongside
+``lockup_timeout``:
+
+.. code-block:: bash
+
+   echo "options amdgpu lockup_timeout=-1 runpm=0" \
+     | sudo tee /etc/modprobe.d/amdgpu-lockup.conf
+   sudo update-initramfs -u
+
+The ``power_dpm_force_performance_level`` cannot be
+persisted via modprobe and must be set each session,
+for example via a systemd unit or rc.local script.
+
+To restore automatic power management afterwards:
+
+.. code-block:: bash
+
+   echo auto | sudo tee \
+     /sys/class/drm/card1/device/\
+   power_dpm_force_performance_level
+   echo auto | sudo tee \
+     /sys/class/drm/card1/device/power/control
+
+.. note::
+
+   The ``card1`` path assumes the GPU is the second
+   DRM device.  Check ``ls /sys/class/drm/`` to find
+   the correct card number for your system.
+
+Set compute lockup timeout to infinity
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The amdgpu driver's ``lockup_timeout`` parameter
+(default 2000 ms) resets the GPU if a compute dispatch
+does not signal its completion fence within the timeout
+window. Infinite-mode kernels never complete by design,
+and long-running finite kernels may also exceed the
+default. The `amdgpu module parameters`_ documentation
+describes the timeout format and default values.
+
+This parameter is read-only at runtime and must be set
+at module load time. Create a modprobe configuration
+file and rebuild the initramfs so the setting takes
+effect when the amdgpu module loads during boot:
+
+.. code-block:: bash
+
+   echo "options amdgpu lockup_timeout=-1" \
+     | sudo tee /etc/modprobe.d/amdgpu-lockup.conf
+   sudo update-initramfs -u
+   sudo reboot
+
+Verify after reboot:
+
+.. code-block:: bash
+
+   cat /sys/module/amdgpu/parameters/lockup_timeout
+   # Should show: -1
+
+Both settings are required for any endpoint kernel that
+uses multi-wavefront thread blocks in infinite or
+long-running mode. Single-wavefront kernels and
+short-duration tests do not need them.
+
 Adding New Tests
 ----------------
 

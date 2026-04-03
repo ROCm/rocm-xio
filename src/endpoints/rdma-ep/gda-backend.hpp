@@ -43,6 +43,7 @@ struct BackendConfig {
   DestInfo remote{};
   const char* hca_list{nullptr};
   bool pci_mmio_bridge{false};
+  QueueMemMode queue_mem{QueueMemMode::HOST_COHERENT};
 };
 
 class Backend {

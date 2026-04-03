@@ -34,20 +34,17 @@ extern "C" {
 int nvme_ep_cleanup_queues(void* endpointConfig);
 }
 
-// SIGINT handler - sets stop flag and attempts to cleanup NVMe queues
+// SIGINT handler - sets stop flag so the GPU kernel
+// exits gracefully via its stopRequested poll loop.
+// Queue cleanup happens in the normal exit path after
+// hipDeviceSynchronize() returns, which ensures the
+// GPU kernel has stopped accessing queue memory before
+// the queues are deleted.
 static void sigintHandler(int sig) {
-  (void)sig; // Suppress unused parameter warning
+  (void)sig;
   if (g_configForSignalHandler != nullptr &&
       g_configForSignalHandler->stopRequested != nullptr) {
     *g_configForSignalHandler->stopRequested = true;
-  }
-
-  // Attempt to delete NVMe queues if this is the NVMe endpoint
-  if (g_configForSignalHandler != nullptr &&
-      g_configForSignalHandler->endpointConfig != nullptr &&
-      g_endpointNameForSignalHandler != nullptr &&
-      *g_endpointNameForSignalHandler == "nvme-ep") {
-    nvme_ep_cleanup_queues(g_configForSignalHandler->endpointConfig);
   }
 }
 

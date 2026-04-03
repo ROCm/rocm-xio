@@ -124,7 +124,7 @@ echo ""
 echo "Step 2: Computing LBAs and verifying..."
 
 python3 << PYEOF
-import subprocess, sys, os
+import sys, os
 
 lfsr_seed_str = '${LFSR_SEED}'
 if lfsr_seed_str.startswith('0x') or \
@@ -138,7 +138,6 @@ base_lba = ${BASE_LBA}
 lba_size = ${LBA_SIZE}
 ns_capacity = ${NS_CAPACITY}
 ns_dev = '${NS}'
-temp_dir = '${TEMP_DIR}'
 
 
 def get_random_lba(op_index, cmd_id,
@@ -147,7 +146,6 @@ def get_random_lba(op_index, cmd_id,
     """Reproduces getRandomLba() from nvme-ep.hip."""
     M64 = 0xFFFFFFFFFFFFFFFF
     M32 = 0xFFFFFFFF
-    # cmd_id * 0x85ebca6b is uint32_t in C++
     seed = (op_index * 0x9e3779b9
             + ((cmd_id * 0x85ebca6b) & M32)
             + lfsr_seed) & M64
@@ -179,7 +177,6 @@ def generate_expected_block(lba_size, lfsr_seed):
     return bytes(pattern)
 
 
-# Compute which LBAs were written (de-duplicate)
 written_lbas = set()
 for i in range(num_writes):
     cmd_id = (i % 65535) + 1
@@ -191,51 +188,36 @@ unique_lbas = sorted(written_lbas)
 print(f"Unique LBAs written: {len(unique_lbas)}"
       f" (from {num_writes} ops)")
 
-# Generate expected pattern (same for all LBAs)
 expected = generate_expected_block(lba_size, lfsr_seed)
-expected_file = os.path.join(temp_dir, "expected.bin")
-with open(expected_file, 'wb') as f:
-    f.write(expected)
-
 print(f"Expected pattern ({lba_size} bytes):"
       f" first 8 = {expected[:8].hex()}")
 
-# Verify each LBA
 fail_count = 0
 ok_count = 0
-for lba in unique_lbas:
-    read_file = os.path.join(
-        temp_dir, f"lba_{lba}.bin")
-    rc = subprocess.run(
-        ['dd', f'if={ns_dev}',
-         f'bs={lba_size}', f'skip={lba}',
-         'count=1', f'of={read_file}'],
-        capture_output=True)
-    if rc.returncode != 0:
-        print(f"FAIL: dd read LBA {lba} failed:"
-              f" {rc.stderr.decode().strip()}")
-        fail_count += 1
-        continue
 
-    with open(read_file, 'rb') as f:
-        actual = f.read()
+with open(ns_dev, 'rb') as dev:
+    for lba in unique_lbas:
+        dev.seek(lba * lba_size)
+        actual = dev.read(lba_size)
 
-    if actual != expected:
-        print(f"FAIL: LBA {lba} mismatch"
-              f" (got {len(actual)} bytes,"
-              f" first 8 = {actual[:8].hex()})")
-        fail_count += 1
-        if fail_count <= 3:
-            for j in range(min(len(actual),
-                               len(expected))):
-                if actual[j] != expected[j]:
-                    print(f"  first diff at byte {j}:"
-                          f" got 0x{actual[j]:02x}"
-                          f" expected"
-                          f" 0x{expected[j]:02x}")
-                    break
-    else:
-        ok_count += 1
+        if actual != expected:
+            print(f"FAIL: LBA {lba} mismatch"
+                  f" (got {len(actual)} bytes,"
+                  f" first 8 = {actual[:8].hex()})")
+            fail_count += 1
+            if fail_count <= 3:
+                for j in range(min(len(actual),
+                                   len(expected))):
+                    if actual[j] != expected[j]:
+                        print(
+                            f"  first diff at byte"
+                            f" {j}:"
+                            f" got 0x{actual[j]:02x}"
+                            f" expected"
+                            f" 0x{expected[j]:02x}")
+                        break
+        else:
+            ok_count += 1
 
 print(f"Results: {ok_count} OK, {fail_count} FAIL"
       f" / {len(unique_lbas)} LBAs")

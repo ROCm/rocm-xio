@@ -58,6 +58,8 @@ struct RdmaEpConfig {
   bool verify = false;                /**< LFSR verification flag.  */
   uint32_t seed = 1;                  /**< LFSR seed value.         */
   std::string deviceName;             /**< RDMA device name filter. */
+  QueueMemMode queueMem = QueueMemMode::HOST_COHERENT; /**< Queue buffer
+                                                          placement. */
 
   /** @name 2-Node Mode Fields
    *  Mutually exclusive with loopback mode.

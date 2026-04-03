@@ -202,7 +202,7 @@ __device__ void Ops::quiet_single(QueuePair& qp) {
 
 __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
                                   uintptr_t laddr, uintptr_t raddr,
-                                  uint8_t opcode) {
+                                  uint8_t opcode, uint32_t imm_data) {
   uint64_t qp_lane_mask = qp.get_same_qp_lane_mask();
   int qp_lane_count = popcount64(qp_lane_mask);
   int lane = get_lane_id();
@@ -224,6 +224,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
   gda_mlx5_wqe wqe{
     wqe_idx,  opcode, qp.qp_num_, MLX5_WQE_CTRL_CQ_UPDATE,       raddr,
     qp.rkey_, laddr,  qp.lkey_,   static_cast<uint32_t>(length), send_inline};
+  wqe.ctrl.imm = endian::to_be<uint32_t>(imm_data);
 
   qp.mlx5_sq_.buf[sq_idx] = wqe;
 
@@ -237,7 +238,8 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
 __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t length,
                                          uintptr_t laddr, uintptr_t raddr,
-                                         uint8_t opcode, bool ring_db) {
+                                         uint8_t opcode, bool ring_db,
+                                         uint32_t imm_data) {
   mlx5_acquire_lock(&qp.mlx5_sq_.lock);
   poll_cq_until(qp, 1);
 
@@ -250,6 +252,7 @@ __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t length,
   gda_mlx5_wqe wqe{
     wqe_idx,  opcode, qp.qp_num_, MLX5_WQE_CTRL_CQ_UPDATE,       raddr,
     qp.rkey_, laddr,  qp.lkey_,   static_cast<uint32_t>(length), send_inline};
+  wqe.ctrl.imm = endian::to_be<uint32_t>(imm_data);
 
   qp.mlx5_sq_.buf[sq_idx] = wqe;
   qp.mlx5_sq_.tail += 1;

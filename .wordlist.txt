@@ -44,6 +44,7 @@ SSDs
 # ===== RDMA and Networking =====
 DMA
 dma
+BUF
 DMABUF
 dmabuf
 DMAs
@@ -163,6 +164,8 @@ RDNA
 ROCm
 rocm
 rocminfo
+Ryzen
+Threadripper
 
 # ===== Hardware and System =====
 cpu
@@ -366,6 +369,7 @@ lsblk
 lsmod
 lsmod
 lsof
+LTS
 md
 md
 mem
@@ -392,12 +396,15 @@ ns
 num
 objdump
 offload
+ops
 pageable
 pageable
 PascalCase
 passthrough
 passthrough
 perf
+pipelined
+Pipelined
 pragmas
 prefetchable
 printf
@@ -451,6 +458,7 @@ WD
 wget
 wsl
 WSL
+WX
 www
 XNACK
 xnack
@@ -783,6 +791,7 @@ xdbe
 
 # ===== RDMA Terms =====
 BCM
+BCM57608
 BNXT
 BlueFlame
 Broadcom
@@ -793,6 +802,8 @@ CQs
 DBNXT
 DKMS
 DPU
+DSC
+DV
 EFA
 ERNIC
 ernicdv
@@ -802,6 +813,11 @@ HPE
 hsi
 ib
 ibv
+IBV
+IMM
+imm
+IONIC
+ionic
 IOCTLs
 KFD
 kfd
@@ -835,6 +851,7 @@ uapi
 UAR
 udata
 umem
+UMEM
 VAs
 VMware
 WQE
@@ -849,9 +866,13 @@ mlx
 natively
 pvrdma
 qp
+queueMem
 recv
 resizable
+responder's
+sge
 src
+WR
 uar
 vmw
 wqe
@@ -969,6 +990,7 @@ signalCounter
 TestEpConfig
 validateConfig
 vram
+VRAM
 waitCounter
 waitSignal
 XioEndpoint
@@ -999,16 +1021,30 @@ ARP
 calc
 CMakePresets
 CTest
+CWSR
+cwsr
+DPM
+dpm
+DRM
+drm
 ExtractBusNumber
 extractEndpointName
 GetBusIdDistance
 GetLcaDepth
+initramfs
+preemptible
+rc
 rocprofv
 rq
+runpm
 stddev
+syncthreads
+systemd
 sz
 teardown
 udev
+workgroup
+workgroups
 XIODetectGPUs
 XIOTestHelpers
 

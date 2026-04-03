@@ -577,7 +577,6 @@ void* Backend::pd_alloc_device_uncached(struct ibv_pd* pd, void* pd_context,
   return dev_ptr;
 }
 
-// Equivalent to allocHostMemory(XIO_HOST_MEM_MAPPED).
 void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
                                     size_t size, size_t alignment,
                                     uint64_t resource_type) {
@@ -586,7 +585,8 @@ void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
   (void)alignment;
   (void)resource_type;
   void* host_ptr = nullptr;
-  hipError_t err = hipHostMalloc(&host_ptr, size, hipHostMallocMapped);
+  hipError_t err = hipHostMalloc(&host_ptr, size,
+                                 hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
     fprintf(stderr, "rdma_ep: hipHostMalloc failed: %s\n",
             hipGetErrorString(err));
@@ -605,7 +605,6 @@ void Backend::pd_release(struct ibv_pd* pd, void* pd_context, void* ptr,
   (void)hipFree(ptr);
 }
 
-// Equivalent to freeHostMemory(XIO_HOST_MEM_MAPPED).
 void Backend::pd_release_host(struct ibv_pd* pd, void* pd_context, void* ptr,
                               uint64_t resource_type) {
   (void)pd;

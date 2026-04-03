@@ -25,6 +25,7 @@ namespace rdma_ep {
 
 /* WQE opcode mapping for ERNIC PVRDMA-style ops */
 constexpr uint32_t ERNIC_WR_RDMA_WRITE = 0;
+constexpr uint32_t ERNIC_WR_RDMA_WRITE_IMM = 1;
 constexpr uint32_t ERNIC_WR_RDMA_READ = 4;
 constexpr uint32_t ERNIC_WR_ATOMIC_CS = 5;
 constexpr uint32_t ERNIC_WR_ATOMIC_FA = 6;
@@ -177,7 +178,7 @@ __device__ void Ops::quiet_single(QueuePair& qp) {
 
 __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                    uintptr_t laddr, int32_t length,
-                                   uint8_t opcode) {
+                                   uint8_t opcode, uint32_t imm_data) {
   poll_cq_until(qp, 1);
 
   void* wqe_ptr = ernic_get_sq_wqe(&qp.ernic_sq_, qp.ernic_sq_.tail);
@@ -189,6 +190,7 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
   hdr.total_len = length;
   hdr.opcode = opcode;
   hdr.send_flags = ERNIC_SEND_SIGNALED;
+  hdr.ex.imm_data = imm_data;
   hdr.wr.rdma.remote_addr = raddr;
   hdr.wr.rdma.rkey = qp.rkey_;
 
@@ -208,7 +210,7 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
 
 __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
                                   uintptr_t laddr, uintptr_t raddr,
-                                  uint8_t opcode) {
+                                  uint8_t opcode, uint32_t imm_data) {
   uint64_t mask = qp.get_same_qp_lane_mask();
   int count = popcount64(mask);
   int lane = get_lane_id();
@@ -222,7 +224,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
   for (int i = 0; i < count; i++) {
     if (i == my_num) {
-      write_rma_wqe(qp, raddr, laddr, length, opcode);
+      write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
       ring_doorbell(qp, qp.ernic_sq_.tail);
     }
   }
@@ -235,8 +237,9 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
 __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t length,
                                          uintptr_t laddr, uintptr_t raddr,
-                                         uint8_t opcode, bool ring_db) {
-  write_rma_wqe(qp, raddr, laddr, length, opcode);
+                                         uint8_t opcode, bool ring_db,
+                                         uint32_t imm_data) {
+  write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
   if (ring_db)
     ring_doorbell(qp, qp.ernic_sq_.tail);
 }
