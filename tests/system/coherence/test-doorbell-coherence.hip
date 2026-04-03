@@ -142,13 +142,16 @@ static int run_test(const char* label, bool use_fenced) {
   CoherenceCpl* cq = nullptr;
   uint32_t* doorbell = nullptr;
 
-  HIP_CHECK(hipHostMalloc(&sq, sizeof(CoherenceCmd), hipHostMallocDefault));
-  HIP_CHECK(hipHostMalloc(&cq, sizeof(CoherenceCpl), hipHostMallocDefault));
-  HIP_CHECK(hipHostMalloc(&doorbell, sizeof(uint32_t), hipHostMallocDefault));
-
-  memset((void*)sq, 0, sizeof(CoherenceCmd));
-  memset((void*)cq, 0, sizeof(CoherenceCpl));
-  *doorbell = 0;
+  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCmd),
+                                 (void**)&sq, "coherence SQ",
+                                 XIO_HOST_MEM_DEFAULT));
+  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCpl),
+                                 (void**)&cq, "coherence CQ",
+                                 XIO_HOST_MEM_DEFAULT));
+  HIP_CHECK(xio::allocHostMemory(sizeof(uint32_t),
+                                 (void**)&doorbell,
+                                 "coherence doorbell",
+                                 XIO_HOST_MEM_DEFAULT));
 
   SharedState state;
   state.sq = sq;
@@ -204,9 +207,9 @@ static int run_test(const char* label, bool use_fenced) {
     printf("%s: PASSED (%u iterations)\n", label, kIterations);
   }
 
-  HIP_CHECK(hipHostFree(sq));
-  HIP_CHECK(hipHostFree(cq));
-  HIP_CHECK(hipHostFree(doorbell));
+  xio::freeHostMemory(sq, XIO_HOST_MEM_DEFAULT);
+  xio::freeHostMemory(cq, XIO_HOST_MEM_DEFAULT);
+  xio::freeHostMemory(doorbell, XIO_HOST_MEM_DEFAULT);
 
   return result;
 }
