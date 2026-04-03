@@ -130,8 +130,13 @@ void Backend::ionic_setup_parent_domain(
   pattr->pd = pd_;
   pattr->td = nullptr;
   pattr->comp_mask = IBV_PARENT_DOMAIN_INIT_ATTR_ALLOCATORS;
-  pattr->alloc = Backend::pd_alloc_host_pinned;
-  pattr->free = Backend::pd_release_host;
+  if (config_.queue_mem == QueueMemMode::DEVICE_VRAM) {
+    pattr->alloc = Backend::pd_alloc_device_uncached;
+    pattr->free = Backend::pd_release;
+  } else {
+    pattr->alloc = Backend::pd_alloc_host_pinned;
+    pattr->free = Backend::pd_release_host;
+  }
   pattr->pd_context = nullptr;
 }
 

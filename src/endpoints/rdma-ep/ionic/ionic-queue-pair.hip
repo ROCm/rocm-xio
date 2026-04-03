@@ -290,8 +290,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t size, uintptr_t laddr,
   wqe->common.length = byteswap<uint32_t>(size);
 
   if (size) {
-    if (is_write &&
-        size <= static_cast<int32_t>(qp.inline_threshold_)) {
+    if (is_write && size <= static_cast<int32_t>(qp.inline_threshold_)) {
       wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_INL);
       wqe->base.num_sge_key = 0;
       if (!laddr) {
@@ -346,8 +345,7 @@ __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t size,
   wqe->common.length = byteswap<uint32_t>(size);
 
   if (size) {
-    if (is_write &&
-        size <= static_cast<int32_t>(qp.inline_threshold_)) {
+    if (is_write && size <= static_cast<int32_t>(qp.inline_threshold_)) {
       wqe_flags |= byteswap<uint16_t>(IONIC_V1_FLAG_INL);
       wqe->base.num_sge_key = 0;
       if (!laddr) {

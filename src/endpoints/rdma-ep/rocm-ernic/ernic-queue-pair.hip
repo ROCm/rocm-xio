@@ -224,8 +224,7 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
 
   for (int i = 0; i < count; i++) {
     if (i == my_num) {
-      write_rma_wqe(qp, raddr, laddr, length, opcode,
-                    imm_data);
+      write_rma_wqe(qp, raddr, laddr, length, opcode, imm_data);
       ring_doorbell(qp, qp.ernic_sq_.tail);
     }
   }
