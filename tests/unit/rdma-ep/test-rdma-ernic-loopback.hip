@@ -127,9 +127,10 @@ int main(int argc, char** argv) {
 
   size_t buf_size = xfer_size * 2;
   void* buf = nullptr;
-  herr = hipHostMalloc(&buf, buf_size, hipHostMallocMapped);
+  herr = xio::allocHostMemory(buf_size, &buf, "ernic loopback data",
+                              XIO_HOST_MEM_MAPPED);
   if (herr != hipSuccess) {
-    fprintf(stderr, "hipHostMalloc failed: %s\n", hipGetErrorString(herr));
+    fprintf(stderr, "allocHostMemory failed\n");
     return 1;
   }
 
@@ -148,7 +149,7 @@ int main(int argc, char** argv) {
   ret = backend.register_data_buffer(buf, buf_size);
   if (ret != 0) {
     fprintf(stderr, "register_data_buffer failed.\n");
-    (void)hipHostFree(buf);
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
   printf("Buffer registered: "
@@ -162,7 +163,8 @@ int main(int argc, char** argv) {
             "hipHostGetDevicePointer "
             "failed: %s\n",
             hipGetErrorString(herr));
-    (void)hipHostFree(buf);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
 
@@ -172,17 +174,23 @@ int main(int argc, char** argv) {
 
   int* d_result = nullptr;
   unsigned long long* d_elapsed = nullptr;
-  herr = hipMalloc(&d_result, sizeof(int));
-  if (herr != hipSuccess) {
-    fprintf(stderr, "hipMalloc(result) failed.\n");
-    (void)hipHostFree(buf);
+  hsa_status_t hsa_ret = xio::allocDeviceMemory(sizeof(int), (void**)&d_result,
+                                                "ernic result",
+                                                XIO_DEVICE_MEM_HIP);
+  if (hsa_ret != HSA_STATUS_SUCCESS) {
+    fprintf(stderr, "allocDeviceMemory(result) failed.\n");
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
-  herr = hipMalloc(&d_elapsed, sizeof(unsigned long long));
-  if (herr != hipSuccess) {
-    fprintf(stderr, "hipMalloc(elapsed) failed.\n");
-    (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+  hsa_ret = xio::allocDeviceMemory(sizeof(unsigned long long),
+                                   (void**)&d_elapsed, "ernic elapsed",
+                                   XIO_DEVICE_MEM_HIP);
+  if (hsa_ret != HSA_STATUS_SUCCESS) {
+    fprintf(stderr, "allocDeviceMemory(elapsed) failed.\n");
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
   int h_result = -1;
@@ -206,30 +214,33 @@ int main(int argc, char** argv) {
   herr = hipGetLastError();
   if (herr != hipSuccess) {
     fprintf(stderr, "Kernel launch failed: %s\n", hipGetErrorString(herr));
-    (void)hipFree(d_elapsed);
-    (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
 
   herr = hipDeviceSynchronize();
   if (herr != hipSuccess) {
     fprintf(stderr, "Kernel sync failed: %s\n", hipGetErrorString(herr));
-    (void)hipFree(d_elapsed);
-    (void)hipFree(d_result);
-    (void)hipHostFree(buf);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
 
   (void)hipMemcpy(&h_result, d_result, sizeof(int), hipMemcpyDeviceToHost);
   (void)hipMemcpy(&h_elapsed, d_elapsed, sizeof(h_elapsed),
                   hipMemcpyDeviceToHost);
-  (void)hipFree(d_elapsed);
-  (void)hipFree(d_result);
+  xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+  xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
 
   if (h_result != 0) {
     fprintf(stderr, "Kernel reported error: %d\n", h_result);
-    (void)hipHostFree(buf);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
 
@@ -256,13 +267,13 @@ int main(int argc, char** argv) {
             "\nFAILED: LFSR mismatch at offset "
             "%zu (got 0x%02x).\n",
             err_offset, dst[err_offset]);
-    (void)hipHostFree(buf);
     backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
     return 1;
   }
 
-  (void)hipHostFree(buf);
   backend.shutdown();
+  xio::freeHostMemory(buf, XIO_HOST_MEM_MAPPED);
 
   printf("\nPASSED: All %u bytes LFSR-verified "
          "via RDMA WRITE loopback.\n",

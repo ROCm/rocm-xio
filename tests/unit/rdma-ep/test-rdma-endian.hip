@@ -14,6 +14,7 @@
 #include <hip/hip_runtime.h>
 
 #include "endian.hpp"
+#include "xio.h"
 
 #define ASSERT_EQ(a, b)                                                        \
   do {                                                                         \
@@ -105,8 +106,11 @@ int test_endian_on_gpu() {
   }
 
   bool* device_results = nullptr;
-  err = hipMalloc(&device_results, sizeof(bool));
-  if (err != hipSuccess)
+  hsa_status_t hsa_ret = xio::allocDeviceMemory(sizeof(bool),
+                                                (void**)&device_results,
+                                                "endian results",
+                                                XIO_DEVICE_MEM_HIP);
+  if (hsa_ret != HSA_STATUS_SUCCESS)
     return 1;
 
   bool host_result = false;
@@ -117,13 +121,13 @@ int test_endian_on_gpu() {
 
   err = hipDeviceSynchronize();
   if (err != hipSuccess) {
-    (void)hipFree(device_results);
+    xio::freeDeviceMemory(device_results, XIO_DEVICE_MEM_HIP);
     return 1;
   }
 
   (void)hipMemcpy(&host_result, device_results, sizeof(bool),
                   hipMemcpyDeviceToHost);
-  (void)hipFree(device_results);
+  xio::freeDeviceMemory(device_results, XIO_DEVICE_MEM_HIP);
 
   return host_result ? 0 : 1;
 }

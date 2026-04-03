@@ -31,6 +31,7 @@
 #include "tcp-exchange.hpp"
 #include "vendor-ops.hpp"
 #include "xio-data-pattern.hpp"
+#include "xio.h"
 
 #if !defined(GDA_BNXT) && !defined(GDA_MLX5) && !defined(GDA_IONIC) &&         \
   !defined(GDA_ERNIC)
@@ -334,19 +335,19 @@ int main(int argc, char** argv) {
 
   // --- Allocate registered region ---
   // Layout: [data (WRITE_SIZE) | pp_send (pp_size) | pp_recv (pp_size) | pad]
-  // Uses hipHostMallocCoherent so GPU sees RDMA writes from remote NIC.
+  // Uses coherent mapped host memory so GPU sees RDMA writes from remote NIC.
   size_t pp_send_offset = WRITE_SIZE;
   size_t pp_recv_offset = WRITE_SIZE + pp_size;
   size_t total_reg_size = WRITE_SIZE + pp_size * 2 + 4096;
+  static constexpr unsigned kRegBufFlags = XIO_HOST_MEM_MAPPED |
+                                           XIO_HOST_MEM_COHERENT;
   void* reg_buf = nullptr;
-  herr = hipHostMalloc(&reg_buf, total_reg_size,
-                       hipHostMallocMapped | hipHostMallocCoherent);
+  herr = xio::allocHostMemory(total_reg_size, &reg_buf, "2-node data",
+                              kRegBufFlags);
   if (herr != hipSuccess) {
-    fprintf(stderr, "hipHostMalloc(coherent) failed: %s\n",
-            hipGetErrorString(herr));
+    fprintf(stderr, "allocHostMemory(coherent) failed\n");
     return 1;
   }
-  memset(reg_buf, 0, total_reg_size);
 
   uint8_t* data_region = static_cast<uint8_t*>(reg_buf);
   uint8_t* pp_send_buf = data_region + pp_send_offset;
@@ -506,8 +507,10 @@ int main(int argc, char** argv) {
   // Allocate device-side error counter and elapsed timer
   uint32_t* d_errors = nullptr;
   unsigned long long* d_elapsed = nullptr;
-  (void)hipMalloc(&d_errors, sizeof(uint32_t));
-  (void)hipMalloc(&d_elapsed, sizeof(unsigned long long));
+  (void)xio::allocDeviceMemory(sizeof(uint32_t), (void**)&d_errors,
+                               "2node errors", XIO_DEVICE_MEM_HIP);
+  (void)xio::allocDeviceMemory(sizeof(unsigned long long), (void**)&d_elapsed,
+                               "2node elapsed", XIO_DEVICE_MEM_HIP);
   uint32_t h_errors = 0;
   unsigned long long h_elapsed = 0;
   (void)hipMemcpy(d_errors, &h_errors, sizeof(h_errors), hipMemcpyHostToDevice);
@@ -516,8 +519,8 @@ int main(int argc, char** argv) {
 
   if (xio::tcp_sync(tcp_fd) != 0) {
     fprintf(stderr, "tcp_sync failed.\n");
-    (void)hipFree(d_errors);
-    (void)hipFree(d_elapsed);
+    xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
     close(tcp_fd);
     return 1;
   }
@@ -553,8 +556,8 @@ int main(int argc, char** argv) {
     if (h_errors > 0) {
       fprintf(stderr, "[CLIENT] FAILED: %u LFSR verification errors\n",
               h_errors);
-      (void)hipFree(d_errors);
-      (void)hipFree(d_elapsed);
+      xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+      xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
       close(tcp_fd);
       return 1;
     }
@@ -578,8 +581,8 @@ int main(int argc, char** argv) {
     if (h_errors > 0) {
       fprintf(stderr, "[SERVER] FAILED: %u LFSR verification errors\n",
               h_errors);
-      (void)hipFree(d_errors);
-      (void)hipFree(d_elapsed);
+      xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+      xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
       close(tcp_fd);
       return 1;
     }
@@ -587,16 +590,16 @@ int main(int argc, char** argv) {
            pp_iters);
   }
 
-  (void)hipFree(d_errors);
-  (void)hipFree(d_elapsed);
+  xio::freeDeviceMemory(d_errors, XIO_DEVICE_MEM_HIP);
+  xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
 
   if (xio::tcp_sync(tcp_fd) != 0)
     fprintf(stderr, "final tcp_sync failed (non-fatal)\n");
 
   // --- Cleanup ---
   close(tcp_fd);
-  (void)hipHostFree(reg_buf);
   backend.shutdown();
+  xio::freeHostMemory(reg_buf, kRegBufFlags);
 
   printf("\n=== 2-Node RDMA Test [%s] PASSED ===\n", role);
   return 0;

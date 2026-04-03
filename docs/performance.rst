@@ -29,7 +29,7 @@ Test Environment
    * - **ROCm**
      - 7.2.0
    * - **Commit**
-     - ``3411d80``
+     - ``a1ad2a9``
 
 Test Methodology
 ----------------
@@ -41,6 +41,13 @@ GPU kernel posts a single WQE, rings the doorbell from
 device code, then spin-polls the CQ for completion. The
 GPU wall clock measures the elapsed time from WQE post
 to CQE arrival.
+
+All test programs allocate memory through the
+``xio::allocHostMemory`` / ``xio::allocDeviceMemory``
+abstraction rather than calling ``posix_memalign``,
+``hipHostMalloc``, or ``hipMalloc`` directly. This
+ensures the same allocation flags and pinning semantics
+used by the production endpoint code paths.
 
 Ten iterations are run per (vendor, transfer size) pair,
 each with a distinct LFSR seed for data verification.
@@ -376,6 +383,51 @@ Current status:
    to time out.  This matches the nvme-ep queue
    allocation path which also uses coherent memory.
 
+NVMe-EP Smoke Test
+------------------
+
+The ``xio-tester nvme-ep`` smoke test validates the
+GPU-initiated NVMe read path end to end: admin queue
+setup, I/O queue creation, SQE construction from GPU
+device code, doorbell ring, CQE polling, and LFSR data
+verification.
+
+.. list-table::
+   :widths: 30 70
+   :header-rows: 0
+
+   * - **NVMe Device**
+     - ``/dev/nvme2`` (MTR_SLC_16GB, FW 2.0.1.06)
+   * - **LBA Size**
+     - 512 bytes
+   * - **Namespace Capacity**
+     - 28,191,632 LBAs (~13.4 GiB)
+   * - **Max Queue ID**
+     - 32
+   * - **PCI BDF**
+     - ``0000:85:00.0``
+
+Results (4 sequential 512-byte reads, batch size 1):
+
+.. list-table::
+   :widths: 20 20 20 20
+   :header-rows: 1
+
+   * - Min (us)
+     - Mean (us)
+     - Std (us)
+     - Max (us)
+   * - 29.6
+     - 30.0
+     - 0.5
+     - 30.6
+
+The unit tests (``test-nvme-config``,
+``test-nvme-helpers``, ``test-nvme-hardware``) validate
+struct layout, helper functions, and hardware queries
+(LBA size, namespace capacity, SMART log, queue ID
+enumeration) without issuing I/O.
+
 Reproducing These Results
 -------------------------
 
@@ -436,3 +488,21 @@ multiple seeds and computes statistics automatically:
 
    VENDOR=bnxt TEST_SIZE=4096 ITERATIONS=10 \
      ./run-test-rdma-loopback.sh
+
+NVMe-EP smoke test (requires root and an NVMe device
+that is **not** the rootfs):
+
+.. code-block:: bash
+
+   # Unit tests (no hardware required for config/helpers)
+   build/tests/unit/nvme-ep/test-nvme-config
+   build/tests/unit/nvme-ep/test-nvme-helpers
+
+   # Hardware query test
+   sudo build/tests/unit/nvme-ep/test-nvme-hardware \
+     --controller /dev/nvme2
+
+   # Full data-path smoke test (4 reads)
+   sudo build/xio-tester nvme-ep \
+     --controller /dev/nvme2 \
+     --read-io 4 --batch-size 1
