@@ -142,16 +142,12 @@ static int run_test(const char* label, bool use_fenced) {
   CoherenceCpl* cq = nullptr;
   uint32_t* doorbell = nullptr;
 
-  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCmd),
-                                 (void**)&sq, "coherence SQ",
-                                 XIO_HOST_MEM_DEFAULT));
-  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCpl),
-                                 (void**)&cq, "coherence CQ",
-                                 XIO_HOST_MEM_DEFAULT));
-  HIP_CHECK(xio::allocHostMemory(sizeof(uint32_t),
-                                 (void**)&doorbell,
-                                 "coherence doorbell",
-                                 XIO_HOST_MEM_DEFAULT));
+  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCmd), (void**)&sq,
+                                 "coherence SQ", XIO_HOST_MEM_DEFAULT));
+  HIP_CHECK(xio::allocHostMemory(sizeof(CoherenceCpl), (void**)&cq,
+                                 "coherence CQ", XIO_HOST_MEM_DEFAULT));
+  HIP_CHECK(xio::allocHostMemory(sizeof(uint32_t), (void**)&doorbell,
+                                 "coherence doorbell", XIO_HOST_MEM_DEFAULT));
 
   SharedState state;
   state.sq = sq;

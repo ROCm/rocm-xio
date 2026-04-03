@@ -339,15 +339,13 @@ int main(int argc, char** argv) {
   size_t pp_send_offset = WRITE_SIZE;
   size_t pp_recv_offset = WRITE_SIZE + pp_size;
   size_t total_reg_size = WRITE_SIZE + pp_size * 2 + 4096;
-  static constexpr unsigned kRegBufFlags =
-    XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT;
+  static constexpr unsigned kRegBufFlags = XIO_HOST_MEM_MAPPED |
+                                           XIO_HOST_MEM_COHERENT;
   void* reg_buf = nullptr;
-  herr = xio::allocHostMemory(total_reg_size, &reg_buf,
-                               "2-node data",
-                               kRegBufFlags);
+  herr = xio::allocHostMemory(total_reg_size, &reg_buf, "2-node data",
+                              kRegBufFlags);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "allocHostMemory(coherent) failed\n");
+    fprintf(stderr, "allocHostMemory(coherent) failed\n");
     return 1;
   }
 
@@ -509,13 +507,10 @@ int main(int argc, char** argv) {
   // Allocate device-side error counter and elapsed timer
   uint32_t* d_errors = nullptr;
   unsigned long long* d_elapsed = nullptr;
-  (void)xio::allocDeviceMemory(
-    sizeof(uint32_t), (void**)&d_errors,
-    "2node errors", XIO_DEVICE_MEM_HIP);
-  (void)xio::allocDeviceMemory(
-    sizeof(unsigned long long),
-    (void**)&d_elapsed, "2node elapsed",
-    XIO_DEVICE_MEM_HIP);
+  (void)xio::allocDeviceMemory(sizeof(uint32_t), (void**)&d_errors,
+                               "2node errors", XIO_DEVICE_MEM_HIP);
+  (void)xio::allocDeviceMemory(sizeof(unsigned long long), (void**)&d_elapsed,
+                               "2node elapsed", XIO_DEVICE_MEM_HIP);
   uint32_t h_errors = 0;
   unsigned long long h_elapsed = 0;
   (void)hipMemcpy(d_errors, &h_errors, sizeof(h_errors), hipMemcpyHostToDevice);
