@@ -12,27 +12,29 @@
 # Container launch broken -- enroot prolog runs but
 # container never starts (all tests affected)
 ctr-cx63-mi300x-12
+ctr-cx65-mi300x-30
+ctr-cx66-mi300x-31
 
 # Stale rocm_xio kernel module stuck loaded; needs
 # node reboot to clear (only affects nvme-ep)
-ctr-cx64-mi300x-4  nvme-ep
+#ctr-cx64-mi300x-4  nvme-ep
 
 # No passwordless sudo -- kernel module install fails
-ctr-cx66-mi300x-13  nvme-ep
+#ctr-cx66-mi300x-13  nvme-ep
 
 # Flaky unsquashfs -- zstd decompression errors on
 # random files during container extraction
-mlse-alola-b39-ws4  nvme-ep
-mlse-alola-b39-ws6  nvme-ep
+#mlse-alola-b39-ws4  nvme-ep
+#mlse-alola-b39-ws6  nvme-ep
 
 # RDMA loopback test failures on this node
-banff-cyxtera-s81-5  rdma-ep
+#banff-cyxtera-s81-5  rdma-ep
 
 # MI308X with intermittent SDMA P2P transfer failures;
 # MLX5 loopback CQE timeout (NIC lacks loopback_mode
 # sysfs, smoke test fails on all seeds);
 # nvme-ep xio-tester hangs after controller probe
-banff-cyxtera-s81-1  two-gpu,rdma-ep,nvme-ep
+banff-cyxtera-s81-1  sdma-ep,rdma-ep,nvme-ep
 
 # SDMA P2P kernel hang during 1MB GPU-to-GPU transfer
-ctr-cx63-mi300x-21  two-gpu
+#ctr-cx63-mi300x-21  sdma-ep

@@ -5,6 +5,8 @@
 #
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
 
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
 SSH_COMMAND="ssh \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
