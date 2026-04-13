@@ -164,8 +164,14 @@ __global__ void sdma_p2p_kernel(anvil::SdmaQueueDeviceHandle* handle,
                                 void* dstBuf, void* srcBuf, size_t transferSize,
                                 unsigned iterations, uint64_t* signal,
                                 unsigned long long* startTimes,
-                                unsigned long long* endTimes) {
+                                unsigned long long* endTimes,
+                                volatile bool* stopRequested) {
+  unsigned last = 0;
   for (unsigned i = 0; i < iterations; i++) {
+    if (stopRequested && i % 100 == 0 &&
+        *stopRequested)
+      break;
+
     size_t offset = i * transferSize;
     void* src = static_cast<char*>(srcBuf) + offset;
     void* dst = static_cast<char*>(dstBuf) + offset;
@@ -183,9 +189,9 @@ __global__ void sdma_p2p_kernel(anvil::SdmaQueueDeviceHandle* handle,
     if (endTimes != nullptr) {
       endTimes[i] = wall_clock64();
     }
+    last = i + 1;
   }
-  // Kernel waits for SDMA completion so host can rely on hipDeviceSynchronize
-  if (iterations > 0) {
+  if (last == iterations && iterations > 0) {
     anvil::waitSignal(signal, 1);
   }
 }
@@ -198,7 +204,8 @@ __global__ void sdma_ping_pong_kernel(anvil::SdmaQueueDeviceHandle* handle,
                                       int rank, uint64_t* counter,
                                       bool use_counter, bool use_flush,
                                       unsigned long long* startTimes,
-                                      unsigned long long* endTimes) {
+                                      unsigned long long* endTimes,
+                                      volatile bool* stopRequested) {
   if (rank > 1)
     return;
 
@@ -219,6 +226,10 @@ __global__ void sdma_ping_pong_kernel(anvil::SdmaQueueDeviceHandle* handle,
   uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
+    if (stopRequested && i % 100 == 0 &&
+        *stopRequested)
+      break;
+
     // Initiator
     if (rank == 0) {
       if (threadIdx.x == 0) {
@@ -338,7 +349,8 @@ __global__ void sdma_buffer_reuse_kernel(
   anvil::SdmaQueueDeviceHandle* handle, void* dstBuf, void* srcBuf,
   size_t nElem, unsigned iterations, uint64_t** signals, int rank,
   uint64_t* counter, bool use_counter, bool use_flush,
-  unsigned long long* startTimes, unsigned long long* endTimes) {
+  unsigned long long* startTimes, unsigned long long* endTimes,
+  volatile bool* stopRequested) {
   if (rank > 1)
     return;
 
@@ -360,9 +372,9 @@ __global__ void sdma_buffer_reuse_kernel(
   uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
-    // if (startTimes != nullptr) {
-    //   startTimes[i] = wall_clock64();
-    // }
+    if (stopRequested && i % 100 == 0 &&
+        *stopRequested)
+      break;
 
     int offset = 0;
 
@@ -912,10 +924,13 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_p2p_kernel, dim3(numBlocks), dim3(threadsPerBlock),
-                       0, 0, sdmaHandles[0], dstBuf, srcBuf, transferSize,
-                       config->iterations, signals[0][0], config->startTimes,
-                       config->endTimes);
+    hipLaunchKernelGGL(sdma_p2p_kernel, dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0,
+                       sdmaHandles[0], dstBuf, srcBuf,
+                       transferSize, config->iterations,
+                       signals[0][0], config->startTimes,
+                       config->endTimes,
+                       config->stopRequested);
   } else if (testType == "buffer-reuse") {
     // For buffer-reuse kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -927,11 +942,16 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
-                       srcBuf, nElem, config->iterations, signals[0],
-                       /*rank*/ 0, counter0, useCounter, useFlush,
-                       config->startTimes, config->endTimes);
+    hipLaunchKernelGGL(sdma_buffer_reuse_kernel,
+                       dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0,
+                       sdmaHandles[0], dstBuf, srcBuf,
+                       nElem, config->iterations,
+                       signals[0], /*rank*/ 0,
+                       counter0, useCounter, useFlush,
+                       config->startTimes,
+                       config->endTimes,
+                       config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -941,11 +961,16 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
-                       dstBuf, nElem, config->iterations, signals[1],
-                       /*rank*/ 1, counter1, useCounter, useFlush,
-                       config->startTimes, config->endTimes);
+    hipLaunchKernelGGL(sdma_buffer_reuse_kernel,
+                       dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0,
+                       sdmaHandles[1], srcBuf, dstBuf,
+                       nElem, config->iterations,
+                       signals[1], /*rank*/ 1,
+                       counter1, useCounter, useFlush,
+                       config->startTimes,
+                       config->endTimes,
+                       config->stopRequested);
   } else if (testType == "ping-pong") {
     // For ping-pong kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -957,11 +982,16 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
-                       srcBuf, nElem, config->iterations, signals[0],
-                       /*rank*/ 0, counter0, useCounter, useFlush,
-                       config->startTimes, config->endTimes);
+    hipLaunchKernelGGL(sdma_ping_pong_kernel,
+                       dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0,
+                       sdmaHandles[0], dstBuf, srcBuf,
+                       nElem, config->iterations,
+                       signals[0], /*rank*/ 0,
+                       counter0, useCounter, useFlush,
+                       config->startTimes,
+                       config->endTimes,
+                       config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -971,11 +1001,16 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
-                       dstBuf, nElem, config->iterations, signals[1],
-                       /*rank*/ 1, counter1, useCounter, useFlush,
-                       config->startTimes, config->endTimes);
+    hipLaunchKernelGGL(sdma_ping_pong_kernel,
+                       dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0,
+                       sdmaHandles[1], srcBuf, dstBuf,
+                       nElem, config->iterations,
+                       signals[1], /*rank*/ 1,
+                       counter1, useCounter, useFlush,
+                       config->startTimes,
+                       config->endTimes,
+                       config->stopRequested);
   } else {
     std::cerr << "Unknown test type: " << testType << std::endl;
     cleanupAll();

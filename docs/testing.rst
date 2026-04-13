@@ -263,6 +263,48 @@ The ``--device`` flag selects the RDMA device by name
 topology-based selection picks the NIC closest to the
 GPU.
 
+Infinite Mode and SIGINT
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Pass ``--iterations 0`` to run indefinitely.  Press
+Ctrl-C to stop gracefully; the GPU kernel polls a
+host-mapped ``stopRequested`` flag after each RDMA
+WRITE completion and exits cleanly.
+
+.. code-block:: bash
+
+   # Infinite loopback with --less-timing stats
+   sudo LD_LIBRARY_PATH="${LIB}" \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     ./build/xio-tester rdma-ep \
+     --provider bnxt \
+     --device rocm-rdma-bnxt0 \
+     --loopback --iterations 0 \
+     --less-timing
+
+SIGINT handling is supported by all endpoints:
+nvme-ep, rdma-ep, test-ep, and sdma-ep.
+
+Per-Iteration Data Verification
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--verify`` checks the LFSR data pattern after
+**each** RDMA WRITE completion, not just at the end.
+Verification runs outside the timing window so it
+does not inflate latency measurements.  On mismatch
+the kernel prints the iteration number and byte
+offset.
+
+.. code-block:: bash
+
+   sudo LD_LIBRARY_PATH="${LIB}" \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     ./build/xio-tester rdma-ep \
+     --provider bnxt \
+     --device rocm-rdma-bnxt0 \
+     --loopback --iterations 128 \
+     --transfer-size 256 --verify
+
 GPU Configuration for Multi-Wavefront Kernels
 ----------------------------------------------
 
