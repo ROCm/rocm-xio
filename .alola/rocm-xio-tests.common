@@ -453,19 +453,20 @@ detect_rdma_nic() {
   local ssh_cmd="$1"
   local host="$2"
   local vendor="$3"
+  local ib="/sys/class/infiniband"
 
   local pattern
   case "${vendor}" in
-    bnxt)  pattern="rocm-rdma-bnxt* bnxt_*" ;;
-    mlx5)  pattern="rocm-rdma-mlx5* mlx5_*" ;;
-    ionic) pattern="rocm-rdma-ionic* ionic_*" ;;
+    bnxt)  pattern="${ib}/rocm-rdma-bnxt* ${ib}/bnxt_*" ;;
+    mlx5)  pattern="${ib}/rocm-rdma-mlx5* ${ib}/mlx5_*" ;;
+    ionic) pattern="${ib}/rocm-rdma-ionic* ${ib}/ionic_*" ;;
     *)     return 1 ;;
   esac
 
   local sysfs_hit
   sysfs_hit=$(${ssh_cmd} "${host}" \
-    "ls -d /sys/class/infiniband/${pattern} \
-    2>/dev/null | head -1" 2>/dev/null || true)
+    "ls -d ${pattern} 2>/dev/null | head -1" \
+    2>/dev/null || true)
   if [ -n "${sysfs_hit}" ]; then
     ${ssh_cmd} "${host}" "basename ${sysfs_hit}"
   fi

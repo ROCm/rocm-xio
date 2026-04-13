@@ -97,7 +97,7 @@ resolve_ib_bdf() {
 }
 
 for _v in bnxt mlx5 ionic; do
-  _dev=$(detect_rdma_nic "${SSH_LOCALHOST}" \
+  _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
     "localhost" "${_v}")
   if [ -n "${_dev}" ]; then
     _bdf=$(resolve_ib_bdf "${_dev}")
