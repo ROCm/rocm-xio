@@ -27,18 +27,25 @@
 
 namespace rdma_ep {
 
-__global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
-                               unsigned long long int* startTimes,
-                               unsigned long long int* endTimes,
-                               xio::XioTimingStats* timingStats,
-                               unsigned iterations, uint32_t transferSize) {
+__global__ void rdma_ep_kernel(
+  QueuePair* qp, void* src_ptr, void* dst_ptr,
+  unsigned long long int* startTimes,
+  unsigned long long int* endTimes,
+  xio::XioTimingStats* timingStats,
+  unsigned iterations, uint32_t transferSize,
+  volatile bool* stopRequested,
+  bool doVerify, uint32_t seed) {
   if (threadIdx.x != 0)
     return;
 
-  for (unsigned i = 0; i < iterations; i++) {
+  bool infinite = (iterations == 0);
+  unsigned i = 0;
+
+  while ((infinite || i < iterations) &&
+         (!stopRequested || !*stopRequested)) {
     unsigned long long int t0 = wall_clock64();
 
-    if (startTimes)
+    if (startTimes && !infinite)
       startTimes[i] = t0;
 
     qp->put_nbi_single(dst_ptr, src_ptr,
@@ -47,11 +54,28 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
 
     unsigned long long int t1 = wall_clock64();
 
-    if (endTimes)
+    if (endTimes && !infinite)
       endTimes[i] = t1;
 
     if (timingStats && t1 > t0)
       updateTimingStats(timingStats, t1 - t0);
+
+    if (doVerify) {
+      auto* dst = static_cast<uint8_t*>(dst_ptr);
+      size_t errOff = 0;
+      xio::DataPatternParams vp{
+        dst, transferSize, 0, transferSize,
+        seed, &errOff};
+      bool ok = xio::dataPattern(true, vp);
+      if (!ok) {
+        printf("rdma-ep: VERIFY FAILED iter=%u"
+               " offset=%zu\n", i, errOff);
+      }
+      for (uint32_t b = 0; b < transferSize; b++)
+        dst[b] = 0;
+    }
+
+    i++;
   }
 }
 
@@ -159,8 +183,7 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
     return "Invalid provider."
            " Must be: bnxt, mlx5, ionic, or ernic";
 
-  if (config->iterations == 0)
-    return "Iterations must be > 0";
+  // iterations == 0 means infinite mode
   if (config->sqDepth == 0)
     return "SQ depth must be > 0";
   if (config->transferSize == 0)
@@ -331,10 +354,22 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     ROCXIO_LOG_DEBUG("rdma-ep: src=%p dst=%p size=%zu\n", (void*)src,
                      (void*)dst, xfer);
 
-    hipLaunchKernelGGL(rdma_ep::rdma_ep_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
-                       (void*)src, (void*)dst, config->startTimes,
-                       config->endTimes, config->timingStats,
-                       config->iterations, cfg->transferSize);
+    unsigned long long int* kStartTimes =
+      config->iterations > 0 ? config->startTimes
+                              : nullptr;
+    unsigned long long int* kEndTimes =
+      config->iterations > 0 ? config->endTimes
+                              : nullptr;
+
+    hipLaunchKernelGGL(
+      rdma_ep::rdma_ep_kernel,
+      dim3(1), dim3(1), 0, 0, gpu_qp,
+      (void*)src, (void*)dst,
+      kStartTimes, kEndTimes,
+      config->timingStats,
+      config->iterations, cfg->transferSize,
+      config->stopRequested,
+      cfg->verify, cfg->seed);
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
@@ -366,43 +401,10 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       return syncErr;
     }
 
-    ROCXIO_LOG_INFO("rdma-ep: Kernel completed"
-                    " %u iterations.\n",
-                    config->iterations);
-
-    if (cfg->verify) {
-      size_t errOff = 0;
-      uint8_t* verify_buf = dst;
-      uint8_t* host_verify = nullptr;
-      if (data_on_device) {
-        (void)xio::allocHostMemory(
-          xfer, (void**)&host_verify,
-          "RDMA verify", XIO_HOST_MEM_PINNED);
-        if (host_verify) {
-          (void)hipMemcpy(host_verify, dst, xfer,
-                          hipMemcpyDeviceToHost);
-          verify_buf = host_verify;
-        }
-      }
-      xio::DataPatternParams vp{
-        verify_buf, xfer, 0,
-        static_cast<uint32_t>(xfer),
-        cfg->seed, &errOff};
-      bool ok = xio::dataPattern(true, vp);
-      if (ok) {
-        ROCXIO_LOG_INFO(
-          "rdma-ep: VERIFY PASSED"
-          " (%zu bytes, seed=%u)\n",
-          xfer, cfg->seed);
-      } else {
-        ROCXIO_LOG_ERROR(
-          "rdma-ep: VERIFY FAILED at"
-          " offset %zu (seed=%u)\n",
-          errOff, cfg->seed);
-      }
-      if (host_verify)
-        xio::freeHostMemory(
-          host_verify, XIO_HOST_MEM_PINNED);
+    if (config->iterations > 0) {
+      ROCXIO_LOG_INFO("rdma-ep: Kernel completed"
+                      " %u iterations.\n",
+                      config->iterations);
     }
 
     if (data_on_device)

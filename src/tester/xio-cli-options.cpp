@@ -178,9 +178,9 @@ void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg) {
   const std::string group = "RDMA Endpoint Options";
 
   app
-    .add_option("-n,--iterations", cfg->iterations, "Number of RDMA operations")
+    .add_option("-n,--iterations", cfg->iterations,
+                "Number of RDMA operations (0 = infinite)")
     ->default_val(128)
-    ->check(CLI::PositiveNumber)
     ->group(group);
 
   app

@@ -331,7 +331,8 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
                                 XioTimingStats* timingStats,
                                 unsigned iterations, unsigned numThreads,
                                 long long delayNs, unsigned doorbell,
-                                uint32_t* doorbellAddr, unsigned queueSize) {
+                                uint32_t* doorbellAddr, unsigned queueSize,
+                                volatile bool* stopRequested) {
   // Get thread ID for multi-threading
   unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= numThreads) {
@@ -370,6 +371,10 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     __syncthreads();
 
     for (unsigned i = 0; i < iterations; ++i) {
+      if (stopRequested && i % 100 == 0 &&
+          *stopRequested)
+        break;
+
       // Record start time for this iteration (when SQE is posted)
       unsigned long long pollStartTime = wall_clock64();
       unsigned long long startTime = 0;
@@ -465,9 +470,11 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     }
   } else {
     // Normal polling mode
-    // Encode thread index in iteration field (upper 32 bits) and iteration
-    // (lower 32 bits)
     for (unsigned i = 0; i < iterations; ++i) {
+      if (stopRequested && i % 100 == 0 &&
+          *stopRequested)
+        break;
+
       // Record start time for this iteration
       unsigned long long pollStartTime = wall_clock64();
       unsigned long long startTime = 0;
@@ -477,8 +484,6 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
         startTime = pollStartTime;
       }
 
-      // Prepare message to CPU (matches simple-test)
-      // Encode thread index in upper 32 bits, iteration in lower 32 bits
       sqeType msg = {};
       msg.magic = magicId;
       msg.iteration = ((uint64_t)tid << 32) | i;
@@ -884,11 +889,17 @@ hipError_t run(XioEndpointConfig* config) {
   } else {
     // Normal mode: launch GPU kernel
     uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
-    hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
-                       sqePtr, cqePtr, config->startTimes, config->endTimes,
-                       config->timingStats, config->iterations,
-                       config->numThreads, config->delayNs, doorbell,
-                       doorbellPtr, queueSize);
+    hipLaunchKernelGGL(endpoint_kernel, dim3(1),
+                       dim3(config->numThreads), 0, 0,
+                       sqePtr, cqePtr,
+                       config->startTimes,
+                       config->endTimes,
+                       config->timingStats,
+                       config->iterations,
+                       config->numThreads,
+                       config->delayNs, doorbell,
+                       doorbellPtr, queueSize,
+                       config->stopRequested);
 
     // Check for kernel launch errors
     err = hipGetLastError();
