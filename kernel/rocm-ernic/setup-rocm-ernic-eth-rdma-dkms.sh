@@ -82,69 +82,27 @@ fi
 
 DKMS_SRC="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
-# -------------------------------------------------------
-# Uninstall
-# -------------------------------------------------------
+# shellcheck source=../dkms-common.sh
+. "$(dirname "${SCRIPT_DIR}")/dkms-common.sh"
 
-if $UNINSTALL; then
-  echo "Removing DKMS module" \
-    "${PKG_NAME}/${PKG_VERSION}..."
-  sudo dkms remove \
-    "${PKG_NAME}/${PKG_VERSION}" \
-    --all 2>/dev/null || true
-  sudo rm -rf "${DKMS_SRC}"
-  echo "Done."
-  exit 0
+dkms_uninstall_guard
+dkms_check_tools dkms make
+dkms_check_kernel_headers
+
+if [ ! -d "${ERNIC_DRV_DIR}" ]; then
+  echo "ERROR: rocm-ernic driver source not" \
+    "found at ${ERNIC_DRV_DIR}"
+  echo "Set --ernic-dir to the rocm-ernic" \
+    "project root."
+  exit 1
 fi
 
-# -------------------------------------------------------
-# Prerequisites
-# -------------------------------------------------------
-
-check_prereqs() {
-  local missing=()
-  command -v dkms &>/dev/null \
-    || missing+=("dkms")
-  command -v make &>/dev/null \
-    || missing+=("make")
-
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "ERROR: Missing required tools:" \
-      "${missing[*]}"
-    echo "Install with:"
-    echo "  sudo apt install ${missing[*]}"
-    exit 1
-  fi
-
-  if [ ! -d "${ERNIC_DRV_DIR}" ]; then
-    echo "ERROR: rocm-ernic driver source not" \
-      "found at ${ERNIC_DRV_DIR}"
-    echo "Set --ernic-dir to the rocm-ernic" \
-      "project root."
-    exit 1
-  fi
-
-  if [ ! -f "${ERNIC_DRV_DIR}/rocm_ernic_main.c" ]
-  then
-    echo "ERROR: rocm_ernic_main.c not found in" \
-      "${ERNIC_DRV_DIR}"
-    exit 1
-  fi
-
-  local kver
-  kver="$(uname -r)"
-  if [ ! -f \
-    "/lib/modules/${kver}/build/Makefile" ]; then
-    echo "ERROR: Kernel headers not found" \
-      "for ${kver}."
-    echo "Install with:"
-    echo "  sudo apt install" \
-      "linux-headers-${kver}"
-    exit 1
-  fi
-}
-
-check_prereqs
+if [ ! -f "${ERNIC_DRV_DIR}/rocm_ernic_main.c" ]
+then
+  echo "ERROR: rocm_ernic_main.c not found in" \
+    "${ERNIC_DRV_DIR}"
+  exit 1
+fi
 
 # -------------------------------------------------------
 # Print status
@@ -159,19 +117,7 @@ echo "  package     :" \
   "${PKG_NAME}/${PKG_VERSION}"
 echo ""
 
-# -------------------------------------------------------
-# Skip if already installed
-# -------------------------------------------------------
-
-if ! $BUILD_ONLY && \
-    dkms status \
-    "${PKG_NAME}/${PKG_VERSION}" \
-    2>/dev/null | grep -q "installed"; then
-  echo "${PKG_NAME}/${PKG_VERSION}" \
-    "already installed."
-  echo "Use --uninstall to remove first."
-  exit 0
-fi
+dkms_skip_if_installed
 
 # -------------------------------------------------------
 # Populate DKMS source tree
@@ -235,52 +181,9 @@ populate_dkms
 # Register and build with DKMS
 # -------------------------------------------------------
 
-build_dkms() {
-  echo ""
-
-  if dkms status \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      2>/dev/null | grep -q .; then
-    echo "Removing stale DKMS registration..."
-    sudo dkms remove \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      --all 2>/dev/null || true
-  fi
-
-  echo "Registering with DKMS..."
-  sudo dkms add "${PKG_NAME}/${PKG_VERSION}"
-
-  local kver
-  kver="$(uname -r)"
-
-  echo "Building rocm_ernic_eth + rocm_ernic_rdma" \
-    "for ${kver}..."
-  if ! sudo dkms build \
-      "${PKG_NAME}/${PKG_VERSION}" \
-      -k "${kver}"; then
-    echo ""
-    echo "ERROR: DKMS build failed."
-    echo "Check: /var/lib/dkms/${PKG_NAME}/" \
-      "${PKG_VERSION}/build/make.log"
-    exit 1
-  fi
-
-  echo ""
-  echo "=== rocm_ernic eth+RDMA built via DKMS ==="
-  echo "  Module: /var/lib/dkms/${PKG_NAME}/" \
-    "${PKG_VERSION}/${kver}/$(uname -m)/module/"
-  echo ""
-  echo "To install:"
-  echo "  $0  (re-run without --build-only)"
-}
-
-install_dkms() {
-  local kver
-  kver="$(uname -r)"
-
-  echo "Installing rocm_ernic_eth + rocm_ernic_rdma..."
-  sudo dkms install \
-    "${PKG_NAME}/${PKG_VERSION}" -k "${kver}"
+dkms_build "rocm_ernic eth+RDMA"
+if ! $BUILD_ONLY; then
+  dkms_install "rocm_ernic eth+RDMA"
 
   echo ""
   echo "=== rocm_ernic eth+RDMA installed via DKMS ==="
@@ -298,9 +201,4 @@ install_dkms() {
   echo "To revert:"
   echo "  $0 --uninstall"
   echo "  sudo depmod -a"
-}
-
-build_dkms
-if ! $BUILD_ONLY; then
-  install_dkms
 fi

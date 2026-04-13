@@ -14,15 +14,8 @@
 #include <hip/hip_runtime.h>
 
 #include "endian.hpp"
+#include "xio-test-assert.h"
 #include "xio.h"
-
-#define ASSERT_EQ(a, b)                                                        \
-  do {                                                                         \
-    if ((a) != (b)) {                                                          \
-      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
 
 int test_byteswap_16() {
   uint16_t val = 0x1234;

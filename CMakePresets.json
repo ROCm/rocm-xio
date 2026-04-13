@@ -37,83 +37,48 @@
   ],
   "testPresets": [
     {
-      "name": "unit",
-      "displayName": "Unit tests (CPU-only)",
+      "name": "base",
+      "hidden": true,
       "configurePreset": "default",
       "output": {
         "outputOnFailure": true,
         "verbosity": "verbose"
-      },
-      "filter": {
-        "include": {
-          "label": "unit"
-        }
       }
+    },
+    {
+      "name": "unit",
+      "displayName": "Unit tests (CPU-only)",
+      "inherits": "base",
+      "filter": { "include": { "label": "unit" } }
     },
     {
       "name": "system",
       "displayName": "System tests (GPU required)",
-      "configurePreset": "default",
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "filter": {
-        "include": {
-          "label": "system"
-        }
-      }
+      "inherits": "base",
+      "filter": { "include": { "label": "system" } }
     },
     {
       "name": "hardware",
       "displayName": "Hardware tests (NIC/device)",
-      "configurePreset": "default",
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "filter": {
-        "include": {
-          "label": "hardware"
-        }
-      }
+      "inherits": "base",
+      "filter": { "include": { "label": "hardware" } }
     },
     {
       "name": "sweep",
       "displayName": "Loopback sweep (multi-seed)",
-      "configurePreset": "default",
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "filter": {
-        "include": {
-          "label": "sweep"
-        }
-      }
+      "inherits": "base",
+      "filter": { "include": { "label": "sweep" } }
     },
     {
       "name": "integration",
       "displayName": "Integration tests (install + examples)",
-      "configurePreset": "default",
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "filter": {
-        "include": {
-          "label": "integration"
-        }
-      }
+      "inherits": "base",
+      "filter": { "include": { "label": "integration" } }
     },
     {
       "name": "all",
       "displayName": "All tests",
-      "configurePreset": "default",
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      }
+      "inherits": "base"
     }
   ]
 }

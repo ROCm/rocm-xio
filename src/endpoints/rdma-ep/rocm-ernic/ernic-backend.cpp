@@ -25,47 +25,19 @@
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
 #include "rocm-ernic/ernic-provider.hpp"
+#include "xio-rdma-check.h"
 #include "xio.h"
 
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
-  do {                                                                         \
-    int _err = (expr);                                                         \
-    if (_err != 0) {                                                           \
-      fprintf(stderr,                                                          \
-              "rdma_ep::ernic: %s failed: "                                    \
-              "%d at %s:%d\n",                                                 \
-              (msg), _err, __FILE__, __LINE__);                                \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
-
+  _XIO_CHECK_ZERO("rdma_ep::ernic", (expr), (msg), return)
 #define XIO_CHECK_NNULL(expr, msg)                                             \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      fprintf(stderr,                                                          \
-              "rdma_ep::ernic: %s returned "                                   \
-              "null at %s:%d\n",                                               \
-              (msg), __FILE__, __LINE__);                                      \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
+  _XIO_CHECK_NNULL("rdma_ep::ernic", (expr), (msg), return)
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
-  if (!out) {
-    fprintf(stderr,
-            "rdma_ep::ernic: dlsym failed for "
-            "%s: %s\n",
-            name, dlerror());
-    return -1;
-  }
-  return 0;
-}
+using xio_rdma::dlsym_load;
 
 ernicdv_funcs_t ernic_dv{};
 void* ernicdv_handle_ = nullptr;
@@ -75,21 +47,7 @@ void* ernicdv_handle_ = nullptr;
 #if defined(GDA_ERNIC)
 
 void* Backend::ernic_dv_dlopen() {
-  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
-  void* handle = nullptr;
-#ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/librocm_ernic.so", flags);
-#endif
-  if (!handle)
-    handle = dlopen("librocm_ernic.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/local/lib/librocm_ernic.so", flags);
-  if (!handle)
-    fprintf(stderr,
-            "rdma_ep::ernic: Could not open "
-            "librocm_ernic.so: %s\n",
-            dlerror());
-  return handle;
+  return xio_rdma::dv_dlopen("librocm_ernic.so", "rdma_ep::ernic");
 }
 
 int Backend::ernic_dv_dl_init() {
@@ -98,7 +56,8 @@ int Backend::ernic_dv_dl_init() {
     return -1;
 
 #define LOAD(field, name)                                                      \
-  if (dlsym_load(ernic_dv.field, ernicdv_handle_, name) != 0)                  \
+  if (dlsym_load(ernic_dv.field, ernicdv_handle_, name, "rdma_ep::ernic") !=   \
+      0)                                                                       \
     return -1;
 
   LOAD(create_qp, "rocm_ernic_dv_create_qp");

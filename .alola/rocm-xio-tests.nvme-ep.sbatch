@@ -168,115 +168,60 @@ test_run "nvme-ep reject --batch-size > max block size (expect fail)" \
 nvme-ep --controller ${NON_ROOTFS_CTRL} \
 --batch-size 1024 -n 1'"
 
-test_run "NVMe-EP memory-mode 0" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128'"
+nvme_ep_test "NVMe-EP memory-mode 0" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128
 
-sleep 3
+nvme_ep_test "NVMe-EP batch-size 4 memory-mode 0" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128 --batch-size 4
 
-test_run "NVMe-EP batch-size 4 memory-mode 0" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128 --batch-size 4'"
+nvme_ep_test "NVMe-EP batch-size 16 memory-mode 0" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128 --batch-size 16
 
-sleep 3
+nvme_ep_test "NVMe-EP batch-size 0 (all-at-once)" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128 --batch-size 0
 
-test_run "NVMe-EP batch-size 16 memory-mode 0" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128 --batch-size 16'"
+nvme_ep_test "NVMe-EP multi-wavefront batch-size 128" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 256 --queue-length 256 --batch-size 128
 
-sleep 3
+nvme_ep_test "NVMe-EP num-queues 2" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128 --num-queues 2
 
-test_run "NVMe-EP batch-size 0 (all-at-once)" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128 --batch-size 0'"
+nvme_ep_test "NVMe-EP num-queues 4" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 23 --queue-length 128 --num-queues 4
 
-sleep 3
-
-test_run "NVMe-EP multi-wavefront batch-size 128" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 256 \
---queue-length 256 --batch-size 128'"
-
-sleep 3
-
-test_run "NVMe-EP num-queues 2" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128 --num-queues 2'"
-
-sleep 3
-
-test_run "NVMe-EP num-queues 4" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 23 \
---queue-length 128 --num-queues 4'"
-
-sleep 3
-
-test_run "NVMe-EP num-queues 2 + batch-size 16" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 0 \
---lbas-per-io 1 --lfsr-seed 32 --read-io 64 \
---queue-length 128 --num-queues 2 --batch-size 16'"
-
-sleep 3
+nvme_ep_test "NVMe-EP num-queues 2 + batch-size 16" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 32 \
+  --read-io 64 --queue-length 128 --num-queues 2 \
+  --batch-size 16
 
 # VRAM-backed queues require CDNA GPUs; RDNA (gfx1100)
 # cannot DMA NVMe I/O to device memory reliably.
 if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
 
-test_run "NVMe-EP memory-mode 3" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 3 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
---queue-length 128'"
+nvme_ep_test "NVMe-EP memory-mode 3" \
+  --memory-mode 3 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128
 
-sleep 3
+nvme_ep_test "NVMe-EP batch-size 4 memory-mode 3" \
+  --memory-mode 3 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128 \
+  --batch-size 4
 
-test_run "NVMe-EP batch-size 4 memory-mode 3" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 3 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
---queue-length 128 --batch-size 4'"
+nvme_ep_test "NVMe-EP memory-mode 11" \
+  --memory-mode 11 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128
 
-sleep 3
-
-test_run "NVMe-EP memory-mode 11" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 11 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
---queue-length 128'"
-
-sleep 3
-
-test_run "NVMe-EP batch-size 16 memory-mode 11" \
-  "run_on_host '${WORKING_DIR}/build/xio-tester \
-nvme-ep --controller ${NON_ROOTFS_CTRL} \
---access-pattern random --memory-mode 11 --less-timing \
---lbas-per-io 1 --lfsr-seed 32 --read-io 573 \
---queue-length 128 --batch-size 16'"
+nvme_ep_test "NVMe-EP batch-size 16 memory-mode 11" \
+  --memory-mode 11 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128 \
+  --batch-size 16
 
 else
   echo "INFO: Skipping VRAM memory-modes 3/11" \

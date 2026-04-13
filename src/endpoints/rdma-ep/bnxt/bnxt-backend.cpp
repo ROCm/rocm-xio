@@ -31,47 +31,19 @@
 #include "gda-backend.hpp"
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
+#include "xio-rdma-check.h"
 #include "xio.h"
 
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
-  do {                                                                         \
-    int _err = (expr);                                                         \
-    if (_err != 0) {                                                           \
-      fprintf(stderr,                                                          \
-              "rdma_ep::bnxt: %s failed: "                                     \
-              "%d at %s:%d\n",                                                 \
-              (msg), _err, __FILE__, __LINE__);                                \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
-
+  _XIO_CHECK_ZERO("rdma_ep::bnxt", (expr), (msg), return)
 #define XIO_CHECK_NNULL(expr, msg)                                             \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      fprintf(stderr,                                                          \
-              "rdma_ep::bnxt: %s returned "                                    \
-              "null at %s:%d\n",                                               \
-              (msg), __FILE__, __LINE__);                                      \
-      return;                                                                  \
-    }                                                                          \
-  } while (0)
+  _XIO_CHECK_NNULL("rdma_ep::bnxt", (expr), (msg), return)
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
-  if (!out) {
-    fprintf(stderr,
-            "rdma_ep::bnxt: dlsym failed for "
-            "%s: %s\n",
-            name, dlerror());
-    return -1;
-  }
-  return 0;
-}
+using xio_rdma::dlsym_load;
 
 bnxtdv_funcs_t bnxt_re_dv{};
 void* bnxtdv_handle_ = nullptr;
@@ -81,21 +53,7 @@ void* bnxtdv_handle_ = nullptr;
 #if defined(GDA_BNXT)
 
 void* Backend::bnxt_dv_dlopen() {
-  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
-  void* handle = nullptr;
-#ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/libbnxt_re.so", flags);
-#endif
-  if (!handle)
-    handle = dlopen("libbnxt_re.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/local/lib/libbnxt_re.so", flags);
-  if (!handle)
-    fprintf(stderr,
-            "rdma_ep::bnxt: Could not open "
-            "libbnxt_re.so: %s\n",
-            dlerror());
-  return handle;
+  return xio_rdma::dv_dlopen("libbnxt_re.so", "rdma_ep::bnxt");
 }
 
 int Backend::bnxt_dv_dl_init() {
@@ -104,7 +62,8 @@ int Backend::bnxt_dv_dl_init() {
     return -1;
 
 #define LOAD(field, name)                                                      \
-  if (dlsym_load(bnxt_re_dv.field, bnxtdv_handle_, name) != 0)                 \
+  if (dlsym_load(bnxt_re_dv.field, bnxtdv_handle_, name, "rdma_ep::bnxt") !=   \
+      0)                                                                       \
     return -1;
 
   LOAD(create_qp, "bnxt_re_dv_create_qp");

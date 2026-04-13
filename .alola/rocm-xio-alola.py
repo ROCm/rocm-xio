@@ -988,6 +988,7 @@ def display_results(
     total_unknown = 0
     total_running = 0
     subtest_counts = []
+    failed_details = []
 
     for test_name, script in TESTS:
         print("-" * 40)
@@ -1058,6 +1059,8 @@ def display_results(
             else:
                 print(f"Status: {label}")
             total_failed += 1
+            failed_details.append(
+                (test_name, suffix.strip("() ")))
 
         elif sc == STATUS_RUNNING:
             print(
@@ -1144,6 +1147,11 @@ def display_results(
     print(f"Passed: {green(total_passed)}")
     if total_failed > 0:
         print(f"Failed: {red(total_failed)}")
+        for fname, fdetail in failed_details:
+            if fdetail:
+                print(f"  {fname}: {fdetail}")
+            else:
+                print(f"  {fname}")
     else:
         print(f"Failed: {green(total_failed)}")
     if total_running > 0:

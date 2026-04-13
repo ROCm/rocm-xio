@@ -414,3 +414,79 @@ test_report() {
     return 1
   fi
 }
+
+# ---------------------------------------------------------
+# rdma_alola_build WORKDIR TARGET
+#
+# rsync + cmake + build for RDMA tests.  Sets
+# RDMA_CORE_LIB and TEST_BIN for the caller.
+# ---------------------------------------------------------
+rdma_alola_build() {
+  local workdir="$1"
+  local target="$2"
+
+  mkdir -p "${workdir}"
+  rsync -a --exclude='.git' . "${workdir}"
+  cd "${workdir}"
+  rm -rf build
+  cmake -S . -B build \
+    -DGDA_BNXT=ON -DGDA_MLX5=ON -DGDA_IONIC=ON
+  cmake --build build \
+    --target "${target}" \
+    --target install-rdma-core \
+    --parallel
+
+  RDMA_CORE_LIB="${workdir}/build/_deps"
+  RDMA_CORE_LIB="${RDMA_CORE_LIB}/rdma-core/install/lib"
+  TEST_BIN="${workdir}/build/tests/unit"
+  TEST_BIN="${TEST_BIN}/rdma-ep/${target}"
+}
+
+# ---------------------------------------------------------
+# detect_rdma_nic SSH_CMD HOST VENDOR
+#
+# Check a single vendor on HOST via SSH_CMD.  Prints
+# "DEVICE" on stdout if found, empty otherwise.
+# VENDOR is one of: bnxt, mlx5, ionic
+# ---------------------------------------------------------
+detect_rdma_nic() {
+  local ssh_cmd="$1"
+  local host="$2"
+  local vendor="$3"
+  local ib="/sys/class/infiniband"
+
+  local pattern
+  case "${vendor}" in
+    bnxt)  pattern="${ib}/rocm-rdma-bnxt* ${ib}/bnxt_*" ;;
+    mlx5)  pattern="${ib}/rocm-rdma-mlx5* ${ib}/mlx5_*" ;;
+    ionic) pattern="${ib}/rocm-rdma-ionic* ${ib}/ionic_*" ;;
+    *)     return 1 ;;
+  esac
+
+  local sysfs_hit
+  sysfs_hit=$(${ssh_cmd} "${host}" \
+    "ls -d ${pattern} 2>/dev/null | head -1" \
+    2>/dev/null || true)
+  if [ -n "${sysfs_hit}" ]; then
+    ${ssh_cmd} "${host}" "basename ${sysfs_hit}"
+  fi
+}
+
+# ---------------------------------------------------------
+# nvme_ep_test LABEL EXTRA_ARGS...
+#
+# Shorthand for the repeated xio-tester nvme-ep invocation
+# pattern in nvme-ep.sbatch.  Runs test_run with the
+# standard controller, seed, and access-pattern options,
+# then sleeps 3s between tests.
+#
+# Required env: WORKING_DIR, NON_ROOTFS_CTRL
+# ---------------------------------------------------------
+nvme_ep_test() {
+  local label="$1"; shift
+  test_run "${label}" \
+    "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern random $*'"
+  sleep 3
+}
