@@ -41,7 +41,8 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
     if (startTimes)
       startTimes[i] = t0;
 
-    qp->put_nbi_single(dst_ptr, src_ptr, transferSize, true);
+    qp->put_nbi_single(dst_ptr, src_ptr,
+                        transferSize, true);
     qp->quiet_single();
 
     unsigned long long int t1 = wall_clock64();
@@ -210,6 +211,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                   rdma_ep::provider_name(cfg->provider), mode_str, cfg->sqDepth,
                   cfg->iterations, cfg->transferSize);
 
+  bool sq_on_device =
+    (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
+  bool data_on_device =
+    (config->memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
+
   rdma_ep::BackendConfig bcfg;
   bcfg.provider = cfg->provider;
   bcfg.gpu_device_id = cfg->gpuDeviceId;
@@ -219,8 +225,12 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
   bcfg.traffic_class = cfg->trafficClass;
   bcfg.loopback = cfg->loopback;
-  bcfg.queue_mem = cfg->queueMem;
+  bcfg.queue_mem = sq_on_device
+    ? rdma_ep::QueueMemMode::DEVICE_VRAM
+    : rdma_ep::QueueMemMode::HOST_COHERENT;
   bcfg.pci_mmio_bridge = config->pciMmioBridge;
+  if (!cfg->deviceName.empty())
+    bcfg.hca_list = cfg->deviceName.c_str();
 
   rdma_ep::Backend backend(bcfg);
   int ret = backend.init();
@@ -247,28 +257,70 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     size_t xfer = cfg->transferSize;
     size_t buf_size = xfer * 2;
     void* buf = nullptr;
-    hipError_t buf_err = xio::allocHostMemory(buf_size, &buf,
-                                              "RDMA loopback buffer",
-                                              XIO_HOST_MEM_PINNED);
-    if (buf_err != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory failed\n");
-      backend.shutdown();
-      return hipErrorMemoryAllocation;
+
+    if (data_on_device) {
+      hsa_status_t hsa_err = xio::allocDeviceMemory(
+        buf_size, &buf, "RDMA loopback buffer",
+        XIO_DEVICE_MEM_FINE_GRAINED,
+        cfg->gpuDeviceId);
+      if (hsa_err != HSA_STATUS_SUCCESS) {
+        ROCXIO_LOG_ERROR(
+          "rdma-ep: allocDeviceMemory failed\n");
+        backend.shutdown();
+        return hipErrorMemoryAllocation;
+      }
+    } else {
+      hipError_t hip_err = xio::allocHostMemory(
+        buf_size, &buf, "RDMA loopback buffer",
+        XIO_HOST_MEM_PINNED);
+      if (hip_err != hipSuccess) {
+        ROCXIO_LOG_ERROR(
+          "rdma-ep: allocHostMemory failed\n");
+        backend.shutdown();
+        return hipErrorMemoryAllocation;
+      }
     }
 
     auto* src = static_cast<uint8_t*>(buf);
     auto* dst = src + xfer;
 
-    xio::DataPatternParams fill_p{src,       xfer,
-                                  0,         static_cast<uint32_t>(xfer),
-                                  cfg->seed, nullptr};
-    xio::dataPattern(false, fill_p);
-    memset(dst, 0x00, xfer);
+    if (data_on_device) {
+      (void)hipMemset(dst, 0x00, xfer);
+      uint8_t* host_fill = nullptr;
+      (void)xio::allocHostMemory(
+        xfer, (void**)&host_fill,
+        "RDMA pattern fill",
+        XIO_HOST_MEM_PINNED);
+      if (host_fill) {
+        xio::DataPatternParams fill_p{
+          host_fill, xfer, 0,
+          static_cast<uint32_t>(xfer),
+          cfg->seed, nullptr};
+        xio::dataPattern(false, fill_p);
+        (void)hipMemcpy(src, host_fill, xfer,
+                        hipMemcpyHostToDevice);
+        xio::freeHostMemory(
+          host_fill, XIO_HOST_MEM_PINNED);
+      }
+    } else {
+      xio::DataPatternParams fill_p{
+        src, xfer, 0,
+        static_cast<uint32_t>(xfer),
+        cfg->seed, nullptr};
+      xio::dataPattern(false, fill_p);
+      memset(dst, 0x00, xfer);
+    }
 
     ret = backend.register_data_buffer(buf, buf_size);
     if (ret != 0) {
-      ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+      ROCXIO_LOG_ERROR(
+        "rdma-ep: register_data_buffer failed\n");
+      if (data_on_device)
+        xio::freeDeviceMemory(
+          buf, XIO_DEVICE_MEM_FINE_GRAINED);
+      else
+        xio::freeHostMemory(
+          buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return hipErrorUnknown;
     }
@@ -286,18 +338,30 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed: %s\n",
-                       hipGetErrorString(launchErr));
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+      ROCXIO_LOG_ERROR(
+        "rdma-ep: Kernel launch failed: %s\n",
+        hipGetErrorString(launchErr));
+      if (data_on_device)
+        xio::freeDeviceMemory(
+          buf, XIO_DEVICE_MEM_FINE_GRAINED);
+      else
+        xio::freeHostMemory(
+          buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return launchErr;
     }
 
     hipError_t syncErr = hipDeviceSynchronize();
     if (syncErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
-                       hipGetErrorString(syncErr));
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+      ROCXIO_LOG_ERROR(
+        "rdma-ep: Kernel sync failed: %s\n",
+        hipGetErrorString(syncErr));
+      if (data_on_device)
+        xio::freeDeviceMemory(
+          buf, XIO_DEVICE_MEM_FINE_GRAINED);
+      else
+        xio::freeHostMemory(
+          buf, XIO_HOST_MEM_PINNED);
       backend.shutdown();
       return syncErr;
     }
@@ -308,22 +372,45 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     if (cfg->verify) {
       size_t errOff = 0;
-      xio::DataPatternParams vp{dst,       xfer,
-                                0,         static_cast<uint32_t>(xfer),
-                                cfg->seed, &errOff};
+      uint8_t* verify_buf = dst;
+      uint8_t* host_verify = nullptr;
+      if (data_on_device) {
+        (void)xio::allocHostMemory(
+          xfer, (void**)&host_verify,
+          "RDMA verify", XIO_HOST_MEM_PINNED);
+        if (host_verify) {
+          (void)hipMemcpy(host_verify, dst, xfer,
+                          hipMemcpyDeviceToHost);
+          verify_buf = host_verify;
+        }
+      }
+      xio::DataPatternParams vp{
+        verify_buf, xfer, 0,
+        static_cast<uint32_t>(xfer),
+        cfg->seed, &errOff};
       bool ok = xio::dataPattern(true, vp);
       if (ok) {
-        ROCXIO_LOG_INFO("rdma-ep: VERIFY PASSED"
-                        " (%zu bytes, seed=%u)\n",
-                        xfer, cfg->seed);
+        ROCXIO_LOG_INFO(
+          "rdma-ep: VERIFY PASSED"
+          " (%zu bytes, seed=%u)\n",
+          xfer, cfg->seed);
       } else {
-        ROCXIO_LOG_ERROR("rdma-ep: VERIFY FAILED at"
-                         " offset %zu (seed=%u)\n",
-                         errOff, cfg->seed);
+        ROCXIO_LOG_ERROR(
+          "rdma-ep: VERIFY FAILED at"
+          " offset %zu (seed=%u)\n",
+          errOff, cfg->seed);
       }
+      if (host_verify)
+        xio::freeHostMemory(
+          host_verify, XIO_HOST_MEM_PINNED);
     }
 
-    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+    if (data_on_device)
+      xio::freeDeviceMemory(
+        buf, XIO_DEVICE_MEM_FINE_GRAINED);
+    else
+      xio::freeHostMemory(
+        buf, XIO_HOST_MEM_PINNED);
   } else {
     // ==========================================================
     // 2-node path -- TCP QP exchange, RDMA WRITE + ping-pong

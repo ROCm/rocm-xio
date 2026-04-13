@@ -249,7 +249,12 @@ __device__ void Ops::quiet(QueuePair& qp) {
 }
 
 __device__ void Ops::quiet_single(QueuePair& qp) {
-  quiet_internal_ccqe_single(qp, qp.sq_prod_);
+  if (!qp.cq_mask_) {
+    quiet_internal_ccqe_single(qp, qp.sq_prod_);
+    return;
+  }
+  uint64_t mask = 1ULL << get_lane_id();
+  quiet_internal(qp, mask, qp.sq_prod_);
 }
 
 // --- RMA posting ---
