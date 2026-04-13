@@ -13,23 +13,9 @@
 #include <cstdlib>
 
 #include "rdma-topology.hpp"
+#include "xio-test-assert.h"
 
 using namespace rdma_ep;
-
-#define ASSERT_EQ(a, b)                                                        \
-  do {                                                                         \
-    if ((a) != (b)) {                                                          \
-      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-#define ASSERT_GE(a, b)                                                        \
-  do {                                                                         \
-    if (!((a) >= (b))) {                                                       \
-      printf("ASSERT_GE failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
 
 int test_extract_bus_number() {
   ASSERT_EQ(ExtractBusNumber("0000:01:00.0"), 1);

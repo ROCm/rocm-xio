@@ -15,30 +15,9 @@
 #include <unistd.h>
 
 #include "bnxt/bnxt-dv-sizing.hpp"
+#include "xio-test-assert.h"
 
 using namespace rdma_ep::bnxt_sizing;
-
-#define ASSERT_EQ(a, b)                                                        \
-  do {                                                                         \
-    if ((a) != (b)) {                                                          \
-      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-#define ASSERT_GT(a, b)                                                        \
-  do {                                                                         \
-    if (!((a) > (b))) {                                                        \
-      printf("ASSERT_GT failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-#define ASSERT_TRUE(x)                                                         \
-  do {                                                                         \
-    if (!(x)) {                                                                \
-      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
 
 int test_roundup_pow2() {
   ASSERT_EQ(roundup_pow2(0), 1u);

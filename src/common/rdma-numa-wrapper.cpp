@@ -12,24 +12,15 @@
 
 #include <dlfcn.h>
 
+#include "xio-rdma-check.h"
+
 namespace rdma_ep {
 
 NUMAWrapper numa;
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* prefix,
-               const char* name) {
-  char full_name[256];
-  snprintf(full_name, sizeof(full_name), "%s%s", prefix, name);
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, full_name));
-  if (!out) {
-    fprintf(stderr, "rdma_ep: dlsym failed for %s: %s\n", full_name, dlerror());
-    return -1;
-  }
-  return 0;
-}
+using xio_rdma::dlsym_load_prefixed;
 
 } // anonymous namespace
 
@@ -63,7 +54,7 @@ NUMAWrapper::~NUMAWrapper() {
 
 int NUMAWrapper::init_function_table() {
 #define LOAD_SYM(field, prefix, name)                                          \
-  if (dlsym_load(funcs_.field, numa_handle_, prefix, name) != 0)               \
+  if (dlsym_load_prefixed(funcs_.field, numa_handle_, prefix, name) != 0)      \
     return -1;
 
   LOAD_SYM(bitmask_isbitset, "numa_", "bitmask_isbitset");

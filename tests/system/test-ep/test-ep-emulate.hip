@@ -20,22 +20,8 @@
 #include <hip/hip_runtime.h>
 
 #include "test-ep.h"
+#include "xio-test-assert.h"
 #include "xio.h"
-
-#define ASSERT_EQ(a, b)                                                        \
-  do {                                                                         \
-    if ((a) != (b)) {                                                          \
-      printf("ASSERT_EQ failed: %s:%d\n", __FILE__, __LINE__);                 \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
-#define ASSERT_TRUE(x)                                                         \
-  do {                                                                         \
-    if (!(x)) {                                                                \
-      printf("ASSERT_TRUE failed: %s:%d\n", __FILE__, __LINE__);               \
-      abort();                                                                 \
-    }                                                                          \
-  } while (0)
 
 int test_emulate_roundtrip() {
   const unsigned kIter = 10;

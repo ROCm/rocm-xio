@@ -31,30 +31,15 @@
 #include "ibv-wrapper.hpp"
 #include "mlx5/mlx5-provider.hpp"
 #include "queue-pair.hpp"
+#include "xio-rdma-check.h"
 #include "xio.h"
 
 namespace rdma_ep {
 
 namespace {
 
-template <typename FuncPtr>
-int dlsym_load(FuncPtr& out, void* handle, const char* name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
-  if (!out) {
-    fprintf(stderr,
-            "rdma_ep::mlx5: dlsym failed for "
-            "%s: %s\n",
-            name, dlerror());
-    return -1;
-  }
-  return 0;
-}
-
-template <typename FuncPtr>
-int dlsym_load_optional(FuncPtr& out, void* handle, const char* name) {
-  out = reinterpret_cast<FuncPtr>(dlsym(handle, name));
-  return out ? 0 : -1;
-}
+using xio_rdma::dlsym_load;
+using xio_rdma::dlsym_load_optional;
 
 void* page_align(void* ptr) {
   long page_size = sysconf(_SC_PAGESIZE);
@@ -70,25 +55,12 @@ mlx5dv_funcs_t mlx5_dv{};
 #if defined(GDA_MLX5)
 
 void* Backend::mlx5_dv_dlopen() {
-  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
-  void* handle = nullptr;
-#ifdef RDMA_CORE_LIB_DIR
-  handle = dlopen(RDMA_CORE_LIB_DIR "/libmlx5.so", flags);
-#endif
-  if (!handle)
-    handle = dlopen("libmlx5.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/lib/x86_64-linux-gnu/libmlx5.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/lib/aarch64-linux-gnu/libmlx5.so", flags);
-  if (!handle)
-    handle = dlopen("/usr/lib64/libmlx5.so", flags);
-  if (!handle)
-    fprintf(stderr,
-            "rdma_ep::mlx5: Could not open "
-            "libmlx5.so: %s\n",
-            dlerror());
-  return handle;
+  static const char* const extra[] = {
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib/aarch64-linux-gnu",
+    "/usr/lib64",
+  };
+  return xio_rdma::dv_dlopen("libmlx5.so", "rdma_ep::mlx5", extra, 3);
 }
 
 int Backend::mlx5_dv_dl_init() {
@@ -96,7 +68,8 @@ int Backend::mlx5_dv_dl_init() {
   if (!mlx5dv_handle_)
     return -1;
 
-  if (dlsym_load(mlx5_dv.init_obj, mlx5dv_handle_, "mlx5dv_init_obj") != 0)
+  if (dlsym_load(mlx5_dv.init_obj, mlx5dv_handle_, "mlx5dv_init_obj",
+                 "rdma_ep::mlx5") != 0)
     return -1;
 
   dlsym_load_optional(mlx5_dv.is_supported, mlx5dv_handle_,
