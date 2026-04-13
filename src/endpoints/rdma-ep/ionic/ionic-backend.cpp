@@ -136,8 +136,7 @@ void Backend::ionic_create_cqs(int ncqes) {
 
   struct ionic_cq_init_attr_ex ionic_cq_attr;
   memset(&ionic_cq_attr, 0, sizeof(ionic_cq_attr));
-  ionic_cq_attr.comp_mask = IONIC_CQ_INIT_ATTR_MASK_FLAGS;
-  ionic_cq_attr.flags = IONIC_CQ_INIT_ATTR_CCQE;
+  ionic_cq_attr.comp_mask = 0;
 
   errno = 0;
   struct ibv_cq_ex* cq_ex = ionic_dv.create_cq_ex(context_, &cq_attr,
@@ -159,7 +158,7 @@ void Backend::ionic_create_cqs(int ncqes) {
 
   fprintf(stderr,
           "rdma_ep::ionic: Created CQ "
-          "(depth=%d, CCQE mode)\n",
+          "(depth=%d, ring mode)\n",
           ncqes);
 }
 

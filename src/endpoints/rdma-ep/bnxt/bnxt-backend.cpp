@@ -162,7 +162,7 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
 void Backend::bnxt_create_cqs(int cqe) {
   int dmabuf = ibv.is_dmabuf_supported();
 
-  cqe = 1; // CQE compression: 1 entry
+  (void)cqe;
 
   (void)xio::allocHostMemory(sizeof(bnxt_host_cq), (void**)&bnxt_scq_,
                              "BNXT SCQ", XIO_HOST_MEM_PLAIN);

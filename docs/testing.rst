@@ -218,6 +218,51 @@ features:
    # Quick CTest-only run (no profiling/stats)
    ctest --preset sweep
 
+xio-tester RDMA-EP
+------------------
+
+``xio-tester rdma-ep`` runs GPU-initiated RDMA WRITEs
+with per-iteration timing statistics and histogram
+support.  It honours ``--memory-mode`` for queue and
+data buffer placement (see :doc:`memory-modes`).
+
+.. code-block:: bash
+
+   LIB=build/_deps/rdma-core/install/lib:/opt/rocm/lib
+
+   # BNXT loopback (128 iterations, 4 KiB)
+   sudo LD_LIBRARY_PATH="${LIB}" \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     ./build/xio-tester rdma-ep \
+     --provider bnxt \
+     --device rocm-rdma-bnxt0 \
+     --loopback --iterations 128 \
+     --transfer-size 4096
+
+   # Ionic loopback
+   sudo LD_LIBRARY_PATH="${LIB}" \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     ./build/xio-tester rdma-ep \
+     --provider ionic \
+     --device rocm-rdma-ionic0 \
+     --loopback --iterations 128 \
+     --transfer-size 4096
+
+   # With data buffer in VRAM (memory-mode bit 3)
+   sudo LD_LIBRARY_PATH="${LIB}" \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     ./build/xio-tester rdma-ep \
+     --provider bnxt \
+     --device rocm-rdma-bnxt0 \
+     --loopback --iterations 128 \
+     --transfer-size 4096 \
+     --memory-mode 8
+
+The ``--device`` flag selects the RDMA device by name
+(as shown by ``rdma link show``).  When omitted,
+topology-based selection picks the NIC closest to the
+GPU.
+
 GPU Configuration for Multi-Wavefront Kernels
 ----------------------------------------------
 

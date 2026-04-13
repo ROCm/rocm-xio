@@ -4,33 +4,46 @@
 # for RDMA NICs supported by the rocm-xio project
 # to persistent, vendor-based names.
 #
+# Net interfaces use $attr{dev_port} (physical port
+# number on the NIC) instead of %n (kernel ifindex)
+# so that names are stable regardless of enumeration
+# order (e.g. rocm-bnxt0 not rocm-bnxt2).
+#
+# InfiniBand renames use a retry loop because the
+# rdma-netlink subsystem may not be ready when udev
+# first fires the add event.
+#
 # Install with:
 #   sudo udev/setup-udev-rules.sh --install
 
 # --- Network interface naming ---
+#
+# $attr{dev_port} gives the physical port index on the
+# NIC (0, 1, ...).  This is stable across reboots and
+# independent of kernel interface enumeration order.
 
 # Broadcom Thor 2 (bnxt_re)
 SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x14e4", \
   DRIVERS=="bnxt_en", \
-  NAME="rocm-bnxt%n"
+  NAME="rocm-bnxt$attr{dev_port}"
 
 # AMD Pensando (ionic)
 SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x1dd8", \
-  NAME="rocm-ionic%n"
+  NAME="rocm-ionic$attr{dev_port}"
 
 # Mellanox ConnectX (mlx5)
 SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x02c9", \
-  NAME="rocm-mlx5-%n"
+  NAME="rocm-mlx5-$attr{dev_port}"
 
 # AMD ROCm ERNIC -- uses DRIVERS guard so we don't
 # accidentally rename other AMD (0x1022) devices.
 SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x1022", \
   DRIVERS=="rocm_ernic", \
-  NAME="rocm-ernic%n"
+  NAME="rocm-ernic$attr{dev_port}"
 
 # --- InfiniBand device naming ---
 #
@@ -38,38 +51,57 @@ SUBSYSTEM=="net", ACTION=="add", \
 # false-matching a parent PCI bridge (e.g. an AMD
 # host bridge with vendor 0x1022).
 #
-# The rename is deferred via a backgrounded subshell
-# because rdma-netlink calls from a synchronous udev
-# RUN can fail while the device is still settling.
+# The rename runs in a backgrounded subshell with a
+# retry loop (up to 5 attempts, 1 s apart) because
+# rdma-netlink may not be ready when udev first fires
+# the add event.  The port number is read from the
+# sibling net device's dev_port attribute so it stays
+# in sync with the net interface name.
 
 # Broadcom Thor 2 (bnxt_re)
 SUBSYSTEM=="infiniband", ACTION=="add", \
   DRIVERS=="bnxt_en", \
   ATTRS{vendor}=="0x14e4", \
-  RUN+="/bin/sh -c '(sleep 1; \
-    /usr/bin/rdma dev set %k \
-    name rocm-rdma-bnxt%n) &'"
+  RUN+="/bin/sh -c '( \
+    p=$$(cat /sys/class/infiniband/%k/device/net/*/dev_port 2>/dev/null | head -1); \
+    p=$${p:-0}; \
+    for i in 1 2 3 4 5; do \
+      /usr/bin/rdma dev set %k name rocm-rdma-bnxt$$p 2>/dev/null && exit 0; \
+      sleep 1; \
+    done) &'"
 
 # AMD Pensando (ionic)
 SUBSYSTEM=="infiniband", ACTION=="add", \
   DRIVERS=="ionic", \
   ATTRS{vendor}=="0x1dd8", \
-  RUN+="/bin/sh -c '(sleep 1; \
-    /usr/bin/rdma dev set %k \
-    name rocm-rdma-ionic%n) &'"
+  RUN+="/bin/sh -c '( \
+    p=$$(cat /sys/class/infiniband/%k/device/net/*/dev_port 2>/dev/null | head -1); \
+    p=$${p:-0}; \
+    for i in 1 2 3 4 5; do \
+      /usr/bin/rdma dev set %k name rocm-rdma-ionic$$p 2>/dev/null && exit 0; \
+      sleep 1; \
+    done) &'"
 
 # Mellanox ConnectX (mlx5)
 SUBSYSTEM=="infiniband", ACTION=="add", \
   DRIVERS=="mlx5_core", \
   ATTRS{vendor}=="0x02c9", \
-  RUN+="/bin/sh -c '(sleep 1; \
-    /usr/bin/rdma dev set %k \
-    name rocm-rdma-mlx5-%n) &'"
+  RUN+="/bin/sh -c '( \
+    p=$$(cat /sys/class/infiniband/%k/device/net/*/dev_port 2>/dev/null | head -1); \
+    p=$${p:-0}; \
+    for i in 1 2 3 4 5; do \
+      /usr/bin/rdma dev set %k name rocm-rdma-mlx5-$$p 2>/dev/null && exit 0; \
+      sleep 1; \
+    done) &'"
 
 # AMD ROCm ERNIC
 SUBSYSTEM=="infiniband", ACTION=="add", \
   DRIVERS=="rocm_ernic", \
   ATTRS{vendor}=="0x1022", \
-  RUN+="/bin/sh -c '(sleep 1; \
-    /usr/bin/rdma dev set %k \
-    name rocm-rdma-ernic%n) &'"
+  RUN+="/bin/sh -c '( \
+    p=$$(cat /sys/class/infiniband/%k/device/net/*/dev_port 2>/dev/null | head -1); \
+    p=$${p:-0}; \
+    for i in 1 2 3 4 5; do \
+      /usr/bin/rdma dev set %k name rocm-rdma-ernic$$p 2>/dev/null && exit 0; \
+      sleep 1; \
+    done) &'"
