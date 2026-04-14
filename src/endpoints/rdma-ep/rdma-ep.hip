@@ -44,6 +44,8 @@ __global__ void rdma_ep_kernel(
   auto* src = static_cast<uint8_t*>(src_ptr);
   auto* dst = static_cast<uint8_t*>(dst_ptr);
 
+  qp->stopRequested_ = stopRequested;
+
   while ((infinite || i < iterations) &&
          (!stopRequested || !*stopRequested)) {
 

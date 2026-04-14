@@ -194,11 +194,22 @@ __device__ void Ops::quiet_internal(QueuePair& qp, uint64_t activemask,
     return;
   }
 
+  unsigned poll_count = 0;
   while ((qp.sq_msn_ - cons) & 0x800000) {
+    if (qp.stopRequested_ &&
+        poll_count % 100 == 0 &&
+        *qp.stopRequested_)
+      return;
+    poll_count++;
+
     if (!ionic_lock_try_acquire(&qp.cq_lock_))
       continue;
 
     while ((qp.sq_msn_ - cons) & 0x800000) {
+      if (qp.stopRequested_ && *qp.stopRequested_) {
+        ionic_lock_release(&qp.cq_lock_);
+        return;
+      }
       uint32_t old_sq_msn = qp.sq_msn_;
       poll_wave_cqes(qp, activemask);
 

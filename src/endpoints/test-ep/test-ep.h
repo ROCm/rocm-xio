@@ -88,6 +88,20 @@ struct TestEpConfig {
    */
   unsigned iterations = 128;
 
+  /**
+   * @brief LFSR data pattern verification.
+   *
+   * When true, the GPU fills the SQE data payload with
+   * an LFSR pattern (per-iteration seed) and verifies it
+   * after each CQE round-trip.
+   */
+  bool verify = false;
+
+  /**
+   * @brief Base seed for LFSR pattern verification.
+   */
+  uint32_t seed = 1;
+
   /** @brief Default constructor. */
   TestEpConfig() = default;
 };

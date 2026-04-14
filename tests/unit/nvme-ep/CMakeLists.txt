@@ -17,7 +17,9 @@ xio_add_test(
   SOURCE test-nvme-helpers.hip
   LABELS unit nvme
   TIMEOUT 30
-  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/nvme-ep
+  INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/src/endpoints/nvme-ep
+    ${CMAKE_SOURCE_DIR}/src/common
 )
 
 # Hardware integration tests (require real NVMe device)

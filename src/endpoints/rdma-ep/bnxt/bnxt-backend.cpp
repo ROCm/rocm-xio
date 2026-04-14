@@ -162,7 +162,8 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
 void Backend::bnxt_create_cqs(int cqe) {
   int dmabuf = ibv.is_dmabuf_supported();
 
-  (void)cqe;
+  if (cqe < 4096)
+    cqe = 4096;
 
   (void)xio::allocHostMemory(sizeof(bnxt_host_cq), (void**)&bnxt_scq_,
                              "BNXT SCQ", XIO_HOST_MEM_PLAIN);
@@ -376,10 +377,17 @@ void Backend::bnxt_initialize_gpu_qp() {
 
   fprintf(stderr,
           "rdma_ep::bnxt: GPU QP initialized "
-          "(CQ id=%u, SQ depth=%u, "
+          "(CQ id=%u, CQ depth=%u, "
+          "CQ buf_len=%lu, CQE_sz=%u, "
+          "SQ depth=%u, "
           "SQ buf=%p, DB=%p, MTU=%lu)\n",
-          host_qp_->bnxt_cq_.id, host_qp_->bnxt_sq_.depth,
-          host_qp_->bnxt_sq_.buf, (void*)host_qp_->bnxt_dbr_,
+          host_qp_->bnxt_cq_.id,
+          host_qp_->bnxt_cq_.depth,
+          (unsigned long)bnxt_scq_->length,
+          bnxt_scq_->cqe_size,
+          host_qp_->bnxt_sq_.depth,
+          host_qp_->bnxt_sq_.buf,
+          (void*)host_qp_->bnxt_dbr_,
           host_qp_->bnxt_sq_.mtu);
 }
 
