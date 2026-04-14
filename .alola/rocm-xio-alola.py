@@ -72,6 +72,27 @@ def set_test_filter(names):
     TESTS = [
         t for t in ALL_TESTS if t[0] in names]
 
+
+def set_test_exclude(names):
+    """Remove named tests from TESTS.
+
+    Validates each name against ALL_TESTS and
+    exits on unknown names.
+    """
+    global TESTS
+    unknown = [
+        n for n in names if n not in ALL_TEST_NAMES]
+    if unknown:
+        print(red(
+            f"ERROR: unknown test(s): "
+            f"{', '.join(unknown)}"))
+        print(
+            f"Available: "
+            f"{', '.join(ALL_TEST_NAMES)}")
+        sys.exit(1)
+    TESTS = [
+        t for t in TESTS if t[0] not in names]
+
 STATUS_PASS = 0
 STATUS_FAIL = 1
 STATUS_UNKNOWN = 2
@@ -1400,8 +1421,15 @@ def cmd_run(args):
 
     if args.tests:
         set_test_filter(
-            [t.strip() for t in
-             args.tests.split(",")])
+            [t for t in
+             (s.strip() for s in
+              args.tests.split(",")) if t])
+
+    if args.exclude_tests:
+        set_test_exclude(
+            [t for t in
+             (s.strip() for s in
+              args.exclude_tests.split(",")) if t])
 
     os.chdir(SCRIPT_DIR)
 
@@ -1884,6 +1912,14 @@ def main():
             "Available: "
             + ",".join(ALL_TEST_NAMES)
             + ". Default: all."),
+    )
+    p_run.add_argument(
+        "--exclude-tests", type=str,
+        default=None, metavar="LIST",
+        help=(
+            "Comma-separated list of tests to "
+            "exclude (e.g. rdma-ep). Applied "
+            "after --tests."),
     )
     p_run.add_argument(
         "--exclude-nodes", type=str,
