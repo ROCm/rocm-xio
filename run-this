@@ -2,6 +2,7 @@
 
 SETUP_GID=${SETUP_GID:-false}
 VENDOR=${VENDOR:-bnxt}
+ITERATIONS=${ITERATIONS:-128}
 NIC=rocm-${VENDOR}0
 
 if [ "${SETUP_GID}" = "true" ]; then
@@ -34,6 +35,6 @@ HSA_FORCE_FINE_GRAIN_PCIE=1 \
   --provider ${VENDOR} \
   --device rocm-rdma-${VENDOR}0 \
   --loopback \
-  --iterations 128 \
+  --iterations ${ITERATIONS} \
   --transfer-size 16384 \
   --less-timing
