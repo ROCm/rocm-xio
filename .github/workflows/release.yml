@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 
-name: deb-build
+name: release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
   workflow_dispatch:
     inputs:
       offload_arch:
@@ -19,8 +19,8 @@ permissions:
   contents: write
 
 jobs:
-  build-debs:
-    name: Build .deb packages
+  build-and-release:
+    name: Build .deb packages and create GitHub Release
     runs-on: ubuntu-latest
     container:
       image: rocm/dev-ubuntu-24.04:7.2
@@ -68,36 +68,14 @@ jobs:
           echo ""
         done
 
-    - name: Upload .deb artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: rocm-xio-debs-${{ github.sha }}
-        path: |
-          ../*.deb
-          ../*.buildinfo
-          ../*.changes
-
     - name: Stage release assets
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       run: |
         mkdir -p /tmp/release-assets
         cp ../*.deb ../*.buildinfo ../*.changes /tmp/release-assets/
 
-    - name: Update rolling latest pre-release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: latest
-        name: Latest development build
-        body: |
-          Rolling pre-release built from the latest commit on `main`.
-
-          **Commit:** ${{ github.sha }}
-          **Built:** ${{ github.event.head_commit.timestamp }}
-
-          These packages are rebuilt on every push to `main` and may not
-          be as stable as tagged releases. For production use, prefer a
-          tagged `vX.Y.Z` release.
-        prerelease: true
-        make_latest: false
+        generate_release_notes: true
+        prerelease: ${{ contains(github.ref_name, '-') }}
         files: /tmp/release-assets/*
