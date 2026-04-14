@@ -320,6 +320,14 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
     return "--batch-size must be < --sq-depth";
   if (config->batchSize > 1 && !config->loopback)
     return "--batch-size > 1 requires loopback mode";
+  if (config->batchSize > 1) {
+    int maxBlock = 0;
+    (void)hipDeviceGetAttribute(&maxBlock, hipDeviceAttributeMaxThreadsPerBlock,
+                                config->gpuDeviceId);
+    if (maxBlock > 0 && config->batchSize + 1 > static_cast<unsigned>(maxBlock))
+      return "--batch-size + 1 exceeds GPU"
+             " max threads per block";
+  }
   if (config->numQueues > 1 && !config->loopback)
     return "--num-queues > 1 requires loopback mode";
 
@@ -368,10 +376,21 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
   bool forceLessTiming = (useBatch || numQueues > 1) &&
                          config->startTimes != nullptr;
 
-  if (forceLessTiming)
+  if (forceLessTiming) {
     ROCXIO_LOG_INFO("rdma-ep: Forcing less-timing"
                     " (batch=%u queues=%u)\n",
                     batchSize, numQueues);
+    if (!config->timingStats) {
+      (void)hipHostMalloc((void**)&config->timingStats,
+                          sizeof(xio::XioTimingStats), hipHostMallocMapped);
+      if (config->timingStats) {
+        config->timingStats->minDuration = ULLONG_MAX;
+        config->timingStats->maxDuration = 0;
+        config->timingStats->sumDuration = 0;
+        config->timingStats->count = 0;
+      }
+    }
+  }
 
   // Per-buffer pairs: batch needs batchSize pairs
   uint32_t pairs = useBatch ? batchSize : 1;

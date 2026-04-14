@@ -543,7 +543,14 @@ int main(int argc, char** argv) {
     printf("ibv CQ cqe=%d\n", ibcq->cqe);
 
     volatile int* h_done = nullptr;
-    (void)hipHostMalloc((void**)&h_done, sizeof(int), hipHostMallocMapped);
+    hipError_t ha = hipHostMalloc((void**)&h_done, sizeof(int),
+                                  hipHostMallocMapped);
+    if (ha != hipSuccess || !h_done) {
+      fprintf(stderr, "hipHostMalloc h_done failed\n");
+      backend.shutdown();
+      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+      return 1;
+    }
 
     int failed = 0;
     for (unsigned i = 0; i < iterations; i++) {
@@ -551,6 +558,7 @@ int main(int argc, char** argv) {
       hipLaunchKernelGGL(loopback_post_one_kernel, dim3(1), dim3(1), 0, 0,
                          gpu_qp, (void*)src, (void*)dst, xfer_size, h_done);
       while (!*h_done) {
+        __builtin_ia32_pause();
       }
       (void)hipDeviceSynchronize();
 

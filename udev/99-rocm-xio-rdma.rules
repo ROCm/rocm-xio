@@ -36,7 +36,7 @@ SUBSYSTEM=="net", ACTION=="add", \
 # Mellanox ConnectX (mlx5)
 SUBSYSTEM=="net", ACTION=="add", \
   ATTR{device/vendor}=="0x02c9", \
-  NAME="rocm-mlx5-$attr{dev_port}"
+  NAME="rocm-mlx5$attr{dev_port}"
 
 # AMD ROCm ERNIC -- uses DRIVERS guard so we don't
 # accidentally rename other AMD (0x1022) devices.
@@ -90,7 +90,7 @@ SUBSYSTEM=="infiniband", ACTION=="add", \
     p=$$(cat /sys/class/infiniband/%k/device/net/*/dev_port 2>/dev/null | head -1); \
     p=$${p:-0}; \
     for i in 1 2 3 4 5; do \
-      /usr/bin/rdma dev set %k name rocm-rdma-mlx5-$$p 2>/dev/null && exit 0; \
+      /usr/bin/rdma dev set %k name rocm-rdma-mlx5$$p 2>/dev/null && exit 0; \
       sleep 1; \
     done) &'"
 
