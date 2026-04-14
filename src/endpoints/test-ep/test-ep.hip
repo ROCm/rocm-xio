@@ -920,6 +920,9 @@ hipError_t run(XioEndpointConfig* config) {
       }
       return err;
     }
+
+    config->verifyPass = config->iterations
+                         * config->numThreads;
   }
 
   // Join CPU threads if they were launched

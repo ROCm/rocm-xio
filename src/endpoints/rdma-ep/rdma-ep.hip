@@ -34,15 +34,31 @@ __global__ void rdma_ep_kernel(
   xio::XioTimingStats* timingStats,
   unsigned iterations, uint32_t transferSize,
   volatile bool* stopRequested,
-  bool doVerify, uint32_t seed) {
+  bool doVerify, uint32_t baseSeed,
+  uint32_t* verifyPass, uint32_t* verifyFail) {
   if (threadIdx.x != 0)
     return;
 
   bool infinite = (iterations == 0);
   unsigned i = 0;
+  auto* src = static_cast<uint8_t*>(src_ptr);
+  auto* dst = static_cast<uint8_t*>(dst_ptr);
 
   while ((infinite || i < iterations) &&
          (!stopRequested || !*stopRequested)) {
+
+    uint32_t iterSeed = baseSeed + i;
+
+    if (doVerify) {
+      xio::DataPatternParams fp{
+        src, transferSize, 0, transferSize,
+        iterSeed, nullptr};
+      xio::dataPattern(false, fp);
+      for (uint32_t b = 0; b < transferSize; b++)
+        dst[b] = 0;
+      __threadfence_system();
+    }
+
     unsigned long long int t0 = wall_clock64();
 
     if (startTimes && !infinite)
@@ -61,18 +77,21 @@ __global__ void rdma_ep_kernel(
       updateTimingStats(timingStats, t1 - t0);
 
     if (doVerify) {
-      auto* dst = static_cast<uint8_t*>(dst_ptr);
       size_t errOff = 0;
       xio::DataPatternParams vp{
         dst, transferSize, 0, transferSize,
-        seed, &errOff};
+        iterSeed, &errOff};
       bool ok = xio::dataPattern(true, vp);
-      if (!ok) {
+      if (ok) {
+        if (verifyPass)
+          atomicAdd(verifyPass, 1u);
+      } else {
+        if (verifyFail)
+          atomicAdd(verifyFail, 1u);
         printf("rdma-ep: VERIFY FAILED iter=%u"
-               " offset=%zu\n", i, errOff);
+               " seed=%u offset=%zu\n",
+               i, iterSeed, errOff);
       }
-      for (uint32_t b = 0; b < transferSize; b++)
-        dst[b] = 0;
     }
 
     i++;
@@ -361,6 +380,19 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       config->iterations > 0 ? config->endTimes
                               : nullptr;
 
+    uint32_t* d_verifyPass = nullptr;
+    uint32_t* d_verifyFail = nullptr;
+    if (cfg->verify) {
+      (void)hipHostMalloc(&d_verifyPass,
+                          sizeof(uint32_t),
+                          hipHostMallocMapped);
+      (void)hipHostMalloc(&d_verifyFail,
+                          sizeof(uint32_t),
+                          hipHostMallocMapped);
+      if (d_verifyPass) *d_verifyPass = 0;
+      if (d_verifyFail) *d_verifyFail = 0;
+    }
+
     hipLaunchKernelGGL(
       rdma_ep::rdma_ep_kernel,
       dim3(1), dim3(1), 0, 0, gpu_qp,
@@ -369,7 +401,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       config->timingStats,
       config->iterations, cfg->transferSize,
       config->stopRequested,
-      cfg->verify, cfg->seed);
+      cfg->verify, cfg->seed,
+      d_verifyPass, d_verifyFail);
 
     hipError_t launchErr = hipGetLastError();
     if (launchErr != hipSuccess) {
@@ -406,6 +439,13 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                       " %u iterations.\n",
                       config->iterations);
     }
+
+    if (cfg->verify && d_verifyPass && d_verifyFail) {
+      config->verifyPass = *d_verifyPass;
+      config->verifyFail = *d_verifyFail;
+    }
+    if (d_verifyPass) (void)hipHostFree(d_verifyPass);
+    if (d_verifyFail) (void)hipHostFree(d_verifyFail);
 
     if (data_on_device)
       xio::freeDeviceMemory(
