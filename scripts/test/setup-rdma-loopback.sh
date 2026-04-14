@@ -87,6 +87,35 @@ setup_vendor() {
       ;;
     mlx5)
       modprobe mlx5_ib 2>/dev/null || true
+      # Auto-discover the network interface from the
+      # IB device via sysfs when the default name
+      # (rocm-mlx5-0) doesn't exist.  Must run after
+      # modprobe mlx5_ib so the IB sysfs entries exist.
+      if [ ! -d "/sys/class/net/${nic_if}" ]; then
+        echo "  ${nic_if} not found," \
+          "auto-discovering from sysfs..."
+        local ib_dev=""
+        for ib in /sys/class/infiniband/mlx5_* \
+                  /sys/class/infiniband/rocm-rdma-mlx5*; do
+          [ -d "${ib}" ] || continue
+          ib_dev=$(basename "${ib}")
+          break
+        done
+        if [ -n "${ib_dev}" ]; then
+          local net_dir
+          net_dir="/sys/class/infiniband"
+          net_dir="${net_dir}/${ib_dev}/device/net"
+          if [ -d "${net_dir}" ]; then
+            local discovered
+            discovered=$(ls "${net_dir}" | head -1)
+            if [ -n "${discovered}" ]; then
+              echo "  Discovered: ${ib_dev}" \
+                "-> ${discovered}"
+              nic_if="${discovered}"
+            fi
+          fi
+        fi
+      fi
       ip link set "${nic_if}" up 2>/dev/null || true
       sleep 3
       ;;
