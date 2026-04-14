@@ -45,7 +45,8 @@ jobs:
 
     - name: Install rocm-kpack Python tools
       run: |
-        pip install --break-system-packages rocm-kpack
+        pip install --break-system-packages \
+          "rocm-kpack @ git+https://github.com/ROCm/rocm-kpack.git@main"
 
     - name: Generate debian/changelog
       run: debian/gen-changelog.sh
