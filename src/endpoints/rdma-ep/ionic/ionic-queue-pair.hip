@@ -202,9 +202,7 @@ __device__ void Ops::quiet_internal(QueuePair& qp, uint64_t activemask,
 
   unsigned poll_count = 0;
   while ((qp.sq_msn_ - cons) & 0x800000) {
-    if (qp.stopRequested_ &&
-        poll_count % 100 == 0 &&
-        *qp.stopRequested_)
+    if (qp.stopRequested_ && poll_count % 100 == 0 && *qp.stopRequested_)
       return;
     poll_count++;
 
@@ -213,9 +211,7 @@ __device__ void Ops::quiet_internal(QueuePair& qp, uint64_t activemask,
 
     unsigned inner_count = 0;
     while ((qp.sq_msn_ - cons) & 0x800000) {
-      if (qp.stopRequested_ &&
-          inner_count % 100 == 0 &&
-          *qp.stopRequested_) {
+      if (qp.stopRequested_ && inner_count % 100 == 0 && *qp.stopRequested_) {
         ionic_lock_release(&qp.cq_lock_);
         return;
       }
@@ -261,6 +257,10 @@ __device__ void Ops::ring_doorbell_single(QueuePair& qp, uint32_t pos) {
   __hip_atomic_store(&qp.sq_dbreg_[8 * get_lane_id()],
                      qp.sq_dbval_ | (qp.sq_mask_ & pos), __ATOMIC_SEQ_CST,
                      __HIP_MEMORY_SCOPE_SYSTEM);
+}
+
+__device__ void Ops::ring_doorbell_only(QueuePair& qp) {
+  (void)qp;
 }
 
 // --- Quiet ---
