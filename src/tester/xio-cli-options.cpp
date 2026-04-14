@@ -58,7 +58,18 @@ void registerTestEpCliOptions(CLI::App& app, xio::test_ep::TestEpConfig* cfg) {
     ->group("Endpoint Options");
   app
     .add_flag("--emulate", cfg->emulate,
-              "Run kernel code on CPU instead of GPU (for testing)")
+              "Run kernel code on CPU instead of GPU"
+              " (for testing)")
+    ->group("Endpoint Options");
+  app
+    .add_flag("--verify", cfg->verify,
+              "Verify LFSR data pattern each"
+              " iteration")
+    ->group("Endpoint Options");
+  app
+    .add_option("--seed", cfg->seed,
+                "LFSR seed for data pattern")
+    ->default_val(1)
     ->group("Endpoint Options");
 }
 

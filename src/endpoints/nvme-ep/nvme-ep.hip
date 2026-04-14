@@ -4,6 +4,7 @@
  */
 
 #include "nvme-ep.h"
+#include "xio-data-pattern.hpp"
 #include "xio-env.h"
 #include "xio-timing.h"
 
@@ -252,14 +253,12 @@ __device__ static void driveEndpointSingle(
                                 bufferParams.bufferSize > 0);
 
   if (has_write_buffer) {
-    dataPatternParams patternParams;
-    patternParams.buffer = bufferParams.writeBuffer;
-    patternParams.size = bufferParams.bufferSize;
-    patternParams.offset = 0;
-    patternParams.lbaSize = ioParams.lbaSize;
-    patternParams.lfsrSeed = ioParams.lfsrSeed;
-    patternParams.errorOffset = nullptr;
-    dataPattern(false, patternParams);
+    xio::DataPatternParams pp{
+      bufferParams.writeBuffer,
+      bufferParams.bufferSize, 0,
+      ioParams.lbaSize, ioParams.lfsrSeed,
+      nullptr};
+    xio::dataPattern(false, pp);
   }
 
   uint16_t cq_head = 0;
@@ -462,14 +461,12 @@ __device__ static void driveEndpointWavefront(
     sh_error = false;
 
     if (has_write_buffer) {
-      dataPatternParams patternParams;
-      patternParams.buffer = bufferParams.writeBuffer;
-      patternParams.size = bufferParams.bufferSize;
-      patternParams.offset = 0;
-      patternParams.lbaSize = ioParams.lbaSize;
-      patternParams.lfsrSeed = ioParams.lfsrSeed;
-      patternParams.errorOffset = nullptr;
-      dataPattern(false, patternParams);
+      xio::DataPatternParams pp{
+        bufferParams.writeBuffer,
+        bufferParams.bufferSize, 0,
+        ioParams.lbaSize, ioParams.lfsrSeed,
+        nullptr};
+      xio::dataPattern(false, pp);
     }
   }
   __syncthreads();
@@ -1334,14 +1331,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         rbuf = host_rb;
       }
       if (rbuf) {
-        nvme_ep::dataPatternParams vp;
-        vp.buffer = rbuf;
-        vp.size = bsz;
-        vp.offset = 0;
-        vp.lbaSize = ioParams.lbaSize;
-        vp.lfsrSeed = ioParams.lfsrSeed;
-        vp.errorOffset = nullptr;
-        if (nvme_ep::dataPattern(true, vp))
+        xio::DataPatternParams vp{
+          rbuf, bsz, 0, ioParams.lbaSize,
+          ioParams.lfsrSeed, nullptr};
+        if (xio::dataPattern(true, vp))
           config->verifyPass +=
             static_cast<uint32_t>(
               nvmeConfig->ioParams.readIo);

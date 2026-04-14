@@ -101,6 +101,7 @@ public:
                                    int64_t atomic_cmp, bool fetching);
 
   Provider provider_{Provider::UNKNOWN};
+  volatile bool* stopRequested_{nullptr};
 
   uint8_t op_rdma_write_;
   uint8_t op_rdma_write_imm_;

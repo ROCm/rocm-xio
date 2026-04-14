@@ -35,6 +35,5 @@ HSA_FORCE_FINE_GRAIN_PCIE=1 \
   --device rocm-rdma-${VENDOR}0 \
   --loopback \
   --iterations 128 \
-  --transfer-size 2 \
-  --less-timing \
-  --verify
+  --transfer-size 16384 \
+  --less-timing
