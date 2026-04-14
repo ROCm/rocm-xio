@@ -58,7 +58,13 @@ __device__ uint32_t Ops::reserve_sq_single(QueuePair& qp, uint32_t num_wqes) {
   uint32_t my_sq_prod = __hip_atomic_fetch_add(&qp.sq_prod_, num_wqes,
                                                __ATOMIC_RELAXED,
                                                __HIP_MEMORY_SCOPE_AGENT);
-  quiet_internal_ccqe_single(qp, my_sq_prod + num_wqes - qp.sq_mask_);
+  uint32_t cons = my_sq_prod + num_wqes - qp.sq_mask_;
+  if (!qp.cq_mask_) {
+    quiet_internal_ccqe_single(qp, cons);
+  } else {
+    uint64_t mask = 1ULL << get_lane_id();
+    quiet_internal(qp, mask, cons);
+  }
   return my_sq_prod;
 }
 
@@ -205,11 +211,15 @@ __device__ void Ops::quiet_internal(QueuePair& qp, uint64_t activemask,
     if (!ionic_lock_try_acquire(&qp.cq_lock_))
       continue;
 
+    unsigned inner_count = 0;
     while ((qp.sq_msn_ - cons) & 0x800000) {
-      if (qp.stopRequested_ && *qp.stopRequested_) {
+      if (qp.stopRequested_ &&
+          inner_count % 100 == 0 &&
+          *qp.stopRequested_) {
         ionic_lock_release(&qp.cq_lock_);
         return;
       }
+      inner_count++;
       uint32_t old_sq_msn = qp.sq_msn_;
       poll_wave_cqes(qp, activemask);
 

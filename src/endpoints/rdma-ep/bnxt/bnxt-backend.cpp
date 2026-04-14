@@ -376,6 +376,13 @@ void Backend::bnxt_initialize_gpu_qp() {
   host_qp_->inline_threshold_ = config_.inline_threshold;
 
   fprintf(stderr,
+          "rdma_ep::bnxt: DB region: "
+          "dbr=%p umdbr=0x%lx dpi=%u\n",
+          (void*)bnxt_qp_->db_region_attr->dbr,
+          (unsigned long)
+            bnxt_qp_->db_region_attr->umdbr,
+          bnxt_qp_->db_region_attr->dpi);
+  fprintf(stderr,
           "rdma_ep::bnxt: GPU QP initialized "
           "(CQ id=%u, CQ depth=%u, "
           "CQ buf_len=%lu, CQE_sz=%u, "
