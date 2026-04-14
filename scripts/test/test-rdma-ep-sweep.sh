@@ -15,10 +15,10 @@
 #   - Timing statistics (min/max/mean/std)
 #
 # Usage:
-#   ./run-test-rdma-loopback.sh
-#   BUILD_ALL=true ./run-test-rdma-loopback.sh
-#   VENDOR=mlx5 ./run-test-rdma-loopback.sh
-#   PROFILE=1 VENDOR=ionic ./run-test-rdma-loopback.sh
+#   ./test-rdma-ep-sweep.sh
+#   BUILD_ALL=true ./test-rdma-ep-sweep.sh
+#   VENDOR=mlx5 ./test-rdma-ep-sweep.sh
+#   PROFILE=1 VENDOR=ionic ./test-rdma-ep-sweep.sh
 #
 # For a quick CTest-only run without this wrapper:
 #   ctest --test-dir build --preset sweep
@@ -26,7 +26,10 @@
 
 set -euo pipefail
 
-BUILD_DIR=${BUILD_DIR:-./build}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+BUILD_DIR=${BUILD_DIR:-${REPO_ROOT}/build}
 BUILD_ALL=${BUILD_ALL:-false}
 VENDOR=${VENDOR:-all}
 PROFILE=${PROFILE:-0}
@@ -62,7 +65,7 @@ echo "====================================="
 echo "  Running hardware setup fixture"
 echo "====================================="
 sudo VENDOR="${VENDOR}" \
-  scripts/test/setup-rdma-loopback.sh
+  "${SCRIPT_DIR}/setup-rdma-loopback.sh"
 
 # --- Test phase ---
 run_sweep() {
@@ -77,7 +80,7 @@ run_sweep() {
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;
     mlx5)
-      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx5-0}"
+      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx50}"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;
@@ -122,6 +125,7 @@ run_sweep() {
       prof_prefix="${prof_prefix} --"
     fi
     # shellcheck disable=SC2086
+    # shellcheck disable=SC2024
     sudo env LD_LIBRARY_PATH="${lib_path}" \
       ${prof_prefix} \
       "${bin}" \
@@ -156,6 +160,7 @@ run_sweep() {
   fi
 
   local min max mean std
+  # shellcheck disable=SC2046
   read -r min max mean std <<< $(
     printf '%s\n' "${times[@]}" | awk '
       BEGIN { min=1e18; max=0; s=0; s2=0; n=0 }

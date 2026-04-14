@@ -90,7 +90,7 @@ int test_config_validate_zero_iterations() {
   cfg.providerStr = "bnxt";
   cfg.iterations = 0;
   std::string err = rdma_ep::validateConfig(&cfg);
-  ASSERT_TRUE(!err.empty());
+  ASSERT_TRUE(err.empty());
   return 0;
 }
 

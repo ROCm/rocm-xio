@@ -33,9 +33,9 @@ setup_vendor() {
       rdma_dev="${IONIC_RDMA_DEV:-rocm-rdma-ionic0}"
       ;;
     mlx5)
-      nic_if="${MLX5_NIC_IF:-rocm-mlx5-0}"
+      nic_if="${MLX5_NIC_IF:-rocm-mlx50}"
       nic_ip="${MLX5_NIC_IP:-198.18.2.1/24}"
-      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx5-0}"
+      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx50}"
       ;;
     *)
       echo "ERROR: Unknown vendor '${vendor}'"
@@ -89,7 +89,7 @@ setup_vendor() {
       modprobe mlx5_ib 2>/dev/null || true
       # Auto-discover the network interface from the
       # IB device via sysfs when the default name
-      # (rocm-mlx5-0) doesn't exist.  Must run after
+      # (rocm-mlx50) doesn't exist.  Must run after
       # modprobe mlx5_ib so the IB sysfs entries exist.
       if [ ! -d "/sys/class/net/${nic_if}" ]; then
         echo "  ${nic_if} not found," \

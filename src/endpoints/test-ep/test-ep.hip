@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "test-ep.h"
+#include "xio-data-pattern.hpp"
 #include "xio-timing.h"
 #include "xio.h"
 
@@ -325,13 +326,13 @@ std::vector<std::thread> launchCpuThreads(void* hostSqeAddr, void* hostCqeAddr,
 }
 
 // Endpoint kernel - receives pointers directly like simple-test
-__global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
-                                unsigned long long int* startTimes,
-                                unsigned long long int* endTimes,
-                                XioTimingStats* timingStats,
-                                unsigned iterations, unsigned numThreads,
-                                long long delayNs, unsigned doorbell,
-                                uint32_t* doorbellAddr, unsigned queueSize) {
+__global__ void endpoint_kernel(
+  sqeType* sqePtr, cqeType* cqePtr, unsigned long long int* startTimes,
+  unsigned long long int* endTimes, XioTimingStats* timingStats,
+  unsigned iterations, unsigned numThreads, long long delayNs,
+  unsigned doorbell, uint32_t* doorbellAddr, unsigned queueSize,
+  volatile bool* stopRequested, bool doVerify, uint32_t baseSeed,
+  uint32_t* verifyPass, uint32_t* verifyFail) {
   // Get thread ID for multi-threading
   unsigned tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= numThreads) {
@@ -370,6 +371,9 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     __syncthreads();
 
     for (unsigned i = 0; i < iterations; ++i) {
+      if (stopRequested && i % 100 == 0 && *stopRequested)
+        break;
+
       // Record start time for this iteration (when SQE is posted)
       unsigned long long pollStartTime = wall_clock64();
       unsigned long long startTime = 0;
@@ -465,9 +469,10 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
     }
   } else {
     // Normal polling mode
-    // Encode thread index in iteration field (upper 32 bits) and iteration
-    // (lower 32 bits)
     for (unsigned i = 0; i < iterations; ++i) {
+      if (stopRequested && i % 100 == 0 && *stopRequested)
+        break;
+
       // Record start time for this iteration
       unsigned long long pollStartTime = wall_clock64();
       unsigned long long startTime = 0;
@@ -477,8 +482,6 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
         startTime = pollStartTime;
       }
 
-      // Prepare message to CPU (matches simple-test)
-      // Encode thread index in upper 32 bits, iteration in lower 32 bits
       sqeType msg = {};
       msg.magic = magicId;
       msg.iteration = ((uint64_t)tid << 32) | i;
@@ -502,26 +505,30 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
       }
       msg.data[0] = actualDelayNs;
 
-      // Fill remaining data payload
-      for (int j = 1; j < 5; ++j) {
-        msg.data[j] = 0x123456789ABCDEF0ULL + tid + i + j;
+      if (doVerify) {
+        uint32_t iterSeed = baseSeed + i;
+        xio::DataPatternParams fp{reinterpret_cast<uint8_t*>(&msg.data[1]),
+                                  4 * sizeof(uint64_t),
+                                  0,
+                                  static_cast<uint32_t>(4 * sizeof(uint64_t)),
+                                  iterSeed,
+                                  nullptr};
+        xio::dataPattern(false, fp);
+      } else {
+        for (int j = 1; j < 5; ++j)
+          msg.data[j] = 0x123456789ABCDEF0ULL + tid + i + j;
       }
 
-      // Write message to memory (matches simple-test)
       *mySqe = msg;
-      __threadfence_system(); // Ensure write is visible
+      __threadfence_system();
 
-      // Poll for CPU response (matches simple-test exactly)
       while (true) {
         uint64_t magic = volatileCqe->magic;
         uint64_t cpuTime = volatileCqe->cpuTime;
         currentResponse.magic = magic;
         currentResponse.cpuTime = cpuTime;
-        // Check if this is a new response
         if (currentResponse.magic == cqeMagicId) {
           if (currentResponse.cpuTime != 0) {
-            // Accept if this is a new response (cpuTime changed)
-            // Or if this is the first valid response (lastCpuTime was 0)
             if (currentResponse.cpuTime != lastCpuTime || lastCpuTime == 0) {
               break;
             }
@@ -531,8 +538,6 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
       lastResponse = currentResponse;
       lastCpuTime = currentResponse.cpuTime;
 
-      // Record GPU time when CPU response is received (use GPU time for both
-      // start and end)
       unsigned long long endTime = wall_clock64();
       if (myEndTimes != nullptr) {
         myEndTimes[i] = endTime;
@@ -540,6 +545,23 @@ __global__ void endpoint_kernel(sqeType* sqePtr, cqeType* cqePtr,
                  endTime > startTime) {
         unsigned long long int duration = endTime - startTime;
         updateTimingStats(timingStats, duration);
+      }
+
+      if (doVerify) {
+        uint32_t iterSeed = baseSeed + i;
+        xio::DataPatternParams vp{reinterpret_cast<uint8_t*>(&mySqe->data[1]),
+                                  4 * sizeof(uint64_t),
+                                  0,
+                                  static_cast<uint32_t>(4 * sizeof(uint64_t)),
+                                  iterSeed,
+                                  nullptr};
+        if (xio::dataPattern(true, vp)) {
+          if (verifyPass)
+            atomicAdd(verifyPass, 1u);
+        } else {
+          if (verifyFail)
+            atomicAdd(verifyFail, 1u);
+        }
       }
     }
   }
@@ -882,33 +904,56 @@ hipError_t run(XioEndpointConfig* config) {
       thread.join();
     }
   } else {
-    // Normal mode: launch GPU kernel
     uint32_t* doorbellPtr = static_cast<uint32_t*>(doorbellAddr);
+    uint32_t* d_vPass = nullptr;
+    uint32_t* d_vFail = nullptr;
+    if (testEpConfig->verify) {
+      (void)hipHostMalloc(&d_vPass, sizeof(uint32_t), hipHostMallocMapped);
+      (void)hipHostMalloc(&d_vFail, sizeof(uint32_t), hipHostMallocMapped);
+      if (d_vPass)
+        *d_vPass = 0;
+      if (d_vFail)
+        *d_vFail = 0;
+    }
+
     hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
                        sqePtr, cqePtr, config->startTimes, config->endTimes,
                        config->timingStats, config->iterations,
                        config->numThreads, config->delayNs, doorbell,
-                       doorbellPtr, queueSize);
+                       doorbellPtr, queueSize, config->stopRequested,
+                       testEpConfig->verify, testEpConfig->seed, d_vPass,
+                       d_vFail);
 
-    // Check for kernel launch errors
     err = hipGetLastError();
     if (err != hipSuccess) {
-      // Join CPU threads if launched
-      for (auto& thread : cpuThreadHandles) {
+      for (auto& thread : cpuThreadHandles)
         thread.join();
-      }
+      if (d_vPass)
+        (void)hipHostFree(d_vPass);
+      if (d_vFail)
+        (void)hipHostFree(d_vFail);
       return err;
     }
 
-    // Wait for GPU kernel to complete
     err = hipDeviceSynchronize();
     if (err != hipSuccess) {
-      // Join CPU threads if launched
-      for (auto& thread : cpuThreadHandles) {
+      for (auto& thread : cpuThreadHandles)
         thread.join();
-      }
+      if (d_vPass)
+        (void)hipHostFree(d_vPass);
+      if (d_vFail)
+        (void)hipHostFree(d_vFail);
       return err;
     }
+
+    if (testEpConfig->verify && d_vPass && d_vFail) {
+      config->verifyPass = *d_vPass;
+      config->verifyFail = *d_vFail;
+    }
+    if (d_vPass)
+      (void)hipHostFree(d_vPass);
+    if (d_vFail)
+      (void)hipHostFree(d_vFail);
   }
 
   // Join CPU threads if they were launched

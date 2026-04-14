@@ -89,6 +89,10 @@ __device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
                      __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
+__device__ void Ops::ring_doorbell_only(QueuePair& qp) {
+  ring_doorbell(qp, qp.bnxt_sq_.tail);
+}
+
 __device__ void Ops::check_cqe_error(QueuePair& qp,
                                      struct bnxt_re_req_cqe* cqe) {
   (void)qp;
@@ -104,14 +108,13 @@ __device__ void Ops::check_cqe_error(QueuePair& qp,
   }
 }
 
-__device__ void Ops::ack_cq(QueuePair& qp, uint32_t cq_cons) {
+__device__ void Ops::ack_cq(QueuePair& qp, uint32_t db_idx) {
   struct bnxt_re_db_hdr hdr;
-  uint64_t key_lo = cq_cons & BNXT_RE_DB_INDX_MASK;
-  uint64_t key_hi =
-    (qp.bnxt_cq_.id & BNXT_RE_DB_QID_MASK) |
-    (((uint64_t)BNXT_RE_QUE_TYPE_CQ_CUT_ACK & BNXT_RE_DB_TYP_MASK)
-     << BNXT_RE_DB_TYP_SHIFT) |
-    (0x1UL << BNXT_RE_DB_VALID_SHIFT);
+  uint64_t key_lo = db_idx;
+  uint64_t key_hi = (qp.bnxt_cq_.id & BNXT_RE_DB_QID_MASK) |
+                    (((uint64_t)BNXT_RE_QUE_TYPE_CQ & BNXT_RE_DB_TYP_MASK)
+                     << BNXT_RE_DB_TYP_SHIFT) |
+                    (0x1UL << BNXT_RE_DB_VALID_SHIFT);
   hdr.typ_qid_indx = (key_lo | (key_hi << 32));
   __threadfence_system();
   __hip_atomic_store(qp.bnxt_dbr_, hdr.typ_qid_indx, __ATOMIC_SEQ_CST,
@@ -121,25 +124,55 @@ __device__ void Ops::ack_cq(QueuePair& qp, uint32_t cq_cons) {
 __device__ void Ops::poll_cq_until(QueuePair& qp,
                                    uint32_t requested_available_slots) {
   uint32_t sq_depth = qp.bnxt_sq_.depth;
+  uint32_t cq_depth = qp.bnxt_cq_.depth;
+  uint32_t cq_cons = qp.bnxt_cq_.head;
+  uint32_t cq_epoch = qp.bnxt_cq_.flags & 1;
+  bool cq_dirty = false;
+  unsigned poll_count = 0;
+  constexpr uint32_t cqe_bytes = sizeof(struct bnxt_re_req_cqe) +
+                                 sizeof(struct bnxt_re_bcqe);
+
   do {
-    auto* cqe = (struct bnxt_re_req_cqe*)qp.bnxt_cq_.buf;
-#ifdef DEBUG
-    check_cqe_error(qp, cqe);
-#endif
-    uint32_t con = cqe->con_indx & 0xFFFF;
-    uint32_t sq_head = ((con * GDA_BNXT_WQE_SLOT_COUNT) % sq_depth);
-    qp.bnxt_sq_.head = sq_head;
+    if (qp.stopRequested_ && poll_count % 100 == 0 && *qp.stopRequested_)
+      return;
+    poll_count++;
+
     uint32_t sq_tail = __hip_atomic_load(&qp.bnxt_sq_.tail, __ATOMIC_SEQ_CST,
                                          __HIP_MEMORY_SCOPE_AGENT);
+    uint32_t sq_head = qp.bnxt_sq_.head;
     uint32_t consumed = (sq_tail - sq_head + sq_depth) % sq_depth;
     uint32_t available = sq_depth - consumed;
     if (available >= requested_available_slots) {
-      if (con != qp.bnxt_cq_.head) {
-        ack_cq(qp, con);
-        qp.bnxt_cq_.head = con;
+      if (cq_dirty) {
+        uint32_t db_idx = (cq_cons % cq_depth) | (cq_epoch << 24);
+        ack_cq(qp, db_idx);
+        qp.bnxt_cq_.head = cq_cons;
+        qp.bnxt_cq_.flags = (qp.bnxt_cq_.flags & ~1u) | cq_epoch;
       }
       return;
     }
+
+    uint32_t cq_idx = cq_cons % cq_depth;
+    uint8_t phase_exp = !((cq_cons / cq_depth) & 1);
+
+    auto* base = (volatile uint8_t*)qp.bnxt_cq_.buf;
+    auto* cqe = (volatile struct bnxt_re_req_cqe*)(base + cq_idx * cqe_bytes);
+    auto* hdr = (volatile struct bnxt_re_bcqe*)(base + cq_idx * cqe_bytes +
+                                                sizeof(struct bnxt_re_req_cqe));
+
+    uint32_t flg = hdr->flg_st_typ_ph;
+    uint8_t phase = flg & BNXT_RE_BCQE_PH_MASK;
+
+    if (phase != phase_exp)
+      continue;
+
+    uint32_t con = cqe->con_indx & 0xFFFF;
+    uint32_t new_head = (con * GDA_BNXT_WQE_SLOT_COUNT) % sq_depth;
+    qp.bnxt_sq_.head = new_head;
+    cq_cons++;
+    if (cq_cons % cq_depth == 0)
+      cq_epoch ^= 1;
+    cq_dirty = true;
   } while (true);
 }
 

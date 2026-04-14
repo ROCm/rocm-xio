@@ -60,6 +60,9 @@ struct RdmaEpConfig {
   std::string deviceName;             /**< RDMA device name filter. */
   QueueMemMode queueMem = QueueMemMode::HOST_COHERENT; /**< Queue buffer
                                                           placement. */
+  uint32_t batchSize = 1;    /**< WQEs per doorbell ring.  */
+  uint16_t numQueues = 1;    /**< Independent QP count.    */
+  bool infiniteMode = false; /**< Run forever (SIGINT).    */
 
   /** @name 2-Node Mode Fields
    *  Mutually exclusive with loopback mode.

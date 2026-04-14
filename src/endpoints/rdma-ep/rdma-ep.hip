@@ -31,14 +31,35 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
                                unsigned long long int* startTimes,
                                unsigned long long int* endTimes,
                                xio::XioTimingStats* timingStats,
-                               unsigned iterations, uint32_t transferSize) {
+                               unsigned iterations, uint32_t transferSize,
+                               volatile bool* stopRequested, bool doVerify,
+                               uint32_t baseSeed, uint32_t* verifyPass,
+                               uint32_t* verifyFail) {
   if (threadIdx.x != 0)
     return;
 
-  for (unsigned i = 0; i < iterations; i++) {
+  bool infinite = (iterations == 0);
+  unsigned i = 0;
+  auto* src = static_cast<uint8_t*>(src_ptr);
+  auto* dst = static_cast<uint8_t*>(dst_ptr);
+
+  qp->stopRequested_ = stopRequested;
+
+  while ((infinite || i < iterations) && (!stopRequested || !*stopRequested)) {
+    uint32_t iterSeed = baseSeed + i;
+
+    if (doVerify) {
+      xio::DataPatternParams fp{src,          transferSize, 0,
+                                transferSize, iterSeed,     nullptr};
+      xio::dataPattern(false, fp);
+      for (uint32_t b = 0; b < transferSize; b++)
+        dst[b] = 0;
+      __threadfence_system();
+    }
+
     unsigned long long int t0 = wall_clock64();
 
-    if (startTimes)
+    if (startTimes && !infinite)
       startTimes[i] = t0;
 
     qp->put_nbi_single(dst_ptr, src_ptr, transferSize, true);
@@ -46,11 +67,137 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
 
     unsigned long long int t1 = wall_clock64();
 
-    if (endTimes)
+    if (endTimes && !infinite)
       endTimes[i] = t1;
 
     if (timingStats && t1 > t0)
       updateTimingStats(timingStats, t1 - t0);
+
+    if (doVerify) {
+      size_t errOff = 0;
+      xio::DataPatternParams vp{dst,          transferSize, 0,
+                                transferSize, iterSeed,     &errOff};
+      bool ok = xio::dataPattern(true, vp);
+      if (ok) {
+        if (verifyPass)
+          atomicAdd(verifyPass, 1u);
+      } else {
+        if (verifyFail)
+          atomicAdd(verifyFail, 1u);
+        printf("rdma-ep: VERIFY FAILED iter=%u"
+               " seed=%u offset=%zu\n",
+               i, iterSeed, errOff);
+      }
+    }
+
+    i++;
+  }
+}
+
+__global__ void rdma_ep_batch_kernel(
+  QueuePair* qp, uint8_t* buf, uint32_t transferSize, uint32_t batchSize,
+  unsigned iterations, xio::XioTimingStats* timingStats,
+  volatile bool* stopRequested, bool doVerify, uint32_t baseSeed,
+  uint32_t* verifyPass, uint32_t* verifyFail) {
+  extern __shared__ unsigned long long int sh_start[];
+  __shared__ unsigned sh_ops_done;
+  __shared__ unsigned sh_batch_count;
+  __shared__ bool sh_stop;
+
+  unsigned tid = threadIdx.x;
+  bool infinite = (iterations == 0);
+
+  if (tid == 0) {
+    qp->stopRequested_ = stopRequested;
+    sh_ops_done = 0;
+    sh_stop = false;
+  }
+  __syncthreads();
+
+  while (!sh_stop) {
+    // Phase 1: coordinator sets batch count
+    if (tid == 0) {
+      unsigned remaining = infinite ? batchSize : iterations - sh_ops_done;
+      if (remaining == 0) {
+        sh_stop = true;
+      } else {
+        sh_batch_count = remaining < batchSize ? remaining : batchSize;
+      }
+      if (stopRequested && *stopRequested)
+        sh_stop = true;
+    }
+    __syncthreads();
+    if (sh_stop)
+      break;
+
+    unsigned batch_count = sh_batch_count;
+
+    // Phase 2a: workers fill src and zero dst
+    if (tid >= 1 && doVerify) {
+      unsigned b = tid - 1;
+      if (b < batch_count) {
+        unsigned op = infinite ? b : sh_ops_done + b;
+        uint8_t* src = buf + (size_t)b * 2 * transferSize;
+        uint8_t* dst = src + transferSize;
+        uint32_t seed = baseSeed + op;
+        xio::DataPatternParams fp{src,          transferSize, 0,
+                                  transferSize, seed,         nullptr};
+        xio::dataPattern(false, fp);
+        for (uint32_t x = 0; x < transferSize; x++)
+          dst[x] = 0;
+        __threadfence_system();
+      }
+    }
+    __syncthreads();
+
+    // Phase 2b + 3: coordinator posts WQEs
+    // serially (SQ state is not thread-safe),
+    // then rings one doorbell and drains CQ.
+    if (tid == 0) {
+      for (unsigned b = 0; b < batch_count; b++) {
+        uint8_t* src = buf + (size_t)b * 2 * transferSize;
+        uint8_t* dst = src + transferSize;
+        sh_start[b] = wall_clock64();
+        qp->put_nbi_single(dst, src, transferSize, false);
+      }
+      qp->ring_doorbell_single();
+      qp->quiet_single();
+      unsigned long long int t1 = wall_clock64();
+
+      for (unsigned b = 0; b < batch_count; b++) {
+        if (timingStats && t1 > sh_start[b])
+          updateTimingStats(timingStats, t1 - sh_start[b]);
+      }
+
+      if (doVerify) {
+        for (unsigned b = 0; b < batch_count; b++) {
+          unsigned op = infinite ? b : sh_ops_done + b;
+          uint8_t* dst = buf + (size_t)b * 2 * transferSize + transferSize;
+          uint32_t seed = baseSeed + op;
+          size_t errOff = 0;
+          xio::DataPatternParams vp{dst,          transferSize, 0,
+                                    transferSize, seed,         &errOff};
+          bool ok = xio::dataPattern(true, vp);
+          if (ok) {
+            if (verifyPass)
+              atomicAdd(verifyPass, 1u);
+          } else {
+            if (verifyFail)
+              atomicAdd(verifyFail, 1u);
+            printf("rdma-ep: batch VERIFY FAILED"
+                   " op=%u seed=%u off=%zu\n",
+                   op, seed, errOff);
+          }
+        }
+      }
+
+      sh_ops_done += batch_count;
+      if (!infinite && sh_ops_done >= iterations)
+        sh_stop = true;
+      if (stopRequested && *stopRequested)
+        sh_stop = true;
+    }
+    __syncthreads();
   }
 }
 
@@ -144,6 +291,9 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
 
 #ifndef __HIP_DEVICE_COMPILE__
 
+#include <climits>
+#include <vector>
+
 #include "tcp-exchange.hpp"
 #include "xio-env.h"
 
@@ -158,19 +308,37 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
     return "Invalid provider."
            " Must be: bnxt, mlx5, ionic, or ernic";
 
-  if (config->iterations == 0)
-    return "Iterations must be > 0";
+  if (config->infiniteMode)
+    config->iterations = 0;
+
   if (config->sqDepth == 0)
     return "SQ depth must be > 0";
   if (config->transferSize == 0)
     return "Transfer size must be > 0";
 
+  if (config->batchSize > 0 && config->batchSize >= config->sqDepth)
+    return "--batch-size must be < --sq-depth";
+  if (config->batchSize > 1 && !config->loopback)
+    return "--batch-size > 1 requires loopback mode";
+  if (config->batchSize > 1) {
+    int maxBlock = 0;
+    (void)hipDeviceGetAttribute(&maxBlock, hipDeviceAttributeMaxThreadsPerBlock,
+                                config->gpuDeviceId);
+    if (maxBlock > 0 && config->batchSize + 1 > static_cast<unsigned>(maxBlock))
+      return "--batch-size + 1 exceeds GPU"
+             " max threads per block";
+  }
+  if (config->numQueues > 1 && !config->loopback)
+    return "--num-queues > 1 requires loopback mode";
+
   if (config->isServer && config->isClient)
-    return "--server and --client are mutually exclusive";
+    return "--server and --client are"
+           " mutually exclusive";
   if (config->isServer || config->isClient)
     config->loopback = false;
   if (!config->loopback && !config->isServer && !config->isClient)
-    return "--no-loopback requires --server or --client";
+    return "--no-loopback requires"
+           " --server or --client";
   if (config->isClient && config->serverHost.empty())
     return "--client requires --server-host";
   if ((config->isServer || config->isClient) && config->ppSize < 16)
@@ -186,12 +354,329 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
 __host__ unsigned getIterations(void* endpointConfig) {
   if (endpointConfig) {
     auto* cfg = static_cast<RdmaEpConfig*>(endpointConfig);
+    if (cfg->infiniteMode)
+      return 0;
     return cfg->iterations;
   }
   return 128;
 }
 
 } // namespace rdma_ep
+
+static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
+                                   rdma_ep::RdmaEpConfig* cfg) {
+  bool sq_on_device = (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
+  bool data_on_device = (config->memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
+
+  uint16_t numQueues = cfg->numQueues;
+  uint32_t batchSize = cfg->batchSize;
+  size_t xfer = cfg->transferSize;
+
+  bool useBatch = (batchSize > 1);
+  bool forceLessTiming = (useBatch || numQueues > 1) &&
+                         config->startTimes != nullptr;
+
+  if (forceLessTiming) {
+    ROCXIO_LOG_INFO("rdma-ep: Forcing less-timing"
+                    " (batch=%u queues=%u)\n",
+                    batchSize, numQueues);
+    if (!config->timingStats) {
+      (void)hipHostMalloc((void**)&config->timingStats,
+                          sizeof(xio::XioTimingStats), hipHostMallocMapped);
+      if (config->timingStats) {
+        config->timingStats->minDuration = ULLONG_MAX;
+        config->timingStats->maxDuration = 0;
+        config->timingStats->sumDuration = 0;
+        config->timingStats->count = 0;
+      }
+    }
+  }
+
+  // Per-buffer pairs: batch needs batchSize pairs
+  uint32_t pairs = useBatch ? batchSize : 1;
+  size_t buf_size = (size_t)pairs * 2 * xfer;
+
+  struct QueueState {
+    rdma_ep::Backend* backend;
+    void* buf;
+    rdma_ep::QueuePair* gpu_qp;
+    hipStream_t stream;
+    xio::XioTimingStats* stats;
+    uint32_t* verifyPass;
+    uint32_t* verifyFail;
+  };
+
+  std::vector<QueueState> queues(numQueues);
+  for (auto& qs : queues) {
+    qs.backend = nullptr;
+    qs.buf = nullptr;
+    qs.gpu_qp = nullptr;
+    qs.stream = nullptr;
+    qs.stats = nullptr;
+    qs.verifyPass = nullptr;
+    qs.verifyFail = nullptr;
+  }
+
+  hipError_t result = hipSuccess;
+
+  // Initialize all backends and buffers
+  for (uint16_t q = 0; q < numQueues; q++) {
+    rdma_ep::BackendConfig bcfg;
+    bcfg.provider = cfg->provider;
+    bcfg.gpu_device_id = cfg->gpuDeviceId;
+    bcfg.sq_depth = cfg->sqDepth;
+    bcfg.cq_depth = cfg->cqDepth;
+    bcfg.inline_threshold = cfg->inlineThreshold;
+    bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
+    bcfg.traffic_class = cfg->trafficClass;
+    bcfg.loopback = true;
+    bcfg.queue_mem = sq_on_device ? rdma_ep::QueueMemMode::DEVICE_VRAM
+                                  : rdma_ep::QueueMemMode::HOST_COHERENT;
+    bcfg.pci_mmio_bridge = config->pciMmioBridge;
+    if (!cfg->deviceName.empty())
+      bcfg.hca_list = cfg->deviceName.c_str();
+
+    queues[q].backend = new rdma_ep::Backend(bcfg);
+    int ret = queues[q].backend->init();
+    if (ret != 0) {
+      ROCXIO_LOG_ERROR("rdma-ep: Backend init"
+                       " failed (queue %u)\n",
+                       q);
+      result = hipErrorUnknown;
+      goto cleanup;
+    }
+
+    queues[q].gpu_qp = queues[q].backend->get_gpu_qp();
+    if (!queues[q].gpu_qp) {
+      ROCXIO_LOG_INFO("rdma-ep: No GPU QueuePair"
+                      " (queue %u)\n",
+                      q);
+      result = hipSuccess;
+      goto cleanup;
+    }
+
+    if (data_on_device) {
+      hsa_status_t hsa_err = xio::allocDeviceMemory(buf_size, &queues[q].buf,
+                                                    "RDMA loopback buffer",
+                                                    XIO_DEVICE_MEM_FINE_GRAINED,
+                                                    cfg->gpuDeviceId);
+      if (hsa_err != HSA_STATUS_SUCCESS) {
+        ROCXIO_LOG_ERROR("rdma-ep: allocDeviceMemory"
+                         " failed (queue %u)\n",
+                         q);
+        result = hipErrorMemoryAllocation;
+        goto cleanup;
+      }
+    } else {
+      hipError_t hip_err = xio::allocHostMemory(buf_size, &queues[q].buf,
+                                                "RDMA loopback buffer",
+                                                XIO_HOST_MEM_PINNED);
+      if (hip_err != hipSuccess) {
+        ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory"
+                         " failed (queue %u)\n",
+                         q);
+        result = hipErrorMemoryAllocation;
+        goto cleanup;
+      }
+    }
+
+    if (!useBatch) {
+      auto* src = static_cast<uint8_t*>(queues[q].buf);
+      auto* dst = src + xfer;
+      if (data_on_device) {
+        (void)hipMemset(dst, 0x00, xfer);
+        uint8_t* hf = nullptr;
+        (void)xio::allocHostMemory(xfer, (void**)&hf, "RDMA pattern fill",
+                                   XIO_HOST_MEM_PINNED);
+        if (hf) {
+          xio::DataPatternParams fp{hf,        xfer,
+                                    0,         static_cast<uint32_t>(xfer),
+                                    cfg->seed, nullptr};
+          xio::dataPattern(false, fp);
+          (void)hipMemcpy(src, hf, xfer, hipMemcpyHostToDevice);
+          xio::freeHostMemory(hf, XIO_HOST_MEM_PINNED);
+        }
+      } else {
+        xio::DataPatternParams fp{src,       xfer,
+                                  0,         static_cast<uint32_t>(xfer),
+                                  cfg->seed, nullptr};
+        xio::dataPattern(false, fp);
+        memset(dst, 0x00, xfer);
+      }
+    }
+
+    int reg = queues[q].backend->register_data_buffer(queues[q].buf, buf_size);
+    if (reg != 0) {
+      ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer"
+                       " failed (queue %u)\n",
+                       q);
+      result = hipErrorUnknown;
+      goto cleanup;
+    }
+
+    if (numQueues > 1) {
+      hipError_t se = hipStreamCreate(&queues[q].stream);
+      if (se != hipSuccess) {
+        ROCXIO_LOG_ERROR("rdma-ep: hipStreamCreate"
+                         " failed (queue %u)\n",
+                         q);
+        result = se;
+        goto cleanup;
+      }
+    }
+
+    bool useLessTiming = forceLessTiming || config->timingStats != nullptr;
+    if (useLessTiming) {
+      (void)hipHostMalloc((void**)&queues[q].stats, sizeof(xio::XioTimingStats),
+                          hipHostMallocMapped);
+      if (queues[q].stats) {
+        queues[q].stats->minDuration = ULLONG_MAX;
+        queues[q].stats->maxDuration = 0;
+        queues[q].stats->sumDuration = 0;
+        queues[q].stats->count = 0;
+      }
+    }
+
+    if (cfg->verify) {
+      (void)hipHostMalloc((void**)&queues[q].verifyPass, sizeof(uint32_t),
+                          hipHostMallocMapped);
+      (void)hipHostMalloc((void**)&queues[q].verifyFail, sizeof(uint32_t),
+                          hipHostMallocMapped);
+      if (queues[q].verifyPass)
+        *queues[q].verifyPass = 0;
+      if (queues[q].verifyFail)
+        *queues[q].verifyFail = 0;
+    }
+
+    ROCXIO_LOG_DEBUG("rdma-ep: Queue %u ready:"
+                     " lkey=0x%x rkey=0x%x\n",
+                     q, queues[q].backend->get_lkey(),
+                     queues[q].backend->get_rkey());
+  }
+
+  // Launch kernels
+  for (uint16_t q = 0; q < numQueues; q++) {
+    unsigned long long int* kStart = nullptr;
+    unsigned long long int* kEnd = nullptr;
+    xio::XioTimingStats* kStats = queues[q].stats;
+
+    if (!forceLessTiming && config->iterations > 0 && numQueues == 1 &&
+        !useBatch) {
+      kStart = config->startTimes;
+      kEnd = config->endTimes;
+    }
+    if (!kStats && !forceLessTiming)
+      kStats = config->timingStats;
+
+    if (useBatch) {
+      size_t shmem = batchSize * sizeof(unsigned long long int);
+      unsigned threads = batchSize + 1;
+      hipLaunchKernelGGL(rdma_ep::rdma_ep_batch_kernel, dim3(1), dim3(threads),
+                         shmem, queues[q].stream, queues[q].gpu_qp,
+                         static_cast<uint8_t*>(queues[q].buf),
+                         cfg->transferSize, batchSize, config->iterations,
+                         kStats, config->stopRequested, cfg->verify, cfg->seed,
+                         queues[q].verifyPass, queues[q].verifyFail);
+    } else {
+      auto* src = queues[q].buf;
+      auto* dst = static_cast<uint8_t*>(src) + xfer;
+      hipLaunchKernelGGL(rdma_ep::rdma_ep_kernel, dim3(1), dim3(1), 0,
+                         queues[q].stream, queues[q].gpu_qp, src, (void*)dst,
+                         kStart, kEnd, kStats, config->iterations,
+                         cfg->transferSize, config->stopRequested, cfg->verify,
+                         cfg->seed, queues[q].verifyPass, queues[q].verifyFail);
+    }
+
+    hipError_t le = hipGetLastError();
+    if (le != hipSuccess) {
+      ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed"
+                       " (queue %u): %s\n",
+                       q, hipGetErrorString(le));
+      result = le;
+      goto cleanup;
+    }
+  }
+
+  {
+    hipError_t syncErr = hipDeviceSynchronize();
+    if (syncErr != hipSuccess) {
+      ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
+                       hipGetErrorString(syncErr));
+      result = syncErr;
+      goto cleanup;
+    }
+  }
+
+  if (config->iterations > 0) {
+    ROCXIO_LOG_INFO("rdma-ep: Kernel completed"
+                    " %u iterations",
+                    config->iterations);
+    if (numQueues > 1)
+      ROCXIO_LOG_INFO(" x %u queues", numQueues);
+    ROCXIO_LOG_INFO(".\n");
+  }
+
+  // Aggregate verify counts
+  if (cfg->verify) {
+    uint32_t totalPass = 0, totalFail = 0;
+    for (uint16_t q = 0; q < numQueues; q++) {
+      if (queues[q].verifyPass)
+        totalPass += *queues[q].verifyPass;
+      if (queues[q].verifyFail)
+        totalFail += *queues[q].verifyFail;
+    }
+    config->verifyPass = totalPass;
+    config->verifyFail = totalFail;
+  }
+
+  // Aggregate timing stats from per-queue buffers
+  // into the harness-owned timingStats.
+  if (config->timingStats && queues[0].stats) {
+    config->timingStats->minDuration = ULLONG_MAX;
+    config->timingStats->maxDuration = 0;
+    config->timingStats->sumDuration = 0;
+    config->timingStats->count = 0;
+    for (uint16_t q = 0; q < numQueues; q++) {
+      if (!queues[q].stats)
+        continue;
+      auto* s = queues[q].stats;
+      if (s->minDuration < config->timingStats->minDuration)
+        config->timingStats->minDuration = s->minDuration;
+      if (s->maxDuration > config->timingStats->maxDuration)
+        config->timingStats->maxDuration = s->maxDuration;
+      config->timingStats->sumDuration += s->sumDuration;
+      config->timingStats->count += s->count;
+    }
+    if (numQueues > 1)
+      ROCXIO_LOG_INFO("rdma-ep: Aggregated timing"
+                      " across %u queues: %llu ops\n",
+                      numQueues,
+                      (unsigned long long)config->timingStats->count);
+  }
+
+cleanup:
+  for (uint16_t q = 0; q < numQueues; q++) {
+    if (queues[q].verifyPass)
+      (void)hipHostFree(queues[q].verifyPass);
+    if (queues[q].verifyFail)
+      (void)hipHostFree(queues[q].verifyFail);
+    if (queues[q].stats)
+      (void)hipHostFree(queues[q].stats);
+    if (queues[q].stream)
+      (void)hipStreamDestroy(queues[q].stream);
+    if (queues[q].buf) {
+      if (data_on_device)
+        xio::freeDeviceMemory(queues[q].buf, XIO_DEVICE_MEM_FINE_GRAINED);
+      else
+        xio::freeHostMemory(queues[q].buf, XIO_HOST_MEM_PINNED);
+    }
+    if (queues[q].backend) {
+      queues[q].backend->shutdown();
+      delete queues[q].backend;
+    }
+  }
+  return result;
+}
 
 hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
@@ -206,137 +691,57 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                                          : "loopback";
 
   ROCXIO_LOG_INFO("rdma-ep: provider=%s mode=%s"
-                  " sq_depth=%u iters=%u size=%u\n",
+                  " sq_depth=%u iters=%u size=%u"
+                  " batch=%u queues=%u\n",
                   rdma_ep::provider_name(cfg->provider), mode_str, cfg->sqDepth,
-                  cfg->iterations, cfg->transferSize);
-
-  rdma_ep::BackendConfig bcfg;
-  bcfg.provider = cfg->provider;
-  bcfg.gpu_device_id = cfg->gpuDeviceId;
-  bcfg.sq_depth = cfg->sqDepth;
-  bcfg.cq_depth = cfg->cqDepth;
-  bcfg.inline_threshold = cfg->inlineThreshold;
-  bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
-  bcfg.traffic_class = cfg->trafficClass;
-  bcfg.loopback = cfg->loopback;
-  bcfg.queue_mem = cfg->queueMem;
-  bcfg.pci_mmio_bridge = config->pciMmioBridge;
-
-  rdma_ep::Backend backend(bcfg);
-  int ret = backend.init();
-  if (ret != 0) {
-    ROCXIO_LOG_ERROR("rdma-ep: Backend init failed\n");
-    return hipErrorUnknown;
-  }
-
-  ROCXIO_LOG_INFO("rdma-ep: Backend initialized.\n");
-
-  rdma_ep::QueuePair* gpu_qp = backend.get_gpu_qp();
-
-  if (!gpu_qp) {
-    ROCXIO_LOG_INFO("rdma-ep: No GPU QueuePair available."
-                    " Backend init verified OK.\n");
-    backend.shutdown();
-    return hipSuccess;
-  }
+                  cfg->iterations, cfg->transferSize, cfg->batchSize,
+                  cfg->numQueues);
 
   if (cfg->loopback) {
-    // ==========================================================
-    // Loopback path -- existing single-node RDMA WRITE test
-    // ==========================================================
-    size_t xfer = cfg->transferSize;
-    size_t buf_size = xfer * 2;
-    void* buf = nullptr;
-    hipError_t buf_err = xio::allocHostMemory(buf_size, &buf,
-                                              "RDMA loopback buffer",
-                                              XIO_HOST_MEM_PINNED);
-    if (buf_err != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory failed\n");
-      backend.shutdown();
-      return hipErrorMemoryAllocation;
-    }
-
-    auto* src = static_cast<uint8_t*>(buf);
-    auto* dst = src + xfer;
-
-    xio::DataPatternParams fill_p{src,       xfer,
-                                  0,         static_cast<uint32_t>(xfer),
-                                  cfg->seed, nullptr};
-    xio::dataPattern(false, fill_p);
-    memset(dst, 0x00, xfer);
-
-    ret = backend.register_data_buffer(buf, buf_size);
-    if (ret != 0) {
-      ROCXIO_LOG_ERROR("rdma-ep: register_data_buffer failed\n");
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
-      backend.shutdown();
-      return hipErrorUnknown;
-    }
-
-    ROCXIO_LOG_DEBUG("rdma-ep: Buffer registered:"
-                     " lkey=0x%x rkey=0x%x\n",
-                     backend.get_lkey(), backend.get_rkey());
-    ROCXIO_LOG_DEBUG("rdma-ep: src=%p dst=%p size=%zu\n", (void*)src,
-                     (void*)dst, xfer);
-
-    hipLaunchKernelGGL(rdma_ep::rdma_ep_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
-                       (void*)src, (void*)dst, config->startTimes,
-                       config->endTimes, config->timingStats,
-                       config->iterations, cfg->transferSize);
-
-    hipError_t launchErr = hipGetLastError();
-    if (launchErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed: %s\n",
-                       hipGetErrorString(launchErr));
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
-      backend.shutdown();
-      return launchErr;
-    }
-
-    hipError_t syncErr = hipDeviceSynchronize();
-    if (syncErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
-                       hipGetErrorString(syncErr));
-      xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
-      backend.shutdown();
-      return syncErr;
-    }
-
-    ROCXIO_LOG_INFO("rdma-ep: Kernel completed"
-                    " %u iterations.\n",
-                    config->iterations);
-
-    if (cfg->verify) {
-      size_t errOff = 0;
-      xio::DataPatternParams vp{dst,       xfer,
-                                0,         static_cast<uint32_t>(xfer),
-                                cfg->seed, &errOff};
-      bool ok = xio::dataPattern(true, vp);
-      if (ok) {
-        ROCXIO_LOG_INFO("rdma-ep: VERIFY PASSED"
-                        " (%zu bytes, seed=%u)\n",
-                        xfer, cfg->seed);
-      } else {
-        ROCXIO_LOG_ERROR("rdma-ep: VERIFY FAILED at"
-                         " offset %zu (seed=%u)\n",
-                         errOff, cfg->seed);
-      }
-    }
-
-    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+    return rdma_ep_loopback(config, cfg);
   } else {
     // ==========================================================
     // 2-node path -- TCP QP exchange, RDMA WRITE + ping-pong
     // ==========================================================
+    bool sq_on_device = (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
+
+    rdma_ep::BackendConfig bcfg;
+    bcfg.provider = cfg->provider;
+    bcfg.gpu_device_id = cfg->gpuDeviceId;
+    bcfg.sq_depth = cfg->sqDepth;
+    bcfg.cq_depth = cfg->cqDepth;
+    bcfg.inline_threshold = cfg->inlineThreshold;
+    bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
+    bcfg.traffic_class = cfg->trafficClass;
+    bcfg.loopback = false;
+    bcfg.queue_mem = sq_on_device ? rdma_ep::QueueMemMode::DEVICE_VRAM
+                                  : rdma_ep::QueueMemMode::HOST_COHERENT;
+    bcfg.pci_mmio_bridge = config->pciMmioBridge;
+    if (!cfg->deviceName.empty())
+      bcfg.hca_list = cfg->deviceName.c_str();
+
+    rdma_ep::Backend backend(bcfg);
+    int ret = backend.init();
+    if (ret != 0) {
+      ROCXIO_LOG_ERROR("rdma-ep: Backend init failed\n");
+      return hipErrorUnknown;
+    }
+    ROCXIO_LOG_INFO("rdma-ep: Backend initialized.\n");
+
+    rdma_ep::QueuePair* gpu_qp = backend.get_gpu_qp();
+    if (!gpu_qp) {
+      ROCXIO_LOG_INFO("rdma-ep: No GPU QueuePair available."
+                      " Backend init verified OK.\n");
+      backend.shutdown();
+      return hipSuccess;
+    }
+
     static constexpr uint8_t DATA_PATTERN = 0xA5;
 
     uint32_t write_size = cfg->transferSize;
     uint32_t pp_size = cfg->ppSize;
     uint32_t pp_iters = cfg->ppIters;
 
-    // Buffer layout:
-    //   [data (write_size) | pp_send (pp_size) | pp_recv (pp_size) | pad]
-    // hipHostMallocCoherent so GPU sees RDMA writes from remote NIC.
     size_t pp_send_offset = write_size;
     size_t pp_recv_offset = write_size + pp_size;
     size_t total_reg_size = write_size + pp_size * 2 + 4096;
@@ -351,7 +756,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                                            XIO_HOST_MEM_MAPPED |
                                              XIO_HOST_MEM_COHERENT);
     if (herr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory(coherent) failed\n");
+      ROCXIO_LOG_ERROR("rdma-ep: allocHostMemory"
+                       "(coherent) failed\n");
       backend.shutdown();
       return herr;
     }
@@ -680,9 +1086,11 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
     close(tcp_fd);
     xio::freeHostMemory(reg_buf, XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
+
+    backend.shutdown();
+    return hipSuccess;
   }
 
-  backend.shutdown();
   return hipSuccess;
 }
 
