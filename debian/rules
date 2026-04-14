@@ -26,6 +26,7 @@ RDMA_CORE_BUILD_DIR    = $(CURDIR)/obj-x86_64-linux-gnu/_deps/rdma-core/install
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
+	  -DCMAKE_INSTALL_PREFIX=$(ROCM_PATH) \
 	  -DCMAKE_BUILD_TYPE=Release \
 	  -DROCM_PATH=$(ROCM_PATH) \
 	  -DOFFLOAD_ARCH="$(DEB_OFFLOAD_ARCH)" \
