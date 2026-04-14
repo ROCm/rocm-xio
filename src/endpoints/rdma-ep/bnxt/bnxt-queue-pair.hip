@@ -105,9 +105,20 @@ __device__ void Ops::check_cqe_error(QueuePair& qp,
 }
 
 __device__ void Ops::ack_cq(QueuePair& qp,
-                            uint32_t cq_cons) {
-  (void)qp;
-  (void)cq_cons;
+                            uint32_t db_idx) {
+  struct bnxt_re_db_hdr hdr;
+  uint64_t key_lo = db_idx;
+  uint64_t key_hi =
+    (qp.bnxt_cq_.id & BNXT_RE_DB_QID_MASK) |
+    (((uint64_t)BNXT_RE_QUE_TYPE_CQ &
+      BNXT_RE_DB_TYP_MASK)
+     << BNXT_RE_DB_TYP_SHIFT) |
+    (0x1UL << BNXT_RE_DB_VALID_SHIFT);
+  hdr.typ_qid_indx = (key_lo | (key_hi << 32));
+  __threadfence_system();
+  __hip_atomic_store(qp.bnxt_dbr_, hdr.typ_qid_indx,
+                     __ATOMIC_SEQ_CST,
+                     __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
 __device__ void Ops::poll_cq_until(QueuePair& qp,
@@ -115,6 +126,8 @@ __device__ void Ops::poll_cq_until(QueuePair& qp,
   uint32_t sq_depth = qp.bnxt_sq_.depth;
   uint32_t cq_depth = qp.bnxt_cq_.depth;
   uint32_t cq_cons = qp.bnxt_cq_.head;
+  uint32_t cq_epoch = qp.bnxt_cq_.flags & 1;
+  bool cq_dirty = false;
   unsigned poll_count = 0;
   constexpr uint32_t cqe_bytes =
     sizeof(struct bnxt_re_req_cqe) +
@@ -134,8 +147,18 @@ __device__ void Ops::poll_cq_until(QueuePair& qp,
     uint32_t consumed =
       (sq_tail - sq_head + sq_depth) % sq_depth;
     uint32_t available = sq_depth - consumed;
-    if (available >= requested_available_slots)
+    if (available >= requested_available_slots) {
+      if (cq_dirty) {
+        uint32_t db_idx =
+          (cq_cons % cq_depth) |
+          (cq_epoch << 24);
+        ack_cq(qp, db_idx);
+        qp.bnxt_cq_.head = cq_cons;
+        qp.bnxt_cq_.flags =
+          (qp.bnxt_cq_.flags & ~1u) | cq_epoch;
+      }
       return;
+    }
 
     uint32_t cq_idx = cq_cons % cq_depth;
     uint8_t phase_exp =
@@ -161,7 +184,9 @@ __device__ void Ops::poll_cq_until(QueuePair& qp,
       % sq_depth;
     qp.bnxt_sq_.head = new_head;
     cq_cons++;
-    qp.bnxt_cq_.head = cq_cons;
+    if (cq_cons % cq_depth == 0)
+      cq_epoch ^= 1;
+    cq_dirty = true;
   } while (true);
 }
 

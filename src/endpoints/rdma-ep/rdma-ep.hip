@@ -422,6 +422,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
 
     hipError_t syncErr = hipDeviceSynchronize();
+
     if (syncErr != hipSuccess) {
       ROCXIO_LOG_ERROR(
         "rdma-ep: Kernel sync failed: %s\n",
