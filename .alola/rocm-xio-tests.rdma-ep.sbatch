@@ -46,7 +46,7 @@ PP_SIZE="${PP_SIZE:-64}"
 PP_ITERS="${PP_ITERS:-100}"
 
 # --- Parse node list ---
-mapfile -t NODES < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+mapfile -t NODES < <(expand_nodelist "${SLURM_JOB_NODELIST}")
 if [ ${#NODES[@]} -lt 2 ]; then
   echo "ERROR: Need 2 nodes, got ${#NODES[@]}"
   exit 1
@@ -137,7 +137,7 @@ detect_vendors_on_node() {
   local node="$1"
   local suffix
   suffix=$(echo "${node}" | tr '-' '_')
-  local vendors=""
+  DETECTED_VENDORS=""
   for _v in bnxt mlx5 ionic; do
     local _dev
     _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
@@ -147,12 +147,11 @@ detect_vendors_on_node() {
       _bdf=$(resolve_ib_bdf "${node}" "${_dev}")
       eval "${_v^^}_DEV_${suffix}=\${_dev}"
       eval "${_v^^}_BDF_${suffix}=\${_bdf}"
-      vendors="${vendors} ${_v}"
+      DETECTED_VENDORS="${DETECTED_VENDORS} ${_v}"
       echo "  Found ${_v^^}: ${_dev}" \
-        "(PCI ${_bdf})" >&2
+        "(PCI ${_bdf})"
     fi
   done
-  echo "${vendors}"
 }
 
 # ---------------------------------------------------------
@@ -189,6 +188,7 @@ run_loopback_on_node() {
         "rdma-ep loopback ${vendor} ${node} seed=${seed}" \
         "${SSH_COMMAND} ${node} \
           \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+            HSA_FORCE_FINE_GRAIN_PCIE=1 \
             ${LOOPBACK_BIN} \
             --provider ${vendor} \
             --device ${dev} \
@@ -210,7 +210,8 @@ echo "=========================================="
 
 echo ""
 echo "Detecting RDMA NICs on ${NODE_A}..."
-VENDORS_A=$(detect_vendors_on_node "${NODE_A}")
+detect_vendors_on_node "${NODE_A}"
+VENDORS_A="${DETECTED_VENDORS}"
 if [ -z "${VENDORS_A}" ]; then
   echo "ERROR: No RDMA NICs detected on ${NODE_A}."
   exit 1
@@ -219,7 +220,8 @@ echo "  Detected vendors:${VENDORS_A}"
 
 echo ""
 echo "Detecting RDMA NICs on ${NODE_B}..."
-VENDORS_B=$(detect_vendors_on_node "${NODE_B}")
+detect_vendors_on_node "${NODE_B}"
+VENDORS_B="${DETECTED_VENDORS}"
 if [ -z "${VENDORS_B}" ]; then
   echo "ERROR: No RDMA NICs detected on ${NODE_B}."
   exit 1
@@ -280,16 +282,21 @@ echo "  pingpong-size=${PP_SIZE}"
 echo "  pingpong-iters=${PP_ITERS}"
 echo ""
 
-# Launch server in background
+# Launch server in background with a timeout so it
+# cannot hang if the client never connects.  Process
+# substitution ensures $! is the SSH PID, not sed.
+SERVER_TIMEOUT=$((PP_ITERS * 2 + 60))
 ${SSH_COMMAND} "${NODE_A}" \
-  "sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+  "sudo timeout ${SERVER_TIMEOUT} \
+    env LD_LIBRARY_PATH=${LIB_PATH} \
+    HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ${TWONODE_BIN} \
     --server \
     --provider ${VENDOR} \
     --device ${SRV_DEV} \
     --pingpong-size ${PP_SIZE} \
     --pingpong-iters ${PP_ITERS}" \
-  2>&1 | sed 's/^/[SERVER] /' &
+  > >(sed 's/^/[SERVER] /') 2>&1 &
 SERVER_PID=$!
 
 sleep 3
@@ -299,6 +306,7 @@ test_run \
   "rdma-ep 2node ${VENDOR}" \
   "${SSH_COMMAND} ${NODE_B} \
     \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+      HSA_FORCE_FINE_GRAIN_PCIE=1 \
       ${TWONODE_BIN} \
       --client \
       --server-host ${NODE_A} \
@@ -307,7 +315,11 @@ test_run \
       --pingpong-size ${PP_SIZE} \
       --pingpong-iters ${PP_ITERS}\""
 
-wait ${SERVER_PID} || true
+wait ${SERVER_PID}
+SERVER_RC=$?
+if [ ${SERVER_RC} -ne 0 ]; then
+  echo "WARN: server exited with rc=${SERVER_RC}"
+fi
 
 # Report results and exit with appropriate code
 test_report
