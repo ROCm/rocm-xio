@@ -31,7 +31,7 @@ if [ "${SETUP_GID}" = "true" ]; then
   sudo ip neigh replace 198.18.0.1 \
     lladdr ${MAC} nud permanent dev ${NIC}
 
-  for i in $(seq 1 10); do
+  for _i in $(seq 1 10); do
     if grep -q 'ffff' \
       /sys/class/infiniband/rocm-rdma-${VENDOR}0/ports/1/gids/* \
       2>/dev/null; then
