@@ -284,7 +284,7 @@ void Backend::open_ib_device() {
 
 void Backend::create_queues() {
   int ncqes = config_.cq_depth;
-  if (provider_ == Provider::IONIC)
+  if (provider_ == Provider::IONIC && ncqes < 8192)
     ncqes = 8192;
 
 #if defined(GDA_BNXT)

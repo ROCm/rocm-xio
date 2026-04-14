@@ -80,7 +80,7 @@ run_sweep() {
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;
     mlx5)
-      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx5-0}"
+      rdma_dev="${MLX5_RDMA_DEV:-rocm-rdma-mlx50}"
       provider_flag="${provider_flag} --device"
       provider_flag="${provider_flag} ${rdma_dev}"
       ;;

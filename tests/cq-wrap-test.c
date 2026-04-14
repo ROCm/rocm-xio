@@ -22,6 +22,7 @@
  *     ./cq-wrap-test rocm-rdma-bnxt0 10000
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -188,7 +189,11 @@ int main(int argc, char** argv) {
 
   /* Register MR */
   size_t buf_size = 512;
-  void* buf = malloc(buf_size);
+  uint8_t* buf = (uint8_t*)malloc(buf_size);
+  if (!buf) {
+    fprintf(stderr, "malloc failed\n");
+    return 1;
+  }
   memset(buf, 0xA5, buf_size / 2);
   memset(buf + buf_size / 2, 0, buf_size / 2);
 
@@ -197,11 +202,12 @@ int main(int argc, char** argv) {
                                    IBV_ACCESS_REMOTE_WRITE);
   if (!mr) {
     fprintf(stderr, "Failed to reg MR\n");
+    free(buf);
     return 1;
   }
 
-  void* src = buf;
-  void* dst = buf + buf_size / 2;
+  uint8_t* src = buf;
+  uint8_t* dst = buf + buf_size / 2;
 
   printf("Running %d RDMA WRITE iterations "
          "(CQ depth=%d)...\n",
