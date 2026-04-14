@@ -38,3 +38,7 @@ banff-cyxtera-s81-1  sdma-ep,rdma-ep,nvme-ep
 
 # SDMA P2P kernel hang during 1MB GPU-to-GPU transfer
 #ctr-cx63-mi300x-21  sdma-ep
+
+# Radeon 8060S hangs on test-ep doorbell poll and
+# test-rdma-endian times out in ctest unit suite
+ctr-halo-b48-02  test-ep,basic-tests
