@@ -6,3 +6,4 @@ etc/udev/rules.d/99-rocm-xio-char.rules
 etc/udev/rules.d/99-rocm-xio-rdma.rules
 etc/udev/rules.d/99-rocm-xio-vfio.rules
 etc/udev/rules.d/99-rocm-xio-nvme.rules
+usr/src/rocm-xio-*

@@ -81,14 +81,21 @@ override_dh_auto_install:
 	    $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack/; \
 	fi
 
-	# DKMS source installation is handled by dh_dkms
-	# via debian/rocm-xio.dkms
+	# --- DKMS kernel module sources ---
+	install -d \
+	  $(CURDIR)/debian/tmp/usr/src/rocm-xio-$(XIO_VERSION)
+	install -m 0644 \
+	  kernel/rocm-xio/rocm-xio.c \
+	  kernel/rocm-xio/rocm-xio.h \
+	  kernel/rocm-xio/Makefile \
+	  $(CURDIR)/debian/tmp/usr/src/rocm-xio-$(XIO_VERSION)/
 
 override_dh_dkms:
 	dh_dkms -procm-xio -V $(XIO_VERSION)
 
 override_dh_shlibdeps:
-	dh_shlibdeps -l$(ROCM_PATH)/lib:$(RDMA_CORE_INSTALL_PATH)
+	dh_shlibdeps -l$(ROCM_PATH)/lib:$(RDMA_CORE_INSTALL_PATH) \
+	  -- --ignore-missing-info
 
 override_dh_auto_test:
 	@echo "Skipping tests during packaging"
