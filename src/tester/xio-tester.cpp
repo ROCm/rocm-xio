@@ -548,11 +548,17 @@ int main(int argc, char** argv) {
       // mode, use UINT_MAX
       unsigned actualIterations = static_cast<unsigned>(timingStats->count);
       if (showHistogram) {
-        printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
-                       UINT_MAX);
+        printHistogram(durations, actualIterations,
+                       baseConfig.numThreads, 0, 0,
+                       UINT_MAX,
+                       baseConfig.verifyPass,
+                       baseConfig.verifyFail);
       } else {
-        printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
-                        0, UINT_MAX);
+        printStatistics(durations, actualIterations,
+                        baseConfig.numThreads, 0, 0,
+                        UINT_MAX,
+                        baseConfig.verifyPass,
+                        baseConfig.verifyFail);
       }
     } else {
       std::cout << "Warning: No timing data collected in less-timing mode"
@@ -587,11 +593,17 @@ int main(int argc, char** argv) {
     // UINT_MAX
     if (durations.size() > 0) {
       if (showHistogram) {
-        printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
-                       UINT_MAX);
+        printHistogram(durations, actualIterations,
+                       baseConfig.numThreads, 0, 0,
+                       UINT_MAX,
+                       baseConfig.verifyPass,
+                       baseConfig.verifyFail);
       } else {
-        printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
-                        0, UINT_MAX);
+        printStatistics(durations, actualIterations,
+                        baseConfig.numThreads, 0, 0,
+                        UINT_MAX,
+                        baseConfig.verifyPass,
+                        baseConfig.verifyFail);
       }
     } else {
       std::cout << "Warning: No valid timing data collected" << std::endl;

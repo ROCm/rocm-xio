@@ -1112,9 +1112,13 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       }
     }
     if (verified) {
+      config->verifyPass = config->iterations;
       std::cout << "Data verification: PASSED (LFSR pattern, "
                 << config->iterations << " iterations)" << std::endl;
     } else {
+      config->verifyPass = failIter;
+      config->verifyFail =
+        config->iterations - failIter;
       std::cerr << "Data verification: FAILED at iteration " << failIter
                 << " offset " << failOffset << std::endl;
       cleanupAll();

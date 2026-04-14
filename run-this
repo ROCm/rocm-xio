@@ -1,11 +1,12 @@
 #!/bin/bash
 
 SETUP_GID=${SETUP_GID:-false}
+VENDOR=${VENDOR:-bnxt}
+NIC=rocm-${VENDOR}0
 
 if [ "${SETUP_GID}" = "true" ]; then
 
   # Add IPv4 address and loopback ARP entry
-NIC=rocm-bnxt0
 sudo ip addr add 198.18.0.1/24 dev ${NIC}
 MAC=$(ip link show ${NIC} \
   | grep -oP 'link/ether \K[0-9a-f:]+')
@@ -15,7 +16,7 @@ sudo ip neigh replace 198.18.0.1 \
   # Wait for any IPv4-mapped GID to appear
 for i in $(seq 1 10); do
   if grep -q 'ffff' \
-    /sys/class/infiniband/rocm-rdma-bnxt0/ports/1/gids/* \
+    /sys/class/infiniband/rocm-rdma-${VENDOR}0/ports/1/gids/* \
     2>/dev/null; then
     echo "GID table ready."
     break
@@ -30,9 +31,10 @@ LIB=build/_deps/rdma-core/install/lib:/opt/rocm/lib
 sudo LD_LIBRARY_PATH="${LIB}" \
 HSA_FORCE_FINE_GRAIN_PCIE=1 \
 ./build/xio-tester rdma-ep \
-  --provider ionic \
-  --device rocm-rdma-ionic0 \
+  --provider ${VENDOR} \
+  --device rocm-rdma-${VENDOR}0 \
   --loopback \
   --iterations 128 \
-  --transfer-size 8192 \
-  --less-timing
+  --transfer-size 2 \
+  --less-timing \
+  --verify

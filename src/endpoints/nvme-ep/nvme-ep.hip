@@ -1316,6 +1316,44 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                     hipGetErrorString(result), result);
   }
 
+  // ---- Verify read buffers ----
+  if (result == hipSuccess && nvmeConfig->ioParams.readIo > 0) {
+    for (uint16_t q = 0; q < numQueues; q++) {
+      uint8_t* rbuf = readBufs[q].gpuPtr
+        ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
+        : static_cast<uint8_t*>(readBufs[q].hostPtr);
+      if (!rbuf)
+        continue;
+      size_t bsz = nvmeConfig->bufferParams.bufferSize;
+      uint8_t* host_rb = nullptr;
+      if (readBufs[q].gpuPtr) {
+        host_rb = static_cast<uint8_t*>(malloc(bsz));
+        if (host_rb)
+          (void)hipMemcpy(host_rb, rbuf, bsz,
+                          hipMemcpyDeviceToHost);
+        rbuf = host_rb;
+      }
+      if (rbuf) {
+        nvme_ep::dataPatternParams vp;
+        vp.buffer = rbuf;
+        vp.size = bsz;
+        vp.offset = 0;
+        vp.lbaSize = ioParams.lbaSize;
+        vp.lfsrSeed = ioParams.lfsrSeed;
+        vp.errorOffset = nullptr;
+        if (nvme_ep::dataPattern(true, vp))
+          config->verifyPass +=
+            static_cast<uint32_t>(
+              nvmeConfig->ioParams.readIo);
+        else
+          config->verifyFail +=
+            static_cast<uint32_t>(
+              nvmeConfig->ioParams.readIo);
+      }
+      free(host_rb);
+    }
+  }
+
   // ---- Aggregate per-queue timing stats ----
   if (useLessTiming && numQueues > 1 && config->timingStats != nullptr) {
     XioTimingStats* agg = config->timingStats;
