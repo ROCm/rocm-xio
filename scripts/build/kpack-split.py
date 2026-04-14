@@ -15,7 +15,8 @@ Usage:
         --output-dir build/kpack \
         [--strip] [--verbose]
 
-Requires the rocm_kpack Python package (pip install rocm-kpack).
+Requires the rocm_kpack Python package:
+    pip install "rocm-kpack @ git+https://github.com/ROCm/rocm-kpack.git@main"
 """
 
 import argparse
@@ -30,8 +31,10 @@ try:
 except ImportError:
     print(
         "ERROR: rocm_kpack package not found.\n"
-        "Install it with: pip install rocm-kpack\n"
-        "Or from source: pip install -e /path/to/rocm-kpack",
+        "Install from GitHub:\n"
+        '  pip install "rocm-kpack @ git+https://github.com/ROCm/rocm-kpack.git@main"\n'
+        "Or from a local clone:\n"
+        "  pip install -e /path/to/rocm-kpack",
         file=sys.stderr,
     )
     sys.exit(1)
