@@ -8,6 +8,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       offload_arch:
@@ -69,20 +72,16 @@ jobs:
           echo ""
         done
 
+    - name: Stage built packages
+      run: |
+        mkdir -p built-debs
+        cp ../*.deb ../*.buildinfo ../*.changes built-debs/
+
     - name: Upload .deb artifacts
       uses: actions/upload-artifact@v4
       with:
         name: rocm-xio-debs-${{ github.sha }}
-        path: |
-          ../*.deb
-          ../*.buildinfo
-          ../*.changes
-
-    - name: Stage release assets
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      run: |
-        mkdir -p /tmp/release-assets
-        cp ../*.deb ../*.buildinfo ../*.changes /tmp/release-assets/
+        path: built-debs/
 
     - name: Update rolling latest pre-release
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -101,4 +100,4 @@ jobs:
           tagged `vX.Y.Z` release.
         prerelease: true
         make_latest: false
-        files: /tmp/release-assets/*
+        files: built-debs/*
