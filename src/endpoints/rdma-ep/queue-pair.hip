@@ -343,4 +343,31 @@ __device__ void QueuePair::quiet_single() {
 #endif
 }
 
+__device__ void QueuePair::ring_doorbell_single() {
+#if defined(GDA_BNXT)
+  if (provider_ == Provider::BNXT) {
+    bnxt::Ops::ring_doorbell_only(*this);
+    return;
+  }
+#endif
+#if defined(GDA_MLX5)
+  if (provider_ == Provider::MLX5) {
+    mlx5::Ops::ring_doorbell_only(*this);
+    return;
+  }
+#endif
+#if defined(GDA_IONIC)
+  if (provider_ == Provider::IONIC) {
+    ionic::Ops::ring_doorbell_only(*this);
+    return;
+  }
+#endif
+#if defined(GDA_ERNIC)
+  if (provider_ == Provider::ROCM_ERNIC) {
+    ernic::Ops::ring_doorbell_only(*this);
+    return;
+  }
+#endif
+}
+
 } // namespace rdma_ep

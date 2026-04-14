@@ -4,6 +4,7 @@
  */
 
 #include "nvme-ep.h"
+#include "xio-data-pattern.hpp"
 #include "xio-env.h"
 #include "xio-timing.h"
 
@@ -252,14 +253,10 @@ __device__ static void driveEndpointSingle(
                                 bufferParams.bufferSize > 0);
 
   if (has_write_buffer) {
-    dataPatternParams patternParams;
-    patternParams.buffer = bufferParams.writeBuffer;
-    patternParams.size = bufferParams.bufferSize;
-    patternParams.offset = 0;
-    patternParams.lbaSize = ioParams.lbaSize;
-    patternParams.lfsrSeed = ioParams.lfsrSeed;
-    patternParams.errorOffset = nullptr;
-    dataPattern(false, patternParams);
+    xio::DataPatternParams pp{
+      bufferParams.writeBuffer, bufferParams.bufferSize, 0,
+      ioParams.lbaSize,         ioParams.lfsrSeed,       nullptr};
+    xio::dataPattern(false, pp);
   }
 
   uint16_t cq_head = 0;
@@ -462,14 +459,10 @@ __device__ static void driveEndpointWavefront(
     sh_error = false;
 
     if (has_write_buffer) {
-      dataPatternParams patternParams;
-      patternParams.buffer = bufferParams.writeBuffer;
-      patternParams.size = bufferParams.bufferSize;
-      patternParams.offset = 0;
-      patternParams.lbaSize = ioParams.lbaSize;
-      patternParams.lfsrSeed = ioParams.lfsrSeed;
-      patternParams.errorOffset = nullptr;
-      dataPattern(false, patternParams);
+      xio::DataPatternParams pp{
+        bufferParams.writeBuffer, bufferParams.bufferSize, 0,
+        ioParams.lbaSize,         ioParams.lfsrSeed,       nullptr};
+      xio::dataPattern(false, pp);
     }
   }
   __syncthreads();
@@ -1314,6 +1307,36 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     ROCXIO_LOG_INFO("Device synchronization error: "
                     "%s (code: %d).\n",
                     hipGetErrorString(result), result);
+  }
+
+  // ---- Verify read buffers ----
+  if (result == hipSuccess && nvmeConfig->ioParams.readIo > 0) {
+    for (uint16_t q = 0; q < numQueues; q++) {
+      uint8_t* rbuf = readBufs[q].gpuPtr
+                        ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
+                        : static_cast<uint8_t*>(readBufs[q].hostPtr);
+      if (!rbuf)
+        continue;
+      size_t bsz = nvmeConfig->bufferParams.bufferSize;
+      uint8_t* host_rb = nullptr;
+      if (readBufs[q].gpuPtr) {
+        host_rb = static_cast<uint8_t*>(malloc(bsz));
+        if (host_rb)
+          (void)hipMemcpy(host_rb, rbuf, bsz, hipMemcpyDeviceToHost);
+        rbuf = host_rb;
+      }
+      if (rbuf) {
+        xio::DataPatternParams vp{
+          rbuf, bsz, 0, ioParams.lbaSize, ioParams.lfsrSeed, nullptr};
+        if (xio::dataPattern(true, vp))
+          config->verifyPass += static_cast<uint32_t>(
+            nvmeConfig->ioParams.readIo);
+        else
+          config->verifyFail += static_cast<uint32_t>(
+            nvmeConfig->ioParams.readIo);
+      }
+      free(host_rb);
+    }
   }
 
   // ---- Aggregate per-queue timing stats ----

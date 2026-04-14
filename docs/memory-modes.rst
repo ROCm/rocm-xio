@@ -60,8 +60,9 @@ On MI300X the host allocation should be **UNCACHED**.
      - ``XIO_HOST_MEM_MAPPED``
      - ``xio-common.hip``
    * - RDMA data buffer
-     - ``XIO_HOST_MEM_PINNED``
-     - ``rdma-ep.hip``
+     - ``XIO_HOST_MEM_PINNED`` or
+       ``XIO_DEVICE_MEM_FINE_GRAINED``
+     - ``rdma-ep.hip`` (per ``--memory-mode`` bit 3)
    * - BNXT/ERNIC SQ/RQ
      - ``XIO_HOST_MEM_PINNED``
      - ``bnxt/ernic-backend.cpp``
@@ -141,7 +142,8 @@ constrained by the libibverbs ABI.
 Memory Mode CLI Flags
 ---------------------
 
-The ``--memory-mode`` CLI option (0-15) controls placement:
+The ``--memory-mode`` CLI option (0--15) controls
+placement:
 
 - Bit 0 (``XIO_MEM_MODE_SQ_DEVICE``): submission queue
   in VRAM
@@ -155,6 +157,56 @@ The ``--memory-mode`` CLI option (0-15) controls placement:
 When a bit is **set**, the corresponding buffer is
 allocated with ``allocDeviceMemory()`` (VRAM); when
 **clear**, with ``allocHostMemory()`` (system RAM).
+
+NVMe-EP Memory Mode
+^^^^^^^^^^^^^^^^^^^^
+
+All four bits are honoured independently.  The SQ and CQ
+are allocated by ``createQueue()`` based on bits 0 and 1.
+The doorbell is placed per bit 2 via a kernel-module MMIO
+bridge path.  Data buffers use bit 3 for host vs. device
+P2PDMA allocation.
+
+RDMA-EP Memory Mode
+^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 25 65
+
+   * - Bit
+     - Effect
+     - Details
+   * - 0
+     - SQ **and** CQ placement
+     - Maps to ``QueueMemMode::DEVICE_VRAM`` (bit set)
+       vs ``HOST_COHERENT`` (bit clear).  Controls the
+       ``ibv_alloc_parent_domain`` allocator used by
+       ``ibv_create_qp_ex`` for SQ/RQ buffers and is
+       also used by ionic for CQ allocation.  BNXT and
+       ERNIC allocate CQ via their DV API (VRAM,
+       uncached).
+   * - 1
+     - *(reserved for future per-queue CQ control)*
+     - Currently ignored.  A future change could split
+       bit 0 (SQ only) and bit 1 (CQ only) by routing
+       the ``resource_type`` callback in the parent
+       domain allocator, or by switching vendors to
+       explicit per-queue allocation.
+   * - 2
+     - *(not applicable)*
+     - RDMA doorbells are always MMIO writes to
+       NIC-mapped BAR regions; memory mode does not
+       apply.
+   * - 3
+     - Data buffer placement
+     - When set, the loopback data buffer (src + dst)
+       is allocated with ``allocDeviceMemory()``
+       (fine-grained VRAM).  When clear, it is
+       allocated with ``allocHostMemory()``
+       (``XIO_HOST_MEM_PINNED``).  The LFSR fill and
+       verify patterns are staged through a temporary
+       host buffer when data is on device.
 
 Mirrored Host+Device Pairs
 ---------------------------
@@ -190,7 +242,7 @@ the centralized ``exportDmabuf()`` wrapper:
    -- Same pattern for ERNIC CQ buffers.
 
 HSA API v2
-~~~~~~~~~~
+^^^^^^^^^^
 
 ROCm 7.1.0 ships ``hsa_amd_portable_export_dmabuf_v2``
 (``/opt/rocm/include/hsa/hsa_ext_amd.h``) which adds a

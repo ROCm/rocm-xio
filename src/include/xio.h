@@ -170,6 +170,9 @@ struct XioEndpointConfig {
   volatile bool* stopRequested = nullptr;
   void* endpointConfig = nullptr;
 
+  uint32_t verifyPass = 0;
+  uint32_t verifyFail = 0;
+
   XioEndpointConfig() = default;
   XioEndpointConfig(unsigned iter, unsigned threads = 1)
     : iterations(iter), numThreads(threads) {
@@ -306,11 +309,14 @@ void printGpuDeviceDetails(int deviceId);
  * @param readIterations Read count (0 to omit).
  * @param writeIterations Write count (0 to omit).
  * @param verifiedReadsCount Verified reads (0 to omit).
+ * @param verifyPass Verified iterations passed (0 to omit).
+ * @param verifyFail Verified iterations failed (0 to omit).
  */
 void printStatistics(const std::vector<double>& durations,
                      unsigned totalIterations = 0, unsigned numThreads = 0,
                      unsigned readIterations = 0, unsigned writeIterations = 0,
-                     unsigned verifiedReadsCount = 0);
+                     unsigned verifiedReadsCount = 0, unsigned verifyPass = 0,
+                     unsigned verifyFail = 0);
 
 /**
  * @brief Print a histogram and statistics from durations.
@@ -320,11 +326,14 @@ void printStatistics(const std::vector<double>& durations,
  * @param readIterations Read count (0 to omit).
  * @param writeIterations Write count (0 to omit).
  * @param verifiedReadsCount Verified reads (0 to omit).
+ * @param verifyPass Verified iterations passed (0 to omit).
+ * @param verifyFail Verified iterations failed (0 to omit).
  */
 void printHistogram(const std::vector<double>& durations, unsigned nIterations,
                     unsigned numThreads = 0, unsigned readIterations = 0,
                     unsigned writeIterations = 0,
-                    unsigned verifiedReadsCount = 0);
+                    unsigned verifiedReadsCount = 0, unsigned verifyPass = 0,
+                    unsigned verifyFail = 0);
 
 /**
  * @brief Allocate queue memory (device or host).

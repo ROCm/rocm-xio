@@ -1114,3 +1114,11 @@ Sphinx
 toctree
 undoc
 wavefronts
+
+# ===== RDMA/GPU terms =====
+backgrounding
+SIGINT
+wr
+WRITEs
+stopRequested
+QueueMemMode

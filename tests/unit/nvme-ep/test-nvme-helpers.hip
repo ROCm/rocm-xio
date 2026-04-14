@@ -19,6 +19,7 @@
 #include <hip/hip_runtime.h>
 
 #include "nvme-ep.h"
+#include "xio-data-pattern.hpp"
 #include "xio-test-assert.h"
 
 using namespace xio::nvme_ep;
@@ -424,15 +425,15 @@ int test_dataPattern_generate_verify() {
   uint8_t buf[sz];
   memset(buf, 0, sz);
 
-  dataPatternParams params = {};
+  xio::DataPatternParams params = {};
   params.buffer = buf;
   params.size = sz;
   params.offset = 0;
-  params.lbaSize = 512;
-  params.lfsrSeed = 0x1234;
+  params.blockSize = 512;
+  params.seed = 0x1234;
   params.errorOffset = nullptr;
 
-  bool ok = dataPattern(false, params);
+  bool ok = xio::dataPattern(false, params);
   ASSERT_TRUE(ok);
 
   bool all_zero = true;
@@ -444,7 +445,7 @@ int test_dataPattern_generate_verify() {
   }
   ASSERT_TRUE(!all_zero);
 
-  ok = dataPattern(true, params);
+  ok = xio::dataPattern(true, params);
   ASSERT_TRUE(ok);
   return 0;
 }
@@ -453,21 +454,21 @@ int test_dataPattern_corruption_detected() {
   const size_t sz = 512;
   uint8_t buf[sz];
 
-  dataPatternParams params = {};
+  xio::DataPatternParams params = {};
   params.buffer = buf;
   params.size = sz;
   params.offset = 0;
-  params.lbaSize = 512;
-  params.lfsrSeed = 0x5678;
+  params.blockSize = 512;
+  params.seed = 0x5678;
   params.errorOffset = nullptr;
 
-  dataPattern(false, params);
+  xio::dataPattern(false, params);
 
   buf[100] ^= 0xFF;
 
   size_t err_off = 0;
   params.errorOffset = &err_off;
-  bool ok = dataPattern(true, params);
+  bool ok = xio::dataPattern(true, params);
   ASSERT_TRUE(!ok);
   ASSERT_EQ(err_off, 100u);
   return 0;
@@ -477,23 +478,23 @@ int test_dataPattern_determinism() {
   const size_t sz = 1024;
   uint8_t buf1[sz], buf2[sz];
 
-  dataPatternParams p1 = {};
+  xio::DataPatternParams p1 = {};
   p1.buffer = buf1;
   p1.size = sz;
   p1.offset = 0;
-  p1.lbaSize = 512;
-  p1.lfsrSeed = 0xABCD;
+  p1.blockSize = 512;
+  p1.seed = 0xABCD;
   p1.errorOffset = nullptr;
-  dataPattern(false, p1);
+  xio::dataPattern(false, p1);
 
-  dataPatternParams p2 = {};
+  xio::DataPatternParams p2 = {};
   p2.buffer = buf2;
   p2.size = sz;
   p2.offset = 0;
-  p2.lbaSize = 512;
-  p2.lfsrSeed = 0xABCD;
+  p2.blockSize = 512;
+  p2.seed = 0xABCD;
   p2.errorOffset = nullptr;
-  dataPattern(false, p2);
+  xio::dataPattern(false, p2);
 
   ASSERT_EQ(memcmp(buf1, buf2, sz), 0);
   return 0;
@@ -503,19 +504,19 @@ int test_dataPattern_different_seeds() {
   const size_t sz = 512;
   uint8_t buf1[sz], buf2[sz];
 
-  dataPatternParams p = {};
+  xio::DataPatternParams p = {};
   p.size = sz;
   p.offset = 0;
-  p.lbaSize = 512;
+  p.blockSize = 512;
   p.errorOffset = nullptr;
 
   p.buffer = buf1;
-  p.lfsrSeed = 0x1111;
-  dataPattern(false, p);
+  p.seed = 0x1111;
+  xio::dataPattern(false, p);
 
   p.buffer = buf2;
-  p.lfsrSeed = 0x2222;
-  dataPattern(false, p);
+  p.seed = 0x2222;
+  xio::dataPattern(false, p);
 
   ASSERT_NE(memcmp(buf1, buf2, sz), 0);
   return 0;
@@ -528,16 +529,16 @@ int test_dataPattern_cross_lba() {
   const size_t sz = 3 * lba_size;
   uint8_t buf[sz];
 
-  dataPatternParams p = {};
+  xio::DataPatternParams p = {};
   p.buffer = buf;
   p.size = sz;
   p.offset = 0;
-  p.lbaSize = lba_size;
-  p.lfsrSeed = 0xBEEF;
+  p.blockSize = lba_size;
+  p.seed = 0xBEEF;
   p.errorOffset = nullptr;
-  dataPattern(false, p);
+  xio::dataPattern(false, p);
 
-  bool ok = dataPattern(true, p);
+  bool ok = xio::dataPattern(true, p);
   ASSERT_TRUE(ok);
 
   uint8_t buf_copy[sz];
@@ -545,7 +546,7 @@ int test_dataPattern_cross_lba() {
   p.buffer = buf_copy;
   p.size = sz;
   p.offset = 0;
-  dataPattern(false, p);
+  xio::dataPattern(false, p);
   ASSERT_EQ(memcmp(buf, buf_copy, sz), 0);
   return 0;
 }
@@ -555,19 +556,19 @@ int test_dataPattern_different_offsets() {
   const size_t sz = lba_size;
   uint8_t buf_off0[sz], buf_off1[sz];
 
-  dataPatternParams p = {};
+  xio::DataPatternParams p = {};
   p.size = sz;
-  p.lbaSize = lba_size;
-  p.lfsrSeed = 0xCAFE;
+  p.blockSize = lba_size;
+  p.seed = 0xCAFE;
   p.errorOffset = nullptr;
 
   p.buffer = buf_off0;
   p.offset = 0;
-  dataPattern(false, p);
+  xio::dataPattern(false, p);
 
   p.buffer = buf_off1;
   p.offset = lba_size;
-  dataPattern(false, p);
+  xio::dataPattern(false, p);
 
   ASSERT_NE(memcmp(buf_off0, buf_off1, sz), 0);
   return 0;
@@ -578,20 +579,20 @@ int test_dataPattern_corruption_at_lba_boundary() {
   const size_t sz = 2 * lba_size;
   uint8_t buf[sz];
 
-  dataPatternParams p = {};
+  xio::DataPatternParams p = {};
   p.buffer = buf;
   p.size = sz;
   p.offset = 0;
-  p.lbaSize = lba_size;
-  p.lfsrSeed = 0xFACE;
+  p.blockSize = lba_size;
+  p.seed = 0xFACE;
   p.errorOffset = nullptr;
-  dataPattern(false, p);
+  xio::dataPattern(false, p);
 
   buf[lba_size] ^= 0xFF;
 
   size_t err_off = 0;
   p.errorOffset = &err_off;
-  bool ok = dataPattern(true, p);
+  bool ok = xio::dataPattern(true, p);
   ASSERT_TRUE(!ok);
   ASSERT_EQ(err_off, (size_t)lba_size);
   return 0;

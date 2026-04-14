@@ -148,7 +148,7 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
   struct bnxt_re_dv_cq_init_attr ca {};
   ca.umem_handle = hcq->umem;
   ca.cq_umem_offset = 0;
-  ca.ncqe = hcq->depth;
+  ca.ncqe = ncqe;
 
   hcq->cq = dv.create_cq(ctx, &ca);
   if (!hcq->cq) {
@@ -162,7 +162,9 @@ static void create_one_cq(bnxt_host_cq* hcq, struct ibv_context* ctx,
 void Backend::bnxt_create_cqs(int cqe) {
   int dmabuf = ibv.is_dmabuf_supported();
 
-  cqe = 1; // CQE compression: 1 entry
+  static constexpr int BNXT_MIN_CQ_DEPTH = 256;
+  if (cqe < BNXT_MIN_CQ_DEPTH)
+    cqe = BNXT_MIN_CQ_DEPTH;
 
   (void)xio::allocHostMemory(sizeof(bnxt_host_cq), (void**)&bnxt_scq_,
                              "BNXT SCQ", XIO_HOST_MEM_PLAIN);
@@ -349,7 +351,7 @@ void Backend::bnxt_initialize_gpu_qp() {
   host_qp_->bnxt_sq_.mtu = ibv_mtu_to_int(port_attr_.active_mtu);
 
   hipError_t herr = hipHostRegister(bnxt_qp_->db_region_attr->dbr,
-                                    getpagesize(), hipHostRegisterDefault);
+                                    getpagesize(), hipHostRegisterIoMemory);
   if (herr != hipSuccess) {
     fprintf(stderr,
             "rdma_ep::bnxt: "
@@ -375,12 +377,21 @@ void Backend::bnxt_initialize_gpu_qp() {
   host_qp_->inline_threshold_ = config_.inline_threshold;
 
   fprintf(stderr,
+          "rdma_ep::bnxt: DB region: "
+          "dbr=%p umdbr=0x%lx dpi=%u\n",
+          (void*)bnxt_qp_->db_region_attr->dbr,
+          (unsigned long)bnxt_qp_->db_region_attr->umdbr,
+          bnxt_qp_->db_region_attr->dpi);
+  fprintf(stderr,
           "rdma_ep::bnxt: GPU QP initialized "
-          "(CQ id=%u, SQ depth=%u, "
+          "(CQ id=%u, CQ depth=%u, "
+          "CQ buf_len=%lu, CQE_sz=%u, "
+          "SQ depth=%u, "
           "SQ buf=%p, DB=%p, MTU=%lu)\n",
-          host_qp_->bnxt_cq_.id, host_qp_->bnxt_sq_.depth,
-          host_qp_->bnxt_sq_.buf, (void*)host_qp_->bnxt_dbr_,
-          host_qp_->bnxt_sq_.mtu);
+          host_qp_->bnxt_cq_.id, host_qp_->bnxt_cq_.depth,
+          (unsigned long)bnxt_scq_->length, bnxt_scq_->cqe_size,
+          host_qp_->bnxt_sq_.depth, host_qp_->bnxt_sq_.buf,
+          (void*)host_qp_->bnxt_dbr_, host_qp_->bnxt_sq_.mtu);
 }
 
 void Backend::bnxt_cleanup() {
