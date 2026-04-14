@@ -3,9 +3,9 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# usage: sbatch rocm-xio-tests.two-gpu.sbatch
+# usage: sbatch rocm-xio-tests.sdma-ep.sbatch
 #
-# Runs on a two-GPU node: builds rocm-xio and exercises sdma-ep
+# SDMA endpoint tests on a two-GPU node.  Exercises sdma-ep
 # transfers that benefit from a multi-GPU allocation:
 #
 #   1. GPU-to-GPU P2P (GPU 0 -> GPU 1) with XGMI metric capture
@@ -48,7 +48,7 @@ if ! $sdma_ep_allowed; then
   echo "ERROR: ${ROCM_GPU_ARCH} not in SDMA whitelist (${SDMA_EP_GFX_WHITELIST})."
   exit 1
 fi
-setup_and_build_workdir "two-gpu"
+setup_and_build_workdir "sdma-ep"
 
 run_p2p_test() {
   local n=$1

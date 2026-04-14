@@ -5,6 +5,8 @@
 #
 # rocm-xio-tests.common - shared setup for rocm-xio-tests.*.sbatch
 
+export HSA_FORCE_FINE_GRAIN_PCIE=1
+
 SSH_COMMAND="ssh \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
@@ -68,6 +70,32 @@ Connection timed out" \
   echo "SSH failed after $((max_retries + 1))" \
     "attempts." >&2
   return ${rc}
+}
+
+# Expand a SLURM compressed node list into one
+# hostname per line.  Works inside containers where
+# scontrol is unavailable.
+# Usage: expand_nodelist "node-[1,3-5]"
+expand_nodelist() {
+  local input="$1"
+  local prefix="" range="" suffix=""
+  if [[ "${input}" =~ ^(.*)\[([^]]+)\](.*)$ ]]; then
+    prefix="${BASH_REMATCH[1]}"
+    range="${BASH_REMATCH[2]}"
+    suffix="${BASH_REMATCH[3]}"
+    IFS=',' read -ra parts <<< "${range}"
+    for part in "${parts[@]}"; do
+      if [[ "${part}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        for ((i=BASH_REMATCH[1]; i<=BASH_REMATCH[2]; i++)); do
+          echo "${prefix}${i}${suffix}"
+        done
+      else
+        echo "${prefix}${part}${suffix}"
+      fi
+    done
+  else
+    echo "${input}"
+  fi
 }
 
 # Project directory (repo root). When submitted from .alola, use its parent.

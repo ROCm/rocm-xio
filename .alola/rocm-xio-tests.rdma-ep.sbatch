@@ -5,11 +5,15 @@
 #
 # usage: sbatch rocm-xio-tests.rdma-ep.sbatch
 #
-# RDMA-EP loopback test. Builds with all GDA vendors
-# enabled, auto-detects which NIC is present on the
-# allocated node, then runs loopback tests for each
-# detected vendor via ssh localhost (host access is
-# required for kernel modules and RDMA devices).
+# RDMA-EP test suite.  Allocates 2 IB nodes, builds
+# with all GDA vendors, auto-detects which NIC is
+# present on each node, then runs:
+#
+#   Phase 1 -- loopback tests on both nodes
+#   Phase 2 -- two-node client-server ping-pong
+#
+# Host access via SSH is required for kernel modules
+# and RDMA devices.
 #
 # To check compatible nodes:
 #   sinfo -Na -o "%N %100f" | grep IB
@@ -20,6 +24,7 @@
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
 #SBATCH --constraint=MARKHAM&IB
+#SBATCH --nodes=2
 #SBATCH --gpus-per-node=1
 
 set -xe
@@ -37,11 +42,25 @@ fi
 LOOPBACK_SEEDS="${LOOPBACK_SEEDS:-1 2 3 4 5}"
 LOOPBACK_SIZE="${LOOPBACK_SIZE:-256}"
 LOOPBACK_ITERS="${LOOPBACK_ITERS:-100}"
+PP_SIZE="${PP_SIZE:-64}"
+PP_ITERS="${PP_ITERS:-100}"
+
+# --- Parse node list ---
+mapfile -t NODES < <(expand_nodelist "${SLURM_JOB_NODELIST}")
+if [ ${#NODES[@]} -lt 2 ]; then
+  echo "ERROR: Need 2 nodes, got ${#NODES[@]}"
+  exit 1
+fi
+NODE_A="${NODES[0]}"
+NODE_B="${NODES[1]}"
 
 cleanup() {
   echo "Cleaning up..."
-  ${SSH_LOCALHOST} "rm -rf ${WORKING_DIR}" \
-    2>/dev/null || true
+  for node in "${NODE_A}" "${NODE_B}"; do
+    ${SSH_COMMAND} "${node}" \
+      "rm -rf ${WORKING_DIR}" \
+      2>/dev/null || true
+  done
   rm -rf "${WORKING_DIR}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -53,8 +72,10 @@ test_init
 display_job_info
 
 echo "=========================================="
-echo "RDMA-EP Loopback Test"
+echo "RDMA-EP Test Suite"
 echo "=========================================="
+echo "  Node A: ${NODE_A}"
+echo "  Node B: ${NODE_B}"
 echo ""
 
 cd "${PROJECT_DIR}"
@@ -63,108 +84,242 @@ detect_gpu_arch
 # --- Build phase (inside container) ---
 WORKING_DIR="/tmp/rocm-xio-tests.rdma-ep.$RANDOM"
 rdma_alola_build "${WORKING_DIR}" "test-rdma-loopback"
+LOOPBACK_BIN="${TEST_BIN}"
 SETUP_SCRIPT="${WORKING_DIR}/scripts/test"
 SETUP_SCRIPT="${SETUP_SCRIPT}/setup-rdma-loopback.sh"
 
-# --- Copy artifacts to host ---
+cmake --build build \
+  --target test-rdma-2node \
+  --parallel
+TWONODE_BIN="${WORKING_DIR}/build/tests/unit"
+TWONODE_BIN="${TWONODE_BIN}/rdma-ep/test-rdma-2node"
+
+# --- Copy artifacts to both nodes ---
 echo ""
-echo "Copying test artifacts to host..."
-${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/build/tests/unit/rdma-ep"
-${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/scripts/test"
-${SCP_COMMAND} "${TEST_BIN}" \
-  "localhost:${TEST_BIN}"
-${SCP_COMMAND} "${SETUP_SCRIPT}" \
-  "localhost:${SETUP_SCRIPT}"
+echo "Copying test artifacts to nodes..."
+for node in "${NODE_A}" "${NODE_B}"; do
+  ${SSH_COMMAND} "${node}" \
+    "mkdir -p ${WORKING_DIR}/build/tests/unit/rdma-ep"
+  ${SSH_COMMAND} "${node}" \
+    "mkdir -p ${WORKING_DIR}/scripts/test"
+  ${SCP_COMMAND} "${LOOPBACK_BIN}" \
+    "${node}:${LOOPBACK_BIN}"
+  ${SCP_COMMAND} "${TWONODE_BIN}" \
+    "${node}:${TWONODE_BIN}"
+  ${SCP_COMMAND} "${SETUP_SCRIPT}" \
+    "${node}:${SETUP_SCRIPT}"
+  ${SSH_COMMAND} "${node}" \
+    "mkdir -p ${WORKING_DIR}/build/_deps/rdma-core"
+  ${SCP_COMMAND} -r \
+    "${WORKING_DIR}/build/_deps/rdma-core/install" \
+    "${node}:${WORKING_DIR}/build/_deps/rdma-core/"
+done
 
-# Copy rdma-core install directory to host
-${SSH_LOCALHOST} \
-  "mkdir -p ${WORKING_DIR}/build/_deps/rdma-core"
-${SCP_COMMAND} -r \
-  "${WORKING_DIR}/build/_deps/rdma-core/install" \
-  "localhost:${WORKING_DIR}/build/_deps/rdma-core/"
+LIB_PATH="${RDMA_CORE_LIB}:${ROCM_NFS}/lib"
 
-# --- Auto-detect NICs on host ---
-echo ""
-echo "Detecting RDMA NICs on host..."
-
-DETECTED_VENDORS=""
-
+# ---------------------------------------------------------
+# detect_vendors_on_node NODE
+#
+# Detect all RDMA vendors on NODE.  Prints space-
+# separated vendor names on stdout (e.g. "mlx5 bnxt").
+# Sets ${VENDOR}_DEV_${suffix} and ${VENDOR}_BDF_${suffix}
+# variables where suffix is the sanitised node name.
+# ---------------------------------------------------------
 resolve_ib_bdf() {
-  local ib_dev="$1"
-  ${SSH_LOCALHOST} \
+  local node="$1"
+  local ib_dev="$2"
+  ${SSH_COMMAND} "${node}" \
     "readlink -f /sys/class/infiniband/${ib_dev}/device \
     | xargs basename" 2>/dev/null || echo "unknown"
 }
 
-for _v in bnxt mlx5 ionic; do
-  _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
-    "localhost" "${_v}")
-  if [ -n "${_dev}" ]; then
-    _bdf=$(resolve_ib_bdf "${_dev}")
-    eval "${_v^^}_DEV=\${_dev}"
-    eval "${_v^^}_BDF=\${_bdf}"
-    DETECTED_VENDORS="${DETECTED_VENDORS} ${_v}"
-    echo "  Found ${_v^^}: ${_dev} (PCI ${_bdf})"
-  fi
-done
-unset _v _dev _bdf
+detect_vendors_on_node() {
+  local node="$1"
+  local suffix
+  suffix=$(echo "${node}" | tr '-' '_')
+  DETECTED_VENDORS=""
+  for _v in bnxt mlx5 ionic; do
+    local _dev
+    _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
+      "${node}" "${_v}")
+    if [ -n "${_dev}" ]; then
+      local _bdf
+      _bdf=$(resolve_ib_bdf "${node}" "${_dev}")
+      eval "${_v^^}_DEV_${suffix}=\${_dev}"
+      eval "${_v^^}_BDF_${suffix}=\${_bdf}"
+      DETECTED_VENDORS="${DETECTED_VENDORS} ${_v}"
+      echo "  Found ${_v^^}: ${_dev}" \
+        "(PCI ${_bdf})"
+    fi
+  done
+}
 
-if [ -z "${DETECTED_VENDORS}" ]; then
-  echo "ERROR: No RDMA NICs detected on host."
-  echo "  Checked /sys/class/infiniband/ for"
-  echo "  rocm-rdma-bnxt*, rocm-rdma-mlx5*,"
-  echo "  rocm-rdma-ionic*, bnxt_*, mlx5_*,"
-  echo "  ionic_*"
+# ---------------------------------------------------------
+# run_loopback_on_node NODE VENDORS
+#
+# Run loopback tests for each vendor on the given node.
+# ---------------------------------------------------------
+run_loopback_on_node() {
+  local node="$1"
+  local vendors="$2"
+  local suffix
+  suffix=$(echo "${node}" | tr '-' '_')
+
+  echo ""
+  echo "Running RDMA hardware setup on ${node}..."
+  ${SSH_COMMAND} "${node}" \
+    "sudo VENDOR=all ${SETUP_SCRIPT}" || true
+
+  for vendor in ${vendors}; do
+    local dev="" bdf=""
+    eval "dev=\${${vendor^^}_DEV_${suffix}}"
+    eval "bdf=\${${vendor^^}_BDF_${suffix}}"
+
+    echo ""
+    echo "--- ${vendor^^} loopback on ${node} ---"
+    echo "  device=${dev}"
+    echo "  PCI BDF=${bdf}"
+    echo "  size=${LOOPBACK_SIZE}"
+    echo "  iterations=${LOOPBACK_ITERS}"
+    echo ""
+
+    for seed in ${LOOPBACK_SEEDS}; do
+      test_run \
+        "rdma-ep loopback ${vendor} ${node} seed=${seed}" \
+        "${SSH_COMMAND} ${node} \
+          \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+            HSA_FORCE_FINE_GRAIN_PCIE=1 \
+            ${LOOPBACK_BIN} \
+            --provider ${vendor} \
+            --device ${dev} \
+            --size ${LOOPBACK_SIZE} \
+            --seed ${seed} \
+            -n ${LOOPBACK_ITERS}\""
+      sleep 1
+    done
+  done
+}
+
+# =========================================================
+# Phase 1 -- Loopback tests on both nodes
+# =========================================================
+echo ""
+echo "=========================================="
+echo "Phase 1: RDMA-EP Loopback Tests"
+echo "=========================================="
+
+echo ""
+echo "Detecting RDMA NICs on ${NODE_A}..."
+detect_vendors_on_node "${NODE_A}"
+VENDORS_A="${DETECTED_VENDORS}"
+if [ -z "${VENDORS_A}" ]; then
+  echo "ERROR: No RDMA NICs detected on ${NODE_A}."
+  exit 1
+fi
+echo "  Detected vendors:${VENDORS_A}"
+
+echo ""
+echo "Detecting RDMA NICs on ${NODE_B}..."
+detect_vendors_on_node "${NODE_B}"
+VENDORS_B="${DETECTED_VENDORS}"
+if [ -z "${VENDORS_B}" ]; then
+  echo "ERROR: No RDMA NICs detected on ${NODE_B}."
+  exit 1
+fi
+echo "  Detected vendors:${VENDORS_B}"
+
+run_loopback_on_node "${NODE_A}" "${VENDORS_A}"
+run_loopback_on_node "${NODE_B}" "${VENDORS_B}"
+
+# =========================================================
+# Phase 2 -- Two-node client-server test
+# =========================================================
+echo ""
+echo "=========================================="
+echo "Phase 2: RDMA-EP Two-Node Test"
+echo "=========================================="
+
+# Use the first vendor detected on each node and
+# verify they match.
+detect_first_vendor() {
+  local node="$1"
+  for _v in mlx5 bnxt ionic; do
+    local _dev
+    _dev=$(detect_rdma_nic "${SSH_COMMAND}" \
+      "${node}" "${_v}")
+    if [ -n "${_dev}" ]; then
+      echo "${_v} ${_dev}"
+      return
+    fi
+  done
+}
+
+read -r SRV_VENDOR SRV_DEV \
+  <<< "$(detect_first_vendor "${NODE_A}")"
+read -r CLI_VENDOR CLI_DEV \
+  <<< "$(detect_first_vendor "${NODE_B}")"
+
+if [ -z "${SRV_VENDOR}" ]; then
+  echo "ERROR: No RDMA NIC on ${NODE_A}"
+  exit 1
+fi
+if [ -z "${CLI_VENDOR}" ]; then
+  echo "ERROR: No RDMA NIC on ${NODE_B}"
+  exit 1
+fi
+if [ "${SRV_VENDOR}" != "${CLI_VENDOR}" ]; then
+  echo "ERROR: vendor mismatch:" \
+    "${NODE_A}=${SRV_VENDOR}" \
+    "${NODE_B}=${CLI_VENDOR}"
   exit 1
 fi
 
-echo "  Detected vendors:${DETECTED_VENDORS}"
-
-# --- Run setup on host ---
+VENDOR="${SRV_VENDOR}"
+echo "  provider=${VENDOR}"
+echo "  server=${NODE_A} (${SRV_DEV})"
+echo "  client=${NODE_B} (${CLI_DEV})"
+echo "  pingpong-size=${PP_SIZE}"
+echo "  pingpong-iters=${PP_ITERS}"
 echo ""
-echo "Running RDMA hardware setup on host..."
-${SSH_LOCALHOST} \
-  "sudo VENDOR=all ${SETUP_SCRIPT}" || true
 
-# --- Run loopback tests for each vendor ---
-echo ""
-echo "=========================================="
-echo "Running RDMA-EP loopback tests"
-echo "=========================================="
+# Launch server in background with a timeout so it
+# cannot hang if the client never connects.  Process
+# substitution ensures $! is the SSH PID, not sed.
+SERVER_TIMEOUT=$((PP_ITERS * 2 + 60))
+${SSH_COMMAND} "${NODE_A}" \
+  "sudo timeout ${SERVER_TIMEOUT} \
+    env LD_LIBRARY_PATH=${LIB_PATH} \
+    HSA_FORCE_FINE_GRAIN_PCIE=1 \
+    ${TWONODE_BIN} \
+    --server \
+    --provider ${VENDOR} \
+    --device ${SRV_DEV} \
+    --pingpong-size ${PP_SIZE} \
+    --pingpong-iters ${PP_ITERS}" \
+  > >(sed 's/^/[SERVER] /') 2>&1 &
+SERVER_PID=$!
 
-LIB_PATH="${RDMA_CORE_LIB}:${ROCM_NFS}/lib"
+sleep 3
 
-for vendor in ${DETECTED_VENDORS}; do
-  RDMA_DEV=""
-  RDMA_BDF=""
-  case "${vendor}" in
-    bnxt)  RDMA_DEV="${BNXT_DEV}";  RDMA_BDF="${BNXT_BDF}" ;;
-    mlx5)  RDMA_DEV="${MLX5_DEV}";  RDMA_BDF="${MLX5_BDF}" ;;
-    ionic) RDMA_DEV="${IONIC_DEV}"; RDMA_BDF="${IONIC_BDF}" ;;
-  esac
+# Launch client
+test_run \
+  "rdma-ep 2node ${VENDOR}" \
+  "${SSH_COMMAND} ${NODE_B} \
+    \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+      HSA_FORCE_FINE_GRAIN_PCIE=1 \
+      ${TWONODE_BIN} \
+      --client \
+      --server-host ${NODE_A} \
+      --provider ${VENDOR} \
+      --device ${CLI_DEV} \
+      --pingpong-size ${PP_SIZE} \
+      --pingpong-iters ${PP_ITERS}\""
 
-  echo ""
-  echo "--- ${vendor^^} loopback ---"
-  echo "  device=${RDMA_DEV}"
-  echo "  PCI BDF=${RDMA_BDF}"
-  echo "  size=${LOOPBACK_SIZE}"
-  echo "  iterations=${LOOPBACK_ITERS}"
-  echo ""
-
-  for seed in ${LOOPBACK_SEEDS}; do
-    test_run \
-      "rdma-ep loopback ${vendor} seed=${seed}" \
-      "ssh_with_retry \
-        \"sudo env LD_LIBRARY_PATH=${LIB_PATH} \
-          ${TEST_BIN} \
-          --provider ${vendor} \
-          --device ${RDMA_DEV} \
-          --size ${LOOPBACK_SIZE} \
-          --seed ${seed} \
-          -n ${LOOPBACK_ITERS}\""
-    sleep 1
-  done
-done
+wait ${SERVER_PID}
+SERVER_RC=$?
+if [ ${SERVER_RC} -ne 0 ]; then
+  echo "WARN: server exited with rc=${SERVER_RC}"
+fi
 
 # Report results and exit with appropriate code
 test_report

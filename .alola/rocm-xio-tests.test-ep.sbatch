@@ -3,21 +3,24 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# usage: sbatch rocm-xio-tests.single-gpu.sbatch
+# usage: sbatch rocm-xio-tests.test-ep.sbatch
+#
+# EP endpoint tests: emulation, basic, threaded,
+# memory-mode sweep, doorbell sweep, histogram, and
+# negative (expect-fail) cases.
 #
 #SBATCH --output=logs/%x.%j.out
 #SBATCH --error=logs/%x.%j.err
 #SBATCH --cpus-per-task=4
 #SBATCH --container-image=/cluster/images/rocm-xio/rocm-xio-alola.sqsh
 #SBATCH --container-mount-home
-#SBATCH --constraint=MARKHAM&(GFX942|GFX950)
+#SBATCH --constraint=MARKHAM
 #SBATCH --gpus-per-node=1
 
 set -xe
 
 # Use timestamped logs directory if provided, otherwise use logs/
 LOGS_DIR="${ALOLA_LOGS_DIR:-logs}"
-# Create directory if it doesn't exist (suppress errors if read-only or exists)
 mkdir -p "${LOGS_DIR}" 2>/dev/null || true
 
 if [ -n "${SLURM_SUBMIT_DIR}" ]; then
@@ -39,17 +42,7 @@ test_init
 
 cd "${PROJECT_DIR}"
 detect_gpu_arch
-setup_and_build_workdir "single-gpu"
-
-test_run "ctest unit tests" \
-  "ctest --test-dir build --preset unit"
-
-# TODO: re-enable once the deadlock hang in
-# test-doorbell-coherence is fixed (the test detects
-# the timeout but the process never exits, blocking
-# the entire sbatch job indefinitely).
-# test_run "doorbell coherence stress" \
-#   "./build/tests/system/coherence/test-doorbell-coherence"
+setup_and_build_workdir "test-ep"
 
 test_run "test-ep --emulate" \
   "./build/xio-tester test-ep --emulate -n ${ITERATIONS}"
@@ -94,18 +87,6 @@ test_run "test-ep invalid memory-mode (expect fail)" \
 
 test_run "test-ep invalid thread count (expect fail)" \
   "! ./build/xio-tester test-ep --threads 0 -n 1"
-
-test_run "example list-endpoints (install)" \
-  "build_and_run_example list-endpoints run"
-
-test_run "example endpoint-info (install)" \
-  "build_and_run_example endpoint-info run"
-
-test_run "example nvme-ep-info (compile-only)" \
-  "build_and_run_example nvme-ep-info"
-
-test_run "example sdma-ep-p2p (compile-only)" \
-  "build_and_run_example sdma-ep-p2p"
 
 cd "$HOME"
 rm -rf "${WORKING_DIR}"

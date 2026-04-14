@@ -35,18 +35,16 @@ JOB_IDS_FILE = SCRIPT_DIR / ".alola-job-ids"
 EXCLUDE_FILE = SCRIPT_DIR / ".alola-exclude"
 
 ALL_TESTS = [
-    ("single-gpu",
-     "rocm-xio-tests.single-gpu.sbatch"),
-    ("two-gpu",
-     "rocm-xio-tests.two-gpu.sbatch"),
+    ("basic-tests",
+     "rocm-xio-tests.basic-tests.sbatch"),
+    ("test-ep",
+     "rocm-xio-tests.test-ep.sbatch"),
+    ("sdma-ep",
+     "rocm-xio-tests.sdma-ep.sbatch"),
     ("nvme-ep",
      "rocm-xio-tests.nvme-ep.sbatch"),
     ("rdma-ep",
      "rocm-xio-tests.rdma-ep.sbatch"),
-    ("rdma-ep-2node",
-     "rocm-xio-tests.rdma-ep-2node.sbatch"),
-    ("integration",
-     "rocm-xio-tests.integration.sbatch"),
 ]
 
 ALL_TEST_NAMES = [t[0] for t in ALL_TESTS]
@@ -1614,8 +1612,8 @@ def cmd_run(args):
 def _test_name_from_out(path):
     """Extract test name from an output filename.
 
-    ``rocm-xio-tests.single-gpu.12345.out``
-    -> ``single-gpu``
+    ``rocm-xio-tests.basic-tests.12345.out``
+    -> ``basic-tests``
     """
     parts = Path(path).name.split(".")
     if (len(parts) >= 4
@@ -1882,7 +1880,7 @@ def main():
         default=None, metavar="LIST",
         help=(
             "Comma-separated list of tests to "
-            "run (e.g. nvme-ep,single-gpu). "
+            "run (e.g. nvme-ep,test-ep). "
             "Available: "
             + ",".join(ALL_TEST_NAMES)
             + ". Default: all."),
