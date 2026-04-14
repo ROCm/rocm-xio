@@ -66,9 +66,7 @@ void registerTestEpCliOptions(CLI::App& app, xio::test_ep::TestEpConfig* cfg) {
               "Verify LFSR data pattern each"
               " iteration")
     ->group("Endpoint Options");
-  app
-    .add_option("--seed", cfg->seed,
-                "LFSR seed for data pattern")
+  app.add_option("--seed", cfg->seed, "LFSR seed for data pattern")
     ->default_val(1)
     ->group("Endpoint Options");
 }
@@ -274,6 +272,34 @@ void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg) {
     ->default_val(100)
     ->check(CLI::PositiveNumber)
     ->group(twonode_group);
+
+  app
+    .add_option("--batch-size", cfg->batchSize,
+                "Number of WQEs per doorbell ring. "
+                "1 = sequential (one WQE at a time), "
+                "N = N WQEs per doorbell. When N > 1, "
+                "each WQE is prepared by a separate "
+                "GPU thread. Max is sq-depth - 1. "
+                "Loopback only.")
+    ->default_val(1)
+    ->check(CLI::NonNegativeNumber)
+    ->group(group);
+
+  app
+    .add_option("--num-queues", cfg->numQueues,
+                "Number of independent RDMA QPs. "
+                "Each QP is driven by its own GPU "
+                "kernel on a separate HIP stream. "
+                "Loopback only. Default: 1.")
+    ->default_val(1)
+    ->check(CLI::PositiveNumber)
+    ->group(group);
+
+  app
+    .add_flag("--infinite", cfg->infiniteMode,
+              "Run forever until SIGINT "
+              "(equivalent to --iterations 0)")
+    ->group(group);
 
   app.add_option("--gpu-device", cfg->gpuDeviceId, "HIP GPU device ID")
     ->default_val(0)

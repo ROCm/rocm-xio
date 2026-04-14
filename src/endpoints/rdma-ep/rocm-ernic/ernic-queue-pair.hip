@@ -126,6 +126,10 @@ __device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
   }
 }
 
+__device__ void Ops::ring_doorbell_only(QueuePair& qp) {
+  ring_doorbell(qp, qp.ernic_sq_.tail);
+}
+
 __device__ void Ops::poll_cq_until(QueuePair& qp, uint32_t requested) {
   uint32_t sq_depth = qp.ernic_sq_.depth;
   do {

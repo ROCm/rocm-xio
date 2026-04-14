@@ -86,6 +86,7 @@ public:
   __device__ void get_nbi_single(void* dest, const void* source, size_t nelems,
                                  bool ring_db = true);
   __device__ void quiet_single();
+  __device__ void ring_doorbell_single();
 
   // --- Common accessor for vendor code ---
   __device__ uint64_t get_same_qp_lane_mask();
@@ -190,6 +191,7 @@ public:
   __device__ static void quiet_single(QueuePair& qp);
 
   __device__ static void ring_doorbell(QueuePair& qp, uint32_t slot_idx);
+  __device__ static void ring_doorbell_only(QueuePair& qp);
   __device__ static void ack_cq(QueuePair& qp, uint32_t cq_cons);
   __device__ static void poll_cq_until(QueuePair& qp, uint32_t requested);
   __device__ static void write_rma_wqe(QueuePair& qp, uintptr_t raddr,
@@ -228,6 +230,7 @@ public:
 
   __device__ static void ring_doorbell(QueuePair& qp, uint16_t counter,
                                        const gda_mlx5_wqe& wqe);
+  __device__ static void ring_doorbell_only(QueuePair& qp);
   __device__ static void poll_cq_until(QueuePair& qp, uint16_t requested);
   __device__ static void check_cqe_error(QueuePair& qp, const mlx5_cqe64* cqe);
 };
@@ -258,6 +261,7 @@ public:
 
   __device__ static void ring_doorbell(QueuePair& qp, uint32_t pos);
   __device__ static void ring_doorbell_single(QueuePair& qp, uint32_t pos);
+  __device__ static void ring_doorbell_only(QueuePair& qp);
   __device__ static uint32_t reserve_sq(QueuePair& qp, uint64_t activemask,
                                         uint32_t num_wqes);
   __device__ static uint32_t reserve_sq_single(QueuePair& qp,
@@ -303,6 +307,7 @@ public:
   __device__ static void quiet_single(QueuePair& qp);
 
   __device__ static void ring_doorbell(QueuePair& qp, uint32_t slot_idx);
+  __device__ static void ring_doorbell_only(QueuePair& qp);
   __device__ static void poll_cq_until(QueuePair& qp, uint32_t requested);
   __device__ static void write_rma_wqe(QueuePair& qp, uintptr_t raddr,
                                        uintptr_t laddr, int32_t length,
