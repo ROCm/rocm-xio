@@ -92,10 +92,8 @@ __device__ void Ops::ring_doorbell(QueuePair& qp, uint16_t sq_wqebb_counter,
 }
 
 __device__ void Ops::ring_doorbell_only(QueuePair& qp) {
-  uint16_t last =
-    (qp.mlx5_sq_.tail - 1) % qp.mlx5_sq_.depth;
-  ring_doorbell(qp, qp.mlx5_sq_.tail,
-                qp.mlx5_sq_.buf[last]);
+  uint16_t last = (qp.mlx5_sq_.tail - 1) % qp.mlx5_sq_.depth;
+  ring_doorbell(qp, qp.mlx5_sq_.tail, qp.mlx5_sq_.buf[last]);
 }
 
 __device__ void Ops::check_cqe_error(QueuePair& qp, const mlx5_cqe64* cqe) {

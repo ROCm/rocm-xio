@@ -242,7 +242,7 @@ the centralized ``exportDmabuf()`` wrapper:
    -- Same pattern for ERNIC CQ buffers.
 
 HSA API v2
-~~~~~~~~~~
+^^^^^^^^^^
 
 ROCm 7.1.0 ships ``hsa_amd_portable_export_dmabuf_v2``
 (``/opt/rocm/include/hsa/hsa_ext_amd.h``) which adds a

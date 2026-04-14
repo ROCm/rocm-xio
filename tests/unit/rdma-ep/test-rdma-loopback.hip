@@ -153,10 +153,11 @@ __global__ void loopback_write_kernel(QueuePair* qp, void* src_ptr,
   *result = 0;
 }
 
-__global__ void loopback_post_one_kernel(
-  QueuePair* qp, void* src_ptr, void* dst_ptr,
-  uint32_t length, volatile int* done) {
-  if (threadIdx.x != 0) return;
+__global__ void loopback_post_one_kernel(QueuePair* qp, void* src_ptr,
+                                         void* dst_ptr, uint32_t length,
+                                         volatile int* done) {
+  if (threadIdx.x != 0)
+    return;
   qp->put_nbi_single(dst_ptr, src_ptr, length, true);
   __threadfence_system();
   *done = 1;
@@ -527,6 +528,7 @@ int main(int argc, char** argv) {
   }
 
   if (cpu_poll) {
+#ifdef INFINIBAND_VERBS_H
     printf("CPU-poll mode: GPU posts 1 WQE,"
            " CPU polls ibv_poll_cq,"
            " repeat %u times...\n",
@@ -541,19 +543,15 @@ int main(int argc, char** argv) {
     printf("ibv CQ cqe=%d\n", ibcq->cqe);
 
     volatile int* h_done = nullptr;
-    (void)hipHostMalloc((void**)&h_done,
-                        sizeof(int),
-                        hipHostMallocMapped);
+    (void)hipHostMalloc((void**)&h_done, sizeof(int), hipHostMallocMapped);
 
     int failed = 0;
     for (unsigned i = 0; i < iterations; i++) {
       *h_done = 0;
-      hipLaunchKernelGGL(
-        loopback_post_one_kernel,
-        dim3(1), dim3(1), 0, 0,
-        gpu_qp, (void*)src, (void*)dst,
-        xfer_size, h_done);
-      while (!*h_done) {}
+      hipLaunchKernelGGL(loopback_post_one_kernel, dim3(1), dim3(1), 0, 0,
+                         gpu_qp, (void*)src, (void*)dst, xfer_size, h_done);
+      while (!*h_done) {
+      }
       (void)hipDeviceSynchronize();
 
       struct ibv_wc wc;
@@ -561,28 +559,25 @@ int main(int argc, char** argv) {
       while (1) {
         int ne = ibv_poll_cq(ibcq, 1, &wc);
         if (ne < 0) {
-          fprintf(stderr,
-                  "poll_cq error iter %u\n", i);
+          fprintf(stderr, "poll_cq error iter %u\n", i);
           failed = 1;
           break;
         }
         if (ne > 0) {
           if (wc.status != IBV_WC_SUCCESS) {
-            fprintf(stderr,
-                    "WC error iter %u: %d\n",
-                    i, wc.status);
+            fprintf(stderr, "WC error iter %u: %d\n", i, wc.status);
             failed = 1;
           }
           break;
         }
         if (++polls > 100000000) {
-          fprintf(stderr,
-                  "poll timeout iter %u\n", i);
+          fprintf(stderr, "poll timeout iter %u\n", i);
           failed = 1;
           break;
         }
       }
-      if (failed) break;
+      if (failed)
+        break;
       if ((i + 1) % 1000 == 0)
         printf("  %u iterations OK\n", i + 1);
     }
@@ -590,19 +585,25 @@ int main(int argc, char** argv) {
     if (!failed)
       printf("\nPASSED: %u CPU-poll iters"
              " (CQ wrapped %u times)\n",
-             iterations,
-             iterations / ibcq->cqe);
+             iterations, iterations / ibcq->cqe);
     else
       printf("\nFAILED\n");
 
     (void)hipHostFree((void*)h_done);
-    xio::freeDeviceMemory(d_elapsed,
-                          XIO_DEVICE_MEM_HIP);
-    xio::freeDeviceMemory(d_result,
-                          XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
     backend.shutdown();
     xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
     return failed ? 1 : 0;
+#else
+    printf("SKIP: --cpu-poll requires"
+           " infiniband/verbs.h\n");
+    xio::freeDeviceMemory(d_elapsed, XIO_DEVICE_MEM_HIP);
+    xio::freeDeviceMemory(d_result, XIO_DEVICE_MEM_HIP);
+    backend.shutdown();
+    xio::freeHostMemory(buf, XIO_HOST_MEM_PINNED);
+    return 77;
+#endif
   } else if (diag_mode) {
     printf("Launching DIAG kernel...\n");
     hipLaunchKernelGGL(loopback_db_diag_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,

@@ -168,8 +168,7 @@ __global__ void sdma_p2p_kernel(anvil::SdmaQueueDeviceHandle* handle,
                                 volatile bool* stopRequested) {
   unsigned last = 0;
   for (unsigned i = 0; i < iterations; i++) {
-    if (stopRequested && i % 100 == 0 &&
-        *stopRequested)
+    if (stopRequested && i % 100 == 0 && *stopRequested)
       break;
 
     size_t offset = i * transferSize;
@@ -226,8 +225,7 @@ __global__ void sdma_ping_pong_kernel(anvil::SdmaQueueDeviceHandle* handle,
   uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
-    if (stopRequested && i % 100 == 0 &&
-        *stopRequested)
+    if (stopRequested && i % 100 == 0 && *stopRequested)
       break;
 
     // Initiator
@@ -372,8 +370,7 @@ __global__ void sdma_buffer_reuse_kernel(
   uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
-    if (stopRequested && i % 100 == 0 &&
-        *stopRequested)
+    if (stopRequested && i % 100 == 0 && *stopRequested)
       break;
 
     int offset = 0;
@@ -924,13 +921,10 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_p2p_kernel, dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0,
-                       sdmaHandles[0], dstBuf, srcBuf,
-                       transferSize, config->iterations,
-                       signals[0][0], config->startTimes,
-                       config->endTimes,
-                       config->stopRequested);
+    hipLaunchKernelGGL(sdma_p2p_kernel, dim3(numBlocks), dim3(threadsPerBlock),
+                       0, 0, sdmaHandles[0], dstBuf, srcBuf, transferSize,
+                       config->iterations, signals[0][0], config->startTimes,
+                       config->endTimes, config->stopRequested);
   } else if (testType == "buffer-reuse") {
     // For buffer-reuse kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -942,15 +936,11 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_buffer_reuse_kernel,
-                       dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0,
-                       sdmaHandles[0], dstBuf, srcBuf,
-                       nElem, config->iterations,
-                       signals[0], /*rank*/ 0,
-                       counter0, useCounter, useFlush,
-                       config->startTimes,
-                       config->endTimes,
+    hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
+                       srcBuf, nElem, config->iterations, signals[0],
+                       /*rank*/ 0, counter0, useCounter, useFlush,
+                       config->startTimes, config->endTimes,
                        config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
@@ -961,15 +951,11 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_buffer_reuse_kernel,
-                       dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0,
-                       sdmaHandles[1], srcBuf, dstBuf,
-                       nElem, config->iterations,
-                       signals[1], /*rank*/ 1,
-                       counter1, useCounter, useFlush,
-                       config->startTimes,
-                       config->endTimes,
+    hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
+                       dstBuf, nElem, config->iterations, signals[1],
+                       /*rank*/ 1, counter1, useCounter, useFlush,
+                       config->startTimes, config->endTimes,
                        config->stopRequested);
   } else if (testType == "ping-pong") {
     // For ping-pong kernel, launch on both GPUs with different ranks
@@ -982,15 +968,11 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_ping_pong_kernel,
-                       dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0,
-                       sdmaHandles[0], dstBuf, srcBuf,
-                       nElem, config->iterations,
-                       signals[0], /*rank*/ 0,
-                       counter0, useCounter, useFlush,
-                       config->startTimes,
-                       config->endTimes,
+    hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
+                       srcBuf, nElem, config->iterations, signals[0],
+                       /*rank*/ 0, counter0, useCounter, useFlush,
+                       config->startTimes, config->endTimes,
                        config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
@@ -1001,15 +983,11 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    hipLaunchKernelGGL(sdma_ping_pong_kernel,
-                       dim3(numBlocks),
-                       dim3(threadsPerBlock), 0, 0,
-                       sdmaHandles[1], srcBuf, dstBuf,
-                       nElem, config->iterations,
-                       signals[1], /*rank*/ 1,
-                       counter1, useCounter, useFlush,
-                       config->startTimes,
-                       config->endTimes,
+    hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
+                       dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
+                       dstBuf, nElem, config->iterations, signals[1],
+                       /*rank*/ 1, counter1, useCounter, useFlush,
+                       config->startTimes, config->endTimes,
                        config->stopRequested);
   } else {
     std::cerr << "Unknown test type: " << testType << std::endl;
@@ -1117,8 +1095,7 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
                 << config->iterations << " iterations)" << std::endl;
     } else {
       config->verifyPass = failIter;
-      config->verifyFail =
-        config->iterations - failIter;
+      config->verifyFail = config->iterations - failIter;
       std::cerr << "Data verification: FAILED at iteration " << failIter
                 << " offset " << failOffset << std::endl;
       cleanupAll();

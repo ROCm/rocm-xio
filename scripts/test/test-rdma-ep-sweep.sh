@@ -125,6 +125,7 @@ run_sweep() {
       prof_prefix="${prof_prefix} --"
     fi
     # shellcheck disable=SC2086
+    # shellcheck disable=SC2024
     sudo env LD_LIBRARY_PATH="${lib_path}" \
       ${prof_prefix} \
       "${bin}" \
@@ -159,6 +160,7 @@ run_sweep() {
   fi
 
   local min max mean std
+  # shellcheck disable=SC2046
   read -r min max mean std <<< $(
     printf '%s\n' "${times[@]}" | awk '
       BEGIN { min=1e18; max=0; s=0; s2=0; n=0 }

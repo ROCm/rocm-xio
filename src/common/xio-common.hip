@@ -136,8 +136,8 @@ void printGpuDeviceDetails(int deviceId) {
 void printStatistics(const std::vector<double>& durations,
                      unsigned totalIterations, unsigned numThreads,
                      unsigned readIterations, unsigned writeIterations,
-                     unsigned verifiedReadsCount,
-                     unsigned verifyPass, unsigned verifyFail) {
+                     unsigned verifiedReadsCount, unsigned verifyPass,
+                     unsigned verifyFail) {
   if (durations.empty()) {
     return;
   }
@@ -221,10 +221,10 @@ void printStatistics(const std::vector<double>& durations,
             << std::setprecision(2) << stddev_display << time_unit << std::endl;
 
   if (verifyPass > 0 || verifyFail > 0) {
-    std::cout << "  Verify Passed:    " << std::setw(10)
-              << verifyPass << std::endl;
-    std::cout << "  Verify Failed:    " << std::setw(10)
-              << verifyFail << std::endl;
+    std::cout << "  Verify Passed:    " << std::setw(10) << verifyPass
+              << std::endl;
+    std::cout << "  Verify Failed:    " << std::setw(10) << verifyFail
+              << std::endl;
   }
 }
 
@@ -338,10 +338,8 @@ void printHistogram(const std::vector<double>& durations, unsigned nIterations,
   }
 
   // Print statistics after histogram
-  printStatistics(durations, nIterations, numThreads,
-                  readIterations, writeIterations,
-                  verifiedReadsCount,
-                  verifyPass, verifyFail);
+  printStatistics(durations, nIterations, numThreads, readIterations,
+                  writeIterations, verifiedReadsCount, verifyPass, verifyFail);
 }
 
 static hsa_status_t allocDeviceMemoryHsa(size_t size, void** ptr,

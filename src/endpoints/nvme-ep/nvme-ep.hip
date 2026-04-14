@@ -254,10 +254,8 @@ __device__ static void driveEndpointSingle(
 
   if (has_write_buffer) {
     xio::DataPatternParams pp{
-      bufferParams.writeBuffer,
-      bufferParams.bufferSize, 0,
-      ioParams.lbaSize, ioParams.lfsrSeed,
-      nullptr};
+      bufferParams.writeBuffer, bufferParams.bufferSize, 0,
+      ioParams.lbaSize,         ioParams.lfsrSeed,       nullptr};
     xio::dataPattern(false, pp);
   }
 
@@ -462,10 +460,8 @@ __device__ static void driveEndpointWavefront(
 
     if (has_write_buffer) {
       xio::DataPatternParams pp{
-        bufferParams.writeBuffer,
-        bufferParams.bufferSize, 0,
-        ioParams.lbaSize, ioParams.lfsrSeed,
-        nullptr};
+        bufferParams.writeBuffer, bufferParams.bufferSize, 0,
+        ioParams.lbaSize,         ioParams.lfsrSeed,       nullptr};
       xio::dataPattern(false, pp);
     }
   }
@@ -1317,8 +1313,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   if (result == hipSuccess && nvmeConfig->ioParams.readIo > 0) {
     for (uint16_t q = 0; q < numQueues; q++) {
       uint8_t* rbuf = readBufs[q].gpuPtr
-        ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
-        : static_cast<uint8_t*>(readBufs[q].hostPtr);
+                        ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
+                        : static_cast<uint8_t*>(readBufs[q].hostPtr);
       if (!rbuf)
         continue;
       size_t bsz = nvmeConfig->bufferParams.bufferSize;
@@ -1326,22 +1322,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       if (readBufs[q].gpuPtr) {
         host_rb = static_cast<uint8_t*>(malloc(bsz));
         if (host_rb)
-          (void)hipMemcpy(host_rb, rbuf, bsz,
-                          hipMemcpyDeviceToHost);
+          (void)hipMemcpy(host_rb, rbuf, bsz, hipMemcpyDeviceToHost);
         rbuf = host_rb;
       }
       if (rbuf) {
         xio::DataPatternParams vp{
-          rbuf, bsz, 0, ioParams.lbaSize,
-          ioParams.lfsrSeed, nullptr};
+          rbuf, bsz, 0, ioParams.lbaSize, ioParams.lfsrSeed, nullptr};
         if (xio::dataPattern(true, vp))
-          config->verifyPass +=
-            static_cast<uint32_t>(
-              nvmeConfig->ioParams.readIo);
+          config->verifyPass += static_cast<uint32_t>(
+            nvmeConfig->ioParams.readIo);
         else
-          config->verifyFail +=
-            static_cast<uint32_t>(
-              nvmeConfig->ioParams.readIo);
+          config->verifyFail += static_cast<uint32_t>(
+            nvmeConfig->ioParams.readIo);
       }
       free(host_rb);
     }

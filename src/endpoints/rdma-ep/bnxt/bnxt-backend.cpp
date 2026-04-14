@@ -379,8 +379,7 @@ void Backend::bnxt_initialize_gpu_qp() {
           "rdma_ep::bnxt: DB region: "
           "dbr=%p umdbr=0x%lx dpi=%u\n",
           (void*)bnxt_qp_->db_region_attr->dbr,
-          (unsigned long)
-            bnxt_qp_->db_region_attr->umdbr,
+          (unsigned long)bnxt_qp_->db_region_attr->umdbr,
           bnxt_qp_->db_region_attr->dpi);
   fprintf(stderr,
           "rdma_ep::bnxt: GPU QP initialized "
@@ -388,14 +387,10 @@ void Backend::bnxt_initialize_gpu_qp() {
           "CQ buf_len=%lu, CQE_sz=%u, "
           "SQ depth=%u, "
           "SQ buf=%p, DB=%p, MTU=%lu)\n",
-          host_qp_->bnxt_cq_.id,
-          host_qp_->bnxt_cq_.depth,
-          (unsigned long)bnxt_scq_->length,
-          bnxt_scq_->cqe_size,
-          host_qp_->bnxt_sq_.depth,
-          host_qp_->bnxt_sq_.buf,
-          (void*)host_qp_->bnxt_dbr_,
-          host_qp_->bnxt_sq_.mtu);
+          host_qp_->bnxt_cq_.id, host_qp_->bnxt_cq_.depth,
+          (unsigned long)bnxt_scq_->length, bnxt_scq_->cqe_size,
+          host_qp_->bnxt_sq_.depth, host_qp_->bnxt_sq_.buf,
+          (void*)host_qp_->bnxt_dbr_, host_qp_->bnxt_sq_.mtu);
 }
 
 void Backend::bnxt_cleanup() {

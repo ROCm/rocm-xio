@@ -136,18 +136,14 @@ __global__ void rdma_ep_batch_kernel(
     if (tid >= 1 && doVerify) {
       unsigned b = tid - 1;
       if (b < batch_count) {
-        unsigned op =
-          infinite ? b : sh_ops_done + b;
-        uint8_t* src =
-          buf + (size_t)b * 2 * transferSize;
+        unsigned op = infinite ? b : sh_ops_done + b;
+        uint8_t* src = buf + (size_t)b * 2 * transferSize;
         uint8_t* dst = src + transferSize;
         uint32_t seed = baseSeed + op;
-        xio::DataPatternParams fp{
-          src, transferSize, 0,
-          transferSize, seed, nullptr};
+        xio::DataPatternParams fp{src,          transferSize, 0,
+                                  transferSize, seed,         nullptr};
         xio::dataPattern(false, fp);
-        for (uint32_t x = 0;
-             x < transferSize; x++)
+        for (uint32_t x = 0; x < transferSize; x++)
           dst[x] = 0;
         __threadfence_system();
       }
@@ -159,12 +155,10 @@ __global__ void rdma_ep_batch_kernel(
     // then rings one doorbell and drains CQ.
     if (tid == 0) {
       for (unsigned b = 0; b < batch_count; b++) {
-        uint8_t* src =
-          buf + (size_t)b * 2 * transferSize;
+        uint8_t* src = buf + (size_t)b * 2 * transferSize;
         uint8_t* dst = src + transferSize;
         sh_start[b] = wall_clock64();
-        qp->put_nbi_single(
-          dst, src, transferSize, false);
+        qp->put_nbi_single(dst, src, transferSize, false);
       }
       qp->ring_doorbell_single();
       qp->quiet_single();
