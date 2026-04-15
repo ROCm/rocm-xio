@@ -42,3 +42,7 @@ banff-cyxtera-s81-1  sdma-ep,rdma-ep,nvme-ep
 # Radeon 8060S hangs on test-ep doorbell poll and
 # test-rdma-endian times out in ctest unit suite
 ctr-halo-b48-02  test-ep,basic-tests
+
+# RX 9070 XT container/driver mismatch -- build hangs,
+# device-memory segfaults in memory-mode tests
+ctr-navi4x-aj53-ws08  test-ep,basic-tests
