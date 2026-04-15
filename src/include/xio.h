@@ -597,6 +597,8 @@ struct xioBufferInfo {
   void* gpuPtr;
   uint64_t dmaAddr;
   bool isDeviceMemory;
+  uint64_t* pagePhysAddrs;
+  uint32_t numPages;
 };
 
 /**

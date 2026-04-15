@@ -22,6 +22,7 @@ BATCH_SIZE=${BATCH_SIZE:-16}
 QUEUE_LENGTH=${QUEUE_LENGTH:-1024}
 NUM_QUEUES=${NUM_QUEUES:-16}
 BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/build}"
+LBAS_PER_IO=${LBAS_PER_IO:-1}
 
 sudo LD_LIBRARY_PATH=/opt/rocm/lib \
   HSA_FORCE_FINE_GRAIN_PCIE=1 \
@@ -33,4 +34,5 @@ sudo LD_LIBRARY_PATH=/opt/rocm/lib \
   --queue-length ${QUEUE_LENGTH} \
   --num-queues ${NUM_QUEUES} \
   --less-timing \
+  --lbas-per-io ${LBAS_PER_IO} \
   --infinite

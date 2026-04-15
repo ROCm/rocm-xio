@@ -28,19 +28,13 @@ set(_xio_tester
 
 # --- Sequential data verification -----------------------
 
-# Known failure: MEMORY_MODE=0 (host memory) with
-# lbas-per-io > page_size/lba_size uses linear DMA
-# address arithmetic (writeBufferDma + offset) which
-# breaks across page boundaries because hipHostMalloc
-# does not guarantee physical contiguity.  The NVMe
-# controller reads stale data from the wrong physical
-# page for commands beyond the first.  Device memory
-# modes (8, 11) are unaffected because GPU VRAM is
-# physically contiguous.
+# Host memory with PRP list support: per-page physical
+# addresses are resolved via pagemap so multi-LBA
+# transfers across non-contiguous pages work correctly.
 xio_add_script_test(
   NAME nvme-verify-seq-host-mem
   SCRIPT ${_verify_wrapper}
-  LABELS hardware nvme verify known-fail
+  LABELS hardware nvme verify
   TIMEOUT 120
   ARGS ${_seq_script}
   ENVIRONMENT
@@ -50,8 +44,6 @@ xio_add_script_test(
     "USE_PCI_MMIO_BRIDGE=0"
     "XIO_TESTER=${_xio_tester}"
 )
-set_tests_properties(nvme-verify-seq-host-mem
-  PROPERTIES DISABLED TRUE)
 
 xio_add_script_test(
   NAME nvme-verify-seq-device-mem
@@ -220,6 +212,76 @@ xio_add_script_test(
   ARGS ${_smoke_common}
     -m 3 --less-timing --batch-size 4
   ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+# --- Multi-LBA PRP list smoke tests ---------------------
+# Exercise PRP list construction for transfers spanning
+# more than two NVMe pages.  Uses device memory (VRAM)
+# which is physically contiguous.
+
+set(_smoke_multi_lba
+  --access-pattern random --lfsr-seed 42
+  --read-io 16 --queue-length 128)
+
+xio_add_script_test(
+  NAME nvme-smoke-lbas-per-io-8-device
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 30
+  ARGS ${_smoke_multi_lba}
+    --lbas-per-io 8 -m 8
+    --data-buffer-size 524288
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-smoke-lbas-per-io-32-device
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 30
+  ARGS ${_smoke_multi_lba}
+    --lbas-per-io 32 -m 8
+    --data-buffer-size 2097152
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-smoke-lbas-per-io-8-host
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 30
+  ARGS ${_smoke_multi_lba}
+    --lbas-per-io 8 -m 0
+    --data-buffer-size 524288
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-smoke-lbas-per-io-32-host
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 30
+  ARGS ${_smoke_multi_lba}
+    --lbas-per-io 32 -m 0
+    --data-buffer-size 2097152
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+# Multi-LBA data verification with device memory
+xio_add_script_test(
+  NAME nvme-verify-seq-device-mem-multi-lba
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 120
+  ARGS ${_seq_script}
+  ENVIRONMENT
+    "MEMORY_MODE=8"
+    "WRITE_IO=4"
+    "BLOCKS_PER_CMD=32"
+    "LFSR_SEED=0xCAFE"
+    "BASE_LBA=2048"
+    "USE_PCI_MMIO_BRIDGE=0"
+    "XIO_TESTER=${_xio_tester}"
 )
 
 # --- Negative tests (expected failures) -----------------

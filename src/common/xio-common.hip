@@ -2451,6 +2451,8 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
   bufferInfo->gpuPtr = nullptr;
   bufferInfo->dmaAddr = 0;
   bufferInfo->isDeviceMemory = false;
+  bufferInfo->pagePhysAddrs = nullptr;
+  bufferInfo->numPages = 0;
 
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
@@ -2501,13 +2503,52 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     if (buf_err != hipSuccess)
       return buf_err;
 
-    // Get physical address for host memory using /proc/self/pagemap
     bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
     if (!bufferInfo->dmaAddr) {
       ROCXIO_LOG_ERROR("Failed to get buffer physical address\n");
       (void)hipHostFree(bufferInfo->hostPtr);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
+    }
+
+    {
+      constexpr size_t nvme_page = 4096;
+      long ps = sysconf(_SC_PAGESIZE);
+      size_t sys_page = (ps > 0) ? (size_t)ps : 4096;
+      uint32_t sys_np = (uint32_t)((size + sys_page - 1) / sys_page);
+      uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
+      size_t pa_bytes = nvme_np * sizeof(uint64_t);
+      uint64_t* pa = nullptr;
+      hipError_t pa_err = hipHostMalloc((void**)&pa, pa_bytes,
+                                        hipHostMallocMapped);
+      if (pa_err == hipSuccess && pa) {
+        memset(pa, 0, pa_bytes);
+        uint64_t sys_addrs[1024];
+        uint32_t max_sys = (sys_np <= 1024) ? sys_np : 1024;
+        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs,
+                                   max_sys);
+        if (ret < 0) {
+          ROCXIO_LOG_WARN("Failed to resolve per-page "
+                          "phys addrs: %s\n",
+                          strerror(-ret));
+          (void)hipHostFree(pa);
+        } else {
+          uint32_t ratio = (uint32_t)(sys_page / nvme_page);
+          for (uint32_t s = 0; s < sys_np; s++) {
+            for (uint32_t sub = 0; sub < ratio; sub++) {
+              uint32_t idx = s * ratio + sub;
+              if (idx >= nvme_np)
+                break;
+              pa[idx] = sys_addrs[s] + sub * nvme_page;
+            }
+          }
+          bufferInfo->pagePhysAddrs = pa;
+          bufferInfo->numPages = nvme_np;
+          ROCXIO_LOG_INFO("  Resolved %u NVMe-page phys "
+                          "addrs for host buffer\n",
+                          nvme_np);
+        }
+      }
     }
 
     ROCXIO_LOG_INFO("  Data buffer virtual:  %p\n", bufferInfo->hostPtr);
@@ -2560,10 +2601,16 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
     freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
   }
 
+  if (bufferInfo->pagePhysAddrs) {
+    (void)hipHostFree(bufferInfo->pagePhysAddrs);
+  }
+
   bufferInfo->hostPtr = nullptr;
   bufferInfo->gpuPtr = nullptr;
   bufferInfo->dmaAddr = 0;
   bufferInfo->isDeviceMemory = false;
+  bufferInfo->pagePhysAddrs = nullptr;
+  bufferInfo->numPages = 0;
 }
 
 __host__ bool validateGpuPointer(void* ptr, const char* name,
