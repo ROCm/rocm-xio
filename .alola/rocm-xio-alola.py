@@ -34,18 +34,32 @@ REPO_DIR = SCRIPT_DIR.parent
 JOB_IDS_FILE = SCRIPT_DIR / ".alola-job-ids"
 EXCLUDE_FILE = SCRIPT_DIR / ".alola-exclude"
 
-ALL_TESTS = [
-    ("basic-tests",
-     "rocm-xio-tests.basic-tests.sbatch"),
-    ("test-ep",
-     "rocm-xio-tests.test-ep.sbatch"),
-    ("sdma-ep",
-     "rocm-xio-tests.sdma-ep.sbatch"),
-    ("nvme-ep",
-     "rocm-xio-tests.nvme-ep.sbatch"),
-    ("rdma-ep",
-     "rocm-xio-tests.rdma-ep.sbatch"),
-]
+_SBATCH_PREFIX = "rocm-xio-tests."
+_SBATCH_SUFFIX = ".sbatch"
+
+
+def _discover_tests():
+    """Scan SCRIPT_DIR for rocm-xio-tests.*.sbatch
+    and return a sorted list of (name, filename)
+    tuples.
+
+    The test name is derived from the filename by
+    stripping the prefix and suffix, e.g.
+    ``rocm-xio-tests.nvme-ep.sbatch`` -> ``nvme-ep``.
+    """
+    tests = []
+    for p in sorted(SCRIPT_DIR.glob(
+        f"{_SBATCH_PREFIX}*{_SBATCH_SUFFIX}"
+    )):
+        name = p.name[
+            len(_SBATCH_PREFIX):
+            -len(_SBATCH_SUFFIX)
+        ]
+        tests.append((name, p.name))
+    return tests
+
+
+ALL_TESTS = _discover_tests()
 
 ALL_TEST_NAMES = [t[0] for t in ALL_TESTS]
 
