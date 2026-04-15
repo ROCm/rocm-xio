@@ -598,6 +598,146 @@ int test_dataPattern_corruption_at_lba_boundary() {
   return 0;
 }
 
+/* ---- PRP list tests (7-arg calculatePrps) ---- */
+
+int test_prp_list_three_pages_contiguous() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t addr = 0x100000;
+  uint32_t size = 3 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0xDEAD000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xDEAD000);
+  ASSERT_EQ(prpList[0], (uint64_t)0x101000);
+  ASSERT_EQ(prpList[1], (uint64_t)0x102000);
+  return 0;
+}
+
+int test_prp_list_eight_pages_contiguous() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[16] = {};
+  uint64_t addr = 0x200000;
+  uint32_t size = 8 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0xBEEF000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xBEEF000);
+  for (uint32_t i = 0; i < 7; i++) {
+    ASSERT_EQ(prpList[i], (uint64_t)(0x201000 + i * NVME_PAGE_SIZE));
+  }
+  return 0;
+}
+
+int test_prp_list_unaligned_four_pages() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t addr = 0x300800;
+  uint32_t first_page = NVME_PAGE_SIZE - 0x800;
+  uint32_t size = first_page + 3 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0xAAA000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xAAA000);
+  ASSERT_EQ(prpList[0], (uint64_t)0x301000);
+  ASSERT_EQ(prpList[1], (uint64_t)0x302000);
+  ASSERT_EQ(prpList[2], (uint64_t)0x303000);
+  return 0;
+}
+
+int test_prp_list_noncontiguous_pages() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t pageAddrs[4] = {0xA0000, 0xC0000, 0xE0000, 0x120000};
+  uint32_t size = 4 * NVME_PAGE_SIZE;
+
+  calculatePrps(pageAddrs[0], size, &sqe, prpList, 0xFFF000, pageAddrs, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, (uint64_t)0xA0000);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xFFF000);
+  ASSERT_EQ(prpList[0], (uint64_t)0xC0000);
+  ASSERT_EQ(prpList[1], (uint64_t)0xE0000);
+  ASSERT_EQ(prpList[2], (uint64_t)0x120000);
+  return 0;
+}
+
+int test_prp_list_noncontiguous_two_pages() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t pageAddrs[2] = {0x50000, 0x90000};
+  uint32_t size = 2 * NVME_PAGE_SIZE;
+
+  calculatePrps(pageAddrs[0], size, &sqe, prpList, 0, pageAddrs, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, (uint64_t)0x50000);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0x90000);
+  return 0;
+}
+
+int test_prp_list_single_page_no_list() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {0xBB};
+  uint64_t pageAddrs[1] = {0x70000};
+  uint32_t size = 512;
+
+  calculatePrps(pageAddrs[0], size, &sqe, prpList, 0, pageAddrs, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, (uint64_t)0x70000);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0);
+  ASSERT_EQ(prpList[0], (uint64_t)0xBB);
+  return 0;
+}
+
+int test_prp_list_contiguous_with_offset() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t addr = 0x403000;
+  uint32_t size = 3 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0xCC0000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xCC0000);
+  ASSERT_EQ(prpList[0], (uint64_t)0x404000);
+  ASSERT_EQ(prpList[1], (uint64_t)0x405000);
+  return 0;
+}
+
+int test_prp_list_max_transfer_32_pages() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[64] = {};
+  uint64_t addr = 0x500000;
+  uint32_t size = 32 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0xDD0000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xDD0000);
+  for (uint32_t i = 0; i < 31; i++) {
+    ASSERT_EQ(prpList[i], (uint64_t)(0x501000 + i * NVME_PAGE_SIZE));
+  }
+  return 0;
+}
+
+int test_prp_list_noncontiguous_page_offset() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[8] = {};
+  uint64_t pageAddrs[8] = {0x10000, 0x30000, 0x50000, 0x70000,
+                           0x90000, 0xB0000, 0xD0000, 0xF0000};
+  uint32_t size = 3 * NVME_PAGE_SIZE;
+
+  calculatePrps(pageAddrs[4], size, &sqe, prpList, 0xEE0000, pageAddrs, 4);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, (uint64_t)0x90000);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0xEE0000);
+  ASSERT_EQ(prpList[0], (uint64_t)0xB0000);
+  ASSERT_EQ(prpList[1], (uint64_t)0xD0000);
+  return 0;
+}
+
 int main() {
   int failures = 0;
 
@@ -612,6 +752,16 @@ int main() {
   failures += test_prp_unaligned_within_page();
   failures += test_prp_at_page_boundary();
   failures += test_prp_two_full_pages();
+
+  failures += test_prp_list_three_pages_contiguous();
+  failures += test_prp_list_eight_pages_contiguous();
+  failures += test_prp_list_unaligned_four_pages();
+  failures += test_prp_list_noncontiguous_pages();
+  failures += test_prp_list_noncontiguous_two_pages();
+  failures += test_prp_list_single_page_no_list();
+  failures += test_prp_list_contiguous_with_offset();
+  failures += test_prp_list_max_transfer_32_pages();
+  failures += test_prp_list_noncontiguous_page_offset();
 
   failures += test_cqeOk_success();
   failures += test_cqeOk_success_with_phase();
