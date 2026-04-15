@@ -100,6 +100,13 @@ struct nvmeBufferParams {
   size_t bufferSize;       // Size of buffers in bytes
   uint64_t readBufferDma;  // DMA address for read buffer
   uint64_t writeBufferDma; // DMA address for write buffer
+  uint64_t* readPagePhysAddrs;
+  uint64_t* writePagePhysAddrs;
+  uint32_t readNumPages;
+  uint32_t writeNumPages;
+  uint64_t* prpListPool;
+  uint64_t prpListPoolDma;
+  uint32_t prpEntriesPerCmd;
 };
 
 /**
@@ -553,34 +560,81 @@ __host__ __device__ static inline uint8_t cqeStatusType(
 }
 
 /**
- * Calculate Physical Region Page (PRP) entries for NVMe data transfer
+ * Calculate PRP entries for an NVMe data transfer with
+ * full PRP list support for transfers spanning > 2 pages.
  *
- * Computes the PRP1 and PRP2 entries needed for an NVMe read or write
- * command based on the buffer address and size. PRPs are used to describe
- * the physical memory layout of data buffers to the NVMe controller.
+ * Per NVMe spec section 4.4:
+ * - <= 1 page:  PRP1 = buffer addr, PRP2 = 0
+ * - <= 2 pages: PRP1 = first page, PRP2 = second page
+ * - > 2 pages:  PRP1 = first page, PRP2 = physical
+ *   address of a PRP list (page-aligned array of
+ *   uint64_t physical page addresses for pages 2..N)
  *
- * The function handles three cases:
- * 1. Single page: Buffer fits entirely within one 4KB page. Only PRP1 is
- *    set (PRP2 = 0).
- * 2. Two pages: Buffer spans exactly two pages. PRP1 points to the first
- *    page, PRP2 points to the second page.
- * 3. Multiple pages: Buffer spans more than two pages. PRP1 points to the
- *    first page, PRP2 points to the second page (simplified implementation
- *    - does not create PRP lists for >2 pages).
- *
- * @param bufferAddr Physical/DMA address of the data buffer
- * @param bufferSize Size of the buffer in bytes
- * @param sqe Pointer to the NVMe SQE structure where PRP1 and PRP2 entries
- *            will be written to sqe->dptr.prp.prp1 and sqe->dptr.prp.prp2
- *
- * @note This function safely handles unaligned buffer addresses by calculating
- *       the offset within the first page.
- * @note For buffers spanning more than 2 pages, this is a simplified
- *       implementation that only sets PRP2 to the second page. Full PRP list
- *       support would require additional logic.
- * @note This function can be called from both host and device code.
- * @note The buffer address should be a physical/DMA address, not a virtual
- *       address.
+ * @param bufferAddr  Physical/DMA address of the buffer
+ * @param bufferSize  Transfer size in bytes
+ * @param sqe         SQE to fill (prp1/prp2)
+ * @param prpList     Writable PRP list memory (GPU or
+ *                    host accessible). May be nullptr
+ *                    when transfer fits in <= 2 pages.
+ * @param prpListDma  Physical address of prpList
+ * @param pagePhysAddrs  Per-page physical addresses for
+ *                       non-contiguous buffers. nullptr
+ *                       means contiguous from bufferAddr
+ * @param bufPageOffset  Page index of the first buffer
+ *                       page within pagePhysAddrs (the
+ *                       buffer may start partway into
+ *                       the allocation)
+ */
+__host__ __device__ static inline void calculatePrps(
+  uint64_t bufferAddr, uint32_t bufferSize, struct nvme_sqe* sqe,
+  uint64_t* prpList, uint64_t prpListDma, const uint64_t* pagePhysAddrs,
+  uint32_t bufPageOffset) {
+  sqe->dptr.prp.prp1 = bufferAddr;
+  sqe->dptr.prp.prp2 = 0;
+
+  uint64_t offset_in_page = bufferAddr & (NVME_PAGE_SIZE - 1);
+  uint64_t first_page_size = NVME_PAGE_SIZE - offset_in_page;
+
+  if (bufferSize <= first_page_size) {
+    return;
+  }
+
+  uint32_t remaining = (uint32_t)(bufferSize - first_page_size);
+  uint32_t num_remaining_pages = (remaining + NVME_PAGE_SIZE - 1) /
+                                 NVME_PAGE_SIZE;
+
+  constexpr uint32_t kMaxPrpListEntries = NVME_PAGE_SIZE / sizeof(uint64_t);
+  if (num_remaining_pages > kMaxPrpListEntries) {
+    num_remaining_pages = kMaxPrpListEntries;
+  }
+
+  if (num_remaining_pages == 1) {
+    if (pagePhysAddrs) {
+      sqe->dptr.prp.prp2 = pagePhysAddrs[bufPageOffset + 1];
+    } else {
+      sqe->dptr.prp.prp2 = (bufferAddr + first_page_size) &
+                           ~((uint64_t)(NVME_PAGE_SIZE - 1));
+    }
+    return;
+  }
+
+  for (uint32_t i = 0; i < num_remaining_pages; i++) {
+    if (pagePhysAddrs) {
+      prpList[i] = pagePhysAddrs[bufPageOffset + 1 + i];
+    } else {
+      prpList[i] = ((bufferAddr + first_page_size) &
+                    ~((uint64_t)(NVME_PAGE_SIZE - 1))) +
+                   (uint64_t)i * NVME_PAGE_SIZE;
+    }
+  }
+
+  sqe->dptr.prp.prp2 = prpListDma;
+}
+
+/**
+ * Backward-compatible calculatePrps for transfers that
+ * fit within at most 2 NVMe pages (up to 8KB at 4KB
+ * page size). Does not support PRP lists.
  */
 __host__ __device__ static inline void calculatePrps(uint64_t bufferAddr,
                                                      uint32_t bufferSize,
@@ -588,18 +642,15 @@ __host__ __device__ static inline void calculatePrps(uint64_t bufferAddr,
   sqe->dptr.prp.prp1 = bufferAddr;
   sqe->dptr.prp.prp2 = 0;
 
-  // Calculate how much data the first page can hold
   uint64_t offset_in_page = bufferAddr & (NVME_PAGE_SIZE - 1);
   uint64_t first_page_size = NVME_PAGE_SIZE - offset_in_page;
 
-  // If buffer fits in first page, we're done
   if (bufferSize <= first_page_size) {
     return;
   }
 
-  // Buffer spans multiple pages - set PRP2 to next page
-  // (Simplified: doesn't handle PRP lists for >2 pages)
-  sqe->dptr.prp.prp2 = (bufferAddr + first_page_size) & ~(NVME_PAGE_SIZE - 1);
+  sqe->dptr.prp.prp2 = (bufferAddr + first_page_size) &
+                       ~((uint64_t)(NVME_PAGE_SIZE - 1));
 }
 
 /**
