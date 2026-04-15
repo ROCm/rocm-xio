@@ -1195,6 +1195,14 @@ def display_results(
             "Unknown/No output: "
             f"{yellow(total_unknown)}")
 
+    excluded = [
+        n for n, _ in ALL_TESTS
+        if n not in {t[0] for t in TESTS}
+    ]
+    if excluded:
+        print(
+            f"Excluded: {', '.join(excluded)}")
+
     if total_running > 0:
         print(
             "Overall Status: "
