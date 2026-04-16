@@ -112,7 +112,7 @@ test_run "ctest nvme-ep unit tests" \
 echo "Building and loading kernel module on host..."
 build_and_load_kernel_module_on_host
 
-# Copy over test program and verification script
+# Copy over test program and verification scripts
 ${SSH_LOCALHOST} "mkdir -p ${WORKING_DIR}/build/"
 ${SCP_COMMAND} ${WORKING_DIR}/build/xio-tester \
   localhost:${WORKING_DIR}/build/xio-tester
@@ -123,6 +123,22 @@ VERIFY_SCRIPT="${VERIFY_SCRIPT}/test-nvme-ep-random-write-verify.sh"
 ${SCP_COMMAND} \
   ${WORKING_DIR}/${VERIFY_SCRIPT} \
   localhost:${WORKING_DIR}/${VERIFY_SCRIPT}
+SEQ_VERIFY_SCRIPT="scripts/test"
+SEQ_VERIFY_SCRIPT="${SEQ_VERIFY_SCRIPT}/test-nvme-ep-data-verification.sh"
+${SCP_COMMAND} \
+  ${WORKING_DIR}/${SEQ_VERIFY_SCRIPT} \
+  localhost:${WORKING_DIR}/${SEQ_VERIFY_SCRIPT}
+
+# Copy CTest system-test wrappers to host
+SYS_TEST_DIR="tests/system/nvme-ep"
+${SSH_LOCALHOST} \
+  "mkdir -p ${WORKING_DIR}/${SYS_TEST_DIR}"
+for wrapper in run-nvme-smoke-test.sh \
+               run-nvme-script-test.sh; do
+  ${SCP_COMMAND} \
+    ${WORKING_DIR}/${SYS_TEST_DIR}/${wrapper} \
+    localhost:${WORKING_DIR}/${SYS_TEST_DIR}/${wrapper}
+done
 
 # Copy hardware unit test binary to host
 HW_TEST_DIR="build/tests/unit/nvme-ep"
@@ -214,6 +230,18 @@ nvme_ep_test "NVMe-EP batch-size 4 memory-mode 3" \
   --lfsr-seed 32 --read-io 573 --queue-length 128 \
   --batch-size 4
 
+nvme_ep_test "NVMe-EP memory-mode 1 (SQ in VRAM)" \
+  --memory-mode 1 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128
+
+nvme_ep_test "NVMe-EP memory-mode 2 (CQ in VRAM)" \
+  --memory-mode 2 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128
+
+nvme_ep_test "NVMe-EP memory-mode 8 (data in VRAM)" \
+  --memory-mode 8 --less-timing --lbas-per-io 1 \
+  --lfsr-seed 32 --read-io 573 --queue-length 128
+
 nvme_ep_test "NVMe-EP memory-mode 11" \
   --memory-mode 11 --less-timing --lbas-per-io 1 \
   --lfsr-seed 32 --read-io 573 --queue-length 128
@@ -224,13 +252,54 @@ nvme_ep_test "NVMe-EP batch-size 16 memory-mode 11" \
   --batch-size 16
 
 else
-  echo "INFO: Skipping VRAM memory-modes 3/11" \
+  echo "INFO: Skipping VRAM memory-modes 1/2/3/8/11" \
     "(${ROCM_GPU_ARCH} does not support NVMe DMA" \
     "to device memory)."
 fi
 
+# Multi-LBA / PRP-list tests (host and device memory)
+nvme_ep_test "NVMe-EP lbas-per-io 8 memory-mode 0" \
+  --memory-mode 0 --lbas-per-io 8 --lfsr-seed 42 \
+  --read-io 16 --queue-length 128 \
+  --data-buffer-size 524288
+
+if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
+nvme_ep_test "NVMe-EP lbas-per-io 8 memory-mode 8" \
+  --memory-mode 8 --less-timing --lbas-per-io 8 \
+  --lfsr-seed 42 --read-io 16 --queue-length 128 \
+  --data-buffer-size 524288
+fi
+
+# Sequential access pattern test
+test_run "NVMe-EP sequential write+read memory-mode 0" \
+  "run_on_host '${WORKING_DIR}/build/xio-tester \
+nvme-ep --controller ${NON_ROOTFS_CTRL} \
+--access-pattern sequential --lbas-per-io 8 \
+--lfsr-seed 0x1234 --write-io 4 --read-io 4 \
+--queue-length 128 --data-buffer-size 1048576 \
+--memory-mode 0'"
+
 # Disable NVMe duration capture
 CAPTURE_NVME_DURATION=0
+
+sleep 3
+
+# CTest hardware tests (system tests built into the repo).
+# These cover batch-size smoke, multi-queue smoke,
+# multi-LBA PRP, and data verification tests.
+echo ""
+echo "=========================================="
+echo "Running CTest NVMe-EP hardware tests"
+echo "=========================================="
+echo ""
+
+test_run "ctest nvme-ep hardware tests" \
+  "run_on_host \
+'cd ${WORKING_DIR} && \
+ROCXIO_NVME_DEVICE=${NON_ROOTFS_CTRL} \
+XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+ctest --test-dir build -L hardware -L nvme \
+--output-on-failure --timeout 120'"
 
 sleep 3
 
@@ -243,12 +312,13 @@ echo "=========================================="
 echo ""
 
 VERIFY_CMD="${WORKING_DIR}/${VERIFY_SCRIPT}"
+SEQ_VERIFY_CMD="${WORKING_DIR}/${SEQ_VERIFY_SCRIPT}"
 
 HAVE_VERIFY_DEPS=true
 if ! ${SSH_LOCALHOST} "command -v python3" \
      > /dev/null 2>&1; then
   echo "WARN: python3 not found on host;" \
-       "skipping write-verify tests"
+       "skipping random write-verify tests"
   HAVE_VERIFY_DEPS=false
 fi
 
@@ -276,6 +346,16 @@ ${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
 
 sleep 3
 
+test_run "NVMe-EP write-verify memory-mode 8" \
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+NUM_WRITES=64 MEMORY_MODE=8 \
+LFSR_SEED=0xFACE BASE_LBA=0 \
+TEMP_DIR=${WORKING_DIR}/verify-m8 \
+${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
+sleep 3
+
 test_run "NVMe-EP write-verify memory-mode 11" \
   "run_on_host \
 'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
@@ -286,7 +366,46 @@ ${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
 
 fi # gfx1100 skip
 
+sleep 3
+
+# Write-verify with batch-size exercises the cooperative
+# batching write path end-to-end.
+test_run "NVMe-EP write-verify batch-size 4" \
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+NUM_WRITES=64 MEMORY_MODE=0 BATCH_SIZE=4 \
+LFSR_SEED=0xFEED BASE_LBA=0 \
+TEMP_DIR=${WORKING_DIR}/verify-b4 \
+${VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
 fi # HAVE_VERIFY_DEPS
+
+sleep 3
+
+# Sequential write-verify (no python3 dependency).
+test_run "NVMe-EP seq write-verify memory-mode 0" \
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+WRITE_IO=4 MEMORY_MODE=0 \
+LFSR_SEED=0x1234 BASE_LBA=0 \
+USE_PCI_MMIO_BRIDGE=0 \
+TEMP_DIR=${WORKING_DIR}/seq-verify-m0 \
+${SEQ_VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
+if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
+
+sleep 3
+
+test_run "NVMe-EP seq write-verify memory-mode 8" \
+  "run_on_host \
+'XIO_TESTER=${WORKING_DIR}/build/xio-tester \
+WRITE_IO=4 MEMORY_MODE=8 \
+LFSR_SEED=0x5678 BASE_LBA=1024 \
+USE_PCI_MMIO_BRIDGE=0 \
+TEMP_DIR=${WORKING_DIR}/seq-verify-m8 \
+${SEQ_VERIFY_CMD} ${NON_ROOTFS_CTRL}'"
+
+fi # gfx1100 skip
 
 # Report results and exit with appropriate code
 test_report "${NVME_NAMESPACE}"

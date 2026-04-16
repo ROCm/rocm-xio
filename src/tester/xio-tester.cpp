@@ -10,6 +10,7 @@
 #include <csignal>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -20,6 +21,7 @@
 #include <CLI/CLI.hpp>
 
 #include "xio-cli-options.h"
+#include "xio-data-pattern.hpp"
 #include "xio.h"
 
 using namespace xio;
@@ -110,6 +112,41 @@ int main(int argc, char** argv) {
               "Use PCI MMIO bridge to route endpoint doorbell rings")
     ->group("Common Options");
 
+  std::string dumpPatternFile;
+  uint32_t dumpPatternSeed = 0;
+  size_t dumpPatternSize = 0;
+  uint32_t dumpPatternBlockSize = 512;
+  uint64_t dumpPatternOffset = 0;
+
+  app
+    .add_option("--dump-pattern", dumpPatternFile,
+                "Generate LFSR data pattern to FILE and exit "
+                "(no GPU, no hardware). Use with "
+                "--dump-pattern-seed and --dump-pattern-size.")
+    ->group("Pattern Generator");
+  app
+    .add_option("--dump-pattern-seed", dumpPatternSeed,
+                "LFSR seed for --dump-pattern")
+    ->default_val(0)
+    ->group("Pattern Generator");
+  app
+    .add_option("--dump-pattern-size", dumpPatternSize,
+                "Number of bytes to generate for --dump-pattern")
+    ->default_val(0)
+    ->group("Pattern Generator");
+  app
+    .add_option("--dump-pattern-block-size", dumpPatternBlockSize,
+                "Block size for pattern generation "
+                "(maps to DataPatternParams::blockSize)")
+    ->default_val(512)
+    ->group("Pattern Generator");
+  app
+    .add_option("--dump-pattern-offset", dumpPatternOffset,
+                "Starting byte offset for pattern generation "
+                "(maps to DataPatternParams::offset)")
+    ->default_val(0)
+    ->group("Pattern Generator");
+
   // Get all available endpoints
   const auto& registry = getEndpointRegistry();
 
@@ -165,6 +202,31 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
 
   // Handle global flags
+  if (!dumpPatternFile.empty()) {
+    if (dumpPatternSize == 0) {
+      std::cerr << "Error: --dump-pattern-size must be > 0" << std::endl;
+      return EXIT_FAILURE;
+    }
+    std::vector<uint8_t> buf(dumpPatternSize);
+    DataPatternParams pp{buf.data(),        dumpPatternSize,
+                         dumpPatternOffset, dumpPatternBlockSize,
+                         dumpPatternSeed,   nullptr};
+    dataPattern(false, pp);
+    std::ofstream out(dumpPatternFile, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      std::cerr << "Error: cannot open " << dumpPatternFile << " for writing"
+                << std::endl;
+      return EXIT_FAILURE;
+    }
+    out.write(reinterpret_cast<char*>(buf.data()),
+              static_cast<std::streamsize>(dumpPatternSize));
+    if (!out) {
+      std::cerr << "Error: failed writing to " << dumpPatternFile << std::endl;
+      return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+  }
+
   if (listEndpoints) {
     listAvailableEndpoints();
     return EXIT_SUCCESS;
