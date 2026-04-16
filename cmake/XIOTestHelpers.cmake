@@ -2,9 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Reusable test helper functions for rocm-xio CTest
-# integration, modelled after hipFile's
-# ais_gtest_discover_tests() pattern.
+# Reusable test helper functions for rocm-xio CTest integration, modelled
+# after hipFile's ais_gtest_discover_tests() pattern.
 
 set(XIO_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
 set(XIO_ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
@@ -27,10 +26,9 @@ set(XIO_TEST_COMMON_DIR ${CMAKE_SOURCE_DIR}/tests/unit/common)
 #
 # NAME       - Test target and CTest name.
 # SOURCE     - Source file to compile.
-# LABELS     - CTest labels for filtering
-#              (unit, system, hardware, stress, rdma).
-# TIMEOUT    - CTest timeout in seconds
-#              (defaults based on label category).
+# LABELS     - CTest labels for filtering (unit, system, hardware, stress,
+#              rdma).
+# TIMEOUT    - CTest timeout in seconds (defaults based on label category).
 # INCLUDE_DIRS - Extra include directories.
 # EXTRA_ARGS - Extra arguments passed to the test command.
 # GPU        - If set, adds RESOURCE_GROUPS for GPU.
