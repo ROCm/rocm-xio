@@ -12,6 +12,7 @@
 #   VENDOR=ionic BATCH_SIZE=4 NUM_QUEUES=2 \
 #     ./test-xio-tester-rdma-ep.sh
 #   ITERATIONS=0 ./test-xio-tester-rdma-ep.sh
+#   VERIFY=false ./test-xio-tester-rdma-ep.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -22,6 +23,7 @@ ITERATIONS=${ITERATIONS:-128}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_QUEUES=${NUM_QUEUES:-1}
 TRANSFER_SIZE=${TRANSFER_SIZE:-4096}
+VERIFY=${VERIFY:-true}
 NIC=rocm-${VENDOR}0
 
 if [ "${SETUP_GID}" = "true" ]; then
@@ -57,4 +59,4 @@ HSA_FORCE_FINE_GRAIN_PCIE=1 \
   --num-queues ${NUM_QUEUES} \
   --transfer-size ${TRANSFER_SIZE} \
   --less-timing \
-  --verify
+  $( [ "${VERIFY}" = "true" ] && echo "--verify" )
