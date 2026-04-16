@@ -8,6 +8,10 @@
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](INSTALL.md)
 [![ROCm](https://img.shields.io/badge/ROCm-supported-green.svg)](https://rocm.docs.amd.com)
 [![Language](https://img.shields.io/badge/language-HIP%20%7C%20C%2B%2B-orange.svg)](https://rocm.docs.amd.com/projects/HIP/en/latest/)
+[![nvme-ep](https://img.shields.io/badge/nvme--ep-supported-green.svg)][ep-nvme]
+[![rdma-ep](https://img.shields.io/badge/rdma--ep-supported-green.svg)][ep-rdma]
+[![sdma-ep](https://img.shields.io/badge/sdma--ep-supported-green.svg)][ep-sdma]
+[![test-ep](https://img.shields.io/badge/test--ep-supported-green.svg)][ep-test]
 
 > [!CAUTION]
 > This release is an *early-access* software technology preview. Running
@@ -32,6 +36,10 @@ site][docs-site].
 <!-- References -->
 
 [docs-site]: https://rocm.github.io/rocm-xio/
+[ep-nvme]: https://rocm.github.io/rocm-xio/endpoints.html#nvme-ep-nvme-endpoint
+[ep-rdma]: https://rocm.github.io/rocm-xio/endpoints.html#rdma-ep-rdma-endpoint
+[ep-sdma]: https://rocm.github.io/rocm-xio/endpoints.html#sdma-ep-sdma-endpoint
+[ep-test]: https://rocm.github.io/rocm-xio/endpoints.html#test-ep-test-endpoint
 
 ## License
 
