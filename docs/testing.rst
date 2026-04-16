@@ -175,17 +175,15 @@ GPU Resource Spec
 At configure time, ``cmake/XIODetectGPUs.cmake`` runs
 ``rocm_agent_enumerator`` and writes
 ``build/ctest-resources.json`` with the detected GPU
-count.  Use it for parallel GPU-aware test scheduling:
+count.  When ``rocm_agent_enumerator`` is unavailable
+the module defaults to a single GPU.  Use the generated
+file for parallel GPU-aware test scheduling:
 
 .. code-block:: bash
 
    ctest --test-dir build \
      --resource-spec-file build/ctest-resources.json \
      --parallel 4
-
-The static fallback at ``cmake/ctest-resources.json``
-(1 GPU) is used if ``rocm_agent_enumerator`` is
-unavailable.
 
 Environment
 -----------

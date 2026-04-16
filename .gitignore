@@ -21,6 +21,7 @@ kernel/*/..module-common.o.cmd
 kernel/*/.*.o.d
 
 # Generated files
+cmake/ctest-resources.json
 src/include/xio-endpoint-registry-gen.h
 src/include/xio-endpoint-includes-gen.h
 src/include/nvme-ep-generated.h
