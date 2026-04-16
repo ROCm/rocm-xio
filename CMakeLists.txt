@@ -279,15 +279,7 @@ if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
 endif()
 
 # Vendor kernel module (DKMS) targets
-if(GDA_BNXT)
-  include(XIOBnxtKernelModule)
-endif()
-if(GDA_IONIC)
-  include(XIOIonicKernelModule)
-endif()
-if(GDA_ERNIC)
-  include(XIOErnicKernelModule)
-endif()
+include(XIORdmaKernelModules)
 
 # Discover source files
 file(GLOB_RECURSE LIB_SOURCES
@@ -678,5 +670,5 @@ if(NOT XIO_DOCS_ONLY)
   include(XIOVirtualMachine)
 
   # VM test targets (vm-test-ep, vm-rdma-ep, vm-nvme-ep)
-  include(XIOVMTests)
+  include(XIOVirtualMachineTests)
 endif()

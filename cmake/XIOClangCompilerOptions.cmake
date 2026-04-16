@@ -8,7 +8,7 @@
 
 function(get_xio_clang_warning_flags outvar compiler_version)
 
-    # Warning flags for clang 17 and earlier
+    # Base warning flags for all clang versions; version-gated additions follow
     set(flags
         # Basic "high" warning levels
         -Wall
@@ -45,9 +45,9 @@ function(get_xio_clang_warning_flags outvar compiler_version)
         # Avoid things that will cause problems on Windows
         -Wmicrosoft
 
-        # Do not warn about incompatibility with earlier versions
-        # of C++. The pedantic versions suppress a larger set of
-        # warnings than the non-pedantic ones.
+        # Do not warn about incompatibility with earlier versions of C++. The
+        # pedantic versions suppress a larger set of warnings than the
+        # non-pedantic ones.
         -Wno-c++98-compat-pedantic
         -Wno-c++11-compat-pedantic
         -Wno-c++14-compat-pedantic
@@ -57,8 +57,7 @@ function(get_xio_clang_warning_flags outvar compiler_version)
         -fstack-clash-protection
         -fstack-protector-strong    # Consider -all instead of -strong
 
-        # Turn on strict flex arrays (helps ASAN, _FORTIFY_SOURCE,
-        # etc.)
+        # Turn on strict flex arrays (helps ASAN, _FORTIFY_SOURCE, etc.)
         -fstrict-flex-arrays=3
 
         # Initialize local variables with a pattern
@@ -66,17 +65,16 @@ function(get_xio_clang_warning_flags outvar compiler_version)
 
         # Misc warnings
         #
-        # This includes most warnings that are not enabled by default
-        # with the exception of C++ 11/14/etc. and clang extension
-        # warnings since we only support one compiler with a defined
-        # language level
+        # This includes most warnings that are not enabled by default with the
+        # exception of C++ 11/14/etc. and clang extension warnings since we only
+        # support one compiler with a defined language level
         #
-        # This list is not set in stone and we should consider
-        # removing diagnostics that return a lot of false positives.
+        # This list is not set in stone and we should consider removing
+        # diagnostics that return a lot of false positives.
         #
-        # Anything commented out with no comment isn't supported w/
-        # clang versions in common use. We'll want to update this
-        # scheme with one that better respects versions in the future.
+        # Anything commented out with no comment isn't supported w/ clang
+        # versions in common use. We'll want to update this scheme with one that
+        # better respects versions in the future.
         -Warc-repeated-use-of-weak
         -Warray-bounds-pointer-arithmetic
         -Wassign-enum
@@ -171,8 +169,7 @@ function(get_xio_clang_warning_flags outvar compiler_version)
         -Wsuggest-override
         -Wsuper-class-method-mismatch
         -Wswitch-default
-        -Werror=switch-enum # To make sure we never miss a CUDA enum
-        # value
+        -Werror=switch-enum # To make sure we never miss a HIP/CUDA enum value
         -Wtautological-constant-in-range-compare
         -Wtype-limits
         -Wunaligned-access
@@ -188,8 +185,7 @@ function(get_xio_clang_warning_flags outvar compiler_version)
         -Wvariadic-macros
         -Wvector-conversion
         -Wvla
-        -Wno-weak-vtables # Lots of noise in gtest code, so turn off
-        # for now
+        -Wno-weak-vtables # Lots of noise in gtest code, so turn off for now
         -Wzero-as-null-pointer-constant
 
         # -Wlocal-type-template-args enables
@@ -243,8 +239,7 @@ function(get_xio_clang_warning_flags outvar compiler_version)
         )
     endif()
 
-    # Only use _FORTIFY_SOURCE if the optimization level is -O2, -O3,
-    # or -Os
+    # Only use _FORTIFY_SOURCE if the optimization level is -O2, -O3, or -Os
     string(JOIN " " MYCXXFLAGS ${CMAKE_CXX_FLAGS}
       ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}})
     if(MYCXXFLAGS MATCHES "-O[2-3s]")

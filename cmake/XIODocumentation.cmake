@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 
 # XIODocumentation.cmake
-# Sphinx + Breathe + Doxygen documentation pipeline
-# (following ROCm best practices)
+# Sphinx + Breathe + Doxygen documentation pipeline (following ROCm best
+# practices)
 #
-# A Python venv is created automatically in the build tree
-# and populated from requirements.txt.
+# A Python venv is created automatically in the build tree and populated from
+# requirements.txt.
 
 option(XIO_BUILD_DOCS
   "Build documentation with Sphinx + Breathe + Doxygen"
