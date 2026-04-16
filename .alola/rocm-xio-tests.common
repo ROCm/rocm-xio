@@ -366,10 +366,30 @@ test_run() {
   TEST_GPU_DEVICES+=("${gpu_device}")
   
   if [ ${exit_code} -eq 0 ]; then
-    PASSED_TESTS=$((PASSED_TESTS + 1))
-    TEST_RESULTS+=("PASS")
-    echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
-    echo "  Node: ${node_name}, GPU Device: ${gpu_device}"
+    # Check for data verification failures in
+    # xio-tester output (Verify Failed: N where N > 0).
+    local verify_fail=""
+    if [ -n "${output}" ]; then
+      verify_fail=$(echo "${output}" \
+        | grep -E "Verify Failed:" \
+        | awk '{print $NF}' | head -1)
+    fi
+    if [ -n "${verify_fail}" ] \
+       && [ "${verify_fail}" -gt 0 ] 2>/dev/null; then
+      FAILED_TESTS=$((FAILED_TESTS + 1))
+      TEST_RESULTS+=("FAIL")
+      echo "✗ Test ${TOTAL_TESTS} FAILED:" \
+        "${test_name} (verify failed:" \
+        "${verify_fail})"
+      echo "  Node: ${node_name}," \
+        "GPU Device: ${gpu_device}"
+    else
+      PASSED_TESTS=$((PASSED_TESTS + 1))
+      TEST_RESULTS+=("PASS")
+      echo "✓ Test ${TOTAL_TESTS} PASSED: ${test_name}"
+      echo "  Node: ${node_name}," \
+        "GPU Device: ${gpu_device}"
+    fi
     
     # Capture average duration for NVMe tests
     if [ "${CAPTURE_NVME_DURATION}" = "1" ] && [ -n "${output}" ]; then

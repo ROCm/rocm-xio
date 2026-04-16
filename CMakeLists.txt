@@ -536,6 +536,7 @@ target_compile_options(xio-tester PRIVATE
 target_include_directories(xio-tester PRIVATE
   ${INCLUDE_DIR}
   ${TESTER_DIR}
+  ${COMMON_DIR}
   ${ENDPOINTS_DIR}/nvme-ep
   ${ENDPOINTS_DIR}/rdma-ep
   ${ENDPOINTS_DIR}/sdma-ep
