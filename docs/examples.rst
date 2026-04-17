@@ -1,18 +1,17 @@
 Examples
 ========
 
-The ``examples/`` directory contains standalone projects
-that demonstrate how to use the installed rocm-xio
-library. Each example is a self-contained CMake project
-that uses ``find_package(rocm-xio)`` to locate the
-library.
+The ``examples/`` directory contains standalone projects that
+demonstrate how to use the installed rocm-xio library. Each
+example is a self-contained CMake project that uses
+``find_package(rocm-xio)`` to locate the library.
 
 Building Examples
 -----------------
 
 All examples follow the same build pattern. First install
-rocm-xio to a temporary prefix, then configure and build
-the example against that prefix:
+rocm-xio to a temporary prefix, then configure and build the
+example against that prefix:
 
 .. code-block:: bash
 
@@ -46,9 +45,9 @@ source files.
 list-endpoints
 ^^^^^^^^^^^^^^
 
-Minimal example that lists all registered endpoints.
-Calls ``listAvailableEndpoints()`` from ``xio.h``. This
-is CPU-only code compiled as HIP.
+Minimal example that lists all registered endpoints. Calls
+``listAvailableEndpoints()`` from ``xio.h``. This is
+CPU-only code compiled as HIP.
 
 **Requirements:** none (CPU-only).
 
@@ -61,8 +60,8 @@ endpoint-info
 
 Iterates the endpoint registry and prints each endpoint's
 name, description, and type. Also validates that
-``getEndpointName()`` and ``isValidEndpoint()`` agree
-with the registry data. CPU-only.
+``getEndpointName()`` and ``isValidEndpoint()`` agree with
+the registry data. CPU-only.
 
 **Requirements:** none (CPU-only).
 
@@ -77,24 +76,23 @@ GPU-initiated peer-to-peer DMA transfer via the SDMA
 endpoint. Uses the public ``sdma_ep`` host-side API
 (``initEndpoint()``, ``createConnection()``,
 ``createQueue()``) and device-side operations
-(``putSignal()``, ``waitSignal()``, ``quiet()``) to
-perform a GPU-to-GPU memory copy driven entirely from
-shader code.
+(``putSignal()``, ``waitSignal()``, ``quiet()``) to perform
+a GPU-to-GPU memory copy driven entirely from shader code.
 
 **Requirements:**
 
 - Two AMD GPUs with XGMI / Infinity Fabric P2P access
 - Root access (hsakmt requires ``/dev/kfd``)
-- Supported GPU architecture (see ``SDMA_EP_GFX_WHITELIST``
-  in the Alola test scripts)
+- Supported GPU architecture (see
+  ``SDMA_EP_GFX_WHITELIST`` in the Alola test scripts)
 
 .. code-block:: bash
 
    sudo /tmp/sdma-ep-p2p-build/sdma-ep-p2p
 
 The example fills a 4 KiB source buffer on GPU 0 with
-``0xAB``, transfers it to GPU 1 via SDMA, and verifies
-the destination buffer contents.
+``0xAB``, transfers it to GPU 1 via SDMA, and verifies the
+destination buffer contents.
 
 sdma-ep-allgather
 ^^^^^^^^^^^^^^^^^^
@@ -107,8 +105,8 @@ IPC memory handles are exchanged via ``MPI_Allgather`` so
 each GPU can write directly into remote GPU memory.
 
 This example is derived from the original
-``shader-sdma-coll`` prototype and serves as a template
-for building multi-process, multi-GPU SDMA collectives.
+``shader-sdma-coll`` prototype and serves as a template for
+building multi-process, multi-GPU SDMA collectives.
 
 **Requirements:**
 
@@ -124,19 +122,17 @@ for building multi-process, multi-GPU SDMA collectives.
    mpirun -np 4 sudo ./sdma-ep-allgather 8192
 
 The optional argument sets the per-rank chunk size in
-integers (default: 1024 = 4 KiB per rank). Each rank
-fills its chunk with ``rank + 1`` and verifies that the
-gathered output contains the correct values from all
-ranks.
+integers (default: 1024 = 4 KiB per rank). Each rank fills
+its chunk with ``rank + 1`` and verifies that the gathered
+output contains the correct values from all ranks.
 
 nvme-ep-info
 ^^^^^^^^^^^^
 
 Queries NVMe controller properties using the ``nvme_ep``
-host-side API. Prints LBA size, namespace capacity,
-maximum queue ID, and SMART/Health log data. Accepts an
-optional device path argument (defaults to
-``/dev/nvme0``).
+host-side API. Prints LBA size, namespace capacity, maximum
+queue ID, and SMART/Health log data. Accepts an optional
+device path argument (defaults to ``/dev/nvme0``).
 
 **Requirements:**
 
@@ -148,9 +144,9 @@ optional device path argument (defaults to
 
    sudo /tmp/nvme-ep-info-build/nvme-ep-info /dev/nvme0
 
-Returns exit code 77 (CTest SKIP convention) when the
-NVMe device cannot be opened, so it can be registered as
-a CTest with graceful skip behavior.
+Returns exit code 77 (CTest SKIP convention) when the NVMe
+device cannot be opened, so it can be registered as a CTest
+with graceful skip behavior.
 
 Writing New Examples
 --------------------
@@ -165,6 +161,6 @@ To add a new example:
    code, since rocm-xio headers use HIP types).
 4. Register the example in
    ``tests/integration/CMakeLists.txt`` via
-   ``xio_add_install_test()``. Use the ``RUN`` flag only
-   if the example can run in CI without special hardware.
+   ``xio_add_install_test()``. Use the ``RUN`` flag only if
+   the example can run in CI without special hardware.
 5. Document the example in this file.

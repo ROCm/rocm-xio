@@ -18,8 +18,8 @@ The ``xio-tester`` CLI tool (built by default via
 
    sudo apt install libcli11-dev
 
-To build the library without the tester (and without
-the CLI11 dependency), pass ``-DBUILD_CLIENTS=OFF``.
+To build the library without the tester (and without the CLI11
+dependency), pass ``-DBUILD_CLIENTS=OFF``.
 
 Quick Start
 -----------
@@ -81,14 +81,15 @@ Testing targets
 
 .. code-block:: bash
 
-   ctest --preset unit       # CPU-only tests (CI)
-   ctest --preset system     # GPU emulation tests
-   ctest --preset hardware   # NIC + GPU tests
-   ctest --preset sweep      # Multi-seed loopback
-   ctest --preset all        # Everything
+   ctest --preset unit          # CPU-only tests (CI)
+   ctest --preset system        # GPU emulation tests
+   ctest --preset hardware      # NIC + GPU tests
+   ctest --preset sweep         # Multi-seed loopback
+   ctest --preset integration   # Install + example tests
+   ctest --preset all           # Everything
 
-See :doc:`testing` for details on labels, hardware
-skip detection, and fixtures.
+See :doc:`testing` for details on labels, hardware skip
+detection, and fixtures.
 
 Utility targets
 ^^^^^^^^^^^^^^^
@@ -104,6 +105,8 @@ Utility targets
    cmake --build build --target lint-all       # All linting
    cmake --build build --target doxygen        # Doxygen XML
    cmake --build build --target sphinx-html    # Full HTML docs
+   cmake --build build --target docs-venv      # Create docs venv
+   cmake --build build --target docs-serve     # Live-reload server
    cmake --build build --target clean-all      # Remove artifacts
    cmake --build build --target clean-external # Remove headers
 
@@ -123,14 +126,14 @@ Build Output Structure
 Build System Details
 --------------------
 
-- **HIP compilation**: Uses ``hipcc`` with ``-fgpu-rdc`` for relocatable
-  device code
-- **Device code extraction**: Tester links with ``hipcc`` to extract device
-  code from the static library
-- **Code generation**: Automatic generation of the endpoint registry and
-  external headers
-- **GPU architecture detection**: Auto-detects via ``rocminfo`` or can be
-  specified via ``OFFLOAD_ARCH``
+- **HIP compilation**: Uses ``hipcc`` with ``-fgpu-rdc`` for
+  relocatable device code
+- **Device code extraction**: Tester links with ``hipcc`` to
+  extract device code from the static library
+- **Code generation**: Automatic generation of the endpoint
+  registry and external headers
+- **GPU architecture detection**: Auto-detects via ``rocminfo``
+  or can be specified via ``OFFLOAD_ARCH``
 
 Requirements
 ^^^^^^^^^^^^

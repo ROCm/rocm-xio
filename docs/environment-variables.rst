@@ -31,9 +31,9 @@ Logging
        --controller /dev/nvme0 --read-io 10
 
 ``ROCXIO_VERBOSE``
-  Boolean (``0`` or ``1``). When set to ``1``, enables
-  verbose output from the library. The xio-tester ``-v``
-  flag also sets this internally.
+  Boolean. Accepts ``"1"`` or ``"true"`` (case-insensitive)
+  to enable verbose output from the library. The xio-tester
+  ``-v`` flag also sets this internally.
 
   .. code-block:: bash
 
@@ -44,9 +44,9 @@ Device Configuration
 
 ``ROCXIO_NVME_DEVICE``
   Default NVMe controller device path (e.g.,
-  ``/dev/nvme0``). Used by unit tests when no ``--controller``
-  argument is supplied. Falls back to the legacy
-  ``NVME_DEVICE`` environment variable for backward
+  ``/dev/nvme0``). Used by unit tests when no
+  ``--controller`` argument is supplied. Falls back to the
+  legacy ``NVME_DEVICE`` environment variable for backward
   compatibility.
 
   .. code-block:: bash
@@ -59,12 +59,12 @@ Interaction with ROCm Variables
 rocm-xio also respects standard ROCm environment variables:
 
 ``HSA_FORCE_FINE_GRAIN_PCIE``
-  Must be set to ``1`` for PCIe peer-to-peer DMA
-  operations with fine-grained device memory.
+  Must be set to ``1`` for PCIe peer-to-peer DMA operations
+  with fine-grained device memory.
 
 ``ROCM_PATH``
-  ROCm installation prefix. Defaults to ``/opt/rocm``
-  when not set.
+  ROCm installation prefix. Defaults to ``/opt/rocm`` when
+  not set.
 
 ``HIP_VISIBLE_DEVICES``
   Restrict visible GPU devices for the HIP runtime.

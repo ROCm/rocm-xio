@@ -4,9 +4,9 @@ rocm-xio: ROCm Library for GPU-Initiated IO
 Introduction
 ------------
 
-rocm-xio provides an API for Accelerator-Initiated IO (XIO) for AMD GPU
-``__device__`` code. It enables AMD GPUs to perform direct IO operations to
-hardware devices without CPU intervention.
+rocm-xio provides an API for Accelerator-Initiated IO (XIO) for AMD
+GPU ``__device__`` code. It enables AMD GPUs to perform direct IO
+operations to hardware devices without CPU intervention.
 
 Supported Endpoints
 -------------------
@@ -24,10 +24,10 @@ Endpoint      Device              Description
 Architecture
 ------------
 
-All endpoints derive from the :cpp:class:`xio::XioEndpoint` base class and
-share a common :cpp:class:`xio::XioEndpointConfig` configuration structure.
-The endpoint registry allows runtime discovery and instantiation via
-``xio::createEndpoint()``.
+All endpoints derive from the :cpp:class:`xio::XioEndpoint` base
+class and share a common :cpp:class:`xio::XioEndpointConfig`
+configuration structure. The endpoint registry allows runtime
+discovery and instantiation via ``xio::createEndpoint()``.
 
 Quick Start
 -----------
@@ -58,7 +58,6 @@ Quick Start
    kernel-module
    memory-modes
    environment-variables
-   coherence-prior-art
 
 .. toctree::
    :maxdepth: 2

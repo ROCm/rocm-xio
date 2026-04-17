@@ -1,17 +1,15 @@
 VM-Isolated Testing
 ===================
 
-Hardware tests (RDMA loopback, NVMe passthrough) touch
-low-level kernel and device state that can trigger
-kernel panics on the host.  Running these tests inside
-a QEMU VM isolates the failure domain: if the guest
-kernel panics the host stays up and the VM can simply
-be restarted.
+Hardware tests (RDMA loopback, NVMe passthrough) touch low-level
+kernel and device state that can trigger kernel panics on the
+host. Running these tests inside a QEMU VM isolates the failure
+domain: if the guest kernel panics the host stays up and the VM
+can simply be restarted.
 
-The VM infrastructure provides CMake targets for image
-creation, provisioning, launching, and testing, plus
-a ``launch-vm`` wrapper script with four passthrough
-modes.
+The VM infrastructure provides CMake targets for image creation,
+provisioning, launching, and testing, plus a ``launch-vm``
+wrapper script with four passthrough modes.
 
 Prerequisites
 -------------
@@ -46,16 +44,16 @@ Quick Start
    cmake -S . -B build
 
    # 2. Create the base VM image
-   make -C build gen-test-vm
+   cmake --build build --target gen-test-vm
 
    # 3. Boot the VM (default: rdma mode)
-   make -C build launch-test-vm
+   cmake --build build --target launch-test-vm
 
    # 4. In another terminal, provision ROCm
-   make -C build setup-test-vm
+   cmake --build build --target setup-test-vm
 
    # 5. Subsequent boots -- just launch and test
-   make -C build launch-test-vm
+   cmake --build build --target launch-test-vm
 
 CMake Targets
 -------------
@@ -71,51 +69,50 @@ bootstrap packages (defined in
 
 .. code-block:: bash
 
-   make gen-test-vm
+   cmake --build build --target gen-test-vm
 
    # Custom credentials
    cmake -DXIO_VM_USERNAME=stebates \
          -DXIO_VM_PASS=mypass .. \
-   && make gen-test-vm
+   && cmake --build build --target gen-test-vm
 
 ``setup-test-vm``
 ^^^^^^^^^^^^^^^^^
 
 Provisions a **running** VM by installing the
 ``sbates130272.batesste`` Ansible Galaxy collection and
-running its ``setup-amd`` playbook via SSH.  This
-installs ROCm, ``amdgpu-dkms``, ``driverctl``, and
-development tools inside the guest.
+running its ``setup-amd`` playbook via SSH. This installs
+ROCm, ``amdgpu-dkms``, ``driverctl``, and development
+tools inside the guest.
 
 .. code-block:: bash
 
    # VM must already be running (launch-test-vm)
-   make setup-test-vm
+   cmake --build build --target setup-test-vm
 
 ``launch-test-vm``
 ^^^^^^^^^^^^^^^^^^
 
-Boots the VM.  The mode is selected via the
-``VM_MODE`` environment variable (defaults to
-``rdma``):
+Boots the VM. The mode is selected via the ``VM_MODE``
+environment variable (defaults to ``rdma``):
 
 .. code-block:: bash
 
    # RDMA NIC passthrough (default)
-   make launch-test-vm
+   cmake --build build --target launch-test-vm
 
    # NVMe controller passthrough
-   VM_MODE=nvme make launch-test-vm
+   VM_MODE=nvme cmake --build build --target launch-test-vm
 
    # Emulated RDMA NIC (rocm-ernic)
-   VM_MODE=ernic make launch-test-vm
+   VM_MODE=ernic cmake --build build --target launch-test-vm
 
    # All devices combined
-   VM_MODE=full make launch-test-vm
+   VM_MODE=full cmake --build build --target launch-test-vm
 
-All modes pass the GPU through via VFIO and include
-an emulated 1 TB NVMe drive so ``nvme-ep`` testing
-is always available.
+All modes pass the GPU through via VFIO and include an
+emulated 1 TB NVMe drive so ``nvme-ep`` testing is always
+available.
 
 Launch Modes
 ------------
@@ -123,8 +120,8 @@ Launch Modes
 ``rdma``
 ^^^^^^^^
 
-Passes the GPU and a Broadcom BNXT NIC through to the
-VM via ``vfio-pci``.  Both devices must be bound to
+Passes the GPU and a Broadcom BNXT NIC through to the VM
+via ``vfio-pci``. Both devices must be bound to
 ``vfio-pci`` on the host before launch:
 
 .. code-block:: bash
@@ -135,22 +132,21 @@ VM via ``vfio-pci``.  Both devices must be bound to
 ``nvme``
 ^^^^^^^^
 
-Passes the GPU and an NVMe controller through.
-Enables the PCI MMIO bridge for GPU-direct NVMe
-access.  The NVMe controller must be bound to
-``vfio-pci``.
+Passes the GPU and an NVMe controller through. Enables the
+PCI MMIO bridge for GPU-direct NVMe access. The NVMe
+controller must be bound to ``vfio-pci``.
 
 ``ernic``
 ^^^^^^^^^
 
-Passes only the GPU through as a real device.  The
-RDMA NIC is emulated by ``rocm-ernic``, which runs as
-a VFIO-user server on the host and connects to QEMU
-via Unix sockets.  This is the safest mode because no
-physical NIC is involved.
+Passes only the GPU through as a real device. The RDMA NIC
+is emulated by ``rocm-ernic``, which runs as a VFIO-user
+server on the host and connects to QEMU via Unix sockets.
+This is the safest mode because no physical NIC is
+involved.
 
 The script automatically starts and stops the
-``rocm-ernic`` server(s).  Configure with:
+``rocm-ernic`` server(s). Configure with:
 
 ====================  ================================
 Variable              Default
@@ -164,15 +160,14 @@ Variable              Default
 ^^^^^^^^
 
 Combines all device types: GPU, BNXT NIC, and NVMe
-controller passthrough via ``vfio-pci``, plus an
-emulated RDMA NIC via ``rocm-ernic`` (VFIO-user).
-All four PCI devices and the emulated NVMe are
-available inside the guest simultaneously.  This is
-useful for testing scenarios that span both RDMA and
-NVMe-EP paths in a single VM.
+controller passthrough via ``vfio-pci``, plus an emulated
+RDMA NIC via ``rocm-ernic`` (VFIO-user). All four PCI
+devices and the emulated NVMe are available inside the
+guest simultaneously. This is useful for testing scenarios
+that span both RDMA and NVMe-EP paths in a single VM.
 
-All three passthrough devices must be bound to
-``vfio-pci`` on the host before launch:
+All three passthrough devices must be bound to ``vfio-pci``
+on the host before launch:
 
 .. code-block:: bash
 
@@ -186,8 +181,8 @@ automatically, just as in ``ernic`` mode.
 CMake Cache Variables
 ---------------------
 
-These can be set with ``cmake -D<VAR>=<value> ..``
-at configure time.
+These can be set with ``cmake -D<VAR>=<value> ..`` at
+configure time.
 
 ======================  ================================
 Variable                Description
@@ -230,10 +225,9 @@ GPU Detection
 -------------
 
 At configure time CMake scans for AMD GPUs (VGA class
-``0300`` and 3D class ``0302``) and checks which are
-bound to ``vfio-pci``.  If no GPU is bound, the
-configure output prints the ``driverctl`` commands
-needed.
+``0300`` and 3D class ``0302``) and checks which are bound
+to ``vfio-pci``. If no GPU is bound, the configure output
+prints the ``driverctl`` commands needed.
 
 To select a specific GPU when multiple are present:
 
@@ -244,8 +238,8 @@ To select a specific GPU when multiple are present:
 Building and Testing Inside the Guest
 --------------------------------------
 
-After the VM boots, the host project tree is available
-via 9p VirtFS:
+After the VM boots, the host project tree is available via
+9p VirtFS:
 
 .. code-block:: bash
 
@@ -255,7 +249,7 @@ via 9p VirtFS:
 
    cd /home/$USER/Projects/rocm-xio/build
    cmake .. -DCMAKE_BUILD_TYPE=Debug
-   make -j$(nproc)
+   cmake --build build -j$(nproc)
 
 Then run the appropriate tests for the mode:
 
@@ -271,17 +265,16 @@ Troubleshooting
 ---------------
 
 **Port 2222 already in use**
-   Another VM or service is listening.  Override with
-   ``SSH_PORT=2223 make launch-test-vm``.
+   Another VM or service is listening. Override with
+   ``SSH_PORT=2223 cmake --build build --target launch-test-vm``.
 
 **GPU not bound to vfio-pci**
    Run ``sudo driverctl set-override 0000:<BDF>
-   vfio-pci``.  The CMake configure step and
-   ``launch-vm`` both check this and print the exact
-   command.
+   vfio-pci``. The CMake configure step and ``launch-vm``
+   both check this and print the exact command.
 
 **VM image not found**
-   Run ``make gen-test-vm`` first.
+   Run ``cmake --build build --target gen-test-vm`` first.
 
 **rocm-ernic binary not found (ernic/full mode)**
    Set ``ERNIC_BIN=/path/to/rocm-ernic`` or build

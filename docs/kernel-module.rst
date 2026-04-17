@@ -1,10 +1,10 @@
 Kernel Module
 =============
 
-The ``rocm-xio`` kernel module (``kernel/rocm-xio/``) provides low-level
-hardware access for queue registration and doorbell mapping. It uses the
-standard Linux kernel build system (Kbuild) and must be built separately from
-the CMake build.
+The ``rocm-xio`` kernel module (``kernel/rocm-xio/``) provides
+low-level hardware access for queue registration and doorbell
+mapping. It uses the standard Linux kernel build system (Kbuild)
+and must be built separately from the CMake build.
 
 Building
 --------
@@ -25,7 +25,11 @@ Installing
 Device Node Setup
 -----------------
 
-After loading the module, create the device node:
+The module calls ``device_create()`` during initialization, so
+``/dev/rocm-xio`` is normally created automatically by
+devtmpfs/udev. Manual device-node creation is only needed on
+systems where devtmpfs is disabled or udev rules prevent
+automatic creation.
 
 .. code-block:: bash
 
@@ -36,7 +40,8 @@ After loading the module, create the device node:
 Notes
 -----
 
-- The kernel module build is independent of the CMake build system and uses its
-  own Makefile following Linux kernel conventions.
-- The module must be loaded before running endpoints that require hardware queue
-  registration (e.g. ``nvme-ep``).
+- The kernel module build is independent of the CMake build
+  system and uses its own Makefile following Linux kernel
+  conventions.
+- The module must be loaded before running endpoints that
+  require hardware queue registration (e.g. ``nvme-ep``).
