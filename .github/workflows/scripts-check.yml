@@ -22,6 +22,5 @@ jobs:
       with:
         scandir: scripts
         severity: warning
-        ignore_names: packages-rocm-xio-vm
       env:
         SHELLCHECK_OPTS: --exclude=SC2086

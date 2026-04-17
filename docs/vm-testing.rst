@@ -66,8 +66,8 @@ CMake Targets
 Creates the ``rocm-xio-vm.qcow2`` base image using
 ``qemu-minimal``'s ``gen-vm`` script and ``cloud-init``.
 The image includes a user account and a minimal set of
-bootstrap packages (see
-``scripts/test/packages-rocm-xio-vm``).
+bootstrap packages (defined in
+``cmake/XIOVirtualMachine.cmake``).
 
 .. code-block:: bash
 
