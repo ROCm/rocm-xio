@@ -156,12 +156,33 @@ struct XioTimingStats {
  * instance of this struct.
  */
 struct XioSubstepStats {
-  unsigned long long int sqeBuild = 0;
-  unsigned long long int sqeEnqueue = 0;
-  unsigned long long int doorbell = 0;
-  unsigned long long int cqPoll = 0;
-  unsigned long long int cqDoorbell = 0;
-  unsigned long long int count = 0;
+  unsigned long long int sqeBuild = 0;    ///< Cycles in SQE/WQE
+                                          ///< field formulation
+                                          ///< (LBA hash, PRP
+                                          ///< lookup, sqeSetup).
+  unsigned long long int sqeEnqueue = 0;  ///< Cycles in
+                                          ///< XioComEnqueue wide
+                                          ///< stores to queue
+                                          ///< slot.
+  unsigned long long int doorbell = 0;    ///< Cycles in SQ
+                                          ///< doorbell write
+                                          ///< (fence + atomic
+                                          ///< store).
+  unsigned long long int cqPoll = 0;      ///< Cycles polling CQ
+                                          ///< for completions
+                                          ///< (device latency).
+  unsigned long long int cqDoorbell = 0;  ///< Cycles in CQ
+                                          ///< doorbell write
+                                          ///< (fence + atomic
+                                          ///< store).
+  unsigned long long int count = 0;       ///< Number of IO
+                                          ///< completions
+                                          ///< measured.
+  unsigned long long int buildCount = 0;  ///< Number of SQE
+                                          ///< builds measured
+                                          ///< (may differ from
+                                          ///< count in batch
+                                          ///< mode).
 };
 
 /**
@@ -950,10 +971,51 @@ XioComDequeue(volatile const void* src, void* dst) {
 }
 
 /**
+ * @brief Write a doorbell register using an atomic store
+ *        with system-scope release ordering.
+ *
+ * Drains all prior memory operations with a single
+ * `__threadfence_system()`, then performs a
+ * `__hip_atomic_store` with `__ATOMIC_RELEASE` and
+ * `__HIP_MEMORY_SCOPE_SYSTEM`.  The atomic store
+ * implicitly provides post-store ordering, eliminating
+ * the need for a second fence after the write.
+ *
+ * Supports 32-bit (NVMe, ERNIC) and 64-bit (BNXT, MLX5,
+ * IONIC) doorbell widths via the @p T template parameter.
+ *
+ * On host builds, falls back to a plain volatile store
+ * (sufficient for MMIO ordering on x86).
+ *
+ * @tparam T  Doorbell value type (`uint32_t` or
+ *            `uint64_t`).
+ *
+ * @param[out] addr   Pointer to the doorbell register.
+ *                    Must be naturally aligned for @p T.
+ * @param[in]  value  Value to write (e.g. queue tail,
+ *                    encoded DB header).
+ *
+ * @see ringDoorbell       Uses this for NVMe doorbells.
+ * @see XioComEnqueue      Typically called before this to
+ *                         write SQE/WQE data.
+ */
+template <typename T>
+__host__ __device__ static inline void
+XioComDoorbell(T* addr, T value) {
+#ifdef __HIP_DEVICE_COMPILE__
+  __threadfence_system();
+  __hip_atomic_store(addr, value, __ATOMIC_RELEASE,
+                     __HIP_MEMORY_SCOPE_SYSTEM);
+#else
+  *reinterpret_cast<volatile T*>(addr) = value;
+#endif
+}
+
+/**
  * @brief Ring a doorbell register via direct MMIO write.
  *
- * Uses __threadfence_system() for portable cross-device
- * ordering.  For MMIO coherence debugging on RDNA GPUs,
+ * Uses XioComDoorbell for a single pre-fence + atomic
+ * store.  For MMIO coherence debugging on RDNA GPUs,
  * see ringDoorbellFenced() which adds ISA-level cache
  * invalidations inspired by from-germany coherence testing.
  *
@@ -1028,13 +1090,7 @@ __host__ __device__ static inline void ringDoorbell(
 #ifdef XIO_DOORBELL_FENCE_AGGRESSIVE
   ringDoorbellFenced(doorbell_addr, value);
 #else
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif
-  *doorbell_addr = value;
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif
+  XioComDoorbell(const_cast<uint32_t*>(doorbell_addr), value);
 #endif
 }
 

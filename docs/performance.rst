@@ -993,6 +993,171 @@ completed successfully across all four memory modes.
    was never written by ``xio-tester``, so the comparison always fails for
    arbitrary on-disk content.
 
+NVMe-EP Hot-Path Sub-Step Breakdown
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``--substep-timing`` flag profiles GPU clock cycles
+spent in each phase of an NVMe IO.  All runs below used
+the WD_BLACK (``/dev/nvme1``), 128 reads, batch size 1,
+queue length 1024, single queue, ``--less-timing``, and
+1 LBA per IO (512 bytes).  Times are per-IO averages in
+nanoseconds (GPU wall clock at 100 MHz = 10 ns/tick).
+
+Memory Mode Comparison
+""""""""""""""""""""""
+
+.. list-table::
+   :widths: 28 14 14 14 14 14
+   :header-rows: 1
+
+   * - Sub-step
+     - Mode 0 FG
+     - Mode 0
+     - Mode 3 FG
+     - Mode 11 FG
+     - Unit
+   * - SQE build
+     - 334
+     - 555
+     - 560
+     - 560
+     - ns
+   * - SQE enqueue
+     - 2,353
+     - 2,706
+     - 2,735
+     - 2,731
+     - ns
+   * - SQ doorbell
+     - 507
+     - 736
+     - 730
+     - 732
+     - ns
+   * - CQ poll
+     - 10,144
+     - 10,471
+     - 10,429
+     - 10,428
+     - ns
+   * - CQ doorbell
+     - 501
+     - 724
+     - 738
+     - 738
+     - ns
+   * - **Total**
+     - **13,838**
+     - **15,192**
+     - **15,190**
+     - **15,188**
+     - **ns**
+
+**FG** = ``HSA_FORCE_FINE_GRAIN_PCIE=1``.  Mode 0 =
+SQ/CQ/data in host memory.  Mode 3 = SQ/CQ in VRAM,
+data in host.  Mode 11 = SQ/CQ/data all in VRAM.
+
+Observations:
+
+- **CQ poll dominates at 68--70%** of total per-IO time.
+  This is pure NVMe device latency (controller processes
+  SQE, performs DMA, writes CQE) and cannot be reduced
+  in software.
+- **SQE enqueue (2.3--2.7 us)** is 8 ``uint64_t`` wide
+  stores via ``XioComEnqueue``.  In mode 0 with fine-grain
+  PCIe enabled, each store to host-coherent memory
+  completes faster due to the always-active coherence
+  protocol (no lazy-to-eager transition penalty).
+- **Doorbells (~500 ns each with fine-grain)** use
+  ``XioComDoorbell``: a single ``__threadfence_system()``
+  followed by ``__hip_atomic_store`` with RELEASE/SYSTEM
+  scope.  This matches the RDMA vendor doorbell pattern
+  and eliminates the post-store fence.
+- **Fine-grain PCIe helps mode 0 by ~1.4 us** because
+  system-scope fences and atomic stores complete faster
+  when the GPU's coherence domain already includes PCIe.
+  Without it, each fence incurs a coherence transition.
+- **VRAM modes (3, 11) are ~1.4 us slower than mode 0
+  with fine-grain**, even though VRAM stores should be
+  local.  With ``HSA_FORCE_FINE_GRAIN_PCIE=1``, VRAM
+  allocations also participate in system coherence,
+  negating the local-store advantage.
+- **SQE build is only 334--560 ns** thanks to PRP
+  pre-computation at kernel start.  The LBA hash,
+  pre-computed PRP lookup, and ``sqeSetup`` field writes
+  are all register/local operations.
+
+Optimization Impact Summary
+"""""""""""""""""""""""""""
+
+The following table summarises the cumulative effect of
+each optimization on GPU-side per-IO overhead (excluding
+CQ poll device latency), measured in mode 0 with
+``HSA_FORCE_FINE_GRAIN_PCIE=1``:
+
+.. list-table::
+   :widths: 42 18 18
+   :header-rows: 1
+
+   * - Optimization
+     - Overhead (ns)
+     - Savings (ns)
+   * - Original (byte-by-byte + 6 fences)
+     - ~20,000 (est.)
+     - --
+   * - + XioComEnqueue (8 wide stores)
+     - ~4,600
+     - ~15,400
+   * - + fence elimination (6 to 4 fences)
+     - ~4,100
+     - ~500
+   * - + XioComDoorbell (4 to 2 fences)
+     - ~3,700
+     - ~400
+
+The wide-store refactoring (``XioComEnqueue``) delivered
+the largest single improvement: an 8x reduction in SQE
+write memory transactions, cutting enqueue time from an
+estimated ~17.6 us (64 byte-stores across PCIe) to
+~2.4 us (8 wide stores).
+
+Reproducing Sub-Step Measurements
+"""""""""""""""""""""""""""""""""
+
+.. code-block:: bash
+
+   # Mode 0 with fine-grain PCIe (fastest)
+   sudo env LD_LIBRARY_PATH=/opt/rocm/lib \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     build/xio-tester nvme-ep \
+     --controller /dev/nvme1 \
+     --memory-mode 0 \
+     --read-io 128 --batch-size 1 \
+     --queue-length 1024 --num-queues 1 \
+     --less-timing --lbas-per-io 1 \
+     --substep-timing
+
+   # Mode 0 without fine-grain
+   sudo env LD_LIBRARY_PATH=/opt/rocm/lib \
+     build/xio-tester nvme-ep \
+     --controller /dev/nvme1 \
+     --memory-mode 0 \
+     --read-io 128 --batch-size 1 \
+     --queue-length 1024 --num-queues 1 \
+     --less-timing --lbas-per-io 1 \
+     --substep-timing
+
+   # Mode 3 (SQ/CQ in VRAM) with fine-grain
+   sudo env LD_LIBRARY_PATH=/opt/rocm/lib \
+     HSA_FORCE_FINE_GRAIN_PCIE=1 \
+     build/xio-tester nvme-ep \
+     --controller /dev/nvme1 \
+     --memory-mode 3 \
+     --read-io 128 --batch-size 1 \
+     --queue-length 1024 --num-queues 1 \
+     --less-timing --lbas-per-io 1 \
+     --substep-timing
+
 CPU Utilization: GPU vs CPU
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

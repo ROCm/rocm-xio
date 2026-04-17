@@ -38,22 +38,56 @@ __host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b) {
   return (a->magic == b->magic && a->cpuTime == b->cpuTime);
 }
 
+/**
+ * @brief Read a test-ep SQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param sqeAddress  Volatile pointer to the SQE slot.
+ * @return Copy of the SQE structure.
+ */
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
   sqeType result;
   xio::XioComDequeue<sizeof(sqeType)>(sqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Read a test-ep CQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param cqeAddress  Volatile pointer to the CQE slot.
+ * @return Copy of the CQE structure.
+ */
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   cqeType result;
   xio::XioComDequeue<sizeof(cqeType)>(cqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Write a test-ep SQE to a queue slot using
+ *        8-byte wide stores via XioComEnqueue.
+ *
+ * Fences after the write (Fence=true) to ensure
+ * visibility before the CPU polling thread sees it.
+ *
+ * @param sqeData     SQE to write (passed by value).
+ * @param sqeAddress  Pointer to the SQE slot.
+ */
 __host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress) {
   xio::XioComEnqueue<sizeof(sqeType), true>(&sqeData, sqeAddress);
 }
 
+/**
+ * @brief Write a test-ep CQE to a queue slot using
+ *        8-byte wide stores via XioComEnqueue.
+ *
+ * Fences after the write (Fence=true) to ensure
+ * visibility before the GPU polling thread sees it.
+ *
+ * @param cqeData     CQE to write (passed by value).
+ * @param cqeAddress  Pointer to the CQE slot.
+ */
 __host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress) {
   xio::XioComEnqueue<sizeof(cqeType), true>(&cqeData, cqeAddress);
 }

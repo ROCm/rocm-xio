@@ -25,23 +25,55 @@
 
 namespace xio::nvme_ep {
 
+/**
+ * @brief Read an NVMe SQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param sqeAddress  Volatile pointer to the SQE slot.
+ * @return Copy of the SQE structure.
+ */
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
   sqeType result;
   xio::XioComDequeue<sizeof(sqeType)>(sqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Read an NVMe CQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param cqeAddress  Volatile pointer to the CQE slot.
+ * @return Copy of the CQE structure.
+ */
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   cqeType result;
   xio::XioComDequeue<sizeof(cqeType)>(cqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Write an NVMe SQE to a volatile queue slot
+ *        using 8-byte wide stores via XioComEnqueue.
+ *
+ * Does not fence; the caller is responsible for
+ * fencing before the subsequent doorbell write
+ * (ringDoorbell provides its own pre-fence).
+ *
+ * @param sqeData     SQE to write (passed by value).
+ * @param sqeAddress  Volatile pointer to the SQE slot.
+ */
 __host__ __device__ void sqeWrite(sqeType sqeData,
                                   volatile sqeType* sqeAddress) {
   xio::XioComEnqueue<sizeof(sqeType)>(&sqeData, sqeAddress);
 }
 
+/**
+ * @brief Write an NVMe CQE to a volatile queue slot
+ *        using 8-byte wide stores via XioComEnqueue.
+ *
+ * @param cqeData     CQE to write (passed by value).
+ * @param cqeAddress  Volatile pointer to the CQE slot.
+ */
 __host__ __device__ void cqeWrite(cqeType cqeData,
                                   volatile cqeType* cqeAddress) {
   xio::XioComEnqueue<sizeof(cqeType)>(&cqeData, cqeAddress);
@@ -311,6 +343,10 @@ __device__ static void driveEndpointSingle(
       unsigned op_idx = ops_done + b;
       uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
 
+      unsigned long long int ss_build0 = 0;
+      if (config.substepStats)
+        ss_build0 = wall_clock64();
+
       bool is_read_op;
       if (ioParams.infiniteMode) {
         is_read_op = infinite_is_read;
@@ -381,6 +417,12 @@ __device__ static void driveEndpointSingle(
       }
 
       sqeSetup(sqe, lba, blocks);
+
+      if (config.substepStats) {
+        unsigned long long int ss_build1 = wall_clock64();
+        config.substepStats->sqeBuild += ss_build1 - ss_build0;
+        config.substepStats->buildCount++;
+      }
 
       if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[op_idx] = wall_clock64();
