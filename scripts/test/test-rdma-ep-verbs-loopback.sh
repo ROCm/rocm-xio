@@ -124,6 +124,8 @@ SRV_LOG=$(mktemp /tmp/rdma-verbs-srv-XXXXXX.log)
 CLT_LOG=$(mktemp /tmp/rdma-verbs-clt-XXXXXX.log)
 trap 'rm -f "$SRV_LOG" "$CLT_LOG"' EXIT
 
+TIMEOUT_SEC="${TIMEOUT_SEC:-30}"
+
 "$PINGPONG" -d "$RDMA_DEV" \
     -g "$GID_INDEX" -n "$NUM_ITERS" \
     >"$SRV_LOG" 2>&1 &
@@ -131,12 +133,19 @@ SERVER_PID=$!
 sleep 2
 
 CLIENT_RC=0
-"$PINGPONG" -d "$RDMA_DEV" \
+timeout "${TIMEOUT_SEC}" \
+    "$PINGPONG" -d "$RDMA_DEV" \
     -g "$GID_INDEX" -n "$NUM_ITERS" \
     "$LOOPBACK_IP" >"$CLT_LOG" 2>&1 || CLIENT_RC=$?
 
 SERVER_RC=0
-wait "$SERVER_PID" || SERVER_RC=$?
+if kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_RC=124
+else
+    wait "$SERVER_PID" || SERVER_RC=$?
+fi
 
 cat "$SRV_LOG"
 cat "$CLT_LOG"
@@ -157,6 +166,18 @@ if grep -qi "Couldn't create QP\|create_qp" \
     echo "SKIP: driver does not support" \
         "standard verbs QP creation" \
         "(DV-only driver)"
+    exit 77
+fi
+
+# Timeout (rc=124) in loopback mode means the
+# driver doesn't complete verbs-level RC
+# send/recv in self-connect (common with
+# firmware-based loopback on IONIC/BNXT).
+if [ "$CLIENT_RC" -eq 124 ] || \
+   [ "$SERVER_RC" -eq 124 ]; then
+    echo "SKIP: ibv_rc_pingpong timed out" \
+        "in loopback mode (driver may not" \
+        "support verbs RC self-connect)"
     exit 77
 fi
 

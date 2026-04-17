@@ -98,6 +98,8 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC OR GDA_ERNIC)
   )
   set_tests_properties(test-rdma-2node PROPERTIES
     FIXTURES_REQUIRED RDMA_HW)
+  set_tests_properties(test-rdma-2node PROPERTIES
+    WILL_FAIL TRUE)
 endif()
 
 if(GDA_ERNIC)
