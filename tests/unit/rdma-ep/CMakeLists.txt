@@ -54,7 +54,14 @@ if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
     SKIP_RETURN_CODE 77)
 endif()
 
-# Hardware integration tests (require NIC + GPU)
+# Hardware integration tests (require NIC + GPU).
+# These tests launch GPU kernels that call device
+# functions from librocm-xio directly (cross-TU
+# device calls).  With shared libraries the device
+# code is resolved inside the .so and cross-DSO
+# device linking is not supported by HIP, so these
+# targets are static-only.
+if(NOT BUILD_SHARED_LIBS)
 if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
   xio_add_test(
     NAME test-rdma-loopback
@@ -101,6 +108,7 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC OR GDA_ERNIC)
   set_tests_properties(test-rdma-2node PROPERTIES
     WILL_FAIL TRUE)
 endif()
+endif() # NOT BUILD_SHARED_LIBS
 
 if(GDA_ERNIC)
   xio_add_test(

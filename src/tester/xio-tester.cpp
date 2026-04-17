@@ -467,8 +467,7 @@ int main(int argc, char** argv) {
   XioSubstepStats* substepStats = nullptr;
   if (substepTiming) {
     hipError_t hipErr = allocHostMemory(sizeof(XioSubstepStats),
-                                        (void**)&substepStats,
-                                        "substep stats",
+                                        (void**)&substepStats, "substep stats",
                                         XIO_HOST_MEM_MAPPED);
     if (hipErr != hipSuccess) {
       std::cerr << "Error: Failed to allocate "
@@ -694,39 +693,30 @@ int main(int argc, char** argv) {
               << "(per IO average) ---" << std::endl;
     std::cout << std::fixed << std::setprecision(1);
     if (substepStats->buildCount > 0) {
-      double bcnt =
-        static_cast<double>(substepStats->buildCount);
+      double bcnt = static_cast<double>(substepStats->buildCount);
       std::cout << "  SQE build   : "
-                << (substepStats->sqeBuild / bcnt) *
-                     gpuClockPeriodNs
-                << " ns" << std::endl;
+                << (substepStats->sqeBuild / bcnt) * gpuClockPeriodNs << " ns"
+                << std::endl;
     }
     std::cout << "  SQE enqueue : "
-              << (substepStats->sqeEnqueue / cnt) *
-                   gpuClockPeriodNs
-              << " ns" << std::endl;
-    std::cout << "  SQ doorbell : "
-              << (substepStats->doorbell / cnt) *
-                   gpuClockPeriodNs
-              << " ns" << std::endl;
-    std::cout << "  CQ poll     : "
-              << (substepStats->cqPoll / cnt) *
-                   gpuClockPeriodNs
-              << " ns" << std::endl;
-    std::cout << "  CQ doorbell : "
-              << (substepStats->cqDoorbell / cnt) *
-                   gpuClockPeriodNs
-              << " ns" << std::endl;
-    double totalNs =
-      ((substepStats->sqeBuild + substepStats->sqeEnqueue +
-        substepStats->doorbell + substepStats->cqPoll +
-        substepStats->cqDoorbell) /
-       cnt) *
-      gpuClockPeriodNs;
-    std::cout << "  Total       : " << totalNs << " ns"
+              << (substepStats->sqeEnqueue / cnt) * gpuClockPeriodNs << " ns"
               << std::endl;
-    std::cout << "  IO count    : "
-              << substepStats->count << std::endl;
+    std::cout << "  SQ doorbell : "
+              << (substepStats->doorbell / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    std::cout << "  CQ poll     : "
+              << (substepStats->cqPoll / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    std::cout << "  CQ doorbell : "
+              << (substepStats->cqDoorbell / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    double totalNs = ((substepStats->sqeBuild + substepStats->sqeEnqueue +
+                       substepStats->doorbell + substepStats->cqPoll +
+                       substepStats->cqDoorbell) /
+                      cnt) *
+                     gpuClockPeriodNs;
+    std::cout << "  Total       : " << totalNs << " ns" << std::endl;
+    std::cout << "  IO count    : " << substepStats->count << std::endl;
   }
 
   // Print completion message

@@ -1128,14 +1128,19 @@ stopRequested
 QueueMemMode
 
 # ===== Performance Documentation Terms =====
+FG
 responder
 CTests
+substep
 TiB
 VID
+XioComDoorbell
+XioComEnqueue
 ioengine
 lbas
 prefetch
 randread
 seqread
+sqeSetup
 uring
 verifier
