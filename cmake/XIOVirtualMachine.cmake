@@ -375,10 +375,29 @@ endif()
 # ---------------------------------------------------
 # 8. Build target: gen-test-vm
 # ---------------------------------------------------
+# Bootstrap packages for the rocm-xio test VM.
+# ROCm and development tools are installed later via
+# Ansible (sbates130272.batesste).
+set(_vm_packages
+  "  - build-essential"
+  "  - cmake"
+  "  - git"
+  "  - libcli11-dev"
+  "  - libnl-3-dev"
+  "  - libnl-route-3-dev"
+  "  - iproute2"
+  "  - net-tools"
+  "  - openssh-server"
+  "  - pciutils"
+  "  - python-is-python3"
+  "  - python3-pip"
+  "  - tree")
+string(REPLACE ";" "\n" _vm_packages_content
+  "${_vm_packages}")
 set(_packages_file
-  "${CMAKE_SOURCE_DIR}/scripts/test/"
-  "packages-rocm-xio-vm")
-string(CONCAT _packages_file ${_packages_file})
+  "${CMAKE_BINARY_DIR}/packages-rocm-xio-vm")
+file(WRITE "${_packages_file}"
+  "${_vm_packages_content}\n")
 
 if(_qemu_ok AND GEN_VM AND CLOUD_LOCALDS)
   set(_qemu_prefix_gen "")

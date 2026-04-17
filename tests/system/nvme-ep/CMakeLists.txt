@@ -307,3 +307,47 @@ xio_add_script_test(
     "XIO_TESTER=${_xio_tester}"
     "EXPECT_FAIL=1"
 )
+
+# --- xio-tester wrapper smoke tests ---------------------
+# Exercise the xio-tester nvme-ep wrapper script with
+# various batch-size and queue configurations.
+
+set(_nvme_tester_script
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-xio-tester-nvme-ep.sh)
+
+xio_add_script_test(
+  NAME nvme-ep-batch-16
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 120
+  ARGS ${_nvme_tester_script}
+  ENVIRONMENT
+    "BATCH_SIZE=16"
+    "READ_IO=128"
+    "BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
+xio_add_script_test(
+  NAME nvme-ep-num-queues-4
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 120
+  ARGS ${_nvme_tester_script}
+  ENVIRONMENT
+    "NUM_QUEUES=4"
+    "READ_IO=128"
+    "BUILD_DIR=${CMAKE_BINARY_DIR}"
+)
+
+xio_add_script_test(
+  NAME nvme-ep-batch-16-queues-4
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme smoke
+  TIMEOUT 120
+  ARGS ${_nvme_tester_script}
+  ENVIRONMENT
+    "BATCH_SIZE=16"
+    "NUM_QUEUES=4"
+    "READ_IO=128"
+    "BUILD_DIR=${CMAKE_BINARY_DIR}"
+)

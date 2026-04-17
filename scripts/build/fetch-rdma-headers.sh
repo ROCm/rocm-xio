@@ -1,5 +1,9 @@
 #!/bin/bash
-# Script to fetch RDMA provider headers from rdma-core repository
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Fetch RDMA provider headers from rdma-core repository
 
 set -euo pipefail
 
