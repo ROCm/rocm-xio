@@ -2430,8 +2430,7 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   cmd.status = PCI_MMIO_BRIDGE_STATUS_PENDING;
   cmd.reserved2 = 0;
   cmd.sequence = slot;
-  XioComEnqueue<sizeof(struct pci_mmio_bridge_command), true>(
-    &cmd, cmdSlot);
+  XioComEnqueue<sizeof(struct pci_mmio_bridge_command), true>(&cmd, cmdSlot);
   meta->producer_idx = meta->producer_idx + 1;
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();

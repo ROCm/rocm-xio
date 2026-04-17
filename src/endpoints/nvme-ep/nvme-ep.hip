@@ -387,12 +387,12 @@ __device__ static void driveEndpointSingle(
 
         if (is_read_op && has_read_buffer) {
           if (buf_off + transfer_size <= bufferParams.bufferSize) {
-            uint64_t addr =
-              bufferParams.readPagePhysAddrs
-                ? bufferParams.readPagePhysAddrs[pageOff] + intraPageOff
-              : bufferParams.readBufferDma
-                ? (bufferParams.readBufferDma + buf_off)
-                : (uint64_t)(bufferParams.readBuffer + buf_off);
+            uint64_t addr = bufferParams.readPagePhysAddrs
+                              ? bufferParams.readPagePhysAddrs[pageOff] +
+                                  intraPageOff
+                            : bufferParams.readBufferDma
+                              ? (bufferParams.readBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.readBuffer + buf_off);
             calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
                           bufferParams.readPagePhysAddrs, pageOff);
           } else {
@@ -400,12 +400,12 @@ __device__ static void driveEndpointSingle(
           }
         } else if (!is_read_op && has_write_buffer) {
           if (buf_off + transfer_size <= bufferParams.bufferSize) {
-            uint64_t addr =
-              bufferParams.writePagePhysAddrs
-                ? bufferParams.writePagePhysAddrs[pageOff] + intraPageOff
-              : bufferParams.writeBufferDma
-                ? (bufferParams.writeBufferDma + buf_off)
-                : (uint64_t)(bufferParams.writeBuffer + buf_off);
+            uint64_t addr = bufferParams.writePagePhysAddrs
+                              ? bufferParams.writePagePhysAddrs[pageOff] +
+                                  intraPageOff
+                            : bufferParams.writeBufferDma
+                              ? (bufferParams.writeBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.writeBuffer + buf_off);
             calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
                           bufferParams.writePagePhysAddrs, pageOff);
           } else {
@@ -1082,9 +1082,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   if (effBatch == 0) {
     unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
                          (unsigned)nvmeConfig->ioParams.writeIo;
-    effBatch = nvmeConfig->ioParams.infiniteMode
-                 ? (uint32_t)(queue_size - 1)
-                 : total_ops;
+    effBatch = nvmeConfig->ioParams.infiniteMode ? (uint32_t)(queue_size - 1)
+                                                 : total_ops;
   }
   if (effBatch > (uint32_t)(queue_size - 1))
     effBatch = queue_size - 1;

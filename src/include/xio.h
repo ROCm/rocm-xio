@@ -156,33 +156,33 @@ struct XioTimingStats {
  * instance of this struct.
  */
 struct XioSubstepStats {
-  unsigned long long int sqeBuild = 0;    ///< Cycles in SQE/WQE
-                                          ///< field formulation
-                                          ///< (LBA hash, PRP
-                                          ///< lookup, sqeSetup).
-  unsigned long long int sqeEnqueue = 0;  ///< Cycles in
-                                          ///< XioComEnqueue wide
-                                          ///< stores to queue
-                                          ///< slot.
-  unsigned long long int doorbell = 0;    ///< Cycles in SQ
-                                          ///< doorbell write
-                                          ///< (fence + atomic
-                                          ///< store).
-  unsigned long long int cqPoll = 0;      ///< Cycles polling CQ
-                                          ///< for completions
-                                          ///< (device latency).
-  unsigned long long int cqDoorbell = 0;  ///< Cycles in CQ
-                                          ///< doorbell write
-                                          ///< (fence + atomic
-                                          ///< store).
-  unsigned long long int count = 0;       ///< Number of IO
-                                          ///< completions
-                                          ///< measured.
-  unsigned long long int buildCount = 0;  ///< Number of SQE
-                                          ///< builds measured
-                                          ///< (may differ from
-                                          ///< count in batch
-                                          ///< mode).
+  unsigned long long int sqeBuild = 0;   ///< Cycles in SQE/WQE
+                                         ///< field formulation
+                                         ///< (LBA hash, PRP
+                                         ///< lookup, sqeSetup).
+  unsigned long long int sqeEnqueue = 0; ///< Cycles in
+                                         ///< XioComEnqueue wide
+                                         ///< stores to queue
+                                         ///< slot.
+  unsigned long long int doorbell = 0;   ///< Cycles in SQ
+                                         ///< doorbell write
+                                         ///< (fence + atomic
+                                         ///< store).
+  unsigned long long int cqPoll = 0;     ///< Cycles polling CQ
+                                         ///< for completions
+                                         ///< (device latency).
+  unsigned long long int cqDoorbell = 0; ///< Cycles in CQ
+                                         ///< doorbell write
+                                         ///< (fence + atomic
+                                         ///< store).
+  unsigned long long int count = 0;      ///< Number of IO
+                                         ///< completions
+                                         ///< measured.
+  unsigned long long int buildCount = 0; ///< Number of SQE
+                                         ///< builds measured
+                                         ///< (may differ from
+                                         ///< count in batch
+                                         ///< mode).
 };
 
 /**
@@ -894,16 +894,12 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
  *                     XioComEnqueue calls.
  */
 template <uint32_t Size, bool Fence = false>
-__host__ __device__ static inline void
-XioComEnqueue(const void* src, volatile void* dst) {
-  static_assert(Size % sizeof(uint64_t) == 0,
-                "Size must be a multiple of 8");
-  static_assert(Size > 0 && Size <= 256,
-                "Size out of expected range");
-  const uint64_t* s =
-    reinterpret_cast<const uint64_t*>(src);
-  volatile uint64_t* d =
-    reinterpret_cast<volatile uint64_t*>(dst);
+__host__ __device__ static inline void XioComEnqueue(const void* src,
+                                                     volatile void* dst) {
+  static_assert(Size % sizeof(uint64_t) == 0, "Size must be a multiple of 8");
+  static_assert(Size > 0 && Size <= 256, "Size out of expected range");
+  const uint64_t* s = reinterpret_cast<const uint64_t*>(src);
+  volatile uint64_t* d = reinterpret_cast<volatile uint64_t*>(dst);
   constexpr uint32_t N = Size / sizeof(uint64_t);
 #pragma unroll
   for (uint32_t i = 0; i < N; i++) {
@@ -954,14 +950,11 @@ XioComEnqueue(const void* src, volatile void* dst) {
  * @see XioComEnqueue  For the corresponding write path.
  */
 template <uint32_t Size>
-__host__ __device__ static inline void
-XioComDequeue(volatile const void* src, void* dst) {
-  static_assert(Size % sizeof(uint64_t) == 0,
-                "Size must be a multiple of 8");
-  static_assert(Size > 0 && Size <= 256,
-                "Size out of expected range");
-  volatile const uint64_t* s =
-    reinterpret_cast<volatile const uint64_t*>(src);
+__host__ __device__ static inline void XioComDequeue(volatile const void* src,
+                                                     void* dst) {
+  static_assert(Size % sizeof(uint64_t) == 0, "Size must be a multiple of 8");
+  static_assert(Size > 0 && Size <= 256, "Size out of expected range");
+  volatile const uint64_t* s = reinterpret_cast<volatile const uint64_t*>(src);
   uint64_t* d = reinterpret_cast<uint64_t*>(dst);
   constexpr uint32_t N = Size / sizeof(uint64_t);
 #pragma unroll
@@ -1000,12 +993,10 @@ XioComDequeue(volatile const void* src, void* dst) {
  *                         write SQE/WQE data.
  */
 template <typename T>
-__host__ __device__ static inline void
-XioComDoorbell(T* addr, T value) {
+__host__ __device__ static inline void XioComDoorbell(T* addr, T value) {
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
-  __hip_atomic_store(addr, value, __ATOMIC_RELEASE,
-                     __HIP_MEMORY_SCOPE_SYSTEM);
+  __hip_atomic_store(addr, value, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
 #else
   *reinterpret_cast<volatile T*>(addr) = value;
 #endif
