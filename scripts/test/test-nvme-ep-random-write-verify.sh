@@ -136,11 +136,13 @@ fi
 echo "Write completed"
 echo ""
 
-echo "Step 2: Generating expected pattern..."
-EXPECTED_BLK="$TEMP_DIR/expected.bin"
-$XIO_TESTER --dump-pattern "$EXPECTED_BLK" \
+echo "Step 2: Generating expected patterns..."
+BATCH="${BATCH_SIZE:-1}"
+PATTERN_SIZE=$((BATCH * LBA_SIZE))
+EXPECTED_BUF="$TEMP_DIR/expected_buf.bin"
+$XIO_TESTER --dump-pattern "$EXPECTED_BUF" \
     --dump-pattern-seed "$LFSR_SEED" \
-    --dump-pattern-size "$LBA_SIZE" \
+    --dump-pattern-size "$PATTERN_SIZE" \
     --dump-pattern-block-size "$LBA_SIZE" \
     --dump-pattern-offset 0 2>/dev/null
 
@@ -161,7 +163,8 @@ base_lba = ${BASE_LBA}
 lba_size = ${LBA_SIZE}
 ns_capacity = ${NS_CAPACITY}
 ns_dev = '${NS}'
-expected_file = '${EXPECTED_BLK}'
+batch_size = ${BATCH}
+buf_file = '${EXPECTED_BUF}'
 
 
 def get_random_lba(op_index, cmd_id,
@@ -181,27 +184,35 @@ def get_random_lba(op_index, cmd_id,
     return base_lba + (seed % lba_range)
 
 
-written_lbas = set()
+with open(buf_file, 'rb') as f:
+    full_buf = f.read()
+
+patterns = {}
+for b in range(batch_size):
+    off = b * lba_size
+    patterns[b] = full_buf[off:off + lba_size]
+    print(f"Expected pattern slot {b}"
+          f" ({len(patterns[b])} bytes):"
+          f" first 8 = {patterns[b][:8].hex()}")
+
+lba_to_slot = {}
 for i in range(num_writes):
     cmd_id = (i % 65535) + 1
     lba = get_random_lba(
         i, cmd_id, lfsr_seed, base_lba, ns_capacity)
-    written_lbas.add(lba)
+    lba_to_slot[lba] = i % batch_size
 
-unique_lbas = sorted(written_lbas)
+unique_lbas = sorted(lba_to_slot.keys())
 print(f"Unique LBAs written: {len(unique_lbas)}"
       f" (from {num_writes} ops)")
-
-with open(expected_file, 'rb') as ef:
-    expected = ef.read()
-print(f"Expected pattern ({len(expected)} bytes):"
-      f" first 8 = {expected[:8].hex()}")
 
 fail_count = 0
 ok_count = 0
 
 with open(ns_dev, 'rb') as dev:
     for lba in unique_lbas:
+        slot = lba_to_slot[lba]
+        expected = patterns[slot]
         dev.seek(lba * lba_size)
         actual = dev.read(lba_size)
 

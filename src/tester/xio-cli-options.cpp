@@ -181,6 +181,12 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->default_val(1)
     ->check(CLI::NonNegativeNumber)
     ->group(nvme_group);
+  app
+    .add_flag("--verify", cfg->verify,
+              "Verify LFSR data pattern after "
+              "read-back (requires --write-io and "
+              "--read-io)")
+    ->group(nvme_group);
 }
 
 void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg) {

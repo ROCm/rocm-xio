@@ -284,7 +284,73 @@ xio_add_script_test(
     "XIO_TESTER=${_xio_tester}"
 )
 
+# --- Inline read-back verification (--verify) ----------
+# Write-then-read with LFSR verification in a single
+# xio-tester invocation.  Requires --batch-size 1
+# (default) and --write-io >= --read-io.
+
+xio_add_script_test(
+  NAME nvme-verify-inline-host-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 30
+  ARGS --access-pattern random -m 0
+    --lbas-per-io 1 --lfsr-seed 0xA1
+    --write-io 16 --read-io 16
+    --queue-length 128 --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-device-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 30
+  ARGS --access-pattern random -m 8
+    --lbas-per-io 1 --lfsr-seed 0xA2
+    --write-io 16 --read-io 16
+    --queue-length 128 --less-timing --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-seq
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 30
+  ARGS --access-pattern sequential -m 0
+    --lbas-per-io 8 --lfsr-seed 0xA3
+    --write-io 4 --read-io 4
+    --queue-length 128
+    --data-buffer-size 1048576 --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-multi-lba
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 30
+  ARGS --access-pattern random -m 0
+    --lbas-per-io 8 --lfsr-seed 0xA4
+    --write-io 8 --read-io 8
+    --queue-length 128
+    --data-buffer-size 524288 --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
 # --- Negative tests (expected failures) -----------------
+
+xio_add_script_test(
+  NAME nvme-reject-verify-no-writes
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme negative
+  TIMEOUT 15
+  ARGS --read-io 10 --verify
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "EXPECT_FAIL=1"
+)
 
 xio_add_script_test(
   NAME nvme-reject-threads-2

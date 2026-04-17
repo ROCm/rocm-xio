@@ -728,6 +728,9 @@ struct nvmeEpConfig {
     uint32_t batchSize;    // SQEs per doorbell (1=seq, 0=all)
   } ioParams;
 
+  // Verification
+  bool verify = false; // Verify LFSR data pattern after read-back
+
   // Data buffer configuration (mirrors nvmeBufferParams POD struct)
   struct {
     size_t bufferSize; // Size of data buffers in bytes
