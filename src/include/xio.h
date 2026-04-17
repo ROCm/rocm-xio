@@ -147,6 +147,24 @@ struct XioTimingStats {
 };
 
 /**
+ * @brief Per-sub-step cycle breakdown for hot-path
+ *        profiling.
+ *
+ * Each field accumulates GPU clock cycles spent in a
+ * specific phase of an IO operation.  Enable by setting
+ * XioEndpointConfig::substepStats to a GPU-accessible
+ * instance of this struct.
+ */
+struct XioSubstepStats {
+  unsigned long long int sqeBuild = 0;
+  unsigned long long int sqeEnqueue = 0;
+  unsigned long long int doorbell = 0;
+  unsigned long long int cqPoll = 0;
+  unsigned long long int cqDoorbell = 0;
+  unsigned long long int count = 0;
+};
+
+/**
  * @brief Base configuration structure for all endpoints.
  *
  * Contains common testing parameters that apply to all
@@ -164,6 +182,7 @@ struct XioEndpointConfig {
   unsigned long long int* startTimes = nullptr;
   unsigned long long int* endTimes = nullptr;
   XioTimingStats* timingStats = nullptr;
+  XioSubstepStats* substepStats = nullptr;
 
   void* submissionQueue = nullptr;
   void* completionQueue = nullptr;
@@ -800,6 +819,135 @@ __host__ void freeContigQueue(struct xioQueueSetup* setup, size_t size,
  */
 __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
                                   void** gpu_ptr_out);
+
+/**
+ * @brief Write a queue entry to device-visible memory
+ *        using wide (8-byte) stores.
+ *
+ * Copies @p Size bytes from a locally-built queue entry
+ * at @p src to a volatile destination slot at @p dst
+ * using `uint64_t`-width stores.  The compiler fully
+ * unrolls the copy into exactly `Size / 8` store
+ * instructions, eliminating loop overhead.
+ *
+ * Use this for all SQE, WQE, and command writes to
+ * submission queues, send queues, or command rings
+ * regardless of endpoint type.
+ *
+ * @tparam Size   Number of bytes to copy.  Must be a
+ *                compile-time constant, a multiple of 8,
+ *                and in the range (0, 256].
+ * @tparam Fence  When @c true, a `__threadfence_system()`
+ *                is emitted after the last store to
+ *                guarantee system-wide visibility before
+ *                a subsequent doorbell write.  Defaults
+ *                to @c false so that callers batching
+ *                multiple entries can defer the fence.
+ *
+ * @param[in]  src  Pointer to the locally-built entry.
+ *                  Must be at least 8-byte aligned.
+ * @param[out] dst  Volatile pointer to the destination
+ *                  queue slot.  Must be at least 8-byte
+ *                  aligned.
+ *
+ * @note Both @p src and @p dst must be 8-byte aligned.
+ *       All queue slot allocators in rocm-xio satisfy
+ *       this (NVMe SQE slots are 64 B, RDMA WQE slots
+ *       are >= 16 B, PCI MMIO bridge slots are at a
+ *       16 B-aligned base).
+ * @note On host builds the fence is a no-op; volatile
+ *       store semantics still provide correct MMIO
+ *       ordering.
+ *
+ * @par Example
+ * @code
+ * nvme_sqe sqeLocal = {};
+ * // ... fill sqeLocal ...
+ * xio::XioComEnqueue<sizeof(nvme_sqe)>(
+ *     &sqeLocal, &sqeAddr[sq_tail]);
+ * // fence deferred to ringDoorbell
+ * @endcode
+ *
+ * @see XioComDequeue  For the corresponding read path.
+ * @see ringDoorbell   Typically called after one or more
+ *                     XioComEnqueue calls.
+ */
+template <uint32_t Size, bool Fence = false>
+__host__ __device__ static inline void
+XioComEnqueue(const void* src, volatile void* dst) {
+  static_assert(Size % sizeof(uint64_t) == 0,
+                "Size must be a multiple of 8");
+  static_assert(Size > 0 && Size <= 256,
+                "Size out of expected range");
+  const uint64_t* s =
+    reinterpret_cast<const uint64_t*>(src);
+  volatile uint64_t* d =
+    reinterpret_cast<volatile uint64_t*>(dst);
+  constexpr uint32_t N = Size / sizeof(uint64_t);
+#pragma unroll
+  for (uint32_t i = 0; i < N; i++) {
+    d[i] = s[i];
+  }
+#ifdef __HIP_DEVICE_COMPILE__
+  if constexpr (Fence)
+    __threadfence_system();
+#endif
+}
+
+/**
+ * @brief Read a queue entry from device-visible memory
+ *        using wide (8-byte) loads.
+ *
+ * Copies @p Size bytes from a volatile source queue
+ * slot at @p src into a local struct at @p dst using
+ * `uint64_t`-width loads.  The compiler fully unrolls
+ * the copy into exactly `Size / 8` load instructions.
+ *
+ * Use this for all CQE and completion-queue reads
+ * regardless of endpoint type.
+ *
+ * @tparam Size  Number of bytes to copy.  Must be a
+ *               compile-time constant, a multiple of 8,
+ *               and in the range (0, 256].
+ *
+ * @param[in]  src  Volatile pointer to the source queue
+ *                  slot.  Must be at least 8-byte
+ *                  aligned.
+ * @param[out] dst  Pointer to the local destination
+ *                  struct.  Must be at least 8-byte
+ *                  aligned.
+ *
+ * @note The caller is responsible for any ordering
+ *       required after the read (e.g. checking a phase
+ *       bit before consuming the entry).
+ *
+ * @par Example
+ * @code
+ * nvme_cqe cqeLocal;
+ * xio::XioComDequeue<sizeof(nvme_cqe)>(
+ *     &cqeAddr[cq_head], &cqeLocal);
+ * if (NVME_CQE_STATUS_PHASE(cqeLocal.status)
+ *     == expected_phase) { ... }
+ * @endcode
+ *
+ * @see XioComEnqueue  For the corresponding write path.
+ */
+template <uint32_t Size>
+__host__ __device__ static inline void
+XioComDequeue(volatile const void* src, void* dst) {
+  static_assert(Size % sizeof(uint64_t) == 0,
+                "Size must be a multiple of 8");
+  static_assert(Size > 0 && Size <= 256,
+                "Size out of expected range");
+  volatile const uint64_t* s =
+    reinterpret_cast<volatile const uint64_t*>(src);
+  uint64_t* d = reinterpret_cast<uint64_t*>(dst);
+  constexpr uint32_t N = Size / sizeof(uint64_t);
+#pragma unroll
+  for (uint32_t i = 0; i < N; i++) {
+    d[i] = s[i];
+  }
+}
 
 /**
  * @brief Ring a doorbell register via direct MMIO write.
