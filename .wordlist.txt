@@ -172,6 +172,7 @@ Threadripper
 # ===== Hardware and System =====
 cpu
 devmem
+devtmpfs
 hostname
 IOMMU
 iommu
@@ -268,6 +269,7 @@ pty
 pwd
 pyspelling
 rojopolis
+venv
 shellcheck
 ShellCheck
 srun
@@ -963,6 +965,7 @@ forceinline
 freeGpuAccessibleBuffer
 freeQueue
 genPciMmioBridgeCmd
+pciMmioBridge
 getEndpointName
 getIterations
 initEndpoint
@@ -1002,6 +1005,7 @@ xioQueueSetup
 XioTimingStats
 
 # ===== VM Testing Infrastructure Terms =====
+XIOVirtualMachine
 Ansible
 ansible
 batesste
@@ -1124,6 +1128,7 @@ stopRequested
 QueueMemMode
 
 # ===== Performance Documentation Terms =====
+responder
 CTests
 TiB
 VID

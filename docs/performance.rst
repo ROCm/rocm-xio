@@ -1,11 +1,10 @@
 Performance
 ===========
 
-This page documents RDMA-EP loopback performance
-measurements collected on a single-node system. All
-results are from GPU-initiated RDMA WRITE operations
-with LFSR data verification, measured end-to-end from
-the GPU kernel (post WQE to CQE completion).
+This page documents RDMA-EP loopback performance measurements collected on a
+single-node system. All results are from GPU-initiated RDMA WRITE operations
+with LFSR data verification, measured end-to-end from the GPU kernel (post WQE
+to CQE completion).
 
 Test Environment
 ----------------
@@ -28,30 +27,23 @@ Test Environment
      - 6.17.0-19-generic
    * - **ROCm**
      - 7.2.0
-   * - **Commit**
-     - ``a1ad2a9``
 
 Test Methodology
 ----------------
 
-Each measurement runs ``test-rdma-loopback`` in a
-single-QP loopback configuration: the NIC sends an RDMA
-WRITE to itself over a QP connected to its own GID. The
-GPU kernel posts a single WQE, rings the doorbell from
-device code, then spin-polls the CQ for completion. The
-GPU wall clock measures the elapsed time from WQE post
-to CQE arrival.
+Each measurement runs ``test-rdma-loopback`` in a single-QP loopback
+configuration: the NIC sends an RDMA WRITE to itself over a QP connected to its
+own GID. The GPU kernel posts a single WQE, rings the doorbell from device code,
+then spin-polls the CQ for completion. The GPU wall clock measures the elapsed
+time from WQE post to CQE arrival.
 
-All test programs allocate memory through the
-``xio::allocHostMemory`` / ``xio::allocDeviceMemory``
-abstraction rather than calling ``posix_memalign``,
-``hipHostMalloc``, or ``hipMalloc`` directly. This
-ensures the same allocation flags and pinning semantics
-used by the production endpoint code paths.
+All test programs allocate memory through the ``xio::allocHostMemory`` /
+``xio::allocDeviceMemory`` abstraction rather than calling ``posix_memalign``,
+``hipHostMalloc``, or ``hipMalloc`` directly. This ensures the same allocation
+flags and pinning semantics used by the production endpoint code paths.
 
-Ten iterations are run per (vendor, transfer size) pair,
-each with a distinct LFSR seed for data verification.
-Statistics are computed over the ten successful
+Ten iterations are run per (vendor, transfer size) pair, each with a distinct
+LFSR seed for data verification. Statistics are computed over the ten successful
 iterations:
 
 - **Min** -- fastest observed operation
@@ -59,32 +51,28 @@ iterations:
 - **Std** -- population standard deviation
 - **Max** -- slowest observed operation
 
-Throughput and IOPS are derived from the per-operation
-latency:
+Throughput and IOPS are derived from the per-operation latency:
 
-- **Throughput** = transfer size / latency (MB/s, where
-  1 MB = 10\ :sup:`6` bytes)
+- **Throughput** = transfer size / latency (MB/s, where 1 MB = 10\ :sup:`6`
+  bytes)
 - **IOPS** = 10\ :sup:`6` / latency (ops/s)
 
-Because these are single-operation measurements (not
-pipelined), the IOPS figures represent the serial
-round-trip rate. Pipelined or multi-queue workloads
+Because these are single-operation measurements (not pipelined), the IOPS
+figures represent the serial round-trip rate. Pipelined or multi-queue workloads
 will achieve higher aggregate IOPS.
 
 .. note::
 
-   Transfer sizes below 32 bytes cause the GPU kernel
-   to hang on both BNXT and IONIC hardware. The
-   minimum working transfer size for loopback RDMA
-   WRITE is 32 bytes.
+   Transfer sizes below 32 bytes cause the GPU kernel to hang on both BNXT and
+   IONIC hardware. The minimum working transfer size for loopback RDMA WRITE
+   is 32 bytes.
 
 Queue Memory Placement
 ----------------------
 
-The CQ and SQ buffers can reside in either host memory
-or GPU VRAM.  The ``--queue-mem host|vram`` flag on
-``test-rdma-loopback`` (and the ``queueMem`` field in
-``RdmaEpConfig``) selects the placement.
+The CQ and SQ buffers can reside in either host memory or GPU VRAM. The
+``--queue-mem host|vram`` flag on ``test-rdma-loopback`` (and the ``queueMem``
+field in ``RdmaEpConfig``) selects the placement.
 
 ============  ========================================
 Mode          Description
@@ -99,11 +87,10 @@ Mode          Description
               coherence concern.
 ============  ========================================
 
-BNXT always uses VRAM for its CQ (allocated via DMA-BUF
-UMEM in the DV backend) regardless of this setting.
-IONIC uses host coherent memory by default; the IONIC
-kernel driver does not currently support VRAM-backed
-queues through ``ib_umem_get``.
+BNXT always uses VRAM for its CQ (allocated via DMA-BUF UMEM in the DV backend)
+regardless of this setting. IONIC uses host coherent memory by default; the
+IONIC kernel driver does not currently support VRAM-backed queues through
+``ib_umem_get``.
 
 RDMA-EP Loopback Results
 ------------------------
@@ -346,51 +333,45 @@ RDMA WRITE with Immediate
 -------------------------
 
 The ``QueuePair`` API now includes ``put_nbi_imm()`` and
-``put_nbi_imm_single()`` for RDMA WRITE with Immediate
-Data (``IBV_WR_RDMA_WRITE_WITH_IMM``). Opcode support
-is wired for all four vendors (BNXT, IONIC, MLX5, ERNIC)
-and the ``--write-imm`` flag is available in
-``test-rdma-loopback``.
+``put_nbi_imm_single()`` for RDMA WRITE with Immediate Data
+(``IBV_WR_RDMA_WRITE_WITH_IMM``). Opcode support is wired for all four vendors
+(BNXT, IONIC, MLX5, ERNIC) and the ``--write-imm`` flag is available in
+``test-rdma-loopback``. Only IONIC currently runs end-to-end with
+``test-rdma-loopback --write-imm``; BNXT and other vendors exit with skip code
+77 because their DV-created QPs do not expose ``ibv_post_recv``, which the
+WRITE_IMM responder path requires.
 
-Per the InfiniBand specification (section 9.3.3.3),
-WRITE_IMM is commonly used as a **zero-length
-notification**: the 32-bit immediate value is the entire
-payload, posted with ``num_sge = 0``. The NIC delivers
-the immediate value by consuming a receive WQE from the
-responder's RQ and generating a completion with the
-immediate data.
+Per the InfiniBand specification (section 9.3.3.3), WRITE_IMM is commonly used
+as a **zero-length notification**: the 32-bit immediate value is the entire
+payload, posted with ``num_sge = 0``. The NIC delivers the immediate value by
+consuming a receive WQE from the responder's RQ and generating a completion with
+the immediate data.
 
 Current status:
 
-- **IONIC**: Functional with ``hipHostMallocCoherent``
-  queue buffers.  Zero-length WRITE_IMM completes in
-  ~14--16 us (loopback).  Occasional failures (~2/10)
-  on rapid QP number reuse are a firmware timing issue,
-  not a coherence problem.
+- **IONIC**: Functional with ``hipHostMallocCoherent`` queue buffers.
+  Zero-length WRITE_IMM completes in ~14--16 us (loopback). Occasional failures
+  (~2/10) on rapid QP number reuse are a firmware timing issue, not a coherence
+  problem.
 
-- **BNXT**: The DV-created QP does not expose
-  ``ibv_post_recv``.  Posting receive WQEs (required
-  for WRITE_IMM) is not supported through the current
-  DV path.  WRITE_IMM is skipped on BNXT (exit 77).
+- **BNXT**: The DV-created QP does not expose ``ibv_post_recv``. Posting receive
+  WQEs (required for WRITE_IMM) is not supported through the current DV path.
+  WRITE_IMM is skipped on BNXT (exit 77).
 
 .. note::
 
-   The ``hipHostMallocCoherent`` fix for the IONIC
-   parent domain allocator was critical for reliable
-   CQ polling.  Without the coherent flag, the GPU L2
-   cache served stale CQE data from previous QP
-   allocations, causing ~60% of WRITE_IMM operations
-   to time out.  This matches the nvme-ep queue
-   allocation path which also uses coherent memory.
+   The ``hipHostMallocCoherent`` fix for the IONIC parent domain allocator was
+   critical for reliable CQ polling. Without the coherent flag, the GPU L2 cache
+   served stale CQE data from previous QP allocations, causing ~60% of WRITE_IMM
+   operations to time out. This matches the nvme-ep queue allocation path which
+   also uses coherent memory.
 
 NVMe-EP Smoke Test
 ------------------
 
-The ``xio-tester nvme-ep`` smoke test validates the
-GPU-initiated NVMe read path end to end: admin queue
-setup, I/O queue creation, SQE construction from GPU
-device code, doorbell ring, CQE polling, and LFSR data
-verification.
+The ``xio-tester nvme-ep`` smoke test validates the GPU-initiated NVMe read path
+end to end: admin queue setup, I/O queue creation, SQE construction from GPU
+device code, doorbell ring, CQE polling, and LFSR data verification.
 
 .. list-table::
    :widths: 30 70
@@ -422,23 +403,19 @@ Results (4 sequential 512-byte reads, batch size 1):
      - 0.5
      - 30.6
 
-The unit tests (``test-nvme-config``,
-``test-nvme-helpers``, ``test-nvme-hardware``) validate
-struct layout, helper functions, and hardware queries
-(LBA size, namespace capacity, SMART log, queue ID
-enumeration) without issuing I/O.
+The unit tests (``test-nvme-config``, ``test-nvme-helpers``,
+``test-nvme-hardware``) validate struct layout, helper functions, and hardware
+queries (LBA size, namespace capacity, SMART log, queue ID enumeration) without
+issuing I/O.
 
 NVMe-EP Performance
 -------------------
 
-This section compares GPU-initiated NVMe I/O (via
-``xio-tester nvme-ep``) against CPU-initiated I/O (via
-``fio``) on two NVMe devices.  The GPU drives the NVMe
-submission and completion queues directly from device
-code, bypassing the kernel block layer entirely.  The
-``fio`` baseline uses the kernel NVMe driver with
-``io_uring`` (QD=32 for throughput) and ``sync`` (QD=1
-for latency).
+This section compares GPU-initiated NVMe I/O (via ``xio-tester nvme-ep``)
+against CPU-initiated I/O (via ``fio``) on two NVMe devices. The GPU drives the
+NVMe submission and completion queues directly from device code, bypassing the
+kernel block layer entirely. The ``fio`` baseline uses the kernel NVMe driver
+with ``io_uring`` (QD=32 for throughput) and ``sync`` (QD=1 for latency).
 
 NVMe Devices Under Test
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -472,8 +449,7 @@ NVMe Devices Under Test
 CTest Results
 ^^^^^^^^^^^^^
 
-All NVMe CTests were run on both devices using
-``ROCXIO_NVME_DEVICE``.
+All NVMe CTests were run on both devices using ``ROCXIO_NVME_DEVICE``.
 
 .. list-table::
    :widths: 40 30 30
@@ -490,20 +466,17 @@ All NVMe CTests were run on both devices using
      - 24 / 25
      - ``nvme-verify-seq-device-mem-multi-lba``
 
-The ``nvme-verify-seq-device-mem-multi-lba`` failure
-occurs on both devices and indicates a data verification
-issue with multi-LBA writes (``--lbas-per-io 32``) using
-device memory (memory mode 8).  The
-``nvme-verify-rand-device-mem`` timeout on MTR_SLC is
-related to the same device-memory verification path.
+The ``nvme-verify-seq-device-mem-multi-lba`` failure occurs on both devices and
+indicates a data verification issue with multi-LBA writes (``--lbas-per-io 32``)
+using device memory (memory mode 8). The ``nvme-verify-rand-device-mem`` timeout
+on MTR_SLC is related to the same device-memory verification path.
 
 fio CPU Baseline
 ^^^^^^^^^^^^^^^^
 
-All fio tests used ``--direct=1`` (bypass page cache),
-30-second runtime, and ``--time_based``.  Bandwidth /
-IOPS tests used ``io_uring`` with ``--iodepth=32``;
-latency tests used ``sync`` with ``--iodepth=1``.
+All fio tests used ``--direct=1`` (bypass page cache), 30-second runtime, and
+``--time_based``. Bandwidth / IOPS tests used ``io_uring`` with
+``--iodepth=32``; latency tests used ``sync`` with ``--iodepth=1``.
 
 MTR_SLC (``/dev/nvme2n1``) -- io_uring QD=32
 """""""""""""""""""""""""""""""""""""""""""""
@@ -748,9 +721,8 @@ WD_BLACK (``/dev/nvme1n1``) -- sync QD=1
 GPU-Initiated NVMe (xio-tester)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-All runs used ``HSA_FORCE_FINE_GRAIN_PCIE=1`` and
-``--less-timing``.  Latency is measured end-to-end on
-the GPU wall clock: from SQE post to CQE arrival.
+All runs used ``HSA_FORCE_FINE_GRAIN_PCIE=1`` and ``--less-timing``. Latency is
+measured end-to-end on the GPU wall clock: from SQE post to CQE arrival.
 Transfer size is 512 bytes (1 LBA) unless noted.
 
 Memory Mode Comparison -- MTR_SLC
@@ -964,9 +936,8 @@ Batched reads (128 reads, batch size 16):
 Sustained Throughput (Infinite Mode)
 """"""""""""""""""""""""""""""""""""
 
-Both devices were run in infinite mode for ~15 seconds
-with 16 queues, batch size 16, memory mode 3 (SQ/CQ in
-VRAM), and 512-byte reads:
+Both devices were run in infinite mode for ~15 seconds with 16 queues, batch
+size 16, memory mode 3 (SQ/CQ in VRAM), and 512-byte reads:
 
 .. list-table::
    :widths: 22 15 15 15 15
@@ -1010,28 +981,24 @@ Derived sustained performance (16 queues x 512 B):
 Write + Read Verification
 """""""""""""""""""""""""
 
-The ``--write-io N --read-io N`` mode writes LFSR
-patterns and then reads them back.  The host-side LFSR
-verifier runs after the GPU kernel finishes and reports
-pass/fail counts.  On both devices, 64 writes followed
-by 64 reads (batch size 1) completed successfully across
-all four memory modes.
+The ``--write-io N --read-io N`` mode writes LFSR patterns and then reads them
+back. The host-side LFSR verifier runs after the GPU kernel finishes and reports
+pass/fail counts. On both devices, 64 writes followed by 64 reads (batch size 1)
+completed successfully across all four memory modes.
 
 .. note::
 
-   Pure read tests show ``Verify Failed`` counts equal
-   to the number of reads.  This is expected: the LFSR
-   verifier checks read data against a pattern that was
-   never written by ``xio-tester``, so the comparison
-   always fails for arbitrary on-disk content.
+   Pure read tests show ``Verify Failed`` counts equal to the number of reads.
+   This is expected: the LFSR verifier checks read data against a pattern that
+   was never written by ``xio-tester``, so the comparison always fails for
+   arbitrary on-disk content.
 
 CPU Utilization: GPU vs CPU
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A key advantage of GPU-initiated NVMe I/O is CPU
-offload.  The GPU kernel constructs SQEs, rings
-doorbells, and polls CQEs entirely from device code.
-The CPU is only involved in queue setup and teardown.
+A key advantage of GPU-initiated NVMe I/O is CPU offload. The GPU kernel
+constructs SQEs, rings doorbells, and polls CQEs entirely from device code. The
+CPU is only involved in queue setup and teardown.
 
 fio (CPU-driven, 4K randread, io_uring QD=32):
 
@@ -1074,15 +1041,12 @@ xio-tester (GPU-driven, 512B reads, mode 3):
      - ~43,598
      - ~0% (GPU-driven, CPU idle)
 
-The CPU-driven path consumes one full core (99.8%
-usr+sys on MTR_SLC at 338K IOPS).  The GPU-driven path
-achieves its IOPS with effectively zero CPU overhead,
-freeing the CPU for other work.  At 512 B transfer
-sizes, the GPU single-op latency (~35 us on MTR_SLC) is
-higher than the kernel NVMe driver (~12.5 us via sync
-QD=1), but the GPU path trades latency for CPU offload
-and can scale across many queues without consuming CPU
-cores.
+The CPU-driven path consumes one full core (99.8% usr+sys on MTR_SLC at 338K
+IOPS). The GPU-driven path achieves its IOPS with effectively zero CPU overhead,
+freeing the CPU for other work. At 512 B transfer sizes, the GPU single-op
+latency (~35 us on MTR_SLC) is higher than the kernel NVMe driver (~12.5 us via
+sync QD=1), but the GPU path trades latency for CPU offload and can scale across
+many queues without consuming CPU cores.
 
 Access Pattern Comparison (MTR_SLC, mode 3, batch 16)
 """""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1107,9 +1071,8 @@ Access Pattern Comparison (MTR_SLC, mode 3, batch 16)
      - 527.6
      - 31.9
 
-Sequential access is ~10% faster on average than random
-on the MTR_SLC device, consistent with the device's
-internal read-ahead and sequential prefetch logic.
+Sequential access is ~10% faster on average than random on the MTR_SLC device,
+consistent with the device's internal read-ahead and sequential prefetch logic.
 
 Reproducing These Results
 -------------------------
@@ -1127,8 +1090,8 @@ Build with both BNXT and IONIC providers enabled:
      --target install-rdma-core \
      --parallel
 
-Run the hardware setup fixture, then execute the sweep
-for each vendor and transfer size:
+Run the hardware setup fixture, then execute the sweep for each vendor and
+transfer size:
 
 .. code-block:: bash
 
@@ -1143,14 +1106,14 @@ for each vendor and transfer size:
      build/tests/unit/rdma-ep/test-rdma-loopback \
      --provider bnxt \
      --device rocm-rdma-bnxt0 \
-     --size 4096 --seed 1
+     --size 4096 --seed 1 -n 10
 
    # Run IONIC sweep (example: 4 KiB, 10 iters)
    sudo env LD_LIBRARY_PATH="${LIB}" \
      build/tests/unit/rdma-ep/test-rdma-loopback \
      --provider ionic \
      --device rocm-rdma-ionic0 \
-     --size 4096 --seed 1
+     --size 4096 --seed 1 -n 10
 
 Queue memory placement can be selected per-run:
 
@@ -1161,19 +1124,20 @@ Queue memory placement can be selected per-run:
      build/tests/unit/rdma-ep/test-rdma-loopback \
      --provider ionic \
      --device rocm-rdma-ionic0 \
-     --size 4096 --seed 1 \
+     --size 4096 --seed 1 -n 10 \
      --queue-mem host
 
-Or use the convenience script which iterates over
-multiple seeds and computes statistics automatically:
+Or use the convenience script which iterates over multiple seeds and computes
+statistics automatically:
 
 .. code-block:: bash
 
-   VENDOR=bnxt TEST_SIZE=4096 ITERATIONS=10 \
-     ./run-test-rdma-loopback.sh
+   PROVIDER=bnxt TRANSFER_SIZE=4096 LFSR_SEED=1 \
+     ITERATIONS=10 \
+     scripts/test/test-rdma-ep-xio-loopback.sh
 
-NVMe-EP smoke test (requires root and an NVMe device
-that is **not** the rootfs):
+NVMe-EP smoke test (requires root and an NVMe device that is **not** the
+rootfs):
 
 .. code-block:: bash
 
