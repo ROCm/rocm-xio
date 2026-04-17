@@ -17,13 +17,25 @@
 #   RDMA_CORE_LIB       Path to in-tree rdma-core
 #                       lib/ (auto-detected)
 #   GID_INDEX           GID table index (default: auto)
-#   LOOPBACK_IP         Loopback IP (default: 198.18.0.1)
+#   LOOPBACK_IP         Loopback IP (derived from device
+#                       name: bnxt=198.18.0.1,
+#                       ionic=198.18.1.1, mlx5=198.18.2.1)
 #   NUM_ITERS           Ping-pong iterations (default: 100)
 
 set -euo pipefail
 
 RDMA_DEV="${ROCXIO_RDMA_DEVICE:?ROCXIO_RDMA_DEVICE not set}"
-LOOPBACK_IP="${LOOPBACK_IP:-198.18.0.1}"
+
+# Derive loopback IP from device name when not set.
+# Must match setup-rdma-loopback.sh assignments.
+if [ -z "${LOOPBACK_IP:-}" ]; then
+    case "$RDMA_DEV" in
+        *bnxt*)  LOOPBACK_IP=198.18.0.1 ;;
+        *ionic*) LOOPBACK_IP=198.18.1.1 ;;
+        *mlx5*)  LOOPBACK_IP=198.18.2.1 ;;
+        *)       LOOPBACK_IP=198.18.0.1 ;;
+    esac
+fi
 NUM_ITERS="${NUM_ITERS:-100}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" \

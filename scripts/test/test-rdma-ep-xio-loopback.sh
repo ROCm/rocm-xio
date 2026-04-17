@@ -15,8 +15,9 @@
 #
 # Environment variables:
 #   ROCXIO_RDMA_DEVICE  RDMA device (set by wrapper)
-#   PROVIDER            bnxt|mlx5|ionic|auto
-#                       (default: auto)
+#   PROVIDER            bnxt|mlx5|ionic|ernic
+#                       (derived from RDMA device name
+#                       when not set explicitly)
 #   TRANSFER_SIZE       Bytes per RDMA WRITE
 #                       (default: 256)
 #   LFSR_SEED           Data pattern seed
@@ -31,7 +32,25 @@
 set -euo pipefail
 
 RDMA_DEV="${ROCXIO_RDMA_DEVICE:-}"
-PROVIDER="${PROVIDER:-auto}"
+
+# Derive provider from device name when not explicit.
+# rocm-rdma-bnxt0 -> bnxt, rocm-rdma-ionic0 -> ionic,
+# rocm-rdma-mlx5-0 -> mlx5, rocm-rdma-ernic0 -> ernic.
+if [ -z "${PROVIDER:-}" ] && [ -n "$RDMA_DEV" ]; then
+    case "$RDMA_DEV" in
+        *bnxt*)  PROVIDER=bnxt  ;;
+        *ionic*) PROVIDER=ionic ;;
+        *mlx5*)  PROVIDER=mlx5  ;;
+        *ernic*) PROVIDER=ernic ;;
+        *)
+            echo "ERROR: cannot derive provider" \
+                "from device '$RDMA_DEV'." \
+                "Set PROVIDER explicitly."
+            exit 1
+            ;;
+    esac
+fi
+PROVIDER="${PROVIDER:?PROVIDER required (bnxt|mlx5|ionic|ernic)}"
 TRANSFER_SIZE="${TRANSFER_SIZE:-256}"
 LFSR_SEED="${LFSR_SEED:-1}"
 ITERATIONS="${ITERATIONS:-1}"
@@ -62,9 +81,7 @@ CMD_ARGS+=(--size "$TRANSFER_SIZE")
 CMD_ARGS+=(--seed "$LFSR_SEED")
 CMD_ARGS+=(-n "$ITERATIONS")
 
-if [ "$PROVIDER" != "auto" ]; then
-    CMD_ARGS+=(--provider "$PROVIDER")
-fi
+CMD_ARGS+=(--provider "$PROVIDER")
 
 if [ -n "$RDMA_DEV" ]; then
     CMD_ARGS+=(--device "$RDMA_DEV")
