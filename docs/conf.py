@@ -11,7 +11,7 @@ copyright = (
     "All rights reserved."
 )
 
-version = "0.0.1"
+version = "@ROCM_XIO_LIBRARY_VERSION@"
 release = version
 
 # -- Extensions --------------------------------------------------
