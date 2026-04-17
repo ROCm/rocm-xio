@@ -1,3 +1,10 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Canonical source: kernel/rocm-xio/dkms.conf
+# This copy is used by dh_dkms during Debian packaging.
+
 PACKAGE_NAME="rocm-xio"
 PACKAGE_VERSION="#MODULE_VERSION#"
 

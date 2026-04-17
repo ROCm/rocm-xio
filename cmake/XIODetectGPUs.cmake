@@ -2,10 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
-# Auto-detect GPUs at configure time and generate a
-# CTest resource specification file.  Falls back to the
-# static cmake/ctest-resources.json when no GPUs are
-# found or rocm_agent_enumerator is unavailable.
+# Auto-detect GPUs at configure time and generate a CTest resource specification
+# file.  Defaults to a single GPU when rocm_agent_enumerator is unavailable.
 #
 # Usage (from top-level CMakeLists.txt):
 #   include(XIODetectGPUs)

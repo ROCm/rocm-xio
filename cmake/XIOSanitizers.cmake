@@ -43,9 +43,8 @@ function(xio_add_sanitizers target)
 
     # clang-only
     #
-    # This has a very small runtime penalty (<1%) and will kill
-    # the process if undefined integer behaviour occurs (like
-    # wrapping a signed integer).
+    # This has a very small runtime penalty (<1%) and will kill the process if
+    # undefined integer behaviour occurs (like wrapping a signed integer).
     if(XIO_USE_INTEGER_SANITIZER)
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             set(integer_sanitize_flags

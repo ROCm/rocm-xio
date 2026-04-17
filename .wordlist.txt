@@ -1122,3 +1122,15 @@ wr
 WRITEs
 stopRequested
 QueueMemMode
+
+# ===== Performance Documentation Terms =====
+CTests
+TiB
+VID
+ioengine
+lbas
+prefetch
+randread
+seqread
+uring
+verifier

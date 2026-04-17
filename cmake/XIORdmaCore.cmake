@@ -1,19 +1,14 @@
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
 #
 # XIORdmaCore.cmake
 #
-# Unified rdma-core build with vendor DV patches.
-# Replaces XIOBnxtDirectVerbs.cmake (rdma-core
-# portion) and XIOErnicDirectVerbs.cmake (rdma-core
-# portion). Kernel DKMS modules remain separate.
+# Unified rdma-core build with vendor DV patches. Replaces
+# XIOBnxtDirectVerbs.cmake (rdma-core portion) and XIOErnicDirectVerbs.cmake
+# (rdma-core portion). Kernel DKMS modules remain separate.
 #
-# Included from the top-level CMakeLists.txt when
-# any GDA vendor is enabled.
-
-include(ExternalProject)
+# Included from the top-level CMakeLists.txt when any GDA vendor is enabled.
 
 # -----------------------------------------------
 # Configurable cache variables

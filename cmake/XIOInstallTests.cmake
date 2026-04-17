@@ -4,9 +4,8 @@
 
 # CTest helpers for install-integration tests.
 #
-# These tests install rocm-xio to a temporary prefix and
-# then configure, build, and run standalone example projects
-# against the installed library.
+# These tests install rocm-xio to a temporary prefix and then configure, build,
+# and run standalone example projects against the installed library.
 
 set(XIO_INSTALL_TEST_PREFIX
   "${CMAKE_BINARY_DIR}/_install_test"
@@ -19,9 +18,9 @@ set(XIO_INSTALL_TEST_BUILDS
   "Build tree root for install-integration examples")
 
 set(XIO_RUN_INSTALL_EXAMPLE
-  "${CMAKE_SOURCE_DIR}/cmake/run-install-example.cmake"
+  "${CMAKE_SOURCE_DIR}/cmake/XIOInstallExample.cmake"
   CACHE FILEPATH
-  "Path to the run-install-example.cmake script")
+  "Path to the XIOInstallExample.cmake script")
 
 # Derive the ROCm prefix so examples can resolve
 # find_dependency(hip) and find_dependency(hsa-runtime64)
@@ -38,9 +37,8 @@ endif()
 # xio_install_test_fixture()
 #
 # Register the CTest fixture that installs rocm-xio into
-# XIO_INSTALL_TEST_PREFIX.  All per-example tests declare
-# FIXTURES_REQUIRED on ROCM_XIO_INSTALL so CTest orders
-# them correctly.
+# XIO_INSTALL_TEST_PREFIX.  All per-example tests declare FIXTURES_REQUIRED on
+# ROCM_XIO_INSTALL so CTest orders them correctly.
 function(xio_install_test_fixture)
   add_test(
     NAME install-rocm-xio
@@ -57,8 +55,8 @@ endfunction()
 
 # xio_add_install_test()
 #
-# Register a CTest test that builds (and optionally runs) a
-# standalone example project against the installed prefix.
+# Register a CTest test that builds (and optionally runs) a standalone
+# example project against the installed prefix.
 #
 # Usage:
 #   xio_add_install_test(
@@ -75,10 +73,9 @@ endfunction()
 #
 # NAME       - CTest name (prefixed with "example-").
 # SOURCE_DIR - Path to the standalone CMake project.
-# SCRIPT     - Path to a cmake -P script (mutually
-#              exclusive with SOURCE_DIR).
-# RUN        - If set, run the built binary after building
-#              (binary name assumed == NAME).
+# SCRIPT     - Path to a cmake -P script (mutually exclusive with SOURCE_DIR).
+# RUN        - If set, run the built binary after building (binary name
+#              assumed == NAME).
 function(xio_add_install_test)
   cmake_parse_arguments(
     XIO_IT

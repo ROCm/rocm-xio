@@ -4,21 +4,20 @@
 
 # Wrapper script for CTest install-integration tests.
 #
-# Configures, builds, and optionally runs a standalone
-# example project against an installed rocm-xio prefix.
+# Configures, builds, and optionally runs a standalone example project against
+# an installed rocm-xio prefix.
 #
 # Required -D arguments:
 #   SOURCE_DIR  - Absolute path to the example project.
 #   BUILD_DIR   - Absolute path for the example build tree.
-#   PREFIX      - Absolute path to the rocm-xio install
-#                 prefix (passed as CMAKE_PREFIX_PATH).
+#   PREFIX      - Absolute path to the rocm-xio install prefix (passed as
+#                 CMAKE_PREFIX_PATH).
 #
 # Optional -D arguments:
-#   ROCM_PREFIX - Path to the ROCm installation (added
-#                 to CMAKE_PREFIX_PATH so find_dependency
-#                 can resolve hip and hsa-runtime64).
-#   RUN_BINARY  - Name of the binary to run after building.
-#                 Skipped if empty or unset.
+#   ROCM_PREFIX - Path to the ROCm installation (added to CMAKE_PREFIX_PATH so
+#                 find_dependency can resolve hip and hsa-runtime64).
+#   RUN_BINARY  - Name of the binary to run after building. Skipped if empty
+#                 or unset.
 #   HIP_COMPILER - Path to the HIP compiler to forward.
 
 cmake_minimum_required(VERSION 3.21)

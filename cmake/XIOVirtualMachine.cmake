@@ -4,8 +4,7 @@
 
 # XIOVirtualMachine.cmake
 #
-# VM targets for safe rocm-xio testing (kernel panics
-# stay inside the VM).
+# VM targets for safe rocm-xio testing (kernel panics stay inside the VM).
 #
 # Targets:
 #   make gen-test-vm      Create the VM image

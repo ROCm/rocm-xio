@@ -8,21 +8,20 @@
 
 function(get_xio_gnu_warning_flags outvar compiler_version)
 
-    # Warning flags for g++ 9 and earlier
+    # Base warning flags for all g++ versions; version-gated additions follow
     set(flags
         # Basic "high" warning levels
         -Wall
         -Wextra
 
         # Avoid non-standard C/C++ behavior
-        # Can't use -pedantic with nvcc at this time, as nvcc
-        # generates code with non-standard #line styles, leading
-        # to a LOT of warnings
+        # Can't use -pedantic with nvcc at this time, as nvcc generates code
+        # with non-standard #line styles, leading to a LOT of warnings
         #-pedantic
 
         # Check for ABI warnings
-        # Most of this is noise, but probably useful to turn
-        # on from time to time
+        # Most of this is noise, but probably useful to turn on from time to
+        # time
         #-Wabi
 
         # Turn on stack protection options
@@ -91,8 +90,8 @@ function(get_xio_gnu_warning_flags outvar compiler_version)
             ${flags}
         )
 
-        # Only use _FORTIFY_SOURCE if the optimization level is -O2,
-        # -O3, or -Os
+        # Only use _FORTIFY_SOURCE if the optimization level is -O2, -O3, or
+        # -Os
         string(JOIN " " MYCXXFLAGS ${CMAKE_CXX_FLAGS}
           ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE}})
         if(MYCXXFLAGS MATCHES "-O[2-3s]")
@@ -105,8 +104,7 @@ function(get_xio_gnu_warning_flags outvar compiler_version)
 
     if(compiler_version VERSION_GREATER_EQUAL 13)
         set(flags
-            # Turn on strict flex arrays (helps ASAN,
-            # _FORTIFY_SOURCE, etc.)
+            # Turn on strict flex arrays (helps ASAN, _FORTIFY_SOURCE, etc.)
             -fstrict-flex-arrays=3
             # Misc warnings
             -Winvalid-utf8
