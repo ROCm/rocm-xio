@@ -24,8 +24,8 @@ ctr-cx66-mi300x-31
 
 # Flaky unsquashfs -- zstd decompression errors on
 # random files during container extraction
-#mlse-alola-b39-ws4  nvme-ep
-#mlse-alola-b39-ws6  nvme-ep
+mlse-alola-b39-ws4
+mlse-alola-b39-ws6
 
 # RDMA loopback test failures on this node
 #banff-cyxtera-s81-5  rdma-ep
@@ -46,3 +46,7 @@ ctr-halo-b48-02  test-ep,basic-tests
 # RX 9070 XT container/driver mismatch -- build hangs,
 # device-memory segfaults in memory-mode tests
 ctr-navi4x-aj53-ws08  test-ep,basic-tests
+
+# No GPU despite SLURM gres -- hipInit fails with
+# "no ROCm-capable device is detected"
+ctr2-mlse-smc-alola-s96-15
