@@ -107,6 +107,13 @@ int main(int argc, char** argv) {
               "useful for large iterations)")
     ->group("Common Options");
 
+  bool substepTiming = false;
+  app
+    .add_flag("--substep-timing", substepTiming,
+              "Profile GPU cycles per hot-path sub-step "
+              "(enqueue, doorbell, CQ poll, CQ doorbell)")
+    ->group("Common Options");
+
   app
     .add_flag("--pci-mmio-bridge", commonConfig.pciMmioBridge,
               "Use PCI MMIO bridge to route endpoint doorbell rings")
@@ -457,6 +464,19 @@ int main(int argc, char** argv) {
     timingStats->count = 0;
   }
 
+  XioSubstepStats* substepStats = nullptr;
+  if (substepTiming) {
+    hipError_t hipErr = allocHostMemory(sizeof(XioSubstepStats),
+                                        (void**)&substepStats, "substep stats",
+                                        XIO_HOST_MEM_MAPPED);
+    if (hipErr != hipSuccess) {
+      std::cerr << "Error: Failed to allocate "
+                << "substep stats buffer" << std::endl;
+      return EXIT_FAILURE;
+    }
+    memset(substepStats, 0, sizeof(XioSubstepStats));
+  }
+
   volatile bool* stopRequestedFlag = nullptr;
   hipError_t stopFlagErr = allocHostMemory(sizeof(bool),
                                            (void**)&stopRequestedFlag,
@@ -469,6 +489,8 @@ int main(int argc, char** argv) {
       freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
     if (lessTiming && timingStats != nullptr)
       freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+    if (substepStats != nullptr)
+      freeHostMemory(substepStats, XIO_HOST_MEM_MAPPED);
     freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
     freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
     return EXIT_FAILURE;
@@ -479,6 +501,7 @@ int main(int argc, char** argv) {
   baseConfig.startTimes = hostStartTime;
   baseConfig.endTimes = hostEndTime;
   baseConfig.timingStats = timingStats;
+  baseConfig.substepStats = substepStats;
   baseConfig.submissionQueue = hostSqeAddr;
   baseConfig.completionQueue = hostCqeAddr;
   baseConfig.stopRequested = stopRequestedFlag;
@@ -510,6 +533,8 @@ int main(int argc, char** argv) {
       freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
     if (lessTiming && timingStats != nullptr)
       freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+    if (substepStats != nullptr)
+      freeHostMemory(substepStats, XIO_HOST_MEM_MAPPED);
     if (stopRequestedFlag != nullptr)
       freeHostMemory(const_cast<bool*>(stopRequestedFlag), XIO_HOST_MEM_MAPPED);
     g_configForSignalHandler = nullptr;
@@ -662,6 +687,38 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (substepStats != nullptr && substepStats->count > 0) {
+    double cnt = static_cast<double>(substepStats->count);
+    std::cout << "\n--- Sub-step Timing Breakdown "
+              << "(per IO average) ---" << std::endl;
+    std::cout << std::fixed << std::setprecision(1);
+    if (substepStats->buildCount > 0) {
+      double bcnt = static_cast<double>(substepStats->buildCount);
+      std::cout << "  SQE build   : "
+                << (substepStats->sqeBuild / bcnt) * gpuClockPeriodNs << " ns"
+                << std::endl;
+    }
+    std::cout << "  SQE enqueue : "
+              << (substepStats->sqeEnqueue / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    std::cout << "  SQ doorbell : "
+              << (substepStats->doorbell / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    std::cout << "  CQ poll     : "
+              << (substepStats->cqPoll / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    std::cout << "  CQ doorbell : "
+              << (substepStats->cqDoorbell / cnt) * gpuClockPeriodNs << " ns"
+              << std::endl;
+    double totalNs = ((substepStats->sqeBuild + substepStats->sqeEnqueue +
+                       substepStats->doorbell + substepStats->cqPoll +
+                       substepStats->cqDoorbell) /
+                      cnt) *
+                     gpuClockPeriodNs;
+    std::cout << "  Total       : " << totalNs << " ns" << std::endl;
+    std::cout << "  IO count    : " << substepStats->count << std::endl;
+  }
+
   // Print completion message
   if (!wasInterrupted) {
     std::cout << "\nTest completed successfully!" << std::endl;
@@ -675,6 +732,8 @@ int main(int argc, char** argv) {
     freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
   if (lessTiming && timingStats != nullptr)
     freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+  if (substepStats != nullptr)
+    freeHostMemory(substepStats, XIO_HOST_MEM_MAPPED);
   if (stopRequestedFlag != nullptr)
     freeHostMemory(const_cast<bool*>(stopRequestedFlag), XIO_HOST_MEM_MAPPED);
 

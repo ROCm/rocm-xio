@@ -25,54 +25,58 @@
 
 namespace xio::nvme_ep {
 
+/**
+ * @brief Read an NVMe SQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param sqeAddress  Volatile pointer to the SQE slot.
+ * @return Copy of the SQE structure.
+ */
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
   sqeType result;
-  // Copy the entire structure byte-by-byte to handle volatile correctly
-  const volatile uint8_t* src = reinterpret_cast<const volatile uint8_t*>(
-    sqeAddress);
-  uint8_t* dst = reinterpret_cast<uint8_t*>(&result);
-  for (size_t i = 0; i < sizeof(sqeType); i++) {
-    dst[i] = src[i];
-  }
+  xio::XioComDequeue<sizeof(sqeType)>(sqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Read an NVMe CQE from a volatile queue slot
+ *        using 8-byte wide loads via XioComDequeue.
+ *
+ * @param cqeAddress  Volatile pointer to the CQE slot.
+ * @return Copy of the CQE structure.
+ */
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   cqeType result;
-  // Copy the entire structure byte-by-byte to handle volatile correctly
-  const volatile uint8_t* src = reinterpret_cast<const volatile uint8_t*>(
-    cqeAddress);
-  uint8_t* dst = reinterpret_cast<uint8_t*>(&result);
-  for (size_t i = 0; i < sizeof(cqeType); i++) {
-    dst[i] = src[i];
-  }
+  xio::XioComDequeue<sizeof(cqeType)>(cqeAddress, &result);
   return result;
 }
 
+/**
+ * @brief Write an NVMe SQE to a volatile queue slot
+ *        using 8-byte wide stores via XioComEnqueue.
+ *
+ * Does not fence; the caller is responsible for
+ * fencing before the subsequent doorbell write
+ * (ringDoorbell provides its own pre-fence).
+ *
+ * @param sqeData     SQE to write (passed by value).
+ * @param sqeAddress  Volatile pointer to the SQE slot.
+ */
 __host__ __device__ void sqeWrite(sqeType sqeData,
                                   volatile sqeType* sqeAddress) {
-  //*sqeAddress = sqeData;
-
-  // Write byte-by-byte to volatile pointer to ensure all writes are visible
-  // This matches sqeRead's approach and ensures proper volatile semantics
-  const uint8_t* src = reinterpret_cast<const uint8_t*>(&sqeData);
-  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(sqeAddress);
-  for (size_t i = 0; i < sizeof(sqeType); i++) {
-    dst[i] = src[i];
-  }
-
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif // __HIP_DEVICE_COMPILE__
+  xio::XioComEnqueue<sizeof(sqeType)>(&sqeData, sqeAddress);
 }
 
+/**
+ * @brief Write an NVMe CQE to a volatile queue slot
+ *        using 8-byte wide stores via XioComEnqueue.
+ *
+ * @param cqeData     CQE to write (passed by value).
+ * @param cqeAddress  Volatile pointer to the CQE slot.
+ */
 __host__ __device__ void cqeWrite(cqeType cqeData,
                                   volatile cqeType* cqeAddress) {
-  const uint8_t* src = reinterpret_cast<const uint8_t*>(&cqeData);
-  volatile uint8_t* dst = reinterpret_cast<volatile uint8_t*>(cqeAddress);
-  for (size_t i = 0; i < sizeof(cqeType); i++) {
-    dst[i] = src[i];
-  }
+  xio::XioComEnqueue<sizeof(cqeType)>(&cqeData, cqeAddress);
 }
 
 // Poll for new SQE - waits for command ID to change
@@ -270,6 +274,63 @@ __device__ static void driveEndpointSingle(
     batch_size = kMaxTimedBatch;
   }
 
+  constexpr unsigned kMaxPrecomputedPrps = 256;
+  uint64_t readPrp1[kMaxPrecomputedPrps];
+  uint64_t readPrp2[kMaxPrecomputedPrps];
+  uint64_t writePrp1[kMaxPrecomputedPrps];
+  uint64_t writePrp2[kMaxPrecomputedPrps];
+  bool prpsPrecomputed = false;
+
+  uint32_t precompute_count = batch_size;
+  if (precompute_count > kMaxPrecomputedPrps)
+    precompute_count = kMaxPrecomputedPrps;
+
+  if (precompute_count > 0) {
+    sqeType tmpSqe = {};
+    for (uint32_t b = 0; b < precompute_count; b++) {
+      uint64_t buf_off = (uint64_t)b * transfer_size;
+      uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
+      uint64_t* prpSlot = bufferParams.prpListPool
+                            ? bufferParams.prpListPool + prpOff
+                            : nullptr;
+      uint64_t prpSlotDma = bufferParams.prpListPoolDma
+                              ? bufferParams.prpListPoolDma +
+                                  prpOff * sizeof(uint64_t)
+                              : 0;
+      uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+      uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
+
+      if (has_read_buffer &&
+          buf_off + transfer_size <= bufferParams.bufferSize) {
+        uint64_t addr = bufferParams.readPagePhysAddrs
+                          ? bufferParams.readPagePhysAddrs[pageOff] +
+                              intraPageOff
+                        : bufferParams.readBufferDma
+                          ? (bufferParams.readBufferDma + buf_off)
+                          : (uint64_t)(bufferParams.readBuffer + buf_off);
+        calculatePrps(addr, transfer_size, &tmpSqe, prpSlot, prpSlotDma,
+                      bufferParams.readPagePhysAddrs, pageOff);
+        readPrp1[b] = tmpSqe.dptr.prp.prp1;
+        readPrp2[b] = tmpSqe.dptr.prp.prp2;
+      }
+
+      if (has_write_buffer &&
+          buf_off + transfer_size <= bufferParams.bufferSize) {
+        uint64_t addr = bufferParams.writePagePhysAddrs
+                          ? bufferParams.writePagePhysAddrs[pageOff] +
+                              intraPageOff
+                        : bufferParams.writeBufferDma
+                          ? (bufferParams.writeBufferDma + buf_off)
+                          : (uint64_t)(bufferParams.writeBuffer + buf_off);
+        calculatePrps(addr, transfer_size, &tmpSqe, prpSlot, prpSlotDma,
+                      bufferParams.writePagePhysAddrs, pageOff);
+        writePrp1[b] = tmpSqe.dptr.prp.prp1;
+        writePrp2[b] = tmpSqe.dptr.prp.prp2;
+      }
+    }
+    prpsPrecomputed = true;
+  }
+
   unsigned ops_done = 0;
   while ((ioParams.infiniteMode || ops_done < total_ops) &&
          (config.stopRequested == nullptr || !*config.stopRequested)) {
@@ -281,6 +342,10 @@ __device__ static void driveEndpointSingle(
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
       uint16_t cmd_id = (uint16_t)((op_idx % 65535) + 1);
+
+      unsigned long long int ss_build0 = 0;
+      if (config.substepStats)
+        ss_build0 = wall_clock64();
 
       bool is_read_op;
       if (ioParams.infiniteMode) {
@@ -299,50 +364,65 @@ __device__ static void driveEndpointSingle(
       sqe->command_id = cmd_id;
       sqe->nsid = nsid;
 
-      uint64_t buf_off = (uint64_t)b * transfer_size;
-      bool prp_valid = false;
-
-      uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
-      uint64_t* prpSlot = bufferParams.prpListPool
-                            ? bufferParams.prpListPool + prpOff
-                            : nullptr;
-      uint64_t prpSlotDma = bufferParams.prpListPoolDma
-                              ? bufferParams.prpListPoolDma +
-                                  prpOff * sizeof(uint64_t)
-                              : 0;
-      uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
-      uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
-
-      if (is_read_op && has_read_buffer) {
-        if (buf_off + transfer_size <= bufferParams.bufferSize) {
-          uint64_t addr = bufferParams.readPagePhysAddrs
-                            ? bufferParams.readPagePhysAddrs[pageOff] +
-                                intraPageOff
-                          : bufferParams.readBufferDma
-                            ? (bufferParams.readBufferDma + buf_off)
-                            : (uint64_t)(bufferParams.readBuffer + buf_off);
-          calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
-                        bufferParams.readPagePhysAddrs, pageOff);
-          prp_valid = true;
+      if (prpsPrecomputed && b < precompute_count) {
+        if (is_read_op) {
+          sqe->dptr.prp.prp1 = readPrp1[b];
+          sqe->dptr.prp.prp2 = readPrp2[b];
+        } else {
+          sqe->dptr.prp.prp1 = writePrp1[b];
+          sqe->dptr.prp.prp2 = writePrp2[b];
         }
-      } else if (!is_read_op && has_write_buffer) {
-        if (buf_off + transfer_size <= bufferParams.bufferSize) {
-          uint64_t addr = bufferParams.writePagePhysAddrs
-                            ? bufferParams.writePagePhysAddrs[pageOff] +
-                                intraPageOff
-                          : bufferParams.writeBufferDma
-                            ? (bufferParams.writeBufferDma + buf_off)
-                            : (uint64_t)(bufferParams.writeBuffer + buf_off);
-          calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
-                        bufferParams.writePagePhysAddrs, pageOff);
-          prp_valid = true;
+      } else {
+        uint64_t buf_off = (uint64_t)b * transfer_size;
+        uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
+        uint64_t* prpSlot = bufferParams.prpListPool
+                              ? bufferParams.prpListPool + prpOff
+                              : nullptr;
+        uint64_t prpSlotDma = bufferParams.prpListPoolDma
+                                ? bufferParams.prpListPoolDma +
+                                    prpOff * sizeof(uint64_t)
+                                : 0;
+        uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+        uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
+
+        if (is_read_op && has_read_buffer) {
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.readPagePhysAddrs
+                              ? bufferParams.readPagePhysAddrs[pageOff] +
+                                  intraPageOff
+                            : bufferParams.readBufferDma
+                              ? (bufferParams.readBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.readBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
+                          bufferParams.readPagePhysAddrs, pageOff);
+          } else {
+            __builtin_trap();
+          }
+        } else if (!is_read_op && has_write_buffer) {
+          if (buf_off + transfer_size <= bufferParams.bufferSize) {
+            uint64_t addr = bufferParams.writePagePhysAddrs
+                              ? bufferParams.writePagePhysAddrs[pageOff] +
+                                  intraPageOff
+                            : bufferParams.writeBufferDma
+                              ? (bufferParams.writeBufferDma + buf_off)
+                              : (uint64_t)(bufferParams.writeBuffer + buf_off);
+            calculatePrps(addr, transfer_size, sqe, prpSlot, prpSlotDma,
+                          bufferParams.writePagePhysAddrs, pageOff);
+          } else {
+            __builtin_trap();
+          }
+        } else {
+          __builtin_trap();
         }
       }
 
-      if (!prp_valid) {
-        __builtin_trap();
-      }
       sqeSetup(sqe, lba, blocks);
+
+      if (config.substepStats) {
+        unsigned long long int ss_build1 = wall_clock64();
+        config.substepStats->sqeBuild += ss_build1 - ss_build0;
+        config.substepStats->buildCount++;
+      }
 
       if (!ioParams.infiniteMode && config.startTimes != nullptr) {
         config.startTimes[op_idx] = wall_clock64();
@@ -350,12 +430,34 @@ __device__ static void driveEndpointSingle(
         batchStartTimes[b] = wall_clock64();
       }
 
+      unsigned long long int ss_t0 = 0, ss_t1 = 0;
+      if (config.substepStats)
+        ss_t0 = wall_clock64();
+
       nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+
+      if (config.substepStats) {
+        ss_t1 = wall_clock64();
+        config.substepStats->sqeEnqueue += ss_t1 - ss_t0;
+      }
+
       sq_tail = (sq_tail + 1) % ioParams.queueSize;
     }
 
-    __threadfence_system();
+    unsigned long long int ss_db0 = 0, ss_db1 = 0;
+    if (config.substepStats)
+      ss_db0 = wall_clock64();
+
     nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+
+    if (config.substepStats) {
+      ss_db1 = wall_clock64();
+      config.substepStats->doorbell += ss_db1 - ss_db0;
+    }
+
+    unsigned long long int ss_poll0 = 0;
+    if (config.substepStats)
+      ss_poll0 = wall_clock64();
 
     for (unsigned b = 0; b < batch_count; b++) {
       unsigned op_idx = ops_done + b;
@@ -408,9 +510,25 @@ __device__ static void driveEndpointSingle(
       if (cq_head == 0) {
         expected_phase ^= 1;
       }
-      nvme_ep::ringDoorbell(cq_head, doorbellParams,
-                            doorbellParams.doorbellOffset +
-                              nvme_ep::doorBellStride);
+    }
+
+    if (config.substepStats) {
+      unsigned long long int ss_poll1 = wall_clock64();
+      config.substepStats->cqPoll += ss_poll1 - ss_poll0;
+    }
+
+    unsigned long long int ss_cqdb0 = 0;
+    if (config.substepStats)
+      ss_cqdb0 = wall_clock64();
+
+    nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                          doorbellParams.doorbellOffset +
+                            nvme_ep::doorBellStride);
+
+    if (config.substepStats) {
+      unsigned long long int ss_cqdb1 = wall_clock64();
+      config.substepStats->cqDoorbell += ss_cqdb1 - ss_cqdb0;
+      config.substepStats->count += batch_count;
     }
 
     ops_done += batch_count;
@@ -600,7 +718,6 @@ __device__ static void driveEndpointWavefront(
       uint16_t new_tail = (sq_tail_base + batch_count) % ioParams.queueSize;
       sh_sq_tail = new_tail;
 
-      __threadfence_system();
       nvme_ep::ringDoorbell(new_tail, doorbellParams);
 
       uint16_t cq_head = sh_cq_head;
@@ -664,6 +781,9 @@ __device__ static void driveEndpointWavefront(
         if (cq_head == 0) {
           expected_phase ^= 1;
         }
+      }
+
+      if (!sh_stop) {
         nvme_ep::ringDoorbell(cq_head, doorbellParams,
                               doorbellParams.doorbellOffset +
                                 nvme_ep::doorBellStride);
@@ -956,11 +1076,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   uint16_t queue_size = nvmeConfig->queueLength;
 
   // Compute effective batch size matching the device-side
-  // caps: min(batchSize, queueSize - 1, total_ops).
+  // logic: batchSize 0 means "all at once" (total_ops in
+  // finite mode, queueSize-1 in infinite mode).
   uint32_t effBatch = nvmeConfig->ioParams.batchSize;
-  if (effBatch > 1) {
-    if (effBatch > (uint32_t)(queue_size - 1))
-      effBatch = queue_size - 1;
+  if (effBatch == 0) {
+    unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
+                         (unsigned)nvmeConfig->ioParams.writeIo;
+    effBatch = nvmeConfig->ioParams.infiniteMode ? (uint32_t)(queue_size - 1)
+                                                 : total_ops;
+  }
+  if (effBatch > (uint32_t)(queue_size - 1))
+    effBatch = queue_size - 1;
+  {
     unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
                          (unsigned)nvmeConfig->ioParams.writeIo;
     if (!nvmeConfig->ioParams.infiniteMode && effBatch > total_ops)
