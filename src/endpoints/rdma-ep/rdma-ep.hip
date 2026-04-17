@@ -34,7 +34,8 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
                                unsigned iterations, uint32_t transferSize,
                                volatile bool* stopRequested, bool doVerify,
                                uint32_t baseSeed, uint32_t* verifyPass,
-                               uint32_t* verifyFail) {
+                               uint32_t* verifyFail,
+                               xio::XioSubstepStats* substepStats) {
   if (threadIdx.x != 0)
     return;
 
@@ -62,8 +63,26 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
     if (startTimes && !infinite)
       startTimes[i] = t0;
 
+    unsigned long long int ss_t0 = 0, ss_t1 = 0;
+    if (substepStats)
+      ss_t0 = wall_clock64();
+
     qp->put_nbi_single(dst_ptr, src_ptr, transferSize, true);
+
+    if (substepStats) {
+      ss_t1 = wall_clock64();
+      substepStats->sqeEnqueue += ss_t1 - ss_t0;
+      substepStats->doorbell += ss_t1 - ss_t0;
+      ss_t0 = ss_t1;
+    }
+
     qp->quiet_single();
+
+    if (substepStats) {
+      ss_t1 = wall_clock64();
+      substepStats->cqPoll += ss_t1 - ss_t0;
+      substepStats->count++;
+    }
 
     unsigned long long int t1 = wall_clock64();
 
@@ -584,7 +603,8 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
                          queues[q].stream, queues[q].gpu_qp, src, (void*)dst,
                          kStart, kEnd, kStats, config->iterations,
                          cfg->transferSize, config->stopRequested, cfg->verify,
-                         cfg->seed, queues[q].verifyPass, queues[q].verifyFail);
+                         cfg->seed, queues[q].verifyPass, queues[q].verifyFail,
+                         config->substepStats);
     }
 
     hipError_t le = hipGetLastError();
