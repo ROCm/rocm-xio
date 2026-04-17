@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# UtilityTargets.cmake
+# XIOUtilityTargets.cmake
 # Utility targets for linting, formatting, and other tasks
 
 # Clean target
@@ -32,8 +32,6 @@ if(CLANG_FORMAT)
         -o -name \\*.c -o -name \\*.cc -o -name \\*.hip \\)
         -not -path ./build/*
         -not -path ./.git/*
-        -not -path ./stebates-*/*
-        -not -path ./stephen-dec5/*
         -not -path ./src/include/external/*
         -not -path ./gda-experiments/rocSHMEM/*
         -not -name \\*.mod.c
@@ -49,8 +47,6 @@ if(CLANG_FORMAT)
         -o -name \\*.c -o -name \\*.cc -o -name \\*.hip \\)
         -not -path ./build/*
         -not -path ./.git/*
-        -not -path ./stebates-*/*
-        -not -path ./stephen-dec5/*
         -not -path ./src/include/external/*
         -not -path ./gda-experiments/rocSHMEM/*
         -not -name \\*.mod.c

@@ -2,6 +2,8 @@
 build*/
 # Exception: scripts/build/ contains build scripts that should be tracked
 !scripts/build/
+# CTest artifacts (generated when running tests from repo root)
+Testing/
 bin/
 lib/
 *.o
@@ -21,6 +23,7 @@ kernel/*/..module-common.o.cmd
 kernel/*/.*.o.d
 
 # Generated files
+cmake/ctest-resources.json
 src/include/xio-endpoint-registry-gen.h
 src/include/xio-endpoint-includes-gen.h
 src/include/nvme-ep-generated.h
@@ -67,3 +70,6 @@ __pycache__/
 .alola/*.out
 .alola/logs/
 .alola/.alola-job-ids
+
+# LLVM profiling data
+default.profraw

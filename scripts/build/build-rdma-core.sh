@@ -57,10 +57,28 @@ echo "  build      : ${BUILD_DIR}"
 echo "  install    : ${INSTALL_DIR}"
 echo ""
 
-# Skip if already built
-if [ -f "${INSTALL_DIR}/lib/libibverbs.so" ]; then
-  echo "rdma-core already installed, skipping."
-  exit 0
+# Configuration stamp: version + vendor flags. If the
+# flags changed since the last install, wipe and rebuild.
+STAMP_FILE="${INSTALL_DIR}/.rdma-core-config"
+CURRENT_CONFIG="v${VERSION}"
+CURRENT_CONFIG="${CURRENT_CONFIG} bnxt=${GDA_BNXT}"
+CURRENT_CONFIG="${CURRENT_CONFIG} ionic=${GDA_IONIC}"
+CURRENT_CONFIG="${CURRENT_CONFIG} ernic=${GDA_ERNIC}"
+
+if [ -f "${STAMP_FILE}" ]; then
+  PREV_CONFIG="$(cat "${STAMP_FILE}")"
+  if [ "${PREV_CONFIG}" = "${CURRENT_CONFIG}" ]; then
+    echo "rdma-core already installed with matching config, skipping."
+    exit 0
+  fi
+  echo "Config changed: ${PREV_CONFIG} -> ${CURRENT_CONFIG}"
+  echo "Wiping stale rdma-core install and source..."
+  rm -rf "${INSTALL_DIR}" "${SRC_DIR}" "${CMAKE_BUILD}"
+  mkdir -p "${INSTALL_DIR}"
+elif [ -f "${INSTALL_DIR}/lib/libibverbs.so" ]; then
+  echo "Pre-stamp rdma-core install found; wiping for clean rebuild..."
+  rm -rf "${INSTALL_DIR}" "${SRC_DIR}" "${CMAKE_BUILD}"
+  mkdir -p "${INSTALL_DIR}"
 fi
 
 mkdir -p "${BUILD_DIR}"
@@ -183,6 +201,8 @@ fi
 
 echo "Installing rdma-core to ${INSTALL_DIR}..."
 cmake --install "${CMAKE_BUILD}"
+
+echo "${CURRENT_CONFIG}" > "${STAMP_FILE}"
 
 echo ""
 echo "=== rdma-core installed ==="

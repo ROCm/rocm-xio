@@ -2,10 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-# XIOVMTests.cmake
+# XIOVirtualMachineTests.cmake
 #
-# CMake targets for running xio-tester tests inside
-# a running VM via SSH.
+# CMake targets for running xio-tester tests inside a running VM via SSH.
 #
 # Targets:
 #   make vm-test-ep   Run test-ep inside the VM

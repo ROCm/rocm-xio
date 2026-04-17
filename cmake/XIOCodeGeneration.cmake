@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# CodeGeneration.cmake
+# XIOCodeGeneration.cmake
 # Helper module for code generation steps
 
 function(setup_code_generation)
@@ -81,8 +81,6 @@ function(setup_code_generation)
   # Make nvme-ep-generated depend on fetch-nvme-headers
   add_dependencies(nvme-ep-generated fetch-nvme-headers)
 
-  # Format NVMe generated file if clang-format is available
-  find_program(CLANG_FORMAT clang-format PATHS /usr/bin ENV PATH)
   if(CLANG_FORMAT)
     add_custom_command(
       TARGET nvme-ep-generated POST_BUILD

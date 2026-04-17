@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# EndpointDiscovery.cmake
+# XIOEndpointDiscovery.cmake
 # Helper module to discover endpoints and map them to compile defines
 
 # Function to convert endpoint name to define name

@@ -21,8 +21,18 @@ PATCH=$(sed -n \
   's/^set(ROCM_XIO_LIBRARY_PATCH \([0-9]*\))/\1/p' \
   "${PROJECT_DIR}/CMakeLists.txt")
 
+if [ -z "${MAJOR}" ] || [ -z "${MINOR}" ] \
+   || [ -z "${PATCH}" ]; then
+  echo "ERROR: failed to parse version from" \
+    "CMakeLists.txt" >&2
+  echo "  MAJOR='${MAJOR}' MINOR='${MINOR}'" \
+    "PATCH='${PATCH}'" >&2
+  exit 1
+fi
+
 VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
+SHORT_SHA="HEAD"
 if command -v git >/dev/null 2>&1 && \
    git -C "${PROJECT_DIR}" rev-parse HEAD \
      >/dev/null 2>&1; then
@@ -39,7 +49,7 @@ DATE=$(date -R)
 cat > "${SCRIPT_DIR}/changelog" <<EOF
 rocm-xio (${DEB_VERSION}) ${DIST}; urgency=low
 
-  * Automated build from git ${SHORT_SHA:-HEAD}
+  * Automated build from git ${SHORT_SHA}
 
  -- AMD ROCm Build <rocm-xio@amd.com>  ${DATE}
 EOF

@@ -18,8 +18,9 @@ XIO_PATCH := $(shell sed -n \
   CMakeLists.txt)
 XIO_VERSION := $(XIO_MAJOR).$(XIO_MINOR).$(XIO_PATCH)
 
+BUILD_DIR              = $(CURDIR)/obj-$(DEB_BUILD_GNU_TYPE)
 RDMA_CORE_INSTALL_PATH = $(ROCM_PATH)/lib/rocm-xio/rdma-core
-RDMA_CORE_BUILD_DIR    = $(CURDIR)/obj-x86_64-linux-gnu/_deps/rdma-core/install
+RDMA_CORE_BUILD_DIR    = $(BUILD_DIR)/_deps/rdma-core/install
 
 %:
 	dh $@ --with dkms
@@ -76,8 +77,8 @@ override_dh_auto_install:
 	# --- kpack archives ---
 	install -d \
 	  $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack
-	if [ -d $(CURDIR)/obj-x86_64-linux-gnu/kpack ]; then \
-	  cp -a $(CURDIR)/obj-x86_64-linux-gnu/kpack/*.kpack \
+	if [ -d $(BUILD_DIR)/kpack ]; then \
+	  cp -a $(BUILD_DIR)/kpack/*.kpack \
 	    $(CURDIR)/debian/tmp$(ROCM_PATH)/lib/rocm-xio/kpack/; \
 	fi
 

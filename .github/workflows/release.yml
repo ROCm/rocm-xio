@@ -11,9 +11,10 @@ on:
   workflow_dispatch:
     inputs:
       offload_arch:
-        description: 'GPU offload architectures (semicolon-separated)'
+        description: >-
+          GPU offload architectures (semicolon-separated).
+          Leave empty to use the default from debian/rules.
         required: false
-        default: 'gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+;gfx950:xnack+;gfx1201'
 
 permissions:
   contents: write
@@ -27,13 +28,18 @@ jobs:
       options: --user root
     env:
       LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu
-      DEB_OFFLOAD_ARCH: ${{ inputs.offload_arch || 'gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+;gfx950:xnack+;gfx1201' }}
 
     steps:
     - name: Check out code
       uses: actions/checkout@v5.0.0
       with:
         fetch-depth: 0
+
+    - name: Set offload architectures
+      if: inputs.offload_arch != ''
+      run: |
+        echo "DEB_OFFLOAD_ARCH=${{ inputs.offload_arch }}" \
+          >> "$GITHUB_ENV"
 
     - name: Install build dependencies
       run: |

@@ -4,9 +4,8 @@
 
 # XIOKpack.cmake — kpack multi-arch packaging support
 #
-# Adds a 'kpack-split' custom target that extracts per-architecture
-# HSACO code objects from librocm-xio.so and creates .kpack archives
-# for distribution.
+# Adds a 'kpack-split' custom target that extracts per-architecture HSACO code
+# objects from librocm-xio.so and creates .kpack archives for distribution.
 #
 # Requires: BUILD_SHARED_LIBS=ON, XIO_USE_KPACK=ON, Python3
 
@@ -37,9 +36,9 @@ add_custom_target(kpack-split
   VERBATIM
 )
 
-# Install kpack archives when available.  The directory may not
-# exist at configure time (it is created by 'kpack-split'), so
-# guard the install with an existence check at install time.
+# Install kpack archives when available.  The directory may not exist at
+# configure time (it is created by 'kpack-split'), so guard the install with
+# an existence check at install time.
 install(CODE "
   set(_kpack_dir \"${XIO_KPACK_OUTPUT_DIR}\")
   if(EXISTS \"\${_kpack_dir}\")

@@ -19,7 +19,10 @@ Build-Depends:
  python3-msgpack,
  python3-zstd,
 Standards-Version: 4.6.2
+Rules-Requires-Root: binary-targets
 Homepage: https://github.com/ROCm/rocm-xio
+Vcs-Git: https://github.com/ROCm/rocm-xio.git
+Vcs-Browser: https://github.com/ROCm/rocm-xio
 
 Package: rocm-xio
 Architecture: amd64
