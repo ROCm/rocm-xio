@@ -17,19 +17,51 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SETUP_GID=${SETUP_GID:-false}
-VENDOR=${VENDOR:-bnxt}
 ITERATIONS=${ITERATIONS:-128}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_QUEUES=${NUM_QUEUES:-1}
 TRANSFER_SIZE=${TRANSFER_SIZE:-4096}
 VERIFY=${VERIFY:-true}
+
+# Derive vendor from ROCXIO_RDMA_DEVICE when VENDOR
+# is not set explicitly.
+if [ -z "${VENDOR:-}" ]; then
+  _dev="${ROCXIO_RDMA_DEVICE:-}"
+  if [ -n "$_dev" ]; then
+    case "$_dev" in
+      *bnxt*)  VENDOR=bnxt  ;;
+      *ionic*) VENDOR=ionic ;;
+      *mlx5*)  VENDOR=mlx5  ;;
+      *ernic*) VENDOR=ernic ;;
+      *)
+        echo "ERROR: cannot derive vendor" \
+          "from device '$_dev'." \
+          "Set VENDOR explicitly."
+        exit 1
+        ;;
+    esac
+  else
+    VENDOR=bnxt
+  fi
+fi
+
 NIC="rocm-${VENDOR}0"
 
+# Loopback IP per vendor (matches
+# setup-rdma-loopback.sh).
+case "${VENDOR}" in
+  bnxt)  _LB_IP="198.18.0.1" ;;
+  ionic) _LB_IP="198.18.1.1" ;;
+  mlx5)  _LB_IP="198.18.2.1" ;;
+  *)     _LB_IP="198.18.0.1" ;;
+esac
+
 if [ "${SETUP_GID}" = "true" ]; then
-  sudo ip addr add 198.18.0.1/24 dev "${NIC}"
+  sudo ip addr add "${_LB_IP}/24" dev "${NIC}" \
+    2>/dev/null || true
   MAC=$(ip link show "${NIC}" \
     | grep -oP 'link/ether \K[0-9a-f:]+')
-  sudo ip neigh replace 198.18.0.1 \
+  sudo ip neigh replace "${_LB_IP}" \
     lladdr "${MAC}" nud permanent dev "${NIC}"
 
   for _i in $(seq 1 10); do
