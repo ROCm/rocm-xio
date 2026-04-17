@@ -2414,24 +2414,24 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   volatile struct pci_mmio_bridge_ring_meta* meta =
     static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
   uint32_t slot = meta->producer_idx % meta->queue_depth;
-  volatile struct pci_mmio_bridge_command* cmd =
+  volatile struct pci_mmio_bridge_command* cmdSlot =
     reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
       static_cast<volatile uint8_t*>(shadowBufferVirt) +
       sizeof(struct pci_mmio_bridge_ring_meta) +
       (slot * sizeof(struct pci_mmio_bridge_command)));
-  cmd->target_bdf = targetBdf;
-  cmd->target_bar = targetBar;
-  cmd->reserved1 = 0;
-  cmd->offset = offset;
-  cmd->value = value;
-  cmd->command = command;
-  cmd->size = size;
-  cmd->status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-  cmd->reserved2 = 0;
-  cmd->sequence = slot;
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif
+  struct pci_mmio_bridge_command cmd;
+  cmd.target_bdf = targetBdf;
+  cmd.target_bar = targetBar;
+  cmd.reserved1 = 0;
+  cmd.offset = offset;
+  cmd.value = value;
+  cmd.command = command;
+  cmd.size = size;
+  cmd.status = PCI_MMIO_BRIDGE_STATUS_PENDING;
+  cmd.reserved2 = 0;
+  cmd.sequence = slot;
+  XioComEnqueue<sizeof(struct pci_mmio_bridge_command), true>(
+    &cmd, cmdSlot);
   meta->producer_idx = meta->producer_idx + 1;
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();

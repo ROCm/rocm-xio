@@ -231,7 +231,8 @@ __device__ void Ops::post_wqe_rma(QueuePair& qp, int32_t length,
     qp.rkey_, laddr,  qp.lkey_,   static_cast<uint32_t>(length), send_inline};
   wqe.ctrl.imm = endian::to_be<uint32_t>(imm_data);
 
-  qp.mlx5_sq_.buf[sq_idx] = wqe;
+  xio::XioComEnqueue<sizeof(gda_mlx5_wqe)>(&wqe,
+                                           &qp.mlx5_sq_.buf[sq_idx]);
 
   if (is_leader) {
     qp.mlx5_sq_.tail += qp_lane_count;
@@ -259,7 +260,8 @@ __device__ void Ops::post_wqe_rma_single(QueuePair& qp, int32_t length,
     qp.rkey_, laddr,  qp.lkey_,   static_cast<uint32_t>(length), send_inline};
   wqe.ctrl.imm = endian::to_be<uint32_t>(imm_data);
 
-  qp.mlx5_sq_.buf[sq_idx] = wqe;
+  xio::XioComEnqueue<sizeof(gda_mlx5_wqe)>(&wqe,
+                                           &qp.mlx5_sq_.buf[sq_idx]);
   qp.mlx5_sq_.tail += 1;
   qp.mlx5_sq_.post += 1;
 
@@ -307,7 +309,8 @@ __device__ uint64_t Ops::post_wqe_amo(QueuePair& qp, uintptr_t raddr,
                    reinterpret_cast<uintptr_t>(atomic_laddr),
                    atomic_lkey};
 
-  qp.mlx5_sq_.buf[sq_idx] = wqe;
+  xio::XioComEnqueue<sizeof(gda_mlx5_wqe)>(&wqe,
+                                           &qp.mlx5_sq_.buf[sq_idx]);
 
   if (is_leader) {
     qp.mlx5_sq_.tail += qp_lane_count;
@@ -355,7 +358,8 @@ __device__ uint64_t Ops::post_wqe_amo_single(QueuePair& qp, uintptr_t raddr,
                    reinterpret_cast<uintptr_t>(atomic_laddr),
                    atomic_lkey};
 
-  qp.mlx5_sq_.buf[sq_idx] = wqe;
+  xio::XioComEnqueue<sizeof(gda_mlx5_wqe)>(&wqe,
+                                           &qp.mlx5_sq_.buf[sq_idx]);
   qp.mlx5_sq_.tail += 1;
   qp.mlx5_sq_.post += 1;
   if (fetching)

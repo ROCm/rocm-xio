@@ -40,34 +40,22 @@ __host__ __device__ bool cqeEqual(const cqeType* a, const cqeType* b) {
 
 __host__ __device__ sqeType sqeRead(volatile sqeType* sqeAddress) {
   sqeType result;
-  result.magic = sqeAddress->magic;
-  result.iteration = sqeAddress->iteration;
-  result.gpuTime = sqeAddress->gpuTime;
-  for (int i = 0; i < 5; ++i) {
-    result.data[i] = sqeAddress->data[i];
-  }
+  xio::XioComDequeue<sizeof(sqeType)>(sqeAddress, &result);
   return result;
 }
 
 __host__ __device__ cqeType cqeRead(volatile cqeType* cqeAddress) {
   cqeType result;
-  result.magic = cqeAddress->magic;
-  result.cpuTime = cqeAddress->cpuTime;
+  xio::XioComDequeue<sizeof(cqeType)>(cqeAddress, &result);
   return result;
 }
 
 __host__ __device__ void sqeWrite(sqeType sqeData, sqeType* sqeAddress) {
-  *sqeAddress = sqeData;
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif // __HIP_DEVICE_COMPILE__
+  xio::XioComEnqueue<sizeof(sqeType), true>(&sqeData, sqeAddress);
 }
 
 __host__ __device__ void cqeWrite(cqeType cqeData, cqeType* cqeAddress) {
-  *cqeAddress = cqeData;
-#ifdef __HIP_DEVICE_COMPILE__
-  __threadfence_system();
-#endif // __HIP_DEVICE_COMPILE__
+  xio::XioComEnqueue<sizeof(cqeType), true>(&cqeData, cqeAddress);
 }
 
 __host__ __device__ sqeType sqePoll(sqeType sqeLast,
@@ -411,9 +399,7 @@ __global__ void endpoint_kernel(
       uint32_t seq = atomicAdd(&globalSeq, 1U);
       unsigned sqeIndex = seq % queueSize;
 
-      // Write SQE
-      sqePtr[sqeIndex] = msg;
-      __threadfence_system(); // Ensure SQE write is visible
+      xio::XioComEnqueue<sizeof(sqeType), true>(&msg, &sqePtr[sqeIndex]);
 
       // Synchronize all threads before ringing doorbell
       __syncthreads();
@@ -519,8 +505,7 @@ __global__ void endpoint_kernel(
           msg.data[j] = 0x123456789ABCDEF0ULL + tid + i + j;
       }
 
-      *mySqe = msg;
-      __threadfence_system();
+      xio::XioComEnqueue<sizeof(sqeType), true>(&msg, mySqe);
 
       while (true) {
         uint64_t magic = volatileCqe->magic;

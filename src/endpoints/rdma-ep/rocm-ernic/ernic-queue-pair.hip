@@ -203,8 +203,10 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
   sge.length = length;
   sge.lkey = qp.lkey_;
 
-  memcpy(wqe_ptr, &hdr, sizeof(hdr));
-  memcpy((char*)wqe_ptr + sizeof(hdr), &sge, sizeof(sge));
+  xio::XioComEnqueue<sizeof(ernic_wqe_hdr)>(&hdr, wqe_ptr);
+  volatile void* sge_dst = static_cast<volatile char*>(
+    static_cast<volatile void*>(wqe_ptr)) + sizeof(hdr);
+  xio::XioComEnqueue<sizeof(ernic_sge)>(&sge, sge_dst);
 
   qp.ernic_sq_.tail++;
   if (qp.ernic_sq_.tail >= qp.ernic_sq_.depth)
@@ -280,8 +282,10 @@ __device__ uint32_t Ops::write_amo_wqe(QueuePair& qp, uintptr_t raddr,
   }
   sge.length = sizeof(uint64_t);
 
-  memcpy(wqe_ptr, &hdr, sizeof(hdr));
-  memcpy((char*)wqe_ptr + sizeof(hdr), &sge, sizeof(sge));
+  xio::XioComEnqueue<sizeof(ernic_wqe_hdr)>(&hdr, wqe_ptr);
+  volatile void* sge_dst = static_cast<volatile char*>(
+    static_cast<volatile void*>(wqe_ptr)) + sizeof(hdr);
+  xio::XioComEnqueue<sizeof(ernic_sge)>(&sge, sge_dst);
 
   qp.ernic_sq_.tail++;
   if (qp.ernic_sq_.tail >= qp.ernic_sq_.depth)

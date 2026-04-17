@@ -222,12 +222,12 @@ __device__ void Ops::write_rma_wqe(QueuePair& qp, uintptr_t raddr,
     sge.length = length;
   }
 
-  memcpy(hdr_ptr, &hdr, sizeof(struct bnxt_re_bsqe));
-  memcpy(rdma_ptr, &rdma, sizeof(struct bnxt_re_rdma));
+  xio::XioComEnqueue<sizeof(struct bnxt_re_bsqe)>(&hdr, hdr_ptr);
+  xio::XioComEnqueue<sizeof(struct bnxt_re_rdma)>(&rdma, rdma_ptr);
   if (inline_msg)
     memcpy(sge_ptr, reinterpret_cast<const void*>(laddr), length);
   else
-    memcpy(sge_ptr, &sge, sizeof(struct bnxt_re_sge));
+    xio::XioComEnqueue<sizeof(struct bnxt_re_sge)>(&sge, sge_ptr);
 
   bnxt_re_fill_psns_for_msntbl(&qp.bnxt_sq_, length);
   bnxt_re_incr_tail(&qp.bnxt_sq_, GDA_BNXT_WQE_SLOT_COUNT);
@@ -306,9 +306,9 @@ __device__ uint32_t Ops::write_amo_wqe(QueuePair& qp, uintptr_t raddr,
   }
   sge.length = length;
 
-  memcpy(hdr_ptr, &hdr, sizeof(struct bnxt_re_bsqe));
-  memcpy(amo_ptr, &amo, sizeof(struct bnxt_re_atomic));
-  memcpy(sge_ptr, &sge, sizeof(struct bnxt_re_sge));
+  xio::XioComEnqueue<sizeof(struct bnxt_re_bsqe)>(&hdr, hdr_ptr);
+  xio::XioComEnqueue<sizeof(struct bnxt_re_atomic)>(&amo, amo_ptr);
+  xio::XioComEnqueue<sizeof(struct bnxt_re_sge)>(&sge, sge_ptr);
 
   bnxt_re_fill_psns_for_msntbl(&qp.bnxt_sq_, length);
   bnxt_re_incr_tail(&qp.bnxt_sq_, GDA_BNXT_WQE_SLOT_COUNT);
