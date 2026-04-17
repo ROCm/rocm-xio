@@ -119,7 +119,6 @@ function(setup_code_generation)
     add_custom_command(
       OUTPUT ${GEN_RDMA_VENDOR_HEADERS}
       COMMAND ${RDMA_GEN_SCRIPT}
-        ${GEN_RDMA_HEADERS_DIR}
         ${GEN_ENDPOINTS_DIR}/rdma-ep
       DEPENDS ${RDMA_GEN_SCRIPT} ${RDMA_HEADERS}
       COMMENT "Generating vendor-specific RDMA headers"
