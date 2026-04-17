@@ -1076,11 +1076,19 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   uint16_t queue_size = nvmeConfig->queueLength;
 
   // Compute effective batch size matching the device-side
-  // caps: min(batchSize, queueSize - 1, total_ops).
+  // logic: batchSize 0 means "all at once" (total_ops in
+  // finite mode, queueSize-1 in infinite mode).
   uint32_t effBatch = nvmeConfig->ioParams.batchSize;
-  if (effBatch > 1) {
-    if (effBatch > (uint32_t)(queue_size - 1))
-      effBatch = queue_size - 1;
+  if (effBatch == 0) {
+    unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
+                         (unsigned)nvmeConfig->ioParams.writeIo;
+    effBatch = nvmeConfig->ioParams.infiniteMode
+                 ? (uint32_t)(queue_size - 1)
+                 : total_ops;
+  }
+  if (effBatch > (uint32_t)(queue_size - 1))
+    effBatch = queue_size - 1;
+  {
     unsigned total_ops = (unsigned)nvmeConfig->ioParams.readIo +
                          (unsigned)nvmeConfig->ioParams.writeIo;
     if (!nvmeConfig->ioParams.infiniteMode && effBatch > total_ops)
