@@ -94,6 +94,11 @@ cmake --build build \
 TWONODE_BIN="${WORKING_DIR}/build/tests/unit"
 TWONODE_BIN="${TWONODE_BIN}/rdma-ep/test-rdma-2node"
 
+# Run CPU-only RDMA unit tests inside the container
+# (no NIC, GPU, or host access needed).
+test_run "ctest rdma-ep unit tests" \
+  "ctest --test-dir build -L rdma -LE hardware"
+
 # --- Copy artifacts to both nodes ---
 echo ""
 echo "Copying test artifacts to nodes..."
@@ -230,6 +235,18 @@ echo "  Detected vendors:${VENDORS_B}"
 
 run_loopback_on_node "${NODE_A}" "${VENDORS_A}"
 run_loopback_on_node "${NODE_B}" "${VENDORS_B}"
+
+# Run CTest RDMA hardware suite on NODE_A.  The RDMA_HW
+# fixture setup was already done by run_loopback_on_node;
+# ctest -E excludes the fixture test so it doesn't re-run.
+test_run "ctest rdma-ep hardware tests (${NODE_A})" \
+  "${SSH_COMMAND} ${NODE_A} \
+    \"cd ${WORKING_DIR} && \
+    sudo env LD_LIBRARY_PATH=${LIB_PATH} \
+    HSA_FORCE_FINE_GRAIN_PCIE=1 \
+    ctest --test-dir build -L hardware -L rdma \
+    -E rdma-hw-setup \
+    --output-on-failure --timeout 300\""
 
 # =========================================================
 # Phase 2 -- Two-node client-server test

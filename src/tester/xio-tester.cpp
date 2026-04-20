@@ -645,6 +645,12 @@ int main(int argc, char** argv) {
     } else {
       std::cout << "Warning: No timing data collected in less-timing mode"
                 << std::endl;
+      if (baseConfig.verifyPass > 0 || baseConfig.verifyFail > 0) {
+        std::cout << "  Verify Passed:    " << std::setw(10)
+                  << baseConfig.verifyPass << std::endl;
+        std::cout << "  Verify Failed:    " << std::setw(10)
+                  << baseConfig.verifyFail << std::endl;
+      }
     }
   } else if (!lessTiming) {
     // Full timing mode: calculate durations from individual timestamps
@@ -684,6 +690,12 @@ int main(int argc, char** argv) {
       }
     } else {
       std::cout << "Warning: No valid timing data collected" << std::endl;
+      if (baseConfig.verifyPass > 0 || baseConfig.verifyFail > 0) {
+        std::cout << "  Verify Passed:    " << std::setw(10)
+                  << baseConfig.verifyPass << std::endl;
+        std::cout << "  Verify Failed:    " << std::setw(10)
+                  << baseConfig.verifyFail << std::endl;
+      }
     }
   }
 

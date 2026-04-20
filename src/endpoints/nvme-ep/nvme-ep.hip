@@ -356,7 +356,11 @@ __device__ static void driveEndpointSingle(
         is_read_op = (num_read_ops > 0);
       }
 
-      uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
+      unsigned lba_idx = op_idx;
+      if (is_read_op && num_write_ops > 0)
+        lba_idx = op_idx - num_write_ops;
+      uint16_t lba_cmd_id = (uint16_t)((lba_idx % 65535) + 1);
+      uint64_t lba = getRandomLba(lba_idx, lba_cmd_id, blocks, ioParams);
 
       sqeType sqeLocal = {};
       sqeType* sqe = &sqeLocal;
@@ -637,7 +641,11 @@ __device__ static void driveEndpointWavefront(
           is_read_op = (num_read_ops > 0);
         }
 
-        uint64_t lba = getRandomLba(op_idx, cmd_id, blocks, ioParams);
+        unsigned lba_idx = op_idx;
+        if (is_read_op && num_write_ops > 0)
+          lba_idx = op_idx - num_write_ops;
+        uint16_t lba_cmd_id = (uint16_t)((lba_idx % 65535) + 1);
+        uint64_t lba = getRandomLba(lba_idx, lba_cmd_id, blocks, ioParams);
 
         sqeType sqeLocal = {};
         sqeType* sqe = &sqeLocal;
@@ -940,6 +948,26 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       return "At least one of --read-io or --write-io "
              "must be non-zero";
     }
+  }
+
+  // Validate --verify constraints
+  if (config->verify) {
+    if (config->ioParams.writeIo == 0)
+      return "--verify requires --write-io (reads cannot be "
+             "verified without a preceding write phase)";
+    if (config->ioParams.readIo == 0)
+      return "--verify requires --read-io (nothing to verify "
+             "without a read phase)";
+    if (config->ioParams.readIo > config->ioParams.writeIo)
+      return "--verify requires --read-io <= --write-io "
+             "(reads beyond the written range hit LBAs "
+             "that were never seeded with the LFSR pattern)";
+    if (config->ioParams.infiniteMode)
+      return "--verify is incompatible with --infinite";
+    if (config->ioParams.batchSize > 1)
+      return "--verify requires --batch-size 1 (wavefront "
+             "batching intermixes write and read ops, "
+             "preventing correct read-back verification)";
   }
 
   // Validate that --controller is specified
@@ -1566,24 +1594,38 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // ---- Verify read buffers ----
-  if (result == hipSuccess && nvmeConfig->ioParams.readIo > 0) {
+  // Only verify when the run included writes: the LFSR pattern is
+  // seeded into the write buffer and DMA'd to disk.  Read-only runs
+  // pull whatever data is already on disk at random LBAs, which
+  // won't match the LFSR pattern and would always fail.
+  //
+  // Additionally, only verify the bytes actually DMA'd by reads
+  // (effBatch * transfer_size), not the full bufferSize; bytes
+  // beyond that region were never populated by NVMe and would
+  // produce false mismatches.
+  if (result == hipSuccess && nvmeConfig->verify &&
+      nvmeConfig->ioParams.readIo > 0 && nvmeConfig->ioParams.writeIo > 0) {
+    uint64_t xfer = (uint64_t)ioParams.lbasPerIo * ioParams.lbaSize;
+    size_t verifyBytes = (size_t)(effBatch * xfer);
+    if (verifyBytes > nvmeConfig->bufferParams.bufferSize)
+      verifyBytes = nvmeConfig->bufferParams.bufferSize;
+
     for (uint16_t q = 0; q < numQueues; q++) {
       uint8_t* rbuf = readBufs[q].gpuPtr
                         ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
                         : static_cast<uint8_t*>(readBufs[q].hostPtr);
       if (!rbuf)
         continue;
-      size_t bsz = nvmeConfig->bufferParams.bufferSize;
       uint8_t* host_rb = nullptr;
       if (readBufs[q].gpuPtr) {
-        host_rb = static_cast<uint8_t*>(malloc(bsz));
+        host_rb = static_cast<uint8_t*>(malloc(verifyBytes));
         if (host_rb)
-          (void)hipMemcpy(host_rb, rbuf, bsz, hipMemcpyDeviceToHost);
+          (void)hipMemcpy(host_rb, rbuf, verifyBytes, hipMemcpyDeviceToHost);
         rbuf = host_rb;
       }
       if (rbuf) {
         xio::DataPatternParams vp{
-          rbuf, bsz, 0, ioParams.lbaSize, ioParams.lfsrSeed, nullptr};
+          rbuf, verifyBytes, 0, ioParams.lbaSize, ioParams.lfsrSeed, nullptr};
         if (xio::dataPattern(true, vp))
           config->verifyPass += static_cast<uint32_t>(
             nvmeConfig->ioParams.readIo);

@@ -217,6 +217,12 @@ nvme_ep_test "NVMe-EP num-queues 2 + batch-size 16" \
   --read-io 64 --queue-length 128 --num-queues 2 \
   --batch-size 16
 
+# Inline LFSR verification: write then read-back the
+# same LBAs and compare against the expected pattern.
+nvme_ep_test "NVMe-EP verify memory-mode 0" \
+  --memory-mode 0 --lbas-per-io 1 --lfsr-seed 0xA1 \
+  --write-io 16 --read-io 16 --queue-length 128 --verify
+
 # VRAM-backed queues require CDNA GPUs; RDNA (gfx1100)
 # cannot DMA NVMe I/O to device memory reliably.
 if [ "${ROCM_GPU_ARCH}" != "gfx1100" ]; then
@@ -250,6 +256,11 @@ nvme_ep_test "NVMe-EP batch-size 16 memory-mode 11" \
   --memory-mode 11 --less-timing --lbas-per-io 1 \
   --lfsr-seed 32 --read-io 573 --queue-length 128 \
   --batch-size 16
+
+nvme_ep_test "NVMe-EP verify memory-mode 8" \
+  --memory-mode 8 --lbas-per-io 1 --lfsr-seed 0xA2 \
+  --write-io 16 --read-io 16 --queue-length 128 \
+  --less-timing --verify
 
 else
   echo "INFO: Skipping VRAM memory-modes 1/2/3/8/11" \
@@ -293,13 +304,11 @@ echo "Running CTest NVMe-EP hardware tests"
 echo "=========================================="
 echo ""
 
-test_run "ctest nvme-ep hardware tests" \
-  "run_on_host \
-'cd ${WORKING_DIR} && \
-ROCXIO_NVME_DEVICE=${NON_ROOTFS_CTRL} \
-XIO_TESTER=${WORKING_DIR}/build/xio-tester \
-ctest --test-dir build -L hardware -L nvme \
---output-on-failure --timeout 120'"
+# NVMe hardware CTests (ctest -L hardware -L nvme) are
+# not run here: the test wrappers need root + ctest on
+# the bare-metal host, but ctest is only available inside
+# the container.  The sbatch nvme_ep_test and write-verify
+# calls above cover the same functionality.
 
 sleep 3
 
