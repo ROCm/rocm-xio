@@ -2,7 +2,7 @@
   :description: ROCm-XIO documentation
   :keywords: ROCm, documentation
 
-.. _testing: 
+.. _testing:
 
 ******************
 Run ROCm-XIO tests

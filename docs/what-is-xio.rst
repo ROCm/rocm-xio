@@ -34,7 +34,7 @@ discovery and instantiation via ``xio::createEndpoint()``.
 Quick Start
 ===========
 
-.. describe the flow instead of providing the instructions 
+.. describe the flow instead of providing the instructions
 
 .. code-block:: bash
 
