@@ -16,22 +16,23 @@ Prerequisites
 - ROCm HIP SDK
 - HSA runtime libraries
 - ``libdrm`` and ``libdrm_amdgpu`` development packages
-- Library dependencies:
 
-    .. code-block:: bash
+You need these library dependencies:
 
-       sudo apt install rocm-hip-sdk rocminfo cmake \
-       libdrm-dev libhsa-runtime-dev
+.. code-block:: bash
 
-    The ``xio-tester`` CLI tool (built by default via
-    ``BUILD_CLIENTS=ON``) additionally requires CLI11:
+   sudo apt install rocm-hip-sdk rocminfo cmake \
+   libdrm-dev libhsa-runtime-dev
 
-    .. code-block:: bash
+The ``xio-tester`` CLI tool (built by default via
+``BUILD_CLIENTS=ON``) additionally requires CLI11:
 
-       sudo apt install libcli11-dev
+.. code-block:: bash
 
-    To build the library without the tester (and without the CLI11
-    dependency), pass ``-DBUILD_CLIENTS=OFF``.
+   sudo apt install libcli11-dev
+
+To build the library without the tester (and without the CLI11
+dependency), pass ``-DBUILD_CLIENTS=OFF``.
 
 Quick start
 -----------
