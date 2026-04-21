@@ -1244,8 +1244,8 @@ Access pattern comparison (MTR_SLC, mode 3, batch 16)
 Sequential access is ~10% faster on average than random on the MTR_SLC device,
 consistent with the device's internal read-ahead and sequential prefetch logic.
 
-Reprode these results
----------------------
+Reproduce these results
+-----------------------
 
 Build with both BNXT and IONIC providers enabled:
 

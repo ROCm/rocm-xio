@@ -139,7 +139,7 @@ mapping (``hsa_amd_memory_lock_to_pool``) and the
 ``ibv_alloc_parent_domain`` callbacks which are constrained by the
 libibverbs ABI.
 
-Memory mpde CLI flags
+Memory mode CLI flags
 ---------------------
 
 The ``--memory-mode`` CLI option (0--15) controls placement:
