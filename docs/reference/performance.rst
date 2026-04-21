@@ -1,12 +1,17 @@
-Performance
-===========
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+*********************************
+ROCm-XIO performance measurements
+*********************************
 
 This page documents RDMA-EP loopback performance measurements collected on a
 single-node system. All results are from GPU-initiated RDMA WRITE operations
 with LFSR data verification, measured end-to-end from the GPU kernel (post WQE
 to CQE completion).
 
-Test Environment
+Test environment
 ----------------
 
 .. list-table::
@@ -28,7 +33,7 @@ Test Environment
    * - **ROCm**
      - 7.2.0
 
-Test Methodology
+Test methodology
 ----------------
 
 Each measurement runs ``test-rdma-loopback`` in a single-QP loopback
@@ -67,7 +72,7 @@ will achieve higher aggregate IOPS.
    IONIC hardware. The minimum working transfer size for loopback RDMA WRITE
    is 32 bytes.
 
-Queue Memory Placement
+Queue memory placement
 ----------------------
 
 The CQ and SQ buffers can reside in either host memory or GPU VRAM. The
@@ -92,7 +97,7 @@ regardless of this setting. IONIC uses host coherent memory by default; the
 IONIC kernel driver does not currently support VRAM-backed queues through
 ``ib_umem_get``.
 
-RDMA-EP Loopback Results
+RDMA-EP loopback results
 ------------------------
 
 Broadcom (BNXT) -- CQ in VRAM
@@ -212,7 +217,7 @@ IOPS
      - 77
      - 6,653
 
-Pensando (IONIC) -- CQ in Host Coherent
+Pensando (IONIC) -- CQ in host coherent
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Latency
@@ -329,7 +334,7 @@ IOPS
      - 52
      - 10,341
 
-RDMA WRITE with Immediate
+RDMA WRITE with immediate
 -------------------------
 
 The ``QueuePair`` API now includes ``put_nbi_imm()`` and
@@ -342,7 +347,7 @@ The ``QueuePair`` API now includes ``put_nbi_imm()`` and
 WRITE_IMM responder path requires.
 
 Per the InfiniBand specification (section 9.3.3.3), WRITE_IMM is commonly used
-as a **zero-length notification**: the 32-bit immediate value is the entire
+as a *zero-length notification*: the 32-bit immediate value is the entire
 payload, posted with ``num_sge = 0``. The NIC delivers the immediate value by
 consuming a receive WQE from the responder's RQ and generating a completion with
 the immediate data.
@@ -366,7 +371,7 @@ Current status:
    operations to time out. This matches the nvme-ep queue allocation path which
    also uses coherent memory.
 
-NVMe-EP Smoke Test
+NVMe-EP smoke test
 ------------------
 
 The ``xio-tester nvme-ep`` smoke test validates the GPU-initiated NVMe read path
@@ -408,7 +413,7 @@ The unit tests (``test-nvme-config``, ``test-nvme-helpers``,
 queries (LBA size, namespace capacity, SMART log, queue ID enumeration) without
 issuing I/O.
 
-NVMe-EP Performance
+NVMe-EP performance
 -------------------
 
 This section compares GPU-initiated NVMe I/O (via ``xio-tester nvme-ep``)
@@ -417,7 +422,7 @@ NVMe submission and completion queues directly from device code, bypassing the
 kernel block layer entirely. The ``fio`` baseline uses the kernel NVMe driver
 with ``io_uring`` (QD=32 for throughput) and ``sync`` (QD=1 for latency).
 
-NVMe Devices Under Test
+NVMe devices under test
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -446,7 +451,7 @@ NVMe Devices Under Test
      - 0x11f8:0xf117 (Microchip)
      - 0x15b7:0x5030 (Sandisk/WD)
 
-CTest Results
+CTest results
 ^^^^^^^^^^^^^
 
 All NVMe CTests were run on both devices using ``ROCXIO_NVME_DEVICE``.
@@ -471,7 +476,7 @@ indicates a data verification issue with multi-LBA writes (``--lbas-per-io 32``)
 using device memory (memory mode 8). The ``nvme-verify-rand-device-mem`` timeout
 on MTR_SLC is related to the same device-memory verification path.
 
-fio CPU Baseline
+fio CPU baseline
 ^^^^^^^^^^^^^^^^
 
 All fio tests used ``--direct=1`` (bypass page cache), 30-second runtime, and
@@ -718,15 +723,15 @@ WD_BLACK (``/dev/nvme1n1``) -- sync QD=1
      - 0.2
      - 10.2
 
-GPU-Initiated NVMe (xio-tester)
+GPU-initiated NVMe (xio-tester)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 All runs used ``HSA_FORCE_FINE_GRAIN_PCIE=1`` and ``--less-timing``. Latency is
 measured end-to-end on the GPU wall clock: from SQE post to CQE arrival.
 Transfer size is 512 bytes (1 LBA) unless noted.
 
-Memory Mode Comparison -- MTR_SLC
-""""""""""""""""""""""""""""""""""
+Memory mode comparison -- ``MTR_SLC``
+"""""""""""""""""""""""""""""""""""""
 
 Single-op latency (128 reads, batch size 1):
 
@@ -861,8 +866,8 @@ Multi-LBA (128 reads, 8 LBAs/IO = 4 KiB, batch 16):
      - 483.4
      - 29.0
 
-Memory Mode Comparison -- WD_BLACK
-""""""""""""""""""""""""""""""""""""
+Memory mode comparison -- ``WD_BLACK``
+""""""""""""""""""""""""""""""""""""""
 
 Single-op latency (128 reads, batch size 1):
 
@@ -933,7 +938,7 @@ Batched reads (128 reads, batch size 16):
      - 9,970
      - 730
 
-Sustained Throughput (Infinite Mode)
+Sustained throughput (infinite mode)
 """"""""""""""""""""""""""""""""""""
 
 Both devices were run in infinite mode for ~15 seconds with 16 queues, batch
@@ -978,7 +983,7 @@ Derived sustained performance (16 queues x 512 B):
      - ~43,598
      - ~21.3
 
-Write + Read Verification
+Write + read verification
 """""""""""""""""""""""""
 
 The ``--write-io N --read-io N`` mode writes LFSR patterns and then reads them
@@ -993,7 +998,7 @@ completed successfully across all four memory modes.
    was never written by ``xio-tester``, so the comparison always fails for
    arbitrary on-disk content.
 
-NVMe-EP Hot-Path Sub-Step Breakdown
+NVMe-EP hot-path sub-step breakdown
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The ``--substep-timing`` flag profiles GPU clock cycles
@@ -1003,7 +1008,7 @@ queue length 1024, single queue, ``--less-timing``, and
 1 LBA per IO (512 bytes).  Times are per-IO averages in
 nanoseconds (GPU wall clock at 100 MHz = 10 ns/tick).
 
-Memory Mode Comparison
+Memory mode comparison
 """"""""""""""""""""""
 
 .. list-table::
@@ -1087,7 +1092,7 @@ Observations:
   pre-computed PRP lookup, and ``sqeSetup`` field writes
   are all register/local operations.
 
-Optimization Impact Summary
+Optimization impact summary
 """""""""""""""""""""""""""
 
 The following table summarises the cumulative effect of
@@ -1121,7 +1126,7 @@ write memory transactions, cutting enqueue time from an
 estimated ~17.6 us (64 byte-stores across PCIe) to
 ~2.4 us (8 wide stores).
 
-Reproducing Sub-Step Measurements
+Reproducing sub-step measurements
 """""""""""""""""""""""""""""""""
 
 .. code-block:: bash
@@ -1158,7 +1163,7 @@ Reproducing Sub-Step Measurements
      --less-timing --lbas-per-io 1 \
      --substep-timing
 
-CPU Utilization: GPU vs CPU
+CPU utilization: GPU vs CPU
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A key advantage of GPU-initiated NVMe I/O is CPU offload. The GPU kernel
@@ -1213,7 +1218,7 @@ latency (~35 us on MTR_SLC) is higher than the kernel NVMe driver (~12.5 us via
 sync QD=1), but the GPU path trades latency for CPU offload and can scale across
 many queues without consuming CPU cores.
 
-Access Pattern Comparison (MTR_SLC, mode 3, batch 16)
+Access pattern comparison (MTR_SLC, mode 3, batch 16)
 """""""""""""""""""""""""""""""""""""""""""""""""""""
 
 .. list-table::
@@ -1239,8 +1244,8 @@ Access Pattern Comparison (MTR_SLC, mode 3, batch 16)
 Sequential access is ~10% faster on average than random on the MTR_SLC device,
 consistent with the device's internal read-ahead and sequential prefetch logic.
 
-Reproducing These Results
--------------------------
+Reproduce these results
+-----------------------
 
 Build with both BNXT and IONIC providers enabled:
 

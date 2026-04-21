@@ -1,71 +1,41 @@
-rocm-xio: ROCm Library for GPU-Initiated IO
-============================================
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
 
-Introduction
-------------
+************************
+ROCm-XIO documentation
+************************
 
-rocm-xio provides an API for Accelerator-Initiated IO (XIO) for AMD
-GPU ``__device__`` code. It enables AMD GPUs to perform direct IO
-operations to hardware devices without CPU intervention.
+ROCm-XIO provides an API for Accelerator-Initiated IO (XIO)
+for an AMD GPU ``__device__`` code.
+It enables AMD GPUs to perform direct
+IO operations to hardware devices without CPU intervention.
 
-Supported Endpoints
--------------------
+.. grid:: 2
+  :gutter: 3
 
-============  ==================  ================================
-Endpoint      Device              Description
-============  ==================  ================================
-``nvme-ep``   NVMe SSDs           NVMe command submission /
-                                  completion
-``rdma-ep``   RDMA NICs           GPU-Direct RDMA (4 vendors)
-``sdma-ep``   AMD SDMA engines    GPU-initiated DMA transfers
-``test-ep``   Software-only       Framework validation endpoint
-============  ==================  ================================
+  .. grid-item-card:: Install
 
-Architecture
-------------
+    * :doc:`Build and install ROCm-XIO </install/building>`
+    * :doc:`Install the kernel module </install/kernel-module>`
 
-All endpoints derive from the :cpp:class:`xio::XioEndpoint` base
-class and share a common :cpp:class:`xio::XioEndpointConfig`
-configuration structure. The endpoint registry allows runtime
-discovery and instantiation via ``xio::createEndpoint()``.
+  .. grid-item-card:: How to
 
-Quick Start
------------
+    * :doc:`Run tests <how-to/testing>`
+    * :doc:`Run VM-isolated tests <how-to/vm-testing>`
 
-.. code-block:: bash
+  .. grid-item-card:: Conceptual
 
-   sudo apt install rocm-hip-sdk rocminfo \
-     cmake libdrm-dev libhsa-runtime-dev libcli11-dev
-   mkdir -p build
-   cmake -S . -B build
-   cmake --build build --target all
+    * :doc:`Memory modes, allocation, and coherence <conceptual/memory-modes>`
 
-   export HSA_FORCE_FINE_GRAIN_PCIE=1
-   sudo ./build/xio-tester nvme-ep \
-     --controller /dev/nvme0 \
-     --read-io 50 --verbose
+  .. grid-item-card:: Reference
 
-.. toctree::
-   :maxdepth: 2
-   :caption: User Guide
+    * :doc:`Examples <reference/examples>`
+    * :doc:`Performance measurements <reference/performance>`
+    * :doc:`Endpoints <reference/endpoints>`
+    * :doc:`Environment variables <reference/environment-variables>`
+    * :doc:`API reference <reference/api>`
 
-   building
-   testing
-   performance
-   vm-testing
-   endpoints
-   examples
-   kernel-module
-   memory-modes
-   environment-variables
+To contribute to the documentation, refer to the `Contributing guide in the GitHub repo <https://github.com/ROCm/rocm-xio/blob/main/CONTRIBUTING.md>`_.
 
-.. toctree::
-   :maxdepth: 2
-   :caption: API Reference
-
-   api
-
-License
--------
-
-MIT License
+You can find licensing information on the :doc:`License <license>` page.
