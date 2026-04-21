@@ -1,18 +1,23 @@
-VM-Isolated Testing
-===================
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+********************************
+Run ROCm-XIO VM-isolated testing
+********************************
 
 Hardware tests (RDMA loopback, NVMe passthrough) touch low-level
 kernel and device state that can trigger kernel panics on the
 host. Running these tests inside a QEMU VM isolates the failure
-domain: if the guest kernel panics the host stays up and the VM
-can simply be restarted.
+domain: if the guest kernel panics, the host stays up and the VM
+can be restarted.
 
 The VM infrastructure provides CMake targets for image creation,
 provisioning, launching, and testing, plus a ``launch-vm``
 wrapper script with four passthrough modes.
 
 Prerequisites
--------------
+=============
 
 ==================  ===================================
 Tool                Install
@@ -35,8 +40,8 @@ Ansible             ``pip install ansible``
 CMake detects all of these at configure time and prints
 actionable messages when something is missing.
 
-Quick Start
------------
+Quick start
+===========
 
 .. code-block:: bash
 
@@ -55,11 +60,11 @@ Quick Start
    # 5. Subsequent boots -- just launch and test
    cmake --build build --target launch-test-vm
 
-CMake Targets
--------------
+CMake targets
+=============
 
 ``gen-test-vm``
-^^^^^^^^^^^^^^^
+---------------
 
 Creates the ``rocm-xio-vm.qcow2`` base image using
 ``qemu-minimal``'s ``gen-vm`` script and ``cloud-init``.
@@ -77,9 +82,9 @@ bootstrap packages (defined in
    && cmake --build build --target gen-test-vm
 
 ``setup-test-vm``
-^^^^^^^^^^^^^^^^^
+-----------------
 
-Provisions a **running** VM by installing the
+Provisions a *running* VM by installing the
 ``sbates130272.batesste`` Ansible Galaxy collection and
 running its ``setup-amd`` playbook via SSH. This installs
 ROCm, ``amdgpu-dkms``, ``driverctl``, and development
@@ -91,7 +96,7 @@ tools inside the guest.
    cmake --build build --target setup-test-vm
 
 ``launch-test-vm``
-^^^^^^^^^^^^^^^^^^
+------------------
 
 Boots the VM. The mode is selected via the ``VM_MODE``
 environment variable (defaults to ``rdma``):
@@ -114,11 +119,11 @@ All modes pass the GPU through via VFIO and include an
 emulated 1 TB NVMe drive so ``nvme-ep`` testing is always
 available.
 
-Launch Modes
-------------
+Launch modes
+============
 
 ``rdma``
-^^^^^^^^
+--------
 
 Passes the GPU and a Broadcom BNXT NIC through to the VM
 via ``vfio-pci``. Both devices must be bound to
@@ -130,14 +135,14 @@ via ``vfio-pci``. Both devices must be bound to
    sudo driverctl set-override 0000:c3:00.1 vfio-pci
 
 ``nvme``
-^^^^^^^^
+--------
 
 Passes the GPU and an NVMe controller through. Enables the
 PCI MMIO bridge for GPU-direct NVMe access. The NVMe
 controller must be bound to ``vfio-pci``.
 
 ``ernic``
-^^^^^^^^^
+---------
 
 Passes only the GPU through as a real device. The RDMA NIC
 is emulated by ``rocm-ernic``, which runs as a VFIO-user
@@ -157,7 +162,7 @@ Variable              Default
 ====================  ================================
 
 ``full``
-^^^^^^^^
+--------
 
 Combines all device types: GPU, BNXT NIC, and NVMe
 controller passthrough via ``vfio-pci``, plus an emulated
@@ -178,8 +183,8 @@ on the host before launch:
 The ``rocm-ernic`` server is started and stopped
 automatically, just as in ``ernic`` mode.
 
-CMake Cache Variables
----------------------
+CMake cache variables
+=====================
 
 These can be set with ``cmake -D<VAR>=<value> ..`` at
 configure time.
@@ -201,8 +206,8 @@ Variable                Description
                         ``gen-vm`` script
 ======================  ================================
 
-Environment Variable Overrides
-------------------------------
+Environment variable overrides
+==============================
 
 These override settings at run time (passed to
 ``launch-vm`` or the CMake target):
@@ -221,8 +226,8 @@ Variable                Default   Notes
                                   ``ernic``, or ``full``
 ======================  ========  =====================
 
-GPU Detection
--------------
+GPU detection
+=============
 
 At configure time CMake scans for AMD GPUs (VGA class
 ``0300`` and 3D class ``0302``) and checks which are bound
@@ -235,8 +240,8 @@ To select a specific GPU when multiple are present:
 
    cmake -DXIO_VM_GPU=c1:00.0 ..
 
-Building and Testing Inside the Guest
---------------------------------------
+Build and test inside the guest
+===============================
 
 After the VM boots, the host project tree is available via
 9p VirtFS:
@@ -262,7 +267,7 @@ Then run the appropriate tests for the mode:
    sudo ./xio-tester nvme-ep
 
 Troubleshooting
----------------
+===============
 
 **Port 2222 already in use**
    Another VM or service is listening. Override with

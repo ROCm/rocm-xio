@@ -1,5 +1,10 @@
-API Reference
-=============
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+**********************
+ROCm-XIO API reference
+**********************
 
 This page documents the rocm-xio public C++ API, extracted
 from annotated source headers by Doxygen and rendered via

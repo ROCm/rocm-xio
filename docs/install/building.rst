@@ -1,27 +1,39 @@
-Building rocm-xio
-=================
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
 
-Dependencies
-------------
+**************************
+Build and install ROCm-XIO
+**************************
 
-Library dependencies:
+Build ROCm-XIO
+==============
 
-.. code-block:: bash
+Prerequisites
+-------------
 
-   sudo apt install rocm-hip-sdk rocminfo cmake \
-     libdrm-dev libhsa-runtime-dev
+- CMake 3.21 or later
+- ROCm HIP SDK
+- HSA runtime libraries
+- ``libdrm`` and ``libdrm_amdgpu`` development packages
+- Library dependencies:
 
-The ``xio-tester`` CLI tool (built by default via
-``BUILD_CLIENTS=ON``) additionally requires CLI11:
+    .. code-block:: bash
 
-.. code-block:: bash
+       sudo apt install rocm-hip-sdk rocminfo cmake \
+       libdrm-dev libhsa-runtime-dev
 
-   sudo apt install libcli11-dev
+    The ``xio-tester`` CLI tool (built by default via
+    ``BUILD_CLIENTS=ON``) additionally requires CLI11:
 
-To build the library without the tester (and without the CLI11
-dependency), pass ``-DBUILD_CLIENTS=OFF``.
+    .. code-block:: bash
 
-Quick Start
+       sudo apt install libcli11-dev
+
+    To build the library without the tester (and without the CLI11
+    dependency), pass ``-DBUILD_CLIENTS=OFF``.
+
+Quick start
 -----------
 
 .. code-block:: bash
@@ -35,7 +47,7 @@ Output locations:
 - Library: ``build/librocm-xio.a``
 - Tester: ``build/xio-tester``
 
-CMake Configuration Options
+CMake configuration options
 ----------------------------
 
 .. code-block:: bash
@@ -52,11 +64,11 @@ CMake Configuration Options
    # Build documentation (Sphinx + Breathe + Doxygen)
    cmake -S . -B build -DXIO_BUILD_DOCS=ON
 
-CMake Build Targets
+CMake build targets
 -------------------
 
 Primary targets
-^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -65,7 +77,7 @@ Primary targets
    cmake --build build --target all         # Both (default)
 
 Code generation targets
-^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -77,7 +89,7 @@ Code generation targets
    cmake --build build --target fetch-external-headers
 
 Testing targets
-^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -88,11 +100,11 @@ Testing targets
    ctest --preset integration   # Install + example tests
    ctest --preset all           # Everything
 
-See :doc:`testing` for details on labels, hardware skip
+See :ref:`testing` for details on labels, hardware skip
 detection, and fixtures.
 
 Utility targets
-^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
@@ -110,7 +122,7 @@ Utility targets
    cmake --build build --target clean-all      # Remove artifacts
    cmake --build build --target clean-external # Remove headers
 
-Build Output Structure
+Build output structure
 ----------------------
 
 ::
@@ -123,7 +135,7 @@ Build Output Structure
    │   └── xml/                # Doxygen XML (intermediate)
    └── CMakeFiles/
 
-Build System Details
+Build system details
 --------------------
 
 - **HIP compilation**: Uses ``hipcc`` with ``-fgpu-rdc`` for
@@ -135,26 +147,19 @@ Build System Details
 - **GPU architecture detection**: Auto-detects via ``rocminfo``
   or can be specified via ``OFFLOAD_ARCH``
 
-Requirements
-^^^^^^^^^^^^
 
-- CMake 3.21 or later
-- ROCm HIP SDK
-- HSA runtime libraries
-- libdrm and libdrm_amdgpu development packages
-
-Installation
-------------
+Install
+=======
 
 Default location (typically ``/opt/rocm``)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+------------------------------------------
 
 .. code-block:: bash
 
    cmake --install build
 
 Custom location
-^^^^^^^^^^^^^^^
+---------------
 
 .. code-block:: bash
 
@@ -171,7 +176,7 @@ Custom location
    cmake -P test-find-package.cmake
 
 Install with tester
-^^^^^^^^^^^^^^^^^^^
+-------------------
 
 .. code-block:: bash
 
@@ -179,7 +184,7 @@ Install with tester
    cmake --install build --prefix /tmp/rocm-xio-test
 
 Install layout
-^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~
 
 ::
 

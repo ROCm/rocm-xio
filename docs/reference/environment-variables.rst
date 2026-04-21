@@ -1,5 +1,10 @@
-Environment Variables
-=====================
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+******************************
+ROCm-XIO environment variables
+******************************
 
 rocm-xio reads several environment variables at runtime to
 control library behaviour. All rocm-xio variables use the
@@ -39,7 +44,7 @@ Logging
 
      ROCXIO_VERBOSE=1 sudo ./build/xio-tester test-ep
 
-Device Configuration
+Device configuration
 --------------------
 
 ``ROCXIO_NVME_DEVICE``
@@ -53,7 +58,7 @@ Device Configuration
 
      ROCXIO_NVME_DEVICE=/dev/nvme2 ctest -R nvme
 
-Interaction with ROCm Variables
+Interaction with ROCm variables
 -------------------------------
 
 rocm-xio also respects standard ROCm environment variables:
