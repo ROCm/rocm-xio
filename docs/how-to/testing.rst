@@ -1,5 +1,12 @@
-Testing
-=======
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+.. _testing: 
+
+******************
+Run ROCm-XIO tests
+******************
 
 rocm-xio uses `CTest`_ with CMake presets, label-based filtering,
 hardware fixture setup, and runtime skip detection.  This page
@@ -7,7 +14,7 @@ documents how to run tests, what labels and presets exist, and how
 hardware-gated tests behave when the required NIC or GPU is absent.
 
 Prerequisites
--------------
+=============
 
 Build with testing enabled (the ``default`` preset does this automatically):
 
@@ -16,8 +23,8 @@ Build with testing enabled (the ``default`` preset does this automatically):
    cmake --preset default
    cmake --build --preset default
 
-CMake Test Presets
-------------------
+CMake test presets
+==================
 
 The project provides six test presets in ``CMakePresets.json``:
 
@@ -47,8 +54,8 @@ Or equivalently without presets:
    ctest --test-dir build -V -L "unit" \
      --parallel --output-on-failure
 
-Test Labels
------------
+Test labels
+===========
 
 Every test carries one or more CTest labels for filtering with
 ``ctest -L <label>``:
@@ -66,17 +73,17 @@ Label         Meaning
 ``fixture``   CTest fixture (setup/teardown)
 ============  =========================================
 
-Combine labels to narrow scope:
+Combine labels to narrow the scope:
 
 .. code-block:: bash
 
    ctest --test-dir build -L "unit" -L "rdma"
 
-Test Inventory
---------------
+Test inventory
+==============
 
 Unit tests (CPU-only)
-^^^^^^^^^^^^^^^^^^^^^
+---------------------
 
 These run in CI without hardware:
 
@@ -98,15 +105,15 @@ These run in CI without hardware:
 - ``test-ep-config`` -- test-ep configuration defaults
 
 System tests
-^^^^^^^^^^^^
+------------
 
 - ``test-ep-emulate`` -- Full SQE/CQE round-trip in emulation mode
   (GPU required)
 
 Hardware tests
-^^^^^^^^^^^^^^
+--------------
 
-These require a GPU and the corresponding RDMA NIC.  When hardware
+These require a GPU and the corresponding RDMA NIC. When hardware
 is absent, tests report ``Skipped`` rather than ``Failed`` (see
 below).
 
@@ -119,8 +126,8 @@ below).
   ERNIC)
 - ``test-rdma-ernic-loopback`` -- ERNIC loopback
 
-Hardware Skip Detection
------------------------
+Hardware skip detection
+=======================
 
 Hardware tests use a three-layer gating strategy:
 
@@ -142,7 +149,7 @@ Hardware tests use a three-layer gating strategy:
    specification is auto-generated at configure time by
    ``cmake/XIODetectGPUs.cmake`` using ``rocm_agent_enumerator``.
 
-CTest Fixtures
+CTest fixtures
 --------------
 
 Hardware tests depend on a ``RDMA_HW`` fixture that runs
@@ -158,8 +165,8 @@ hardware test executes.  This fixture handles:
 When you run ``ctest -L hardware``, CTest automatically runs the fixture
 first in dependency order.
 
-GPU Resource Spec
------------------
+GPU resource spec
+=================
 
 At configure time, ``cmake/XIODetectGPUs.cmake`` runs ``rocm_agent_enumerator``
 and writes ``build/ctest-resources.json`` with the detected GPU count.  When
@@ -174,14 +181,14 @@ scheduling:
      --parallel 4
 
 Environment
------------
+===========
 
 Hardware tests automatically set ``LD_LIBRARY_PATH`` to include the
 rdma-core build tree via the CTest ``ENVIRONMENT`` property.  No
 manual ``export`` is needed when running through ``ctest``.
 
-Shell Script Runner
--------------------
+Shell script runner
+===================
 
 The convenience script ``scripts/test/test-rdma-ep-xio-loopback.sh``
 wraps the compiled ``test-rdma-loopback`` binary with additional
@@ -208,12 +215,12 @@ features:
    # Quick CTest-only run
    ctest --preset sweep
 
-xio-tester RDMA-EP
-------------------
+``xio-tester rdma-ep``
+======================
 
 ``xio-tester rdma-ep`` runs GPU-initiated RDMA WRITEs with per-iteration
 timing statistics and histogram support.  It honours ``--memory-mode``
-for queue and data buffer placement (see :doc:`memory-modes`).
+for queue and data buffer placement (see :ref:`memory-modes`).
 
 .. code-block:: bash
 
@@ -251,10 +258,10 @@ The ``--device`` flag selects the RDMA device by name (as shown by
 ``rdma link show``).  When omitted, topology-based selection picks
 the NIC closest to the GPU.
 
-Infinite Mode and SIGINT
-^^^^^^^^^^^^^^^^^^^^^^^^^
+Infinite mode and SIGINT
+------------------------
 
-Pass ``--iterations 0`` to run indefinitely.  Press Ctrl-C to stop
+Pass ``--iterations 0`` to run indefinitely.  Press **Ctrl-C** to stop
 gracefully; the GPU kernel polls a host-mapped ``stopRequested``
 flag after each RDMA WRITE completion and exits cleanly.
 
@@ -269,15 +276,15 @@ flag after each RDMA WRITE completion and exits cleanly.
      --loopback --iterations 0 \
      --less-timing
 
-SIGINT handling is supported by all endpoints: nvme-ep, rdma-ep,
-test-ep, and sdma-ep.
+SIGINT handling is supported by all endpoints: ``nvme-ep``, ``rdma-ep``,
+``test-ep``, and ``sdma-ep``.
 
-Per-Iteration Data Verification
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Per-iteration data verification
+-------------------------------
 
-``--verify`` checks the LFSR data pattern after **each** RDMA WRITE
-completion, not just at the end.  Verification runs outside the
-timing window so it does not inflate latency measurements.  On
+``--verify`` checks the LFSR data pattern after *each* RDMA WRITE
+completion, not just at the end. Verification runs outside the
+timing window so it doesn't inflate latency measurements. On
 mismatch the kernel prints the iteration number and byte offset.
 
 .. code-block:: bash
@@ -290,8 +297,8 @@ mismatch the kernel prints the iteration number and byte offset.
      --loopback --iterations 128 \
      --transfer-size 256 --verify
 
-GPU Configuration for Multi-Wavefront Kernels
-----------------------------------------------
+GPU configuration for multi-wavefront kernels
+=============================================
 
 Any endpoint kernel that spans multiple wavefronts (i.e., the thread
 block contains more threads than the hardware wavefront size) uses
@@ -302,14 +309,14 @@ non-preemptible workgroups and must be configured before running long
 or infinite multi-wavefront kernels.
 
 For ``nvme-ep`` this applies when ``--batch-size`` exceeds the
-wavefront size (typically 32 on RDNA or 64 on CDNA).  Other
+wavefront size (typically 32 on RDNA or 64 on CDNA). Other
 endpoints are similarly affected whenever their GPU kernels launch
 thread blocks larger than one wavefront.
 
 Background on GPU preemption and reset is documented in the
 `amdgpu module parameters`_ section of the Linux kernel
-documentation.  The ``cwsr_enable`` parameter (Compute Wave Store
-and Resume) controls mid-wave preemption support.  When a workgroup
+documentation. The ``cwsr_enable`` parameter (Compute Wave Store
+and Resume) controls mid-wave preemption support. When a workgroup
 holds a ``__syncthreads()`` barrier, CWSR cannot save and restore
 individual waves, so the entire workgroup becomes non-preemptible.
 See also the `ROCm system debugging guide`_ for related environment
@@ -321,22 +328,22 @@ variables.
    https://rocm.docs.amd.com/en/latest/how-to/system-debugging.html
 
 Disable GPU power management
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+----------------------------
 
 On headless systems the amdgpu driver periodically suspends and resumes
 the GPU (every ~20 seconds) via two independent mechanisms: DPM (Dynamic
 Power Management) level switching and PCI runtime power management
-(``runpm``).  Both are described in the `amdgpu module parameters`_
+(``runpm``). Both are described in the `amdgpu module parameters`_
 documentation.
 
 Single-wavefront kernels survive these suspend/resume cycles because
-CWSR can preempt and restore them.  Multi-wavefront kernels
-that hold ``__syncthreads()`` barriers cannot be preempted, so a
-power-gate cycle terminates the kernel and resets the GPU.  A GPU
+CWSR can preempt and restore them. Multi-wavefront kernels
+that hold ``__syncthreads()`` barriers can't be preempted, so a
+power-gate cycle terminates the kernel and resets the GPU. A GPU
 reset can cause system-wide instability including crashes in
 unrelated processes.
 
-Both DPM and PCI runtime PM must be disabled.  Set them at runtime
+Both DPM and PCI runtime PM must be disabled. Set them at runtime
 before launching kernels:
 
 .. code-block:: bash
@@ -359,9 +366,9 @@ alongside ``lockup_timeout``:
      | sudo tee /etc/modprobe.d/amdgpu-lockup.conf
    sudo update-initramfs -u
 
-The ``power_dpm_force_performance_level`` cannot be persisted via
+The ``power_dpm_force_performance_level`` can't be persisted via
 modprobe and must be set each session, for example via a systemd
-unit or rc.local script.
+unit or ``rc.local`` script.
 
 To restore automatic power management afterwards:
 
@@ -380,13 +387,13 @@ To restore automatic power management afterwards:
    for your system.
 
 Set compute lockup timeout to infinity
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+--------------------------------------
 
 The amdgpu driver's ``lockup_timeout`` parameter (default 2000 ms)
 resets the GPU if a compute dispatch does not signal its completion
-fence within the timeout window.  Infinite-mode kernels never
+fence within the timeout window. Infinite-mode kernels never
 complete by design, and long-running finite kernels may also exceed
-the default.  The `amdgpu module parameters`_ documentation
+the default. The `amdgpu module parameters`_ documentation
 describes the timeout format and default values.
 
 This parameter is read-only at runtime and must be set at module
@@ -410,10 +417,10 @@ Verify after reboot:
 
 Both settings are required for any endpoint kernel that uses
 multi-wavefront thread blocks in infinite or long-running mode.
-Single-wavefront kernels and short-duration tests do not need them.
+Single-wavefront kernels and short-duration tests don't need them.
 
-Adding New Tests
-----------------
+Add new tests
+=============
 
 Use the ``xio_add_test()`` CMake function defined in
 ``cmake/XIOTestHelpers.cmake``:
@@ -447,8 +454,8 @@ For hardware tests that need the RDMA fixture, add after registration:
    set_tests_properties(test-my-feature PROPERTIES
      FIXTURES_REQUIRED RDMA_HW)
 
-CI Integration
---------------
+CI integration
+==============
 
 The GitHub Actions workflows run tests as follows:
 
@@ -460,8 +467,8 @@ The GitHub Actions workflows run tests as follows:
 Hardware and sweep tests are not run in CI -- they require physical
 NIC and GPU hardware.
 
-VM-Isolated Testing
--------------------
+VM-isolated testing
+===================
 
 Hardware and RDMA tests can trigger kernel panics on bare metal.
 For a safer alternative that isolates failures inside a QEMU VM,
