@@ -1,12 +1,17 @@
-Examples
-========
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+*****************
+ROCm-XIO examples
+*****************
 
 The ``examples/`` directory contains standalone projects that
 demonstrate how to use the installed rocm-xio library. Each
 example is a self-contained CMake project that uses
 ``find_package(rocm-xio)`` to locate the library.
 
-Building Examples
+Building examples
 -----------------
 
 All examples follow the same build pattern. First install
@@ -27,50 +32,50 @@ example against that prefix:
    cmake --build /tmp/list-endpoints-build
 
 CTest runs these automatically via the install-integration
-test fixture (see :doc:`testing`).
+test fixture (see :ref:`testing`).
 
-Available Examples
+Available examples
 ------------------
 
-find-package
-^^^^^^^^^^^^
+``find-package``
+^^^^^^^^^^^^^^^^
 
 Configure-time smoke test. Verifies that
 ``find_package(rocm-xio)`` resolves the installed package
 and prints the discovered version and paths. Contains no
 source files.
 
-**Requirements:** none (configure-time only).
+**Requirements**: none (configure-time only).
 
-list-endpoints
-^^^^^^^^^^^^^^
+``list-endpoints``
+^^^^^^^^^^^^^^^^^^
 
 Minimal example that lists all registered endpoints. Calls
 ``listAvailableEndpoints()`` from ``xio.h``. This is
 CPU-only code compiled as HIP.
 
-**Requirements:** none (CPU-only).
+**Requirements**: none (CPU-only).
 
 .. code-block:: bash
 
    /tmp/list-endpoints-build/list-endpoints
 
-endpoint-info
-^^^^^^^^^^^^^
+``endpoint-info``
+^^^^^^^^^^^^^^^^^
 
 Iterates the endpoint registry and prints each endpoint's
 name, description, and type. Also validates that
 ``getEndpointName()`` and ``isValidEndpoint()`` agree with
 the registry data. CPU-only.
 
-**Requirements:** none (CPU-only).
+**Requirements**: none (CPU-only).
 
 .. code-block:: bash
 
    /tmp/endpoint-info-build/endpoint-info
 
-sdma-ep-p2p
-^^^^^^^^^^^^
+``sdma-ep-p2p``
+^^^^^^^^^^^^^^^
 
 GPU-initiated peer-to-peer DMA transfer via the SDMA
 endpoint. Uses the public ``sdma_ep`` host-side API
@@ -79,7 +84,7 @@ endpoint. Uses the public ``sdma_ep`` host-side API
 (``putSignal()``, ``waitSignal()``, ``quiet()``) to perform
 a GPU-to-GPU memory copy driven entirely from shader code.
 
-**Requirements:**
+**Requirements**:
 
 - Two AMD GPUs with XGMI / Infinity Fabric P2P access
 - Root access (hsakmt requires ``/dev/kfd``)
@@ -94,8 +99,8 @@ The example fills a 4 KiB source buffer on GPU 0 with
 ``0xAB``, transfers it to GPU 1 via SDMA, and verifies the
 destination buffer contents.
 
-sdma-ep-allgather
-^^^^^^^^^^^^^^^^^^
+``sdma-ep-allgather``
+^^^^^^^^^^^^^^^^^^^^^
 
 MPI allgather collective driven entirely from GPU shader
 code via SDMA. Each MPI rank owns one GPU and uses the
@@ -108,7 +113,7 @@ This example is derived from the original
 ``shader-sdma-coll`` prototype and serves as a template for
 building multi-process, multi-GPU SDMA collectives.
 
-**Requirements:**
+**Requirements**:
 
 - N AMD GPUs with XGMI / Infinity Fabric P2P access
 - MPI (OpenMPI, MPICH, etc.)
@@ -126,17 +131,17 @@ integers (default: 1024 = 4 KiB per rank). Each rank fills
 its chunk with ``rank + 1`` and verifies that the gathered
 output contains the correct values from all ranks.
 
-nvme-ep-info
-^^^^^^^^^^^^
+``nvme-ep-info``
+^^^^^^^^^^^^^^^^
 
 Queries NVMe controller properties using the ``nvme_ep``
 host-side API. Prints LBA size, namespace capacity, maximum
 queue ID, and SMART/Health log data. Accepts an optional
 device path argument (defaults to ``/dev/nvme0``).
 
-**Requirements:**
+**Requirements**:
 
-- An NVMe device (e.g. ``/dev/nvme0``)
+- An NVMe device (e.g., ``/dev/nvme0``)
 - Root access (NVMe admin commands require
   ``CAP_SYS_ADMIN``)
 
@@ -148,8 +153,8 @@ Returns exit code 77 (CTest SKIP convention) when the NVMe
 device cannot be opened, so it can be registered as a CTest
 with graceful skip behavior.
 
-Writing New Examples
---------------------
+Write new examples
+------------------
 
 To add a new example:
 

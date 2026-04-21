@@ -1,10 +1,17 @@
-Memory Modes, Allocation, and Coherence
-=======================================
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+.. _memory-modes:
+
+***************************************************
+Memory modes, allocation, and coherence in ROCm-XIO
+***************************************************
 
 This page documents the unified memory allocation API, memory coherence
 considerations, and the DMA-BUF export architecture in rocm-xio.
 
-Fine-Grained vs. Coarse-Grained Memory
+Fine-grained vs. coarse-grained memory
 ---------------------------------------
 
 **Coarse-grained** memory means that a store to a memory location may only
@@ -22,7 +29,7 @@ the environment variable is set:
 On MI-series accelerators (MI300X, etc.) fine-grained memory is available
 by default.
 
-Host Memory Allocation
+Host memory allocation
 ----------------------
 
 All host allocation in rocm-xio goes through ``allocHostMemory()`` with
@@ -77,7 +84,7 @@ The only remaining raw host allocations are the
 ``ibv_alloc_parent_domain`` callbacks (constrained by the libibverbs
 ABI).
 
-Device Memory Allocation
+Device memory allocation
 -------------------------
 
 All device (VRAM) allocation goes through ``allocDeviceMemory()`` with
@@ -132,7 +139,7 @@ mapping (``hsa_amd_memory_lock_to_pool``) and the
 ``ibv_alloc_parent_domain`` callbacks which are constrained by the
 libibverbs ABI.
 
-Memory Mode CLI Flags
+Memory mode CLI flags
 ---------------------
 
 The ``--memory-mode`` CLI option (0--15) controls placement:
@@ -148,7 +155,7 @@ When a bit is **set**, the corresponding buffer is allocated with
 ``allocDeviceMemory()`` (VRAM); when **clear**, with
 ``allocHostMemory()`` (system RAM).
 
-NVMe-EP Memory Mode
+NVMe-EP memory mode
 ^^^^^^^^^^^^^^^^^^^^
 
 Bits 0, 1, and 3 are honoured independently. The SQ and CQ are
@@ -159,7 +166,7 @@ NVMe implementation; doorbell routing is controlled by the
 ``XioEndpointConfig::pciMmioBridge``) instead. Data buffers use bit 3
 for host vs. device P2PDMA allocation.
 
-RDMA-EP Memory Mode
+RDMA-EP memory mode
 ^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -200,7 +207,7 @@ RDMA-EP Memory Mode
        verify patterns are staged through a temporary
        host buffer when data is on device.
 
-Mirrored Host+Device Pairs
+Mirrored host+device pairs
 ---------------------------
 
 ``allocDeviceMemoryPair()`` allocates a host+device pair
@@ -208,7 +215,7 @@ Mirrored Host+Device Pairs
 are constructed on the host then copied to the GPU with ``hipMemcpy``.
 Used for GPU QueuePair staging in the RDMA endpoint.
 
-DMA-BUF Export
+DMA-BUF export
 --------------
 
 rocm-xio calls ``hsa_amd_portable_export_dmabuf`` directly (v1, no
@@ -228,7 +235,7 @@ flags) at **three call sites**, all routed through the centralized
    buffer for BNXT Direct Verbs UMEM registration with
    ``BNXT_RE_DV_UMEM_FLAGS_DMABUF``.
 
-ERNIC does not use dmabuf for CQ allocation; it uses host-pinned
+ERNIC doesn't use dmabuf for CQ allocation; it uses host-pinned
 memory (``XIO_HOST_MEM_PINNED``) with ``dmabuf_fd = -1``.
 
 HSA API v2
@@ -249,7 +256,7 @@ The v1 API is documented as equivalent to v2 with
 Additionally, ``hsa_amd_portable_close_dmabuf()`` provides proper
 cleanup of dmabuf file descriptors, replacing raw ``close(fd)`` calls.
 
-HIP Virtual Memory Management
+HIP virtual memory management
 ------------------------------
 
 ROCm 7 introduces `HIP Virtual Memory Management`_ built on HSA
@@ -301,7 +308,7 @@ later dmabuf export:
    access.flags = hipMemAccessFlagsProtReadWrite;
    hipMemSetAccess(ptr, allocSize, &access, 1);
 
-Device-to-Host Visibility
+Device-to-host visibility
 -------------------------
 
 If ``__device__`` code stores to host memory, the following are
@@ -311,14 +318,14 @@ needed so a host CPU core can see the store:
 - ``volatile`` qualification on the host-side pointer
 - ``__threadfence_system()`` on the device side
 
-Host-to-Device Visibility
+Host-to-device visibility
 -------------------------
 
 If ``__host__`` code stores to host memory that a GPU core reads,
 ``hipHostMalloc()`` alone is typically sufficient because it marks the
 memory as uncached, making CPU writes visible at the system level.
 
-Thread Fences
+Thread fences
 -------------
 
 - ``__threadfence()`` -- sufficient on MI300X for intra-device
@@ -339,7 +346,7 @@ rocm-xio deliberately removed this abstraction (see
 internals"). rocm-xio uses a single-endpoint model with no symmetric
 heap, making a full allocator hierarchy unnecessary.
 
-Upstream Tracking
+Upstream tracking
 -----------------
 
 Monitor ``ROCm/rocm-systems#3762`` for any breaking changes to the

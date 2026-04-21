@@ -1,19 +1,24 @@
-Endpoints
-=========
+.. meta::
+  :description: ROCm-XIO documentation
+  :keywords: ROCm, documentation
+
+******************
+ROCm-XIO endpoints
+******************
 
 Endpoints define hardware interfaces and protocols for different IO
 devices. Each endpoint provides its own queue entry formats and IO
 semantics.
 
-Listing Available Endpoints
----------------------------
+List available endpoints
+------------------------
 
 .. code-block:: bash
 
    ./build/xio-tester --list-endpoints
 
-test-ep -- Test Endpoint
-------------------------
+``test-ep`` -- test endpoint
+----------------------------
 
 A software-only endpoint for validating the XIO framework. No hardware
 required.
@@ -22,8 +27,8 @@ required.
 
    sudo ./build/xio-tester test-ep --verbose
 
-nvme-ep -- NVMe Endpoint
--------------------------
+``nvme-ep`` -- NVMe endpoint
+----------------------------
 
 Implements NVMe command submission (SQE) and completion (CQE) handling.
 Supports Read and Write commands with configurable IO patterns and
@@ -81,7 +86,7 @@ is no fixed array ceiling.
      --read-io 1 --batch-size 8 \
      --infinite --less-timing
 
-Multi-Queue Parallelism (``--num-queues``)
+Multi-queue parallelism (``--num-queues``)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``--num-queues N`` (default 1) creates ``N`` independent NVMe I/O
@@ -103,7 +108,7 @@ IDs are allocated as a contiguous range ending at the auto-detected
      --read-io 64 --num-queues 4 \
      --batch-size 16
 
-Timing Semantics
+Timing semantics
 ^^^^^^^^^^^^^^^^
 
 When ``--batch-size > 1`` or ``--num-queues > 1``, per-operation
@@ -112,7 +117,7 @@ lightweight ``XioTimingStats`` mode (min/max/sum/count). For
 multi-queue runs, per-queue stats are allocated independently and
 aggregated after all kernels finish.
 
-Doorbell Modes
+Doorbell modes
 ^^^^^^^^^^^^^^
 
 The NVMe endpoint supports two doorbell delivery modes. Choosing the
@@ -122,7 +127,7 @@ or an emulated device inside a virtual machine.
 **Direct BAR0 (default -- use with real hardware)**
   The GPU writes directly to the NVMe controller's BAR0 doorbell
   registers. This is the correct mode when the NVMe SSD is passed
-  through to the VM (or bare-metal host) via **vfio-pci** or is
+  through to the VM (or bare-metal host) via ``vfio-pci`` or is
   otherwise a real PCIe endpoint. Direct BAR0 avoids the extra
   latency of the MMIO bridge and is the lowest-overhead path.
 
@@ -141,7 +146,7 @@ or an emulated device inside a virtual machine.
 **PCI MMIO bridge (emulated devices in VMs only)**
   Routes doorbell writes through a QEMU virtual PCI device that
   forwards them to the emulated NVMe controller's BAR0. This mode
-  is **essential** when the NVMe device is emulated by QEMU (e.g.
+  is *essential* when the NVMe device is emulated by QEMU (e.g.
   the built-in ``nvme`` device model) because the emulated BAR0
   lives in QEMU's address space and cannot be reached by a direct
   GPU store. Enable with ``--pci-mmio-bridge``:
@@ -152,14 +157,14 @@ or an emulated device inside a virtual machine.
        --controller /dev/nvme0 \
        --read-io 8 --pci-mmio-bridge
 
-  **Do not** use the PCI MMIO bridge with real NVMe endpoints
+  Do *not* use the PCI MMIO bridge with real NVMe endpoints
   passed through via vfio-pci. The bridge adds an unnecessary PCIe
   hop and QEMU processing overhead that hurts latency and
   throughput with no benefit -- real hardware already exposes its
   BAR0 directly to the GPU.
 
-rdma-ep -- RDMA Endpoint
--------------------------
+``rdma-ep`` -- RDMA endpoint
+----------------------------
 
 GPU-Direct RDMA endpoint supporting four major vendors:
 
@@ -292,13 +297,13 @@ Troubleshooting
    in ``/sys/class/infiniband/*/ports/1/gids/``. Wait a few
    seconds after module reload for the GID table to populate.
 
-sdma-ep -- SDMA Endpoint
--------------------------
+``sdma-ep`` -- SDMA endpoint
+----------------------------
 
 GPU-initiated DMA transfers using AMD hardware SDMA engines. Based
 on the anvil library from AMD's RAD team.
 
-Hardware Requirements
+Hardware requirements
 ^^^^^^^^^^^^^^^^^^^^^
 
 - AMD Instinct datacenter GPUs
@@ -306,7 +311,7 @@ Hardware Requirements
 - P2P mode: multi-GPU system with XGMI/Infinity Fabric
 - Single-GPU mode: use ``--to-host``
 
-Usage Examples
+Usage examples
 ^^^^^^^^^^^^^^
 
 Single-GPU (SDMA to pinned host memory):
@@ -340,7 +345,7 @@ Transfer size (``-s``) accepts bytes or suffixes: ``4k``, ``1M``,
 ``2G``. Suffixes are power-of-2 (KiB, MiB, GiB). Value must be a
 multiple of 4.
 
-Host-Side Setup (Library API)
+Host-side setup (Library API)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Applications that want to use shader-initiated SDMA from their own
@@ -376,8 +381,8 @@ setup API:
 See the :doc:`api` page for full function signatures and cleanup
 semantics.
 
-Device-Side Operations (Kernel API)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Device-side operations (Kernel API)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 GPU kernels use the ``sdma_ep::`` device-side functions to issue
 SDMA transfers, signal completion, and wait for results. All
@@ -429,7 +434,7 @@ Limitations
 - P2P requires at least two GPUs
 - Requires hsakmt (KFD kernel driver interface)
 
-Environment Variables
+Environment variables
 ---------------------
 
 On consumer Radeon GPUs (RX series), set the following before

@@ -1,0 +1,44 @@
+defaults:
+  numbered: False
+  maxdepth: 6
+root: index
+subtrees:
+- entries:
+  - file: what-is-xio.rst
+    title: What is ROCm-XIO?
+
+- caption: Install
+  entries:
+  - file: install/building
+    title: Build and install ROCm-XIO
+  - file: install/kernel-module
+    title: Install the kernel module
+
+- caption: How to
+  entries:
+  - file: how-to/testing
+    title: Run tests
+  - file: how-to/vm-testing
+    title: Run VM-isolated tests
+
+- caption: Conceptual
+  entries:
+  - file: conceptual/memory-modes
+    title: Memory modes, allocation, and coherence
+
+- caption: Reference
+  entries:
+  - file: reference/examples
+    title: Examples
+  - file: reference/performance
+    title: Performance measurements
+  - file: reference/endpoints
+    title: Endpoints
+  - file: reference/environment-variables
+    title: Environment variables
+  - file: reference/api
+    title: API reference
+  
+- caption: About
+  entries:
+  - file: license.rst
