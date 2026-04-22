@@ -1,10 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for xio::extractEndpointName() CLI parser.
- * CPU-only: exercises pure argument parsing.
+ * Unit tests for xio::extractEndpointName() CLI parser. CPU-only: exercises
+ * pure argument parsing.
  */
 
 #include <cassert>

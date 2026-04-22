@@ -1,10 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for nvme-ep configuration, struct sizes,
- * magic constants, and queue-length validation.
+ * Unit tests for nvme-ep configuration, struct sizes, magic constants, and
+ * queue-length validation.
  */
 
 #include <cassert>

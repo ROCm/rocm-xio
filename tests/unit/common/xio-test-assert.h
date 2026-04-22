@@ -1,11 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Shared test assertion macros for rocm-xio unit and
- * system tests.  Include this header instead of
- * defining per-file ASSERT_* macros.
+ * Shared test assertion macros for rocm-xio unit and system tests. Include
+ * this header instead of defining per-file ASSERT_* macros.
  */
 
 #ifndef XIO_TEST_ASSERT_H

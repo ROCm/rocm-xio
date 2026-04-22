@@ -5,6 +5,8 @@ build*/
 # CTest artifacts (generated when running tests from repo root)
 Testing/
 bin/
+# Local cq-wrap-test binary (legacy name); must not be committed
+/cq-wrap-test
 lib/
 *.o
 *.a

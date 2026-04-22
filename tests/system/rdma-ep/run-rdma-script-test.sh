@@ -1,13 +1,11 @@
 #!/bin/bash
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
 #
-# Thin wrapper for RDMA-EP shell-script tests that
-# maps missing prerequisites to CTest skip (exit 77)
-# instead of hard failure.  Mirrors the NVMe-EP
-# wrapper (tests/system/nvme-ep/run-nvme-script-test.sh).
+# Thin wrapper for RDMA-EP shell-script tests that maps missing prerequisites
+# to CTest skip (exit 77) instead of hard failure. Mirrors the NVMe-EP wrapper
+# (tests/system/nvme-ep/run-nvme-script-test.sh).
 #
 # Usage:
 #   run-rdma-script-test.sh <script> [extra-args...]

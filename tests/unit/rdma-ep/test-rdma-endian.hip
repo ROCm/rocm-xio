@@ -1,5 +1,4 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
@@ -85,16 +84,14 @@ __global__ void test_endian_gpu(bool* results) {
 int test_endian_on_gpu() {
   hipError_t err = hipInit(0);
   if (err != hipSuccess) {
-    printf("  skipping GPU endian test"
-           " (no GPU)\n");
+    printf("  skipping GPU endian test (no GPU)\n");
     return 0;
   }
 
   int count = 0;
   err = hipGetDeviceCount(&count);
   if (err != hipSuccess || count == 0) {
-    printf("  skipping GPU endian test"
-           " (no GPU)\n");
+    printf("  skipping GPU endian test (no GPU)\n");
     return 0;
   }
 

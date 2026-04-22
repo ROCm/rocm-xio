@@ -30,7 +30,9 @@ DEVICE="${3:-}"
 PROVIDER="${4:-${PROVIDER:-auto}}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/../../../build"
+# Default build tree; override with BUILD_DIR when using a non-default
+# out-of-source directory (same convention as scripts/test/).
+BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/../../../build}"
 TEST_BIN="$BUILD_DIR/tests/unit"
 TEST_BIN="$TEST_BIN/rdma-ep/test-rdma-2node"
 

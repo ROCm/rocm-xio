@@ -1,10 +1,8 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for test-ep configuration, struct sizes,
- * and magic constants.
+ * Unit tests for test-ep configuration, struct sizes, and magic constants.
  */
 
 #include <cassert>
