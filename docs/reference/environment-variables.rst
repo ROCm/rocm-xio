@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn about the environment variables used in ROCm XIO
+  :keywords: ROCm, documentation, environment, variables, XIO
 
 ******************************
 ROCm XIO environment variables

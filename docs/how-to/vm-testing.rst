@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn how to run ROCm XIO tests in a virtual machine
+  :keywords: ROCm, documentation, XIO, virtual machine, hardware tests
 
 ********************************
 Run ROCm XIO VM-isolated testing
