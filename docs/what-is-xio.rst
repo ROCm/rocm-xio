@@ -1,12 +1,12 @@
 .. meta::
-  :description: ROCm-XIO license
-  :keywords: ROCm, documentation
+  :description: Learn about ROCm XIO, its features, and its architecture
+  :keywords: ROCm, documentation, XIO, architecture
 
 *****************
-What is ROCm-XIO?
+What is ROCm XIO?
 *****************
 
-rocm-xio provides an API for Accelerator-Initiated IO (XIO) for AMD
+ROCm XIO provides an API for Accelerator-Initiated IO (XIO) for AMD
 GPU ``__device__`` code. It enables AMD GPUs to perform direct IO
 operations to hardware devices without CPU intervention.
 
@@ -34,7 +34,7 @@ discovery and instantiation via ``xio::createEndpoint()``.
 Quick Start
 ===========
 
-.. describe the flow instead of providing the instructions
+.. describe the flow instead of providing the instructions and then provide a link to our installation page
 
 .. code-block:: bash
 

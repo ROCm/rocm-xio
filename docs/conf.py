@@ -14,7 +14,7 @@ flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-develope
 html_theme = "rocm_docs_theme"
 html_theme_options = {
     "flavor": "generic",
-    "header_title": "ROCm-XIO",
+    "header_title": "ROCm™ XIO",
     "header_link": "https://github.com/ROCm/rocm-xio",
     "nav_secondary_items": {
         "GitHub": "https://github.com/ROCm/rocm-xio",
@@ -45,7 +45,7 @@ all_article_info_author = ""
 version_number = "0.1.0"
 
 # for PDF output on Read the Docs
-project = "ROCm-XIO"
+project = "ROCm™ XIO"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
 version = version_number
@@ -77,4 +77,4 @@ suppress_warnings = [
 
 html_title = f"{project} {version_number} documentation"
 
-external_projects_current_project = "ROCm-XIO"
+external_projects_current_project = "ROCm™ XIO"
