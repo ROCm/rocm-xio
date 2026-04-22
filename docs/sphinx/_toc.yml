@@ -5,12 +5,12 @@ root: index
 subtrees:
 - entries:
   - file: what-is-xio.rst
-    title: What is ROCm-XIO?
+    title: What is ROCm XIO?
 
 - caption: Install
   entries:
   - file: install/building
-    title: Build and install ROCm-XIO
+    title: Build and install ROCm XIO
   - file: install/kernel-module
     title: Install the kernel module
 

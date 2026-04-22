@@ -1,13 +1,13 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 *****************
-ROCm-XIO examples
+ROCm XIO examples
 *****************
 
 The ``examples/`` directory contains standalone projects that
-demonstrate how to use the installed rocm-xio library. Each
+demonstrate how to use the installed ROCm XIO library. Each
 example is a self-contained CMake project that uses
 ``find_package(rocm-xio)`` to locate the library.
 
@@ -15,7 +15,7 @@ Building examples
 -----------------
 
 All examples follow the same build pattern. First install
-rocm-xio to a temporary prefix, then configure and build the
+ROCm XIO to a temporary prefix, then configure and build the
 example against that prefix:
 
 .. code-block:: bash
@@ -163,7 +163,7 @@ To add a new example:
    ``find_package(rocm-xio REQUIRED)`` and links against
    ``rocm-xio::rocm-xio``.
 3. Add the source file(s) as ``.hip`` (even for CPU-only
-   code, since rocm-xio headers use HIP types).
+   code, since ROCm XIO headers use HIP types).
 4. Register the example in
    ``tests/integration/CMakeLists.txt`` via
    ``xio_add_install_test()``. Use the ``RUN`` flag only if

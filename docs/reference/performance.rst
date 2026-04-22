@@ -1,9 +1,9 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 *********************************
-ROCm-XIO performance measurements
+ROCm XIO performance measurements
 *********************************
 
 This page documents RDMA-EP loopback performance measurements collected on a

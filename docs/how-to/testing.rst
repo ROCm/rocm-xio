@@ -1,14 +1,14 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 .. _testing:
 
 ******************
-Run ROCm-XIO tests
+Run ROCm XIO tests
 ******************
 
-rocm-xio uses `CTest`_ with CMake presets, label-based filtering,
+ROCm XIO uses `CTest`_ with CMake presets, label-based filtering,
 hardware fixture setup, and runtime skip detection.  This page
 documents how to run tests, what labels and presets exist, and how
 hardware-gated tests behave when the required NIC or GPU is absent.

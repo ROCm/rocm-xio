@@ -1,12 +1,12 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 **************************
-Build and install ROCm-XIO
+Build and install ROCm XIO
 **************************
 
-Build ROCm-XIO
+Build ROCm XIO
 ==============
 
 Prerequisites

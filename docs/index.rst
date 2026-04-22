@@ -1,12 +1,12 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 ************************
-ROCm-XIO documentation
+ROCm XIO documentation
 ************************
 
-ROCm-XIO provides an API for Accelerator-Initiated IO (XIO)
+ROCm XIO provides an API for Accelerator-Initiated IO (XIO)
 for an AMD GPU ``__device__`` code.
 It enables AMD GPUs to perform direct
 IO operations to hardware devices without CPU intervention.
@@ -16,7 +16,7 @@ IO operations to hardware devices without CPU intervention.
 
   .. grid-item-card:: Install
 
-    * :doc:`Build and install ROCm-XIO </install/building>`
+    * :doc:`Build and install ROCm XIO </install/building>`
     * :doc:`Install the kernel module </install/kernel-module>`
 
   .. grid-item-card:: How to

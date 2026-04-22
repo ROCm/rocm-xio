@@ -1,13 +1,13 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 ******************************
-ROCm-XIO environment variables
+ROCm XIO environment variables
 ******************************
 
-rocm-xio reads several environment variables at runtime to
-control library behaviour. All rocm-xio variables use the
+ROCm XIO reads several environment variables at runtime to
+control library behaviour. All ROCm XIO variables use the
 ``ROCXIO_`` prefix, following ROCm ecosystem conventions.
 
 Logging
@@ -61,7 +61,7 @@ Device configuration
 Interaction with ROCm variables
 -------------------------------
 
-rocm-xio also respects standard ROCm environment variables:
+ROCm XIO also respects standard ROCm environment variables:
 
 ``HSA_FORCE_FINE_GRAIN_PCIE``
   Must be set to ``1`` for PCIe peer-to-peer DMA operations
