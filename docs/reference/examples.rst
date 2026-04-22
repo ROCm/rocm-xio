@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Use these standalone CMake ROCm XIO project examples as a reference for your workflow
+  :keywords: ROCm, documentation, XIO, CMake, examples
 
 *****************
 ROCm XIO examples

@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn about the APIs used in ROCm XIO
+  :keywords: ROCm, documentation, API, XIO
 
 **********************
 ROCm XIO API reference

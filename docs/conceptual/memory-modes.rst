@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn about the unified memory allocation API, memory coherence considerations, and the DMA-BUF export architecture in ROCm XIO
+  :keywords: ROCm, documentation, memory, allocation, coherence, XIO
 
 .. _memory-modes:
 

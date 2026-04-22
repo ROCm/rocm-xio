@@ -1,6 +1,6 @@
 .. meta::
-  :description: ROCm XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn about the endpoints used in ROCm XIO which define hardware interfaces and protocols
+  :keywords: ROCm, documentation, endpoints, XIO
 
 ******************
 ROCm XIO endpoints
