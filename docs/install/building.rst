@@ -1,16 +1,20 @@
 .. meta::
-  :description: ROCm-XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn how to build and install ROCm XIO
+  :keywords: ROCm, documentation, XIO, CMake, HSA, runtime libraries
 
 **************************
-Build and install ROCm-XIO
+Build and install ROCm XIO
 **************************
 
-Build ROCm-XIO
+.. describe installation path, what they'll see when they succeed, and optional configurations.
+
+Build ROCm XIO
 ==============
 
 Prerequisites
 -------------
+
+.. moved these prerequisites towards the top of the page
 
 - CMake 3.21 or later
 - ROCm HIP SDK

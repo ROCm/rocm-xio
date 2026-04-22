@@ -1,15 +1,15 @@
 .. meta::
-  :description: ROCm-XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn about the unified memory allocation API, memory coherence considerations, and the DMA-BUF export architecture in ROCm XIO
+  :keywords: ROCm, documentation, memory, allocation, coherence, XIO
 
 .. _memory-modes:
 
 ***************************************************
-Memory modes, allocation, and coherence in ROCm-XIO
+Memory modes, allocation, and coherence in ROCm XIO
 ***************************************************
 
 This page documents the unified memory allocation API, memory coherence
-considerations, and the DMA-BUF export architecture in rocm-xio.
+considerations, and the DMA-BUF export architecture in ROCm XIO.
 
 Fine-grained vs. coarse-grained memory
 ---------------------------------------
@@ -32,7 +32,7 @@ by default.
 Host memory allocation
 ----------------------
 
-All host allocation in rocm-xio goes through ``allocHostMemory()`` with
+All host allocation in ROCm XIO goes through ``allocHostMemory()`` with
 ``XIO_HOST_MEM_*`` flags:
 
 - ``XIO_HOST_MEM_MAPPED`` (0x0) -- ``hipHostMalloc(Mapped)`` with ``malloc``
@@ -218,7 +218,7 @@ Used for GPU QueuePair staging in the RDMA endpoint.
 DMA-BUF export
 --------------
 
-rocm-xio calls ``hsa_amd_portable_export_dmabuf`` directly (v1, no
+ROCm XIO calls ``hsa_amd_portable_export_dmabuf`` directly (v1, no
 flags) at **three call sites**, all routed through the centralized
 ``exportDmabuf()`` wrapper:
 
@@ -260,7 +260,7 @@ HIP virtual memory management
 ------------------------------
 
 ROCm 7 introduces `HIP Virtual Memory Management`_ built on HSA
-``hsa_amd_vmem_*`` APIs. Key benefits for rocm-xio:
+``hsa_amd_vmem_*`` APIs. Key benefits for ROCm XIO:
 
 1. **No device sync on free** --
    ``hipMemUnmap``/``hipMemRelease``/``hipMemAddressFree``
@@ -341,15 +341,15 @@ rocSHMEM has a full allocator hierarchy (``HIPAllocator``,
 PEs. Each allocator knows how to allocate memory and export it as
 dmabuf for RDMA registration.
 
-rocm-xio deliberately removed this abstraction (see
+ROCm XIO deliberately removed this abstraction (see
 ``src/endpoints/rdma-ep/README.md``: "Decoupled from rocshmem
-internals"). rocm-xio uses a single-endpoint model with no symmetric
+internals"). ROCm XIO uses a single-endpoint model with no symmetric
 heap, making a full allocator hierarchy unnecessary.
 
 Upstream tracking
 -----------------
 
 Monitor ``ROCm/rocm-systems#3762`` for any breaking changes to the
-HSA allocator interface that would require rocm-xio changes.
+HSA allocator interface that would require ROCm XIO changes.
 
 .. _HIP Virtual Memory Management: https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/virtual_memory.html

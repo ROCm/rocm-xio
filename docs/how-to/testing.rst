@@ -1,15 +1,15 @@
 .. meta::
-  :description: ROCm-XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn how to run tests with CMake in ROCm XIO
+  :keywords: ROCm, documentation, CMake, testing, XIO
 
 .. _testing:
 
 ******************
-Run ROCm-XIO tests
+Run ROCm XIO tests
 ******************
 
-rocm-xio uses `CTest`_ with CMake presets, label-based filtering,
-hardware fixture setup, and runtime skip detection.  This page
+ROCm XIO uses `CTest`_ with CMake presets, label-based filtering,
+hardware fixture setup, and runtime skip detection. This page
 documents how to run tests, what labels and presets exist, and how
 hardware-gated tests behave when the required NIC or GPU is absent.
 
@@ -137,15 +137,15 @@ Hardware tests use a three-layer gating strategy:
    configure time.
 
 2. **Runtime detection** -- Each hardware test probes for the
-   required NIC and GPU at startup.  If hardware is absent the test
-   prints ``SKIP: ...`` and exits with code 77.  CTest recognises
+   required NIC and GPU at startup. If the hardware is absent, the test
+   prints ``SKIP: ...`` and exits with code 77. CTest recognises
    this via ``SKIP_RETURN_CODE 77`` and
    ``SKIP_REGULAR_EXPRESSION "SKIP:"`` properties set by
    ``xio_add_test()``.
 
 3. **GPU resource allocation** -- Tests with the ``GPU`` flag
    declare ``RESOURCE_GROUPS "gpus:1"`` so CTest can schedule
-   parallel tests without oversubscribing GPUs.  The resource
+   parallel tests without oversubscribing GPUs. The resource
    specification is auto-generated at configure time by
    ``cmake/XIODetectGPUs.cmake`` using ``rocm_agent_enumerator``.
 
@@ -171,7 +171,7 @@ GPU resource spec
 At configure time, ``cmake/XIODetectGPUs.cmake`` runs ``rocm_agent_enumerator``
 and writes ``build/ctest-resources.json`` with the detected GPU count.  When
 ``rocm_agent_enumerator`` is unavailable the module defaults to a
-single GPU.  Use the generated file for parallel GPU-aware test
+single GPU. Use the generated file for parallel GPU-aware test
 scheduling:
 
 .. code-block:: bash
@@ -219,7 +219,7 @@ features:
 ======================
 
 ``xio-tester rdma-ep`` runs GPU-initiated RDMA WRITEs with per-iteration
-timing statistics and histogram support.  It honours ``--memory-mode``
+timing statistics and histogram support. It honours ``--memory-mode``
 for queue and data buffer placement (see :ref:`memory-modes`).
 
 .. code-block:: bash
@@ -255,13 +255,13 @@ for queue and data buffer placement (see :ref:`memory-modes`).
      --memory-mode 8
 
 The ``--device`` flag selects the RDMA device by name (as shown by
-``rdma link show``).  When omitted, topology-based selection picks
+``rdma link show``). When omitted, topology-based selection picks
 the NIC closest to the GPU.
 
 Infinite mode and SIGINT
 ------------------------
 
-Pass ``--iterations 0`` to run indefinitely.  Press **Ctrl-C** to stop
+Pass ``--iterations 0`` to run indefinitely. Press **Ctrl-C** to stop
 gracefully; the GPU kernel polls a host-mapped ``stopRequested``
 flag after each RDMA WRITE completion and exits cleanly.
 
@@ -304,7 +304,7 @@ Any endpoint kernel that spans multiple wavefronts (i.e., the thread
 block contains more threads than the hardware wavefront size) uses
 ``__syncthreads()`` barriers to coordinate work across wavefronts.
 These barriers prevent the GPU scheduler from preempting the workgroup
-mid-execution.  Two amdgpu driver behaviours interact badly with
+mid-execution. Two amdgpu driver behaviours interact badly with
 non-preemptible workgroups and must be configured before running long
 or infinite multi-wavefront kernels.
 
@@ -317,7 +317,7 @@ Background on GPU preemption and reset is documented in the
 `amdgpu module parameters`_ section of the Linux kernel
 documentation. The ``cwsr_enable`` parameter (Compute Wave Store
 and Resume) controls mid-wave preemption support. When a workgroup
-holds a ``__syncthreads()`` barrier, CWSR cannot save and restore
+holds a ``__syncthreads()`` barrier, CWSR can't save and restore
 individual waves, so the entire workgroup becomes non-preemptible.
 See also the `ROCm system debugging guide`_ for related environment
 variables.
@@ -397,7 +397,7 @@ the default. The `amdgpu module parameters`_ documentation
 describes the timeout format and default values.
 
 This parameter is read-only at runtime and must be set at module
-load time.  Create a modprobe configuration file and rebuild the
+load time. Create a modprobe configuration file and rebuild the
 initramfs so the setting takes effect when the amdgpu module loads
 during boot:
 

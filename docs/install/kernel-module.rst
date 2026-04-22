@@ -1,9 +1,9 @@
 .. meta::
-  :description: ROCm-XIO documentation
-  :keywords: ROCm, documentation
+  :description: Learn how to build and install the ROCm XIO kernel module 
+  :keywords: ROCm, documentation, XIO, kernel module
 
 ********************************************
-Build and install the ROCm-XIO kernel module
+Build and install the ROCm XIO kernel module
 ********************************************
 
 The ``rocm-xio`` kernel module (``kernel/rocm-xio/``) provides
