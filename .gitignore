@@ -65,11 +65,5 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Alola slurm-based output files.
-.alola/*.err
-.alola/*.out
-.alola/logs/
-.alola/.alola-job-ids
-
 # LLVM profiling data
 default.profraw
