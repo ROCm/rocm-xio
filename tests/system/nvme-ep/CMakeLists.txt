@@ -4,9 +4,8 @@
 
 # NVMe endpoint system tests.
 #
-# Wrappers exit 77 (CTest skip) when prerequisites are
-# missing.  The NVMe device comes from
-# $ROCXIO_NVME_DEVICE at runtime.
+# Wrappers exit 77 (CTest skip) when prerequisites are missing. The NVMe
+# device comes from $ROCXIO_NVME_DEVICE at runtime.
 #
 # Label convention:
 #   hardware  - requires real NVMe device + root

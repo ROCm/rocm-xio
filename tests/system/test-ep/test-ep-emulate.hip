@@ -1,14 +1,12 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
  * System-level test for test-ep in emulate mode.
  *
- * Validates the full SQE/CQE roundtrip using CPU
- * emulation threads. This exercises the same code path
- * as `xio-tester test-ep --emulate` but through the
- * library API with a minimal configuration.
+ * Validates the full SQE/CQE roundtrip using CPU emulation threads. This
+ * exercises the same code path as `xio-tester test-ep --emulate` but through
+ * the library API with a minimal configuration.
  */
 
 #include <cassert>
