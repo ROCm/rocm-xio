@@ -1,5 +1,5 @@
 .. meta::
-  :description: ROCm-XIO license
+  :description: ROCm XIO license
   :keywords: ROCm, documentation
 
 *******

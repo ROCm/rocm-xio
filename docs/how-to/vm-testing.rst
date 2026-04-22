@@ -1,9 +1,9 @@
 .. meta::
-  :description: ROCm-XIO documentation
+  :description: ROCm XIO documentation
   :keywords: ROCm, documentation
 
 ********************************
-Run ROCm-XIO VM-isolated testing
+Run ROCm XIO VM-isolated testing
 ********************************
 
 Hardware tests (RDMA loopback, NVMe passthrough) touch low-level
