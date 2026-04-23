@@ -3,10 +3,9 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# Thin wrapper for NVMe shell-script tests that maps
-# missing prerequisites to CTest skip (exit 77) instead
-# of hard failure. This avoids modifying the scripts in
-# scripts/test/ while giving CTest proper skip semantics.
+# Thin wrapper for NVMe shell-script tests that maps missing prerequisites to
+# CTest skip (exit 77) instead of hard failure. This avoids modifying the
+# scripts in scripts/test/ while giving CTest proper skip semantics.
 #
 # Usage:
 #   run-nvme-script-test.sh <script> [extra-args...]

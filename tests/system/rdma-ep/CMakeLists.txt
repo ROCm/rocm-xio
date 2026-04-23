@@ -1,21 +1,16 @@
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 #
 # SPDX-License-Identifier: MIT
 
 # RDMA-EP loopback system tests.
 #
-# Each test invokes one of the shell scripts in
-# scripts/test/ via a thin wrapper that exits 77
-# (CTest skip) when prerequisites are missing.
-# The RDMA device is auto-detected or taken from
-# $ROCXIO_RDMA_DEVICE at runtime.
+# Each test invokes one of the shell scripts in scripts/test/ via a thin
+# wrapper that exits 77 (CTest skip) when prerequisites are missing. The RDMA
+# device is auto-detected or taken from $ROCXIO_RDMA_DEVICE at runtime.
 #
-# All tests depend on the RDMA_HW fixture defined
-# in tests/unit/rdma-ep/CMakeLists.txt, which runs
-# scripts/test/setup-rdma-loopback.sh to configure
-# the neighbor-GID loopback (IP + static ARP +
-# GID table wait).
+# All tests depend on the RDMA_HW fixture defined in tests/unit/rdma-ep/
+# CMakeLists.txt, which runs scripts/test/setup-rdma-loopback.sh to configure
+# the neighbor-GID loopback (IP + static ARP + GID table wait).
 #
 # Labels: hardware, rdma, verify
 

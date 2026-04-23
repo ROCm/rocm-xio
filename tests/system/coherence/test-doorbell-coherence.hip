@@ -4,17 +4,15 @@
  *
  * Coherence stress test for GPU-to-host doorbell ordering.
  *
- * Reproduces the access pattern from an external GPU-NVMe
- * coherence study (from-germany): a single GPU thread writes
- * sequential "commands" to a shared queue, rings a doorbell
- * (host-pinned memory standing in for BAR0 MMIO), and polls
- * for completions.  A host thread monitors the doorbell,
- * validates commands, and writes completions.
+ * Reproduces the access pattern from an external GPU-NVMe coherence study
+ * (from-germany): a single GPU thread writes sequential "commands" to a shared
+ * queue, rings a doorbell (host-pinned memory standing in for BAR0 MMIO), and
+ * polls for completions. A host thread monitors the doorbell, validates
+ * commands, and writes completions.
  *
- * The test passes if all iterations complete before the
- * timeout.  Deadlocks indicate that either the doorbell
- * write or the completion write is not visible across the
- * GPU/CPU coherence boundary.
+ * The test passes if all iterations complete before the timeout. Deadlocks
+ * indicate that either the doorbell write or the completion write is not
+ * visible across the GPU/CPU coherence boundary.
  */
 
 #include <atomic>

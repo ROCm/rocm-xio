@@ -1,10 +1,8 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Hardware integration tests for nvme-ep.
- * Requires a real NVMe controller.
+ * Hardware integration tests for nvme-ep. Requires a real NVMe controller.
  * Skips with exit code 77 if no device is available.
  *
  * Usage:
