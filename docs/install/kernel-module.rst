@@ -42,11 +42,10 @@ automatic creation.
      $(grep rocm-xio /proc/devices | awk '{print $1}') 0
    sudo chmod 666 /dev/rocm-xio
 
-Notes
-=====
+.. note::
 
-- The kernel module build is independent of the CMake build
-  system and uses its own Makefile following Linux kernel
-  conventions.
-- The module must be loaded before running endpoints that
-  require hardware queue registration (e.g., ``nvme-ep``).
+  - The kernel module build is independent of the CMake build
+    system and uses its own Makefile following Linux kernel
+    conventions.
+  - The module must be loaded before running endpoints that
+    require hardware queue registration (e.g., ``nvme-ep``).
