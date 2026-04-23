@@ -177,7 +177,7 @@ RDMA-EP memory mode
      - Effect
      - Details
    * - 0
-     - SQ **and** CQ placement
+     - SQ and CQ placement
      - Maps to ``QueueMemMode::DEVICE_VRAM`` (bit set)
        vs ``HOST_COHERENT`` (bit clear).  Controls the
        ``ibv_alloc_parent_domain`` allocator used by
@@ -186,14 +186,14 @@ RDMA-EP memory mode
        ERNIC allocate CQ via their DV API (VRAM,
        uncached).
    * - 1
-     - *(reserved for future per-queue CQ control)*
+     - Reserved for future per-queue CQ control
      - Currently ignored.  A future change could split
        bit 0 (SQ only) and bit 1 (CQ only) by routing
        the ``resource_type`` callback in the parent
        domain allocator, or by switching vendors to
        explicit per-queue allocation.
    * - 2
-     - *(not applicable)*
+     - Not applicable
      - RDMA doorbells are always MMIO writes to
        NIC-mapped BAR regions; memory mode does not
        apply.
@@ -222,16 +222,16 @@ ROCm XIO calls ``hsa_amd_portable_export_dmabuf`` directly (v1, no
 flags) at **three call sites**, all routed through the centralized
 ``exportDmabuf()`` wrapper:
 
-1. ``src/common/ibv-wrapper.cpp`` -- ``IBVWrapper::reg_mr()`` exports
+- ``src/common/ibv-wrapper.cpp`` -- ``IBVWrapper::reg_mr()`` exports
    GPU memory as dmabuf, then calls ``ibv_reg_dmabuf_mr`` for RDMA MR
    registration. Used for GPU atomic buffers only, not the main data
    path.
 
-2. ``src/common/xio-common.hip`` -- ``exportRegVramBuf()`` exports
+- ``src/common/xio-common.hip`` -- ``exportRegVramBuf()`` exports
    VRAM for NVMe physical address resolution via the kernel module
    ioctl.
 
-3. ``src/endpoints/rdma-ep/bnxt/bnxt-backend.cpp`` -- Exports CQ
+- ``src/endpoints/rdma-ep/bnxt/bnxt-backend.cpp`` -- Exports CQ
    buffer for BNXT Direct Verbs UMEM registration with
    ``BNXT_RE_DV_UMEM_FLAGS_DMABUF``.
 
@@ -262,18 +262,18 @@ HIP virtual memory management
 ROCm 7 introduces `HIP Virtual Memory Management`_ built on HSA
 ``hsa_amd_vmem_*`` APIs. Key benefits for ROCm XIO:
 
-1. **No device sync on free** --
+- **No device sync on free** --
    ``hipMemUnmap``/``hipMemRelease``/``hipMemAddressFree``
    do not synchronize the device, unlike ``hipFree``.
 
-2. **Per-buffer P2P access** -- ``hipMemSetAccess`` replaces
+- **Per-buffer P2P access** -- ``hipMemSetAccess`` replaces
    device-wide ``hipDeviceEnablePeerAccess`` with per-buffer,
    per-device access control.
 
-3. **Dynamic growth without copy** -- Buffers can be extended by
+- **Dynamic growth without copy** -- Buffers can be extended by
    reserving additional VA and mapping new physical pages.
 
-4. **dmabuf compatibility** --
+- **dmabuf compatibility** --
    ``hsa_amd_vmem_export_shareable_handle()`` exports vmem
    allocations as dmabuf file descriptors.
 
@@ -336,7 +336,7 @@ Thread fences
 Comparison with rocSHMEM
 ------------------------
 
-rocSHMEM has a full allocator hierarchy (``HIPAllocator``,
+`rocSHMEM <https://rocm.docs.amd.com/projects/rocSHMEM/en/latest/index.html>`_ has a full allocator hierarchy (``HIPAllocator``,
 ``FreeList``, ``Pow2Bins``) managing a symmetric heap shared across
 PEs. Each allocator knows how to allocate memory and export it as
 dmabuf for RDMA registration.

@@ -29,7 +29,7 @@ CMake test presets
 The project provides six test presets in ``CMakePresets.json``:
 
 =================  ==============================  ================
-Preset             Description                     Hardware needed
+Preset             Description                     Hardware 
 =================  ==============================  ================
 ``unit``           CPU-only unit tests             None
 ``system``         System tests (emulation)        HIP-capable GPU
@@ -61,7 +61,7 @@ Every test carries one or more CTest labels for filtering with
 ``ctest -L <label>``:
 
 ============  =========================================
-Label         Meaning
+Label         Definition
 ============  =========================================
 ``unit``      CPU-only, no GPU or NIC (runs in CI)
 ``system``    Needs a HIP-capable GPU
