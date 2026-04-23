@@ -23,8 +23,6 @@ namespace xio::nvme_ep {
 extern hipError_t run(XioEndpointConfig* config);
 std::string validateConfig(nvmeEpConfig* config);
 } // namespace xio::nvme_ep
-extern hipError_t rdma_ep_run(xio::XioEndpointConfig* config);
-extern hipError_t sdma_ep_run(xio::XioEndpointConfig* config);
 
 // ============================================================================
 // Derived Endpoint Classes
@@ -200,7 +198,8 @@ public:
   }
 
   __host__ const char* getDescription() const override {
-    return "RDMA endpoint with GDA support (BNXT, MLX5, IONIC)";
+    return "RDMA endpoint with multi-vendor support (MLX5, BNXT_RE, IONIC, "
+           "ROCM_ERNIC)";
   }
 
   __host__ size_t getSubmissionQueueEntrySize() const override {
@@ -224,7 +223,7 @@ public:
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
-    return rdma_ep_run(config);
+    return xio::rdma_ep::run(config);
   }
 
   __host__ void* initializeEndpointConfig() override {
@@ -280,7 +279,7 @@ public:
   }
 
   __host__ hipError_t run(XioEndpointConfig* config) override {
-    return sdma_ep_run(config);
+    return xio::sdma_ep::run(config);
   }
 
   __host__ void* initializeEndpointConfig() override {

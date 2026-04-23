@@ -11,7 +11,7 @@
 
 #if defined(GDA_BNXT)
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 // --- BNXT SQ helpers ---
 
@@ -367,5 +367,6 @@ __device__ uint64_t Ops::post_wqe_amo_single(QueuePair& qp, uintptr_t raddr,
 
 } // namespace bnxt
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // defined(GDA_BNXT)

@@ -26,6 +26,10 @@
 
 #include "sdma_pkt_struct.h"
 
+namespace xio {
+
+struct XioEndpointConfig;
+
 namespace sdma_ep {
 
 /* ================================================================
@@ -958,6 +962,14 @@ __host__ std::string validateConfig(SdmaEpConfig* config);
  */
 __host__ unsigned getIterations(void* endpointConfig);
 
+/**
+ * @brief Run the SDMA endpoint workload.
+ */
+__host__ hipError_t run(XioEndpointConfig* config);
+
 } // namespace sdma_ep
+} // namespace xio
+
+namespace sdma_ep = xio::sdma_ep;
 
 #endif // SDMA_EP_H

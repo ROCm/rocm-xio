@@ -20,7 +20,7 @@
 #include "ibv-core.hpp"
 #include "vendor-ops.hpp"
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 class QueuePair;
 
@@ -223,5 +223,6 @@ private:
 };
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // RDMA_EP_GDA_BACKEND_HPP

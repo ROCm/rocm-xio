@@ -13,7 +13,7 @@
 
 #include <hip/hip_runtime.h>
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 template <typename T, std::enable_if_t<std::is_integral_v<T>, bool> = true>
 constexpr inline __host__ __device__ T byteswap(T val) {
@@ -81,5 +81,6 @@ __host__ __device__ constexpr inline T from_le(T val) {
 } // namespace endian
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // ROCM_XIO_ENDIAN_HPP

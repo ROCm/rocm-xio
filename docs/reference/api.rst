@@ -39,6 +39,9 @@ Endpoint Registry
 
 .. doxygenfunction:: xio::createEndpoint(const std::string &endpointName)
 
+Both ``createEndpoint`` overloads return a null pointer when the type or
+name is unknown. Callers must check the result before use.
+
 Memory and Buffer Management
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -207,18 +210,26 @@ Test Endpoint
 Kernel Module IOCTL Structures
 ------------------------------
 
-.. doxygenstruct:: rocm_axiio_vram_req
+.. doxygenstruct:: rocm_xio_vram_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_register_queue_addr_req
+.. doxygenstruct:: rocm_xio_register_queue_addr_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_register_buffer_req
+.. doxygenstruct:: rocm_xio_register_buffer_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_mmio_bridge_shadow_req
+.. doxygenstruct:: rocm_xio_mmio_bridge_shadow_req
+   :members:
+   :undoc-members:
+
+.. doxygenstruct:: rocm_xio_alloc_contig_req
+   :members:
+   :undoc-members:
+
+.. doxygenstruct:: rocm_xio_free_contig_req
    :members:
    :undoc-members:

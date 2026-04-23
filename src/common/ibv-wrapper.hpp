@@ -17,7 +17,7 @@
 
 #include "ibv-core.hpp"
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 class IBVWrapper {
 public:
@@ -133,5 +133,6 @@ private:
 extern IBVWrapper ibv;
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // ROCM_XIO_IBV_WRAPPER_HPP

@@ -17,7 +17,7 @@
 
 #include <hip/hip_runtime.h>
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 constexpr uint32_t WF_SIZE = 64;
 constexpr uint32_t SPIN_LOCK_UNLOCKED = 0;
@@ -142,5 +142,6 @@ __device__ inline int last_lane(uint64_t mask) {
 }
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // RDMA_EP_VENDOR_OPS_HPP

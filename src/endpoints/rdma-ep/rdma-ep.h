@@ -34,6 +34,10 @@
 #define RDMA_EP_SQE_SIZE 0
 #define RDMA_EP_CQE_SIZE 0
 
+namespace xio {
+
+struct XioEndpointConfig;
+
 namespace rdma_ep {
 
 /**
@@ -76,13 +80,24 @@ struct RdmaEpConfig {
   /** @} */
 };
 
-} // namespace rdma_ep
-
-namespace rdma_ep {
-
+/**
+ * @brief Validate RDMA endpoint configuration.
+ */
 __host__ std::string validateConfig(RdmaEpConfig* config);
+
+/**
+ * @brief Resolve iteration count from opaque endpoint config.
+ */
 __host__ unsigned getIterations(void* endpointConfig);
 
+/**
+ * @brief Run the RDMA endpoint (loopback or 2-node mode).
+ */
+__host__ hipError_t run(XioEndpointConfig* config);
+
 } // namespace rdma_ep
+} // namespace xio
+
+namespace rdma_ep = xio::rdma_ep;
 
 #endif // RDMA_EP_H

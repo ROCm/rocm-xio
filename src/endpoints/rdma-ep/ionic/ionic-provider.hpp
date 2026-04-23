@@ -32,7 +32,7 @@ extern "C" {
 #include "ionic/ionic-fw.h"
 }
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 struct ionicdv_funcs_t {
   int (*get_ctx)(struct ionic_dv_ctx* dvctx, struct ibv_context* ibctx);
@@ -51,5 +51,6 @@ struct ionicdv_funcs_t {
 };
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // RDMA_EP_IONIC_PROVIDER_HPP
