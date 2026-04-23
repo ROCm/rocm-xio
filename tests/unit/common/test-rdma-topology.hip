@@ -1,11 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for rdma-topology PCIe address parsing.
- * CPU-only: tests ExtractBusNumber and
- * GetBusIdDistance which are pure string/math ops.
+ * Unit tests for rdma-topology PCIe address parsing. CPU-only: tests
+ * ExtractBusNumber and GetBusIdDistance which are pure string/math ops.
  */
 
 #include <cassert>

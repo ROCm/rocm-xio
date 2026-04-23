@@ -225,8 +225,9 @@ int main(int argc, char** argv) {
   }
 
   if (!is_server && !is_client) {
-    print_usage(argv[0]);
-    return 1;
+    printf("SKIP: 2-node RDMA test needs --server or --client "
+           "(CTest default invocation has no peer).\n");
+    return 77;
   }
   if (is_client && !server_host) {
     fprintf(stderr, "Client needs --server-host\n");

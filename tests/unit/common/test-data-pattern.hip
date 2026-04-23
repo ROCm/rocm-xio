@@ -1,11 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for xio::DataPatternParams and
- * xio::dataPattern() LFSR-based generation and
- * verification.
+ * Unit tests for xio::DataPatternParams and xio::dataPattern() LFSR-based
+ * generation and verification.
  */
 
 #include <cassert>

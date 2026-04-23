@@ -1,11 +1,9 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for BNXT DV queue sizing helpers.
- * CPU-only: exercises pure arithmetic, no GPU or
- * NIC required.
+ * Unit tests for BNXT DV queue sizing helpers. CPU-only: exercises pure
+ * arithmetic, no GPU or NIC required.
  */
 
 #include <cassert>

@@ -1,13 +1,10 @@
-/* Copyright (c) Advanced Micro Devices, Inc.
- * All rights reserved.
+/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for nvme-ep helper functions:
- * sqeSetup, calculatePrps, cqeOk, cqeStatusCode,
- * cqeStatusType, sqeRead/sqeWrite, cqeRead/cqeWrite,
- * NVME_CQE_STATUS_* macros, NVME_STATUS_MAKE
- * round-trip, and dataPattern.
+ * Unit tests for nvme-ep helper functions: sqeSetup, calculatePrps, cqeOk,
+ * cqeStatusCode, cqeStatusType, sqeRead/sqeWrite, cqeRead/cqeWrite,
+ * NVME_CQE_STATUS_* macros, NVME_STATUS_MAKE round-trip, and dataPattern.
  */
 
 #include <cassert>
