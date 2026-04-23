@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Unit tests for rdma_ep::RdmaEpConfig validation and Provider enum.
+ * Unit tests for xio::rdma_ep::RdmaEpConfig validation and Provider enum.
  */
 
 #include <cassert>
@@ -18,46 +18,46 @@
 #include "xio-test-assert.h"
 
 int test_provider_enum() {
-  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::BNXT), 0);
-  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::MLX5), 1);
-  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::IONIC), 2);
-  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::ROCM_ERNIC), 3);
-  ASSERT_EQ(static_cast<uint8_t>(rdma_ep::Provider::UNKNOWN), 0xFF);
+  ASSERT_EQ(static_cast<uint8_t>(xio::rdma_ep::Provider::BNXT), 0);
+  ASSERT_EQ(static_cast<uint8_t>(xio::rdma_ep::Provider::MLX5), 1);
+  ASSERT_EQ(static_cast<uint8_t>(xio::rdma_ep::Provider::IONIC), 2);
+  ASSERT_EQ(static_cast<uint8_t>(xio::rdma_ep::Provider::ROCM_ERNIC), 3);
+  ASSERT_EQ(static_cast<uint8_t>(xio::rdma_ep::Provider::UNKNOWN), 0xFF);
   return 0;
 }
 
 int test_provider_name() {
-  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::BNXT), "bnxt");
-  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::MLX5), "mlx5");
-  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::IONIC), "ionic");
-  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::ROCM_ERNIC),
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::BNXT), "bnxt");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::MLX5), "mlx5");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::IONIC), "ionic");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::ROCM_ERNIC),
                "rocm-ernic");
-  ASSERT_STREQ(rdma_ep::provider_name(rdma_ep::Provider::UNKNOWN), "unknown");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::UNKNOWN), "unknown");
   return 0;
 }
 
 int test_provider_from_string() {
-  ASSERT_EQ(rdma_ep::provider_from_string("bnxt"), rdma_ep::Provider::BNXT);
-  ASSERT_EQ(rdma_ep::provider_from_string("bnxt_re"), rdma_ep::Provider::BNXT);
-  ASSERT_EQ(rdma_ep::provider_from_string("mlx5"), rdma_ep::Provider::MLX5);
-  ASSERT_EQ(rdma_ep::provider_from_string("ionic"), rdma_ep::Provider::IONIC);
-  ASSERT_EQ(rdma_ep::provider_from_string("pensando"),
-            rdma_ep::Provider::IONIC);
-  ASSERT_EQ(rdma_ep::provider_from_string("rocm_ernic"),
-            rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(rdma_ep::provider_from_string("ernic"),
-            rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(rdma_ep::provider_from_string("rocm-ernic"),
-            rdma_ep::Provider::ROCM_ERNIC);
-  ASSERT_EQ(rdma_ep::provider_from_string("invalid"),
-            rdma_ep::Provider::UNKNOWN);
-  ASSERT_EQ(rdma_ep::provider_from_string(nullptr), rdma_ep::Provider::UNKNOWN);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt"), xio::rdma_ep::Provider::BNXT);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt_re"), xio::rdma_ep::Provider::BNXT);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("mlx5"), xio::rdma_ep::Provider::MLX5);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("ionic"), xio::rdma_ep::Provider::IONIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("pensando"),
+            xio::rdma_ep::Provider::IONIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("rocm_ernic"),
+            xio::rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("ernic"),
+            xio::rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("rocm-ernic"),
+            xio::rdma_ep::Provider::ROCM_ERNIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("invalid"),
+            xio::rdma_ep::Provider::UNKNOWN);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string(nullptr), xio::rdma_ep::Provider::UNKNOWN);
   return 0;
 }
 
 int test_config_defaults() {
-  rdma_ep::RdmaEpConfig cfg;
-  ASSERT_EQ(cfg.provider, rdma_ep::Provider::BNXT);
+  xio::rdma_ep::RdmaEpConfig cfg;
+  ASSERT_EQ(cfg.provider, xio::rdma_ep::Provider::BNXT);
   ASSERT_EQ(cfg.iterations, 128u);
   ASSERT_EQ(cfg.sqDepth, 256u);
   ASSERT_EQ(cfg.cqDepth, 256u);
@@ -69,33 +69,33 @@ int test_config_defaults() {
 }
 
 int test_config_validate_good() {
-  rdma_ep::RdmaEpConfig cfg;
+  xio::rdma_ep::RdmaEpConfig cfg;
   cfg.providerStr = "bnxt";
-  std::string err = rdma_ep::validateConfig(&cfg);
+  std::string err = xio::rdma_ep::validateConfig(&cfg);
   ASSERT_TRUE(err.empty());
-  ASSERT_EQ(cfg.provider, rdma_ep::Provider::BNXT);
+  ASSERT_EQ(cfg.provider, xio::rdma_ep::Provider::BNXT);
   return 0;
 }
 
 int test_config_validate_bad_provider() {
-  rdma_ep::RdmaEpConfig cfg;
+  xio::rdma_ep::RdmaEpConfig cfg;
   cfg.providerStr = "nonexistent";
-  std::string err = rdma_ep::validateConfig(&cfg);
+  std::string err = xio::rdma_ep::validateConfig(&cfg);
   ASSERT_TRUE(!err.empty());
   return 0;
 }
 
 int test_config_validate_zero_iterations() {
-  rdma_ep::RdmaEpConfig cfg;
+  xio::rdma_ep::RdmaEpConfig cfg;
   cfg.providerStr = "bnxt";
   cfg.iterations = 0;
-  std::string err = rdma_ep::validateConfig(&cfg);
+  std::string err = xio::rdma_ep::validateConfig(&cfg);
   ASSERT_TRUE(err.empty());
   return 0;
 }
 
 int test_config_validate_null() {
-  std::string err = rdma_ep::validateConfig(nullptr);
+  std::string err = xio::rdma_ep::validateConfig(nullptr);
   ASSERT_TRUE(!err.empty());
   return 0;
 }

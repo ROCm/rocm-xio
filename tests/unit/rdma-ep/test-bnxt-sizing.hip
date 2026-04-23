@@ -15,7 +15,7 @@
 #include "bnxt/bnxt-dv-sizing.hpp"
 #include "xio-test-assert.h"
 
-using namespace rdma_ep::bnxt_sizing;
+using namespace xio::rdma_ep::bnxt_sizing;
 
 int test_roundup_pow2() {
   ASSERT_EQ(roundup_pow2(0), 1u);

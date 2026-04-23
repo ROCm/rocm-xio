@@ -41,7 +41,7 @@ int main() {
 }
 #else
 
-using namespace rdma_ep;
+using namespace xio::rdma_ep;
 using xio::ExchangeMsg;
 
 static constexpr uint32_t WRITE_SIZE = 4096;
