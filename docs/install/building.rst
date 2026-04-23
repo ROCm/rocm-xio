@@ -153,8 +153,8 @@ Build system details
   or can be specified via ``OFFLOAD_ARCH``
 
 
-Install
-=======
+Install ROCm XIO
+================
 
 Default location (typically ``/opt/rocm``)
 ------------------------------------------
