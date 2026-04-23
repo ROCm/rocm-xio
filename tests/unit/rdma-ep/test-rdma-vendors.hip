@@ -16,14 +16,14 @@
 #include "xio-test-assert.h"
 
 int test_vendor_ids() {
-  ASSERT_EQ(rdma_ep::VENDOR_ID_BROADCOM, 0x14E4u);
-  ASSERT_EQ(rdma_ep::VENDOR_ID_MELLANOX, 0x02C9u);
-  ASSERT_EQ(rdma_ep::VENDOR_ID_PENSANDO, 0x1DD8u);
+  ASSERT_EQ(xio::rdma_ep::VENDOR_ID_BROADCOM, 0x14E4u);
+  ASSERT_EQ(xio::rdma_ep::VENDOR_ID_MELLANOX, 0x02C9u);
+  ASSERT_EQ(xio::rdma_ep::VENDOR_ID_PENSANDO, 0x1DD8u);
   return 0;
 }
 
 int test_rma_descriptor() {
-  rdma_ep::RmaDescriptor desc{};
+  xio::rdma_ep::RmaDescriptor desc{};
   desc.local_addr = 0x1000;
   desc.remote_addr = 0x2000;
   desc.length = 4096;
@@ -43,7 +43,7 @@ int test_rma_descriptor() {
 }
 
 int test_amo_descriptor() {
-  rdma_ep::AmoDescriptor desc{};
+  xio::rdma_ep::AmoDescriptor desc{};
   desc.remote_addr = 0x3000;
   desc.rkey = 0x5678;
   desc.opcode = 0x0B;
@@ -60,8 +60,8 @@ int test_amo_descriptor() {
 }
 
 int test_constants() {
-  ASSERT_EQ(rdma_ep::WF_SIZE, 64u);
-  ASSERT_EQ(rdma_ep::SPIN_LOCK_UNLOCKED, 0u);
+  ASSERT_EQ(xio::rdma_ep::WF_SIZE, 64u);
+  ASSERT_EQ(xio::rdma_ep::SPIN_LOCK_UNLOCKED, 0u);
   return 0;
 }
 

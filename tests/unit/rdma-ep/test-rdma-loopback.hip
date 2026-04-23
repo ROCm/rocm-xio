@@ -46,7 +46,7 @@ int main() {
 }
 #else
 
-using namespace rdma_ep;
+using namespace xio::rdma_ep;
 
 static constexpr uint32_t DEFAULT_XFER_SIZE = 256;
 static constexpr uint32_t DEFAULT_LFSR_SEED = 1;
