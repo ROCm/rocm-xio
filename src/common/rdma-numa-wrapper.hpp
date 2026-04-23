@@ -13,7 +13,7 @@
 
 struct bitmask;
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 class NUMAWrapper {
 public:
@@ -56,5 +56,6 @@ private:
 extern NUMAWrapper numa;
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // ROCM_XIO_RDMA_NUMA_WRAPPER_HPP

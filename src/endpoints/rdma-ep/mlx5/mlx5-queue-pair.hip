@@ -13,7 +13,7 @@
 
 #if defined(GDA_MLX5)
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 static constexpr int MLX5_LOCK_S_SLEEP_DELAY = 2;
 static constexpr uint8_t MLX5_WQE_CTRL_CQ_UPDATE = 0x08;
@@ -372,5 +372,6 @@ __device__ uint64_t Ops::post_wqe_amo_single(QueuePair& qp, uintptr_t raddr,
 
 } // namespace mlx5
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // defined(GDA_MLX5)

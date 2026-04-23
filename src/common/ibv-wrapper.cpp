@@ -19,7 +19,7 @@
 #include "xio-rdma-check.h"
 #include "xio.h"
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 IBVWrapper ibv;
 
@@ -302,3 +302,4 @@ int IBVWrapper::destroy_qp(struct ibv_qp* qp) {
 }
 
 } // namespace rdma_ep
+} // namespace xio

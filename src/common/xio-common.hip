@@ -1392,7 +1392,7 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
     return -EINVAL;
   }
 
-  struct rocm_axiio_register_queue_addr_req reg_req;
+  struct rocm_xio_register_queue_addr_req reg_req;
   memset(&reg_req, 0, sizeof(reg_req));
   reg_req.virt_addr = reinterpret_cast<uint64_t>(virt_addr);
   reg_req.phys_addr = phys_addr;
@@ -1733,7 +1733,7 @@ int loadKernelModule() {
 int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
   int kmod_fd = -1;
   int ret = 0;
-  struct rocm_axiio_mmio_bridge_shadow_req req;
+  struct rocm_xio_mmio_bridge_shadow_req req;
   void* mapped = MAP_FAILED;
 
   if (!virt_addr) {
@@ -2047,7 +2047,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
     return -EIO;
   }
 
-  struct rocm_axiio_alloc_contig_req req;
+  struct rocm_xio_alloc_contig_req req;
   memset(&req, 0, sizeof(req));
   req.size = size;
   req.nvme_bdf = nvme_bdf;
@@ -2074,7 +2074,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
         "sysconf(_SC_PAGESIZE) failed for %s contig buffer: %s\n", queue_name,
         strerror(errno));
 
-      struct rocm_axiio_free_contig_req freq;
+      struct rocm_xio_free_contig_req freq;
       memset(&freq, 0, sizeof(freq));
       freq.mmap_offset = req.mmap_offset;
       ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
@@ -2094,7 +2094,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
                      "buffer: %s\n",
                      queue_name, strerror(errno));
 
-    struct rocm_axiio_free_contig_req freq;
+    struct rocm_xio_free_contig_req freq;
     memset(&freq, 0, sizeof(freq));
     freq.mmap_offset = req.mmap_offset;
     ioctl(kmod_fd, ROCM_XIO_FREE_CONTIG_QUEUE, &freq);
@@ -2126,7 +2126,7 @@ __host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
   }
 
   if (!gpu_ptr) {
-    struct rocm_axiio_free_contig_req free_req = {};
+    struct rocm_xio_free_contig_req free_req = {};
     free_req.mmap_offset = req.mmap_offset;
 
     hsa_status_t status = hsa_init();
@@ -2376,7 +2376,7 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
   }
 
   // Register buffer with kernel module to get physical address
-  struct rocm_axiio_register_buffer_req req = {};
+  struct rocm_xio_register_buffer_req req = {};
   req.dmabuf_fd = dmabuf_fd;
   req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
   req.size = size;

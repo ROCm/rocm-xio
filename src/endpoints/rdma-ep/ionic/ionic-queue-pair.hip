@@ -13,7 +13,7 @@
 
 #if defined(GDA_IONIC)
 
-namespace rdma_ep {
+namespace xio { namespace rdma_ep {
 
 // --- IONIC locking helpers ---
 
@@ -525,5 +525,6 @@ __device__ uint64_t Ops::post_wqe_amo_single(QueuePair& qp, uintptr_t raddr,
 
 } // namespace ionic
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // defined(GDA_IONIC)

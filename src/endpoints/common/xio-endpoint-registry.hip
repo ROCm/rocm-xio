@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#include <unordered_map>
 #include <vector>
 
 #include <hip/hip_runtime.h>
@@ -25,20 +26,36 @@ const std::vector<EndpointInfo>& getEndpointRegistry() {
   return registry;
 }
 
+static const std::unordered_map<std::string, EndpointType>&
+endpointTypeByLowerName() {
+  static const std::unordered_map<std::string, EndpointType> map = [] {
+    std::unordered_map<std::string, EndpointType> out;
+    std::vector<EndpointInfo> registry = ENDPOINT_REGISTRY_ENTRIES;
+    for (const auto& ep : registry) {
+      std::string key = ep.name;
+      std::transform(key.begin(), key.end(), key.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      out.emplace(std::move(key), ep.type);
+    }
+    return out;
+  }();
+  return map;
+}
+
 EndpointType getEndpointType(const std::string& name) {
   std::string lowerName = name;
   std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                  [](unsigned char c) {
-                   return std::tolower(c);
+                   return static_cast<char>(std::tolower(c));
                  });
 
-  const auto& registry = getEndpointRegistry();
-  for (const auto& ep : registry) {
-    if (ep.name == lowerName) {
-      return ep.type;
-    }
+  const auto& map = endpointTypeByLowerName();
+  const auto it = map.find(lowerName);
+  if (it != map.end()) {
+    return it->second;
   }
-
   return EndpointType::UNKNOWN;
 }
 
