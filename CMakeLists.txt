@@ -36,6 +36,10 @@ option(XIO_DOCS_ONLY
   "Only configure documentation targets (no HIP/ROCm needed)"
   OFF)
 
+option(XIO_BUILD_PYTHON
+  "Build Python bindings for sdma-ep"
+  OFF)
+
 # OFFLOAD_ARCH → CMAKE_HIP_ARCHITECTURES must be set BEFORE
 # project() because enabling LANGUAGES HIP triggers compiler
 # detection which auto-populates CMAKE_HIP_ARCHITECTURES.
@@ -288,6 +292,7 @@ file(GLOB_RECURSE LIB_SOURCES
 )
 file(GLOB_RECURSE ENDPOINT_SOURCES
   ${ENDPOINTS_DIR}/*.hip
+  ${ENDPOINTS_DIR}/*.cpp
 )
 # Filter out common directory from endpoint sources
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
@@ -295,6 +300,9 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 # Filter out vendor queue-pair device code files (they are #included from queue-pair.hip)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-queue-pair\\.hip")
+# Filter out vendor backend files (they are added conditionally based on GDA_* options)
+list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+  "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-backend\\.cpp")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
@@ -488,6 +496,11 @@ endif()
 # Dependencies on generated files
 add_dependencies(rocm-xio endpoint-registry-generated)
 add_dependencies(rocm-xio nvme-ep-generated)
+
+# Python bindings (optional)
+if(XIO_BUILD_PYTHON)
+  add_subdirectory(python)
+endif()
 
 set_source_files_properties(
   ${ENDPOINTS_DIR}/nvme-ep/nvme-ep.hip
