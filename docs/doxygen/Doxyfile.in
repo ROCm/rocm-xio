@@ -7,7 +7,7 @@ PROJECT_NUMBER         = "@PROJECT_VERSION@"
 PROJECT_BRIEF          = "ROCm Library for GPU-Initiated IO"
 
 OUTPUT_DIRECTORY       = .
-INPUT                  = @XIO_DOXYFILE_INPUT@
+INPUT                  = ../../src/include
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.hpp *.hip *.dox
 
