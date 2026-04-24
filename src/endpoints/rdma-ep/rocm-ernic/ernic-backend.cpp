@@ -28,7 +28,8 @@
 #include "xio-rdma-check.h"
 #include "xio.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
   _XIO_CHECK_ZERO("rdma_ep::ernic", (expr), (msg), return)

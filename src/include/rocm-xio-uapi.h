@@ -48,8 +48,7 @@ extern "C" {
 #define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
   _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_xio_free_contig_req)
 
-#define ROCM_XIO_FLAG_EMULATED                                                 \
-  (1 << 0) /* Return BAR GPA for emulated NVMe */
+#define ROCM_XIO_FLAG_EMULATED (1 << 0) /* Return BAR GPA for emulated NVMe */
 #define ROCM_XIO_FLAG_PASSTHROUGH                                              \
   (1 << 1) /* Return P2PDMA IOVA for passthrough */
 

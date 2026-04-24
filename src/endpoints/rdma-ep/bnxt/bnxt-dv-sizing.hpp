@@ -30,7 +30,8 @@ extern "C" {
 #include "bnxt/bnxt-re-hsi.h"
 }
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 namespace bnxt_sizing {
 
 static constexpr uint32_t STRIDE = sizeof(struct bnxt_re_sge); /* 16 */

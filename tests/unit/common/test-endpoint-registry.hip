@@ -34,8 +34,7 @@ int main() {
       return 4;
     }
     if (getEndpointType(ep.name) != ep.type) {
-      std::cerr << "getEndpointType round-trip failed for " << ep.name
-                << "\n";
+      std::cerr << "getEndpointType round-trip failed for " << ep.name << "\n";
       return 5;
     }
   }

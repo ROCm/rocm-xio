@@ -20,7 +20,8 @@
 #include "ibv-core.hpp"
 #include "vendor-ops.hpp"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 class QueuePair;
 

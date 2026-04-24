@@ -17,7 +17,8 @@
 
 #include "ibv-core.hpp"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 enum GidPriority {
   GID_UNKNOWN = -1,

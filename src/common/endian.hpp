@@ -13,7 +13,8 @@
 
 #include <hip/hip_runtime.h>
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 template <typename T, std::enable_if_t<std::is_integral_v<T>, bool> = true>
 constexpr inline __host__ __device__ T byteswap(T val) {

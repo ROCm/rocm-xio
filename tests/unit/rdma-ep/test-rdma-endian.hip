@@ -56,8 +56,9 @@ int test_to_le_from_le_roundtrip() {
 
 int test_native_is_identity() {
   uint32_t val = 0x42424242;
-  ASSERT_EQ((xio::rdma_ep::endian::to_native<xio::rdma_ep::endian::Order::Native>(val)),
-            val);
+  ASSERT_EQ(
+    (xio::rdma_ep::endian::to_native<xio::rdma_ep::endian::Order::Native>(val)),
+    val);
   return 0;
 }
 

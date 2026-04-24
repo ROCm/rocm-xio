@@ -27,20 +27,28 @@ int test_provider_enum() {
 }
 
 int test_provider_name() {
-  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::BNXT), "bnxt");
-  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::MLX5), "mlx5");
-  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::IONIC), "ionic");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::BNXT),
+               "bnxt");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::MLX5),
+               "mlx5");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::IONIC),
+               "ionic");
   ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::ROCM_ERNIC),
                "rocm-ernic");
-  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::UNKNOWN), "unknown");
+  ASSERT_STREQ(xio::rdma_ep::provider_name(xio::rdma_ep::Provider::UNKNOWN),
+               "unknown");
   return 0;
 }
 
 int test_provider_from_string() {
-  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt"), xio::rdma_ep::Provider::BNXT);
-  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt_re"), xio::rdma_ep::Provider::BNXT);
-  ASSERT_EQ(xio::rdma_ep::provider_from_string("mlx5"), xio::rdma_ep::Provider::MLX5);
-  ASSERT_EQ(xio::rdma_ep::provider_from_string("ionic"), xio::rdma_ep::Provider::IONIC);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt"),
+            xio::rdma_ep::Provider::BNXT);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("bnxt_re"),
+            xio::rdma_ep::Provider::BNXT);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("mlx5"),
+            xio::rdma_ep::Provider::MLX5);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string("ionic"),
+            xio::rdma_ep::Provider::IONIC);
   ASSERT_EQ(xio::rdma_ep::provider_from_string("pensando"),
             xio::rdma_ep::Provider::IONIC);
   ASSERT_EQ(xio::rdma_ep::provider_from_string("rocm_ernic"),
@@ -51,7 +59,8 @@ int test_provider_from_string() {
             xio::rdma_ep::Provider::ROCM_ERNIC);
   ASSERT_EQ(xio::rdma_ep::provider_from_string("invalid"),
             xio::rdma_ep::Provider::UNKNOWN);
-  ASSERT_EQ(xio::rdma_ep::provider_from_string(nullptr), xio::rdma_ep::Provider::UNKNOWN);
+  ASSERT_EQ(xio::rdma_ep::provider_from_string(nullptr),
+            xio::rdma_ep::Provider::UNKNOWN);
   return 0;
 }
 

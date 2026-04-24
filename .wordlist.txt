@@ -32,6 +32,7 @@ nvme
 nvmexpress
 PRP
 prp
+contig
 slba
 SQE
 SQEs
@@ -144,6 +145,7 @@ hipDeviceCanAccessPeer
 hipcc
 hipHostMalloc
 hipHostMallocCoherent
+hipSuccess
 hipImportExternalMemory
 HSA
 hsa
@@ -267,6 +269,7 @@ makefile
 Makefile
 pty
 pwd
+cwd
 pyspelling
 rojopolis
 venv
@@ -289,6 +292,7 @@ datacenter
 endian
 Endian
 enum
+expr
 ar
 atlassian
 awk
@@ -707,6 +711,7 @@ xC
 arg
 cmd
 cout
+stderr
 dpkg
 endl
 eq

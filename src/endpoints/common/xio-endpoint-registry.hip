@@ -33,10 +33,9 @@ endpointTypeByLowerName() {
     std::vector<EndpointInfo> registry = ENDPOINT_REGISTRY_ENTRIES;
     for (const auto& ep : registry) {
       std::string key = ep.name;
-      std::transform(key.begin(), key.end(), key.begin(),
-                     [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                     });
+      std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
       out.emplace(std::move(key), ep.type);
     }
     return out;

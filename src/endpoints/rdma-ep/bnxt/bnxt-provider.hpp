@@ -23,7 +23,8 @@ extern "C" {
 #include "bnxt/bnxt-re-hsi.h"
 }
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 #define GDA_BNXT_WQE_SLOT_COUNT 3
 

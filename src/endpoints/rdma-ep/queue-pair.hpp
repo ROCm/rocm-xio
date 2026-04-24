@@ -37,7 +37,8 @@
 #include "rocm-ernic/ernic-provider.hpp"
 #endif
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 // Forward declarations for vendor namespace free functions.
 // Each vendor namespace provides the same set of function names.

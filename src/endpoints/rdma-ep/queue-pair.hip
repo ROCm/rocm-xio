@@ -30,7 +30,8 @@
 #include "rocm-ernic/ernic-queue-pair.hip"
 #endif
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 #ifndef __HIP_DEVICE_COMPILE__
 

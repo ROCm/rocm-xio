@@ -14,7 +14,8 @@
 
 #include "xio-rdma-check.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 NUMAWrapper numa;
 

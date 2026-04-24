@@ -11,7 +11,8 @@
 
 #if defined(GDA_BNXT)
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 // --- BNXT SQ helpers ---
 

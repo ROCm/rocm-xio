@@ -13,6 +13,7 @@
 
 // Include auto-generated EndpointType enum
 #include "xio-endpoint-registry-gen.h"
+#include "xio-export.h"
 
 // Endpoint information structure
 struct EndpointInfo {
@@ -22,21 +23,21 @@ struct EndpointInfo {
 };
 
 // Get the registry of all available endpoints
-const std::vector<EndpointInfo>& getEndpointRegistry();
+XIO_API const std::vector<EndpointInfo>& getEndpointRegistry();
 
 // Convert string name to endpoint type
-EndpointType getEndpointType(const std::string& name);
+XIO_API EndpointType getEndpointType(const std::string& name);
 
 // Get endpoint name from type
-const char* getEndpointName(EndpointType type);
+XIO_API const char* getEndpointName(EndpointType type);
 
 // List all available endpoints
-void listAvailableEndpoints();
+XIO_API void listAvailableEndpoints();
 
 // Validate endpoint name
-bool isValidEndpoint(const std::string& name);
+XIO_API bool isValidEndpoint(const std::string& name);
 
 // Get EndpointInfo from EndpointType
-EndpointInfo getEndpointInfo(EndpointType type);
+XIO_API EndpointInfo getEndpointInfo(EndpointType type);
 
 #endif // XIO_ENDPOINT_REGISTRY_H

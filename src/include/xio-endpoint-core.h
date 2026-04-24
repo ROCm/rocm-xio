@@ -8,8 +8,6 @@
 #ifndef XIO_ENDPOINT_CORE_H
 #define XIO_ENDPOINT_CORE_H
 
-#include "xio-export.h"
-
 #include <climits>
 #include <cstdint>
 #include <memory>
@@ -18,6 +16,7 @@
 #include <hip/hip_runtime.h>
 
 #include "xio-endpoint-registry.h"
+#include "xio-export.h"
 
 namespace xio {
 

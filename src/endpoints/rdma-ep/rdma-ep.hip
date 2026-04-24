@@ -25,7 +25,8 @@
 #include "xio-timing.h"
 #include "xio.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
                                unsigned long long int* startTimes,
@@ -317,7 +318,8 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
 #include "tcp-exchange.hpp"
 #include "xio-env.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 __host__ std::string validateConfig(RdmaEpConfig* config) {
   if (!config)
@@ -897,8 +899,8 @@ hipError_t run(XioEndpointConfig* config) {
       ROCXIO_LOG_INFO("rdma-ep: WRITE %u bytes"
                       " to server...\n",
                       write_size);
-      hipLaunchKernelGGL(rdma_write_kernel, dim3(1), dim3(1), 0, 0,
-                         gpu_qp, remote_data, data_region, write_size);
+      hipLaunchKernelGGL(rdma_write_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
+                         remote_data, data_region, write_size);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
         ROCXIO_LOG_ERROR("rdma-ep: WRITE kernel failed:"
@@ -1012,11 +1014,9 @@ hipError_t run(XioEndpointConfig* config) {
     }
 
     if (cfg->isClient) {
-      hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0,
-                         0, gpu_qp,
+      hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                          reinterpret_cast<PingPongBuf*>(pp_send_buf),
-                         reinterpret_cast<volatile PingPongBuf*>(
-                           pp_recv_buf),
+                         reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors, d_elapsed);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
@@ -1063,11 +1063,9 @@ hipError_t run(XioEndpointConfig* config) {
                       " all %u iterations correct.\n",
                       pp_iters);
     } else {
-      hipLaunchKernelGGL(pingpong_server_kernel, dim3(1), dim3(1), 0,
-                         0, gpu_qp,
+      hipLaunchKernelGGL(pingpong_server_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                          reinterpret_cast<PingPongBuf*>(pp_send_buf),
-                         reinterpret_cast<volatile PingPongBuf*>(
-                           pp_recv_buf),
+                         reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
