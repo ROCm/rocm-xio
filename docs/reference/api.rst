@@ -7,8 +7,8 @@ ROCm XIO API reference
 **********************
 
 This page documents the ROCm XIO public C++ API, extracted
-from annotated source headers by Doxygen and rendered via
-Breathe.
+from annotated source headers by Doxygen and rendered in Sphinx
+via ``rocm_docs.doxygen`` (Breathe directives).
 
 Core Framework
 --------------
@@ -38,6 +38,9 @@ Endpoint Registry
 .. doxygenfunction:: xio::createEndpoint(EndpointType type)
 
 .. doxygenfunction:: xio::createEndpoint(const std::string &endpointName)
+
+Both ``createEndpoint`` overloads return a null pointer when the type or
+name is unknown. Callers must check the result before use.
 
 Memory and Buffer Management
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -107,24 +110,22 @@ NVMe Endpoint
    :members:
    :undoc-members:
 
-.. doxygenstruct:: xio::nvme_ep::dataPatternParams
+.. doxygenstruct:: xio::DataPatternParams
    :members:
    :undoc-members:
 
 RDMA Endpoint
 -------------
 
-.. doxygenstruct:: rdma_ep::RdmaEpConfig
+.. doxygenstruct:: xio::rdma_ep::RdmaEpConfig
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rdma_wqe
-   :members:
-   :undoc-members:
-
-.. doxygenstruct:: rdma_cqe
-   :members:
-   :undoc-members:
+Vendor WQE and CQE layouts (``struct rdma_wqe``, ``struct rdma_cqe``) live in
+generated RDMA headers under ``src/endpoints/rdma-ep/`` (see
+``scripts/build/generate-rdma-vendor-headers.sh``). They are not present until
+those headers are generated, so they are omitted from this auto-generated API
+page.
 
 SDMA Endpoint
 -------------
@@ -132,62 +133,62 @@ SDMA Endpoint
 Configuration
 ^^^^^^^^^^^^^
 
-.. doxygenstruct:: sdma_ep::SdmaEpConfig
+.. doxygenstruct:: xio::sdma_ep::SdmaEpConfig
    :members:
    :undoc-members:
 
 Host-Side Setup
 ^^^^^^^^^^^^^^^
 
-.. doxygenstruct:: sdma_ep::SdmaConnectionInfo
+.. doxygenstruct:: xio::sdma_ep::SdmaConnectionInfo
    :members:
    :undoc-members:
 
-.. doxygenstruct:: sdma_ep::SdmaQueueInfo
+.. doxygenstruct:: xio::sdma_ep::SdmaQueueInfo
    :members:
    :undoc-members:
 
-.. doxygenfunction:: sdma_ep::initEndpoint
+.. doxygenfunction:: xio::sdma_ep::initEndpoint
 
-.. doxygenfunction:: sdma_ep::shutdownEndpoint
+.. doxygenfunction:: xio::sdma_ep::shutdownEndpoint
 
-.. doxygenfunction:: sdma_ep::createConnection
+.. doxygenfunction:: xio::sdma_ep::createConnection
 
-.. doxygenfunction:: sdma_ep::createQueue
+.. doxygenfunction:: xio::sdma_ep::createQueue
 
-.. doxygenfunction:: sdma_ep::destroyQueue
+.. doxygenfunction:: xio::sdma_ep::destroyQueue
 
 Device-Side Operations
 ^^^^^^^^^^^^^^^^^^^^^^
 
-.. doxygenfunction:: sdma_ep::put
+.. doxygenfunction:: xio::sdma_ep::put
 
-.. doxygenfunction:: sdma_ep::putTile
+.. doxygenfunction:: xio::sdma_ep::putTile
 
-.. doxygenfunction:: sdma_ep::signal
+.. doxygenfunction:: xio::sdma_ep::signal
 
-.. doxygenfunction:: sdma_ep::putSignal
+.. doxygenfunction:: xio::sdma_ep::putSignal
 
-.. doxygenfunction:: sdma_ep::putSignalCounter
+.. doxygenfunction:: xio::sdma_ep::putSignalCounter
 
-.. doxygenfunction:: sdma_ep::putCounter
+.. doxygenfunction:: xio::sdma_ep::putCounter
 
-.. doxygenfunction:: sdma_ep::signalCounter
+.. doxygenfunction:: xio::sdma_ep::signalCounter
 
-.. doxygenfunction:: sdma_ep::waitSignal
+.. doxygenfunction:: xio::sdma_ep::waitSignal
 
-.. doxygenfunction:: sdma_ep::waitCounter
+.. doxygenfunction:: xio::sdma_ep::waitCounter
 
-.. doxygenfunction:: sdma_ep::flush
+.. doxygenfunction:: xio::sdma_ep::flush
 
-.. doxygenfunction:: sdma_ep::quiet
+.. doxygenfunction:: xio::sdma_ep::quiet
 
 Validation
 ^^^^^^^^^^
 
-.. doxygenfunction:: sdma_ep::validateConfig
+.. doxygenfunction:: xio::sdma_ep::validateConfig
 
-.. doxygenfunction:: sdma_ep::getIterations
+.. doxygenfunction:: xio::sdma_ep::getIterations
 
 Test Endpoint
 -------------
@@ -207,18 +208,26 @@ Test Endpoint
 Kernel Module IOCTL Structures
 ------------------------------
 
-.. doxygenstruct:: rocm_axiio_vram_req
+.. doxygenstruct:: rocm_xio_vram_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_register_queue_addr_req
+.. doxygenstruct:: rocm_xio_register_queue_addr_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_register_buffer_req
+.. doxygenstruct:: rocm_xio_register_buffer_req
    :members:
    :undoc-members:
 
-.. doxygenstruct:: rocm_axiio_mmio_bridge_shadow_req
+.. doxygenstruct:: rocm_xio_mmio_bridge_shadow_req
+   :members:
+   :undoc-members:
+
+.. doxygenstruct:: rocm_xio_alloc_contig_req
+   :members:
+   :undoc-members:
+
+.. doxygenstruct:: rocm_xio_free_contig_req
    :members:
    :undoc-members:

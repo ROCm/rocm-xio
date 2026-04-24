@@ -1,5 +1,8 @@
 obj-m += rocm-xio.o
 
+# Shared ioctl definitions with userspace (src/include/rocm-xio-uapi.h)
+ccflags-y += -I$(src)/../../src/include
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 

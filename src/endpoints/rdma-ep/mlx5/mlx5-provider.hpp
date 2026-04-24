@@ -33,6 +33,7 @@ extern "C" {
 
 #include "endian.hpp"
 
+namespace xio {
 namespace rdma_ep {
 
 union gda_mlx5_wqe_segment {
@@ -343,5 +344,6 @@ struct mlx5dv_funcs_t {
 };
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // RDMA_EP_MLX5_PROVIDER_HPP

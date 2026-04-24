@@ -13,7 +13,7 @@
 #include "rdma-topology.hpp"
 #include "xio-test-assert.h"
 
-using namespace rdma_ep;
+using namespace xio::rdma_ep;
 
 int test_extract_bus_number() {
   ASSERT_EQ(ExtractBusNumber("0000:01:00.0"), 1);

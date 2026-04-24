@@ -1,17 +1,15 @@
 # Doxyfile for rocm-xio
-# Generated from docs/Doxyfile.in by CMake
-#
-# Doxygen generates XML consumed by Breathe; Sphinx
-# produces the final HTML output.
+# Configured by CMake into the build tree (docs-doxygen/). Doxygen is run
+# with that directory as the working directory so XML is written to ./xml/.
 
 PROJECT_NAME           = "@PROJECT_NAME@"
 PROJECT_NUMBER         = "@PROJECT_VERSION@"
 PROJECT_BRIEF          = "ROCm Library for GPU-Initiated IO"
 
-OUTPUT_DIRECTORY       = @XIO_DOC_PATH@
+OUTPUT_DIRECTORY       = .
 INPUT                  = @XIO_DOXYFILE_INPUT@
 RECURSIVE              = YES
-FILE_PATTERNS          = *.h *.hip
+FILE_PATTERNS          = *.h *.hpp *.hip *.dox
 
 EXTRACT_ALL            = YES
 EXTRACT_PRIVATE        = NO
@@ -22,7 +20,7 @@ EXCLUDE_PATTERNS       = */external/* \
                          *-generated.h \
                          *-gen.h
 
-# XML output for Breathe (Sphinx integration)
+# XML output for Breathe (via rocm_docs.doxygen)
 GENERATE_HTML          = NO
 GENERATE_LATEX         = NO
 GENERATE_XML           = YES
@@ -48,19 +46,15 @@ PREDEFINED             = __host__= \
                          __attribute__(x)= \
                          __HIP_DEVICE_COMPILE__=0
 
-# Source browsing (available via Breathe)
 SOURCE_BROWSER         = YES
 INLINE_SOURCES         = NO
 STRIP_CODE_COMMENTS    = YES
 
-# Diagrams
 HAVE_DOT               = NO
 
-# Sorting
 SORT_MEMBER_DOCS       = YES
 SORT_BRIEF_DOCS        = YES
 
-# Miscellaneous
 OPTIMIZE_OUTPUT_FOR_C  = NO
 TYPEDEF_HIDES_STRUCT   = NO
 SHOW_INCLUDE_FILES     = YES

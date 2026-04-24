@@ -66,6 +66,10 @@
 
 * Use HIP error checking for all HIP API calls
 * Propagate errors to callers rather than silently ignoring them
+* The `HIP_CHECK` macro in `xio.h` logs HIP failures to stderr and does
+  not change control flow; treat it as a legacy diagnostic aid only.
+  Prefer `XIO_HIP_TRY(expr)` or explicit `if ((expr) != hipSuccess) return
+  ...;` patterns for new code.
 
 ## Testing Conventions
 

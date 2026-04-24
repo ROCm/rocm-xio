@@ -28,20 +28,25 @@
 
 #if defined(GDA_BNXT)
 #include "bnxt/bnxt-provider.hpp"
+namespace xio {
 namespace rdma_ep {
 int bnxt_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
                       int attr_mask);
 } // namespace rdma_ep
+} // namespace xio
 #endif
 
 #if defined(GDA_ERNIC)
 #include "rocm-ernic/ernic-provider.hpp"
+namespace xio {
 namespace rdma_ep {
 int ernic_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
                        int attr_mask);
 } // namespace rdma_ep
+} // namespace xio
 #endif
 
+namespace xio {
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
@@ -798,3 +803,4 @@ void Backend::initialize_gpu_qp() {
 #undef XIO_CHECK_NNULL
 
 } // namespace rdma_ep
+} // namespace xio

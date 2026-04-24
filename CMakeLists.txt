@@ -392,6 +392,11 @@ if(BUILD_SHARED_LIBS)
       hip::device
       hsakmt::hsakmt
   )
+  target_compile_definitions(rocm-xio PRIVATE
+    ROCM_XIO_BUILDING_LIBRARY
+    ROCM_XIO_SHARED
+  )
+  target_compile_options(rocm-xio PRIVATE -fvisibility=hidden)
 endif()
 
 # GNUInstallDirs must be included before the INSTALL_INTERFACE
@@ -575,6 +580,9 @@ install(TARGETS rocm-xio
 # Install public headers
 install(FILES
     ${INCLUDE_DIR}/xio.h
+    ${INCLUDE_DIR}/xio-endpoint-core.h
+    ${INCLUDE_DIR}/xio-export.h
+    ${INCLUDE_DIR}/rocm-xio-uapi.h
     ${INCLUDE_DIR}/xio-endpoint-registry.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
     COMPONENT rocm-xio

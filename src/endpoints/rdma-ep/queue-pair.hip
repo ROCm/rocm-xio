@@ -30,6 +30,7 @@
 #include "rocm-ernic/ernic-queue-pair.hip"
 #endif
 
+namespace xio {
 namespace rdma_ep {
 
 #ifndef __HIP_DEVICE_COMPILE__
@@ -371,3 +372,4 @@ __device__ void QueuePair::ring_doorbell_single() {
 }
 
 } // namespace rdma_ep
+} // namespace xio

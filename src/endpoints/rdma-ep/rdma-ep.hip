@@ -25,6 +25,7 @@
 #include "xio-timing.h"
 #include "xio.h"
 
+namespace xio {
 namespace rdma_ep {
 
 __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
@@ -307,6 +308,7 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
 }
 
 } // namespace rdma_ep
+} // namespace xio
 
 #ifndef __HIP_DEVICE_COMPILE__
 
@@ -316,6 +318,7 @@ __global__ void pingpong_server_kernel(QueuePair* qp, PingPongBuf* send_buf,
 #include "tcp-exchange.hpp"
 #include "xio-env.h"
 
+namespace xio {
 namespace rdma_ep {
 
 __host__ std::string validateConfig(RdmaEpConfig* config) {
@@ -381,6 +384,7 @@ __host__ unsigned getIterations(void* endpointConfig) {
 }
 
 } // namespace rdma_ep
+} // namespace xio
 
 static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
                                    rdma_ep::RdmaEpConfig* cfg) {
@@ -698,13 +702,16 @@ cleanup:
   return result;
 }
 
-hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
+namespace xio {
+namespace rdma_ep {
+
+hipError_t run(XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
     ROCXIO_LOG_ERROR("rdma-ep: Missing endpoint config\n");
     return hipErrorInvalidValue;
   }
 
-  auto* cfg = static_cast<rdma_ep::RdmaEpConfig*>(config->endpointConfig);
+  auto* cfg = static_cast<RdmaEpConfig*>(config->endpointConfig);
 
   const char* mode_str = cfg->isServer   ? "server"
                          : cfg->isClient ? "client"
@@ -713,7 +720,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
   ROCXIO_LOG_INFO("rdma-ep: provider=%s mode=%s"
                   " sq_depth=%u iters=%u size=%u"
                   " batch=%u queues=%u\n",
-                  rdma_ep::provider_name(cfg->provider), mode_str, cfg->sqDepth,
+                  provider_name(cfg->provider), mode_str, cfg->sqDepth,
                   cfg->iterations, cfg->transferSize, cfg->batchSize,
                   cfg->numQueues);
 
@@ -725,7 +732,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     // ==========================================================
     bool sq_on_device = (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
 
-    rdma_ep::BackendConfig bcfg;
+    BackendConfig bcfg;
     bcfg.provider = cfg->provider;
     bcfg.gpu_device_id = cfg->gpuDeviceId;
     bcfg.sq_depth = cfg->sqDepth;
@@ -734,13 +741,13 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
     bcfg.traffic_class = cfg->trafficClass;
     bcfg.loopback = false;
-    bcfg.queue_mem = sq_on_device ? rdma_ep::QueueMemMode::DEVICE_VRAM
-                                  : rdma_ep::QueueMemMode::HOST_COHERENT;
+    bcfg.queue_mem = sq_on_device ? QueueMemMode::DEVICE_VRAM
+                                  : QueueMemMode::HOST_COHERENT;
     bcfg.pci_mmio_bridge = config->pciMmioBridge;
     if (!cfg->deviceName.empty())
       bcfg.hca_list = cfg->deviceName.c_str();
 
-    rdma_ep::Backend backend(bcfg);
+    Backend backend(bcfg);
     int ret = backend.init();
     if (ret != 0) {
       ROCXIO_LOG_ERROR("rdma-ep: Backend init failed\n");
@@ -748,7 +755,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
     ROCXIO_LOG_INFO("rdma-ep: Backend initialized.\n");
 
-    rdma_ep::QueuePair* gpu_qp = backend.get_gpu_qp();
+    QueuePair* gpu_qp = backend.get_gpu_qp();
     if (!gpu_qp) {
       ROCXIO_LOG_INFO("rdma-ep: No GPU QueuePair available."
                       " Backend init verified OK.\n");
@@ -819,7 +826,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       return hipErrorUnknown;
     }
 
-    rdma_ep::DestInfo local_dest = backend.get_local_dest_info();
+    DestInfo local_dest = backend.get_local_dest_info();
     xio::ExchangeMsg local_msg{};
     local_msg.qpn = local_dest.qpn;
     local_msg.rkey = backend.get_rkey();
@@ -848,7 +855,7 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                      (unsigned long)remote_msg.remote_addr);
 
     // --- Connect QP to peer ---
-    rdma_ep::DestInfo peer{};
+    DestInfo peer{};
     peer.lid = remote_msg.lid;
     peer.qpn = remote_msg.qpn;
     peer.psn = 0;
@@ -892,8 +899,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
       ROCXIO_LOG_INFO("rdma-ep: WRITE %u bytes"
                       " to server...\n",
                       write_size);
-      hipLaunchKernelGGL(rdma_ep::rdma_write_kernel, dim3(1), dim3(1), 0, 0,
-                         gpu_qp, remote_data, data_region, write_size);
+      hipLaunchKernelGGL(rdma_write_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
+                         remote_data, data_region, write_size);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
         ROCXIO_LOG_ERROR("rdma-ep: WRITE kernel failed:"
@@ -1007,11 +1014,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
     }
 
     if (cfg->isClient) {
-      hipLaunchKernelGGL(rdma_ep::pingpong_client_kernel, dim3(1), dim3(1), 0,
-                         0, gpu_qp,
-                         reinterpret_cast<rdma_ep::PingPongBuf*>(pp_send_buf),
-                         reinterpret_cast<volatile rdma_ep::PingPongBuf*>(
-                           pp_recv_buf),
+      hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
+                         reinterpret_cast<PingPongBuf*>(pp_send_buf),
+                         reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors, d_elapsed);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
@@ -1058,11 +1063,9 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
                       " all %u iterations correct.\n",
                       pp_iters);
     } else {
-      hipLaunchKernelGGL(rdma_ep::pingpong_server_kernel, dim3(1), dim3(1), 0,
-                         0, gpu_qp,
-                         reinterpret_cast<rdma_ep::PingPongBuf*>(pp_send_buf),
-                         reinterpret_cast<volatile rdma_ep::PingPongBuf*>(
-                           pp_recv_buf),
+      hipLaunchKernelGGL(pingpong_server_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
+                         reinterpret_cast<PingPongBuf*>(pp_send_buf),
+                         reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors);
       herr = hipDeviceSynchronize();
       if (herr != hipSuccess) {
@@ -1113,5 +1116,8 @@ hipError_t rdma_ep_run(xio::XioEndpointConfig* config) {
 
   return hipSuccess;
 }
+
+} // namespace rdma_ep
+} // namespace xio
 
 #endif // !__HIP_DEVICE_COMPILE__

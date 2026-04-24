@@ -14,6 +14,7 @@
 
 #include "xio-rdma-check.h"
 
+namespace xio {
 namespace rdma_ep {
 
 NUMAWrapper numa;
@@ -109,3 +110,4 @@ int NUMAWrapper::distance(int node1, int node2) {
 }
 
 } // namespace rdma_ep
+} // namespace xio

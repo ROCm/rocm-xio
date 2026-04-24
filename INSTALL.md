@@ -29,6 +29,10 @@ cmake -S . -B build
 cmake --build build --target all
 ```
 
+The default CMake build type is Debug. For performance measurements,
+configure with ``-DCMAKE_BUILD_TYPE=Release`` (or ``None`` with explicit ``-O3``)
+so results reflect an optimized build.
+
 Verify the build by listing available endpoints:
 
 ```
