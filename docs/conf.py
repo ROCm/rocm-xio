@@ -57,7 +57,7 @@ all_article_info_os = ["linux"]
 all_article_info_author = ""
 
 # for PDF output on Read the Docs
-project = "ROCm™ XIO (Beta)"
+project = "ROCm XIO (Beta)"
 author = "Advanced Micro Devices, Inc."
 copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved."
 version = version_number
