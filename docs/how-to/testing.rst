@@ -31,11 +31,11 @@ The project provides six test presets in ``CMakePresets.json``:
 =================  ==============================  ================
 Preset             Description                     Hardware
 =================  ==============================  ================
-``unit``           CPU-only unit tests             None
-``system``         System tests (emulation)        HIP-capable GPU
+``unit``           CPU-only unit tests             CPU-only
+``system``         System tests (emulation)        GPU-only
 ``hardware``       Hardware integration tests      GPU + RDMA NIC
 ``sweep``          Multi-seed loopback sweep       GPU + RDMA NIC
-``integration``    Install-integration examples    None
+``integration``    Install-integration examples    CPU-only
 ``all``            All tests                       Varies
 =================  ==============================  ================
 
