@@ -8,6 +8,8 @@ on:
       - 'feat/**'
     paths:
       - 'docs/**'
+      - 'cmake/XIODocumentation.cmake'
+      - 'requirements.txt'
       - 'src/**/*.h'
       - 'README.md'
       - '.codespellrc'
@@ -53,4 +55,6 @@ jobs:
     - name: Install doc8
       run: pip install doc8
     - name: Lint RST files
-      run: doc8 docs/ --max-line-length 80
+      run: >
+        doc8 docs/ --max-line-length 80
+        --ignore-path docs/sphinx/requirements.txt

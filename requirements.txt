@@ -1,3 +1,1 @@
-sphinx>=7.0
-breathe>=4.35
-sphinx-book-theme>=1.0
+rocm-docs-core[api_reference]>=1.33.1,<2

@@ -6,7 +6,7 @@
 Build and install ROCm XIO
 **************************
 
-.. describe installation path, what they'll see when they succeed, and optional configurations.
+.. Describe installation path, success output, and optional configurations.
 
 Build ROCm XIO
 ==============
@@ -120,8 +120,8 @@ Utility targets
    cmake --build build --target lint-spell     # Spell-check docs
    cmake --build build --target lint-codespell # codespell check
    cmake --build build --target lint-all       # All linting
-   cmake --build build --target doxygen        # Doxygen XML
-   cmake --build build --target sphinx-html    # Full HTML docs
+   cmake --build build --target doxygen        # Doxygen XML only
+   cmake --build build --target sphinx-html    # Full HTML (runs Doxygen too)
    cmake --build build --target docs-venv      # Create docs venv
    cmake --build build --target docs-serve     # Live-reload server
    cmake --build build --target clean-all      # Remove artifacts
@@ -136,8 +136,8 @@ Build output structure
    ├── xio-tester              # Test application
    ├── librocm-xio.a           # Static library
    ├── docs/                   # (if XIO_BUILD_DOCS=ON)
-   │   ├── html/               # Sphinx HTML output
-   │   └── xml/                # Doxygen XML (intermediate)
+   │   └── html/               # Sphinx HTML output
+   ├── docs-doxygen/           # Doxygen cwd + ``xml/`` (intermediate)
    └── CMakeFiles/
 
 Build system details
