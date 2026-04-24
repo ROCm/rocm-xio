@@ -11,6 +11,7 @@ INPUT                  = ../../src/include \
                          ../../src/endpoints/nvme-ep \
                          ../../src/endpoints/rdma-ep \
                          ../../src/endpoints/sdma-ep \
+                         ../../src/common \
                          ../../src/endpoints/test-ep
 
 RECURSIVE              = YES
