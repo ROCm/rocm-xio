@@ -43,7 +43,7 @@ target_link_libraries(sdma_ep_py PRIVATE
   hsakmt::hsakmt
 )
 
-# Install to sdma_ep package directory
+# Install to xio.sdma_ep package directory
 install(TARGETS sdma_ep_py
-  LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/sdma_ep
+  LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/xio/sdma_ep
 )

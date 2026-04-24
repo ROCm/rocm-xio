@@ -1,140 +1,111 @@
 #include "anvil-host-api.hpp"
 #include "anvil.hpp"
-#include "sdma_pkt_struct.h"
-#include "sdma_opcodes.h"
+#include "sdma_packets.hpp"
 
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <thread>
+#include <string>
 
 namespace anvil
 {
 
-// ==================== Host-Side Packet Creation Functions ====================
-// These are host-only versions of the packet builders (unlike device-side __device__ versions)
-
-static inline SDMA_PKT_COPY_LINEAR CreateCopyPacketHost(void* srcBuf, void* dstBuf, size_t packetSize)
+namespace
 {
-   SDMA_PKT_COPY_LINEAR pkt = {};
-   pkt.HEADER_UNION.op = SDMA_OP_COPY;
-   pkt.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR;
-   pkt.COUNT_UNION.count = static_cast<uint32_t>(packetSize - 1); // HW wants size - 1
-   pkt.SRC_ADDR_LO_UNION.src_addr_31_0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(srcBuf));
-   pkt.SRC_ADDR_HI_UNION.src_addr_63_32 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(srcBuf) >> 32);
-   pkt.DST_ADDR_LO_UNION.dst_addr_31_0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dstBuf));
-   pkt.DST_ADDR_HI_UNION.dst_addr_63_32 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dstBuf) >> 32);
-   return pkt;
+constexpr uint64_t kMaxSdmaDword = std::numeric_limits<uint32_t>::max();
+constexpr uint64_t kMaxLinearSize = 0x1'0000'0000ULL; // 32-bit count field -> size-1 fits in uint32_t
+
+inline void validate_linear_args(void* src, void* dst, size_t size, const char* fn_name)
+{
+   if (!src || !dst || size == 0)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": invalid nullptr/size arguments");
+   }
+   if (size > kMaxLinearSize)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": size exceeds SDMA linear packet limit (4 GiB)");
+   }
 }
 
-template <typename T> static inline SDMA_PKT_ATOMIC CreateAtomicAddPacketHost(T* ptr, T value)
+inline void validate_tile_geometry(const Tile& tile, const char* fn_name)
 {
-   static_assert(sizeof(T) == 4 || sizeof(T) == 8, "atomic_add only supports 32-bit or 64-bit types");
-
-   SDMA_PKT_ATOMIC pkt = {};
-   pkt.HEADER_UNION.op = SDMA_OP_ATOMIC;
-   pkt.HEADER_UNION.operation = (sizeof(T) == 8) ? SDMA_ATOMIC_ADD64 : SDMA_ATOMIC_ADD32;
-
-   uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-   pkt.ADDR_LO_UNION.addr_31_0 = static_cast<uint32_t>(addr);
-   pkt.ADDR_HI_UNION.addr_63_32 = static_cast<uint32_t>(addr >> 32);
-
-   uint64_t val64 = static_cast<uint64_t>(value);
-   pkt.SRC_DATA_LO_UNION.src_data_31_0 = static_cast<uint32_t>(val64);
-   pkt.SRC_DATA_HI_UNION.src_data_63_32 = static_cast<uint32_t>(val64 >> 32);
-
-   return pkt;
+   if (!tile.data)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": tile.data is null");
+   }
+   if (tile.block_m <= 0 || tile.block_n <= 0 || tile.elem_size == 0)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": tile has invalid block or element size");
+   }
+   if (tile.pid_m < 0 || tile.pid_n < 0)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": negative tile coordinates are unsupported");
+   }
 }
 
-static inline SDMA_PKT_TIMESTAMP CreateTimestampPacketHost(uint64_t* timestamp_ptr)
+inline packets::LargeSubWindowCopyPacket build_tile_packet(const Tile& tile, void* dst_ptr, size_t dst_stride,
+                                                           const char* fn_name)
 {
-   SDMA_PKT_TIMESTAMP pkt = {};
-   pkt.HEADER_UNION.op = SDMA_OP_TIMESTAMP;
-   pkt.HEADER_UNION.sub_op = SDMA_SUBOP_TIMESTAMP_GLOBAL; // 100MHz fixed clock for MI300X
+   validate_tile_geometry(tile, fn_name);
+   if (!dst_ptr)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": destination pointer is null");
+   }
+   if (dst_stride == 0 || dst_stride > kMaxSdmaDword)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": destination stride exceeds SDMA limits");
+   }
 
-   uintptr_t addr = reinterpret_cast<uintptr_t>(timestamp_ptr);
-   pkt.ADDR_LO_UNION.addr_31_0 = static_cast<uint32_t>(addr);
-   pkt.ADDR_HI_UNION.addr_63_32 = static_cast<uint32_t>(addr >> 32);
+   const size_t tile_width_bytes = tile.width_bytes();
+   const size_t tile_height = tile.height();
+   const size_t src_pitch = tile.src_pitch();
+   const uint64_t src_x = static_cast<uint64_t>(tile.offset_n()) * tile.elem_size;
+   const uint64_t src_y = static_cast<uint64_t>(tile.offset_m());
 
-   return pkt;
+   if (tile_width_bytes == 0 || tile_height == 0)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": tile has zero extent");
+   }
+   if (tile_width_bytes > kMaxSdmaDword || tile_height > kMaxSdmaDword)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": tile dimensions exceed SDMA limits");
+   }
+   if (src_pitch == 0 || src_pitch > kMaxSdmaDword)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": source pitch exceeds SDMA limits");
+   }
+   if (src_x > kMaxSdmaDword || src_y > kMaxSdmaDword)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": source offsets exceed SDMA limits");
+   }
+
+   return packets::LargeSubWindowCopyPacket(tile.data, dst_ptr, static_cast<uint32_t>(tile_width_bytes),
+                                            static_cast<uint32_t>(tile_height), static_cast<uint32_t>(src_pitch),
+                                            static_cast<uint32_t>(dst_stride), static_cast<uint32_t>(src_x),
+                                            static_cast<uint32_t>(src_y), 0, 0);
 }
 
-static inline SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY CreateLargeSubWindowCopyPacketHost(void* srcBuf, void* dstBuf,
-                                                                                         uint32_t tile_width,
-                                                                                         uint32_t tile_height,
-                                                                                         uint32_t src_buffer_pitch,
-                                                                                         uint32_t dst_buffer_pitch,
-                                                                                         uint32_t src_x, uint32_t src_y,
-                                                                                         uint32_t dst_x, uint32_t dst_y)
+template <typename T> inline packets::AtomicAddPacket<T> build_atomic_packet(T* ptr, T value, const char* fn_name)
 {
-   SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY pkt = {};
-   pkt.HEADER_UNION.op = SDMA_OP_COPY;
-   pkt.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW;
-
-   // Source buffer base address
-   pkt.SRC_ADDR_LO_UNION.src_base_addr_31_0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(srcBuf));
-   pkt.SRC_ADDR_HI_UNION.src_base_addr_63_32 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(srcBuf) >> 32);
-
-   // Source offset
-   pkt.SRC_X_UNION.src_x = src_x;
-   pkt.SRC_Y_UNION.src_y = src_y;
-   pkt.SRC_Z_UNION.src_z = 0;
-
-   // Source pitch (1-based, so subtract 1)
-   pkt.SRC_PITCH_UNION.src_pitch = src_buffer_pitch - 1;
-
-   // Source slice pitch (for 2D, use 0 which means slice_pitch of 1)
-   uint64_t src_slice_pitch = 0;
-   pkt.SRC_SLICE_PITCH_LO_UNION.src_slice_pitch_31_0 = static_cast<uint32_t>(src_slice_pitch & 0xFFFFFFFF);
-   pkt.SRC_SLICE_PITCH_HI_UNION.src_slice_pitch_47_32 = static_cast<uint16_t>((src_slice_pitch >> 32) & 0xFFFF);
-
-   // Destination buffer base address
-   pkt.DST_ADDR_LO_UNION.dst_data_31_0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dstBuf));
-   pkt.DST_ADDR_HI_UNION.src_data_63_32 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dstBuf) >> 32);
-
-   // Destination offset
-   pkt.DST_X_UNION.dst_x = dst_x;
-   pkt.DST_Y_UNION.dst_y = dst_y;
-   pkt.DST_Z_UNION.dst_z = 0;
-
-   // Destination pitch (1-based, so subtract 1)
-   pkt.DST_PITCH_UNION.dst_pitch = dst_buffer_pitch - 1;
-
-   // Destination slice pitch (for 2D, use 0)
-   uint64_t dst_slice_pitch = 0;
-   pkt.DST_SLICE_PITCH_LO_UNION.dst_slice_pitch_31_0 = static_cast<uint32_t>(dst_slice_pitch & 0xFFFFFFFF);
-   pkt.DST_SLICE_PITCH_HI_UNION.dst_slice_pitch_47_32 = static_cast<uint16_t>((dst_slice_pitch >> 32) & 0xFFFF);
-
-   // Rectangle dimensions (1-based, so subtract 1)
-   pkt.RECT_X_UNION.rect_x = tile_width - 1;
-   pkt.RECT_Y_UNION.rect_y = tile_height - 1;
-   pkt.RECT_Z_UNION.rect_z = 0; // 2D copy, depth is 1, subtract 1 gives 0
-
-   return pkt;
+   if (!ptr)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": flag pointer is null");
+   }
+   return packets::AtomicAddPacket<T>(ptr, value);
 }
 
 template <typename T>
-static inline SDMA_PKT_POLL_REGMEM CreatePollRegmemPacketHost(T* flag_ptr, T expected_value, uint32_t interval = 10,
-                                                                uint32_t retry_count = 0xFFF)
+inline packets::PollRegmemPacket<T> build_poll_packet(T* ptr, T expected, const char* fn_name, uint32_t interval = 10,
+                                                      uint32_t retry = 0xFFF)
 {
-   static_assert(sizeof(T) == 4, "CreatePollRegmemPacket only supports 32-bit types");
-
-   SDMA_PKT_POLL_REGMEM pkt = {};
-   pkt.HEADER_UNION.op = SDMA_OP_POLL_REGMEM;
-   pkt.HEADER_UNION.func = 5;       // Greater than or EQUAL
-   pkt.HEADER_UNION.mem_poll = 1;   // Poll memory (not register)
-
-   uintptr_t flag_addr = reinterpret_cast<uintptr_t>(flag_ptr);
-   pkt.ADDR_LO_UNION.addr_31_0 = static_cast<uint32_t>(flag_addr);
-   pkt.ADDR_HI_UNION.addr_63_32 = static_cast<uint32_t>(flag_addr >> 32);
-
-   pkt.VALUE_UNION.value = static_cast<uint32_t>(expected_value);
-   pkt.MASK_UNION.mask = 0xFFFFFFFF; // Match all bits
-
-   pkt.DW5_UNION.interval = interval;         // Polling interval
-   pkt.DW5_UNION.retry_count = retry_count;   // Retry count (0xFFF = infinite)
-
-   return pkt;
+   if (!ptr)
+   {
+      throw std::invalid_argument(std::string(fn_name) + ": flag pointer is null");
+   }
+   return packets::PollRegmemPacket<T>(ptr, expected, interval, retry);
 }
+} // namespace
 
 // ==================== SdmaQueueHostHandle Implementation ====================
 
@@ -250,40 +221,32 @@ void SdmaQueueHostHandle::submitPacket(uint64_t base, uint64_t pending_wptr)
 
 void SdmaQueueHostHandle::put(void* src, void* dst, size_t size)
 {
-   if (!src || !dst || size == 0)
-   {
-      throw std::invalid_argument("Invalid put() parameters");
-   }
+   validate_linear_args(src, dst, size, "put");
 
    // Reserve space for SDMA_PKT_COPY_LINEAR (7 dwords = 28 bytes)
-   uint64_t base = reserveQueueSpace(sizeof(SDMA_PKT_COPY_LINEAR));
+   uint64_t base = reserveQueueSpace(packets::CopyLinearPacket::size_bytes());
 
    // Create copy packet
-   SDMA_PKT_COPY_LINEAR packet = CreateCopyPacketHost(src, dst, size);
+   packets::CopyLinearPacket packet(src, dst, size);
 
    // Place and submit packet
-   placePacket(&packet, sizeof(packet), base);
-   submitPacket(base, base + sizeof(packet));
+   placePacket(packet.data(), packets::CopyLinearPacket::size_bytes(), base);
+   submitPacket(base, base + packets::CopyLinearPacket::size_bytes());
 }
 
 template <typename T> void SdmaQueueHostHandle::atomic_add(T* ptr, T value)
 {
    static_assert(sizeof(T) == 4 || sizeof(T) == 8, "atomic_add only supports 32-bit or 64-bit types");
 
-   if (!ptr)
-   {
-      throw std::invalid_argument("Invalid atomic_add() parameters");
-   }
-
    // Reserve space for SDMA_PKT_ATOMIC (8 dwords = 32 bytes)
-   uint64_t base = reserveQueueSpace(sizeof(SDMA_PKT_ATOMIC));
+   uint64_t base = reserveQueueSpace(packets::AtomicAddPacket<T>::size_bytes());
 
    // Create atomic packet
-   SDMA_PKT_ATOMIC packet = CreateAtomicAddPacketHost(ptr, value);
+   auto packet = build_atomic_packet(ptr, value, "atomic_add");
 
    // Place and submit packet
-   placePacket(&packet, sizeof(packet), base);
-   submitPacket(base, base + sizeof(packet));
+   placePacket(packet.data(), packets::AtomicAddPacket<T>::size_bytes(), base);
+   submitPacket(base, base + packets::AtomicAddPacket<T>::size_bytes());
 }
 
 // Explicit template instantiations
@@ -300,43 +263,27 @@ void SdmaQueueHostHandle::timestamp(uint64_t* timestamp_ptr)
    }
 
    // Reserve space for SDMA_PKT_TIMESTAMP (3 dwords = 12 bytes)
-   uint64_t base = reserveQueueSpace(sizeof(SDMA_PKT_TIMESTAMP));
+   uint64_t base = reserveQueueSpace(packets::TimestampPacket::size_bytes());
 
    // Create timestamp packet
-   SDMA_PKT_TIMESTAMP packet = CreateTimestampPacketHost(timestamp_ptr);
+   packets::TimestampPacket packet(timestamp_ptr);
 
    // Place and submit packet
-   placePacket(&packet, sizeof(packet), base);
-   submitPacket(base, base + sizeof(packet));
+   placePacket(packet.data(), packets::TimestampPacket::size_bytes(), base);
+   submitPacket(base, base + packets::TimestampPacket::size_bytes());
 }
 
 void SdmaQueueHostHandle::put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride)
 {
-   if (!tile.data || !dst_ptr)
-   {
-      throw std::invalid_argument("Invalid put_tile() parameters");
-   }
-
    // Reserve space for SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
-   uint64_t base = reserveQueueSpace(sizeof(SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY));
+   uint64_t base = reserveQueueSpace(packets::LargeSubWindowCopyPacket::size_bytes());
 
    // Create sub-window copy packet
-   SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY packet =
-       CreateLargeSubWindowCopyPacketHost(tile.data,                        // srcBuf
-                                          dst_ptr,                          // dstBuf
-                                          tile.width_bytes(),               // tile_width
-                                          tile.height(),                    // tile_height
-                                          tile.src_pitch(),                 // src_buffer_pitch
-                                          dst_stride,                       // dst_buffer_pitch
-                                          tile.offset_n() * tile.elem_size, // src_x
-                                          tile.offset_m(),                  // src_y
-                                          0,                                // dst_x
-                                          0                                 // dst_y
-       );
+   auto packet = build_tile_packet(tile, dst_ptr, dst_stride, "put_tile");
 
    // Place and submit packet
-   placePacket(&packet, sizeof(packet), base);
-   submitPacket(base, base + sizeof(packet));
+   placePacket(packet.data(), packets::LargeSubWindowCopyPacket::size_bytes(), base);
+   submitPacket(base, base + packets::LargeSubWindowCopyPacket::size_bytes());
 }
 
 template <typename T>
@@ -344,27 +291,25 @@ void SdmaQueueHostHandle::put_signal(void* src, void* dst, size_t size, T* flag_
 {
    static_assert(sizeof(T) == 4 || sizeof(T) == 8, "put_signal only supports 32-bit or 64-bit types");
 
-   if (!src || !dst || !flag_ptr || size == 0)
-   {
-      throw std::invalid_argument("Invalid put_signal() parameters");
-   }
+   validate_linear_args(src, dst, size, "put_signal");
 
    // Reserve space for BOTH packets in one call
-   constexpr size_t LINEAR_SIZE = sizeof(SDMA_PKT_COPY_LINEAR);
-   constexpr size_t ATOMIC_SIZE = sizeof(SDMA_PKT_ATOMIC);
+   constexpr size_t LINEAR_SIZE = packets::CopyLinearPacket::size_bytes();
+   constexpr size_t ATOMIC_SIZE = packets::AtomicAddPacket<T>::size_bytes();
    constexpr size_t TOTAL_SIZE = LINEAR_SIZE + ATOMIC_SIZE;
 
    uint64_t base = reserveQueueSpace(TOTAL_SIZE);
 
    // Build copy packet
-   SDMA_PKT_COPY_LINEAR linear_pkt = CreateCopyPacketHost(src, dst, size);
+   packets::CopyLinearPacket linear_pkt(src, dst, size);
 
    // Build atomic packet
-   SDMA_PKT_ATOMIC atomic_pkt = CreateAtomicAddPacketHost(flag_ptr, flag_value);
+   auto atomic_pkt = build_atomic_packet(flag_ptr, flag_value, "put_signal");
 
    // Place both packets
-   placePacket(&linear_pkt, sizeof(linear_pkt), base);
-   placePacket(&atomic_pkt, sizeof(atomic_pkt), base + sizeof(linear_pkt));
+   placePacket(linear_pkt.data(), packets::CopyLinearPacket::size_bytes(), base);
+   placePacket(atomic_pkt.data(), packets::AtomicAddPacket<T>::size_bytes(),
+               base + packets::CopyLinearPacket::size_bytes());
 
    // Submit both packets together
    submitPacket(base, base + TOTAL_SIZE);
@@ -376,38 +321,22 @@ void SdmaQueueHostHandle::put_tile_signal(const Tile& tile, void* dst_ptr, size_
 {
    static_assert(sizeof(T) == 4 || sizeof(T) == 8, "put_tile_signal only supports 32-bit or 64-bit types");
 
-   if (!tile.data || !dst_ptr || !flag_ptr)
-   {
-      throw std::invalid_argument("Invalid put_tile_signal() parameters");
-   }
-
    // Reserve space for BOTH packets in one call
-   constexpr size_t SUBWIN_SIZE = sizeof(SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY);
-   constexpr size_t ATOMIC_SIZE = sizeof(SDMA_PKT_ATOMIC);
+   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
+   constexpr size_t ATOMIC_SIZE = packets::AtomicAddPacket<T>::size_bytes();
    constexpr size_t TOTAL_SIZE = SUBWIN_SIZE + ATOMIC_SIZE;
 
    uint64_t base = reserveQueueSpace(TOTAL_SIZE);
 
    // Build SUB_WINDOW packet
-   SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY subwin_pkt =
-       CreateLargeSubWindowCopyPacketHost(tile.data,                        // srcBuf
-                                          dst_ptr,                          // dstBuf
-                                          tile.width_bytes(),               // tile_width
-                                          tile.height(),                    // tile_height
-                                          tile.src_pitch(),                 // src_buffer_pitch
-                                          dst_stride,                       // dst_buffer_pitch
-                                          tile.offset_n() * tile.elem_size, // src_x
-                                          tile.offset_m(),                  // src_y
-                                          0,                                // dst_x
-                                          0                                 // dst_y
-       );
+   auto subwin_pkt = build_tile_packet(tile, dst_ptr, dst_stride, "put_tile_signal");
 
    // Build ATOMIC packet
-   SDMA_PKT_ATOMIC atomic_pkt = CreateAtomicAddPacketHost(flag_ptr, flag_value);
+   auto atomic_pkt = build_atomic_packet(flag_ptr, flag_value, "put_tile_signal");
 
    // Place both packets sequentially
-   placePacket(&subwin_pkt, SUBWIN_SIZE, base);
-   placePacket(&atomic_pkt, ATOMIC_SIZE, base + SUBWIN_SIZE);
+   placePacket(subwin_pkt.data(), SUBWIN_SIZE, base);
+   placePacket(atomic_pkt.data(), ATOMIC_SIZE, base + SUBWIN_SIZE);
 
    // Submit both packets in one doorbell ring
    submitPacket(base, base + TOTAL_SIZE);
@@ -429,27 +358,24 @@ void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value, void
 {
    static_assert(sizeof(T) == 4, "wait_flag_then_put only supports 32-bit types");
 
-   if (!flag_ptr || !src || !dst || size == 0)
-   {
-      throw std::invalid_argument("Invalid wait_flag_then_put() parameters");
-   }
+   validate_linear_args(src, dst, size, "wait_flag_then_put");
 
    // Reserve space for BOTH packets in one call
-   constexpr size_t POLL_SIZE = sizeof(SDMA_PKT_POLL_REGMEM);
-   constexpr size_t COPY_SIZE = sizeof(SDMA_PKT_COPY_LINEAR);
+   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
+   constexpr size_t COPY_SIZE = packets::CopyLinearPacket::size_bytes();
    constexpr size_t TOTAL_SIZE = POLL_SIZE + COPY_SIZE;
 
    uint64_t base = reserveQueueSpace(TOTAL_SIZE);
 
    // Build POLL packet
-   SDMA_PKT_POLL_REGMEM poll_pkt = CreatePollRegmemPacketHost(flag_ptr, expected_value);
+   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put");
 
    // Build COPY packet
-   SDMA_PKT_COPY_LINEAR copy_pkt = CreateCopyPacketHost(src, dst, size);
+   packets::CopyLinearPacket copy_pkt(src, dst, size);
 
    // Place both packets sequentially
-   placePacket(&poll_pkt, sizeof(poll_pkt), base);
-   placePacket(&copy_pkt, sizeof(copy_pkt), base + POLL_SIZE);
+   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
+   placePacket(copy_pkt.data(), packets::CopyLinearPacket::size_bytes(), base + POLL_SIZE);
 
    // Submit both packets in one doorbell ring
    submitPacket(base, base + TOTAL_SIZE);
@@ -461,38 +387,22 @@ void SdmaQueueHostHandle::wait_flag_then_put_tile(T* flag_ptr, T expected_value,
 {
    static_assert(sizeof(T) == 4, "wait_flag_then_put_tile only supports 32-bit types");
 
-   if (!flag_ptr || !tile.data || !dst_ptr)
-   {
-      throw std::invalid_argument("Invalid wait_flag_then_put_tile() parameters");
-   }
-
    // Reserve space for BOTH packets in one call
-   constexpr size_t POLL_SIZE = sizeof(SDMA_PKT_POLL_REGMEM);
-   constexpr size_t SUBWIN_SIZE = sizeof(SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY);
+   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
+   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
    constexpr size_t TOTAL_SIZE = POLL_SIZE + SUBWIN_SIZE;
 
    uint64_t base = reserveQueueSpace(TOTAL_SIZE);
 
    // Build POLL packet
-   SDMA_PKT_POLL_REGMEM poll_pkt = CreatePollRegmemPacketHost(flag_ptr, expected_value);
+   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tile");
 
    // Build SUB_WINDOW_COPY packet
-   SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY subwin_pkt =
-       CreateLargeSubWindowCopyPacketHost(tile.data,                        // srcBuf
-                                          dst_ptr,                          // dstBuf
-                                          tile.width_bytes(),               // tile_width
-                                          tile.height(),                    // tile_height
-                                          tile.src_pitch(),                 // src_buffer_pitch
-                                          dst_stride,                       // dst_buffer_pitch
-                                          tile.offset_n() * tile.elem_size, // src_x
-                                          tile.offset_m(),                  // src_y
-                                          0,                                // dst_x
-                                          0                                 // dst_y
-       );
+   auto subwin_pkt = build_tile_packet(tile, dst_ptr, dst_stride, "wait_flag_then_put_tile");
 
    // Place both packets sequentially
-   placePacket(&poll_pkt, sizeof(poll_pkt), base);
-   placePacket(&subwin_pkt, sizeof(subwin_pkt), base + POLL_SIZE);
+   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
+   placePacket(subwin_pkt.data(), packets::LargeSubWindowCopyPacket::size_bytes(), base + POLL_SIZE);
 
    // Submit both packets in one doorbell ring
    submitPacket(base, base + TOTAL_SIZE);
@@ -510,32 +420,20 @@ void SdmaQueueHostHandle::wait_flag_then_put_tiles(T* flag_ptr, T expected_value
       throw std::invalid_argument("Invalid wait_flag_then_put_tiles() parameters");
    }
 
-   for (size_t i = 0; i < tiles.size(); ++i)
-   {
-      if (!tiles[i].data || !dst_ptrs[i])
-      {
-         throw std::invalid_argument("Invalid wait_flag_then_put_tiles() tile parameters");
-      }
-   }
-
-   constexpr size_t POLL_SIZE = sizeof(SDMA_PKT_POLL_REGMEM);
-   constexpr size_t SUBWIN_SIZE = sizeof(SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY);
+   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
+   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
    const size_t total_size = POLL_SIZE + tiles.size() * SUBWIN_SIZE;
 
    uint64_t base = reserveQueueSpace(total_size);
 
-   SDMA_PKT_POLL_REGMEM poll_pkt = CreatePollRegmemPacketHost(flag_ptr, expected_value);
-   placePacket(&poll_pkt, sizeof(poll_pkt), base);
+   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tiles");
+   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
 
    uint64_t offset = base + POLL_SIZE;
    for (size_t i = 0; i < tiles.size(); ++i)
    {
-      const Tile& tile = tiles[i];
-      SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY subwin_pkt =
-          CreateLargeSubWindowCopyPacketHost(tile.data, dst_ptrs[i], tile.width_bytes(), tile.height(),
-                                             tile.src_pitch(), dst_strides[i], tile.offset_n() * tile.elem_size,
-                                             tile.offset_m(), 0, 0);
-      placePacket(&subwin_pkt, sizeof(subwin_pkt), offset);
+      auto subwin_pkt = build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "wait_flag_then_put_tiles");
+      placePacket(subwin_pkt.data(), packets::LargeSubWindowCopyPacket::size_bytes(), offset);
       offset += SUBWIN_SIZE;
    }
 

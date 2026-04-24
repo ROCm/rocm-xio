@@ -1,6 +1,8 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 
 #include "anvil.hpp"
 #include "xio.h"
@@ -457,7 +459,8 @@ void AnvilLib::init() {
 
 SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
                                      uint32_t engineId, int* channelIdx) {
-  auto& vec = sdma_channels_[dstDeviceId];
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto& vec = sdma_channels_[key];
   vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
                                                gpuAgents_[srcDeviceId],
                                                engineId));
@@ -466,41 +469,70 @@ SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
   return vec.back().get();
 }
 
-bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels, bool allocateOnHost) {
-  // Use separate storage based on allocation type
-  auto& channels = allocateOnHost ? host_sdma_channels_ : sdma_channels_;
-
-  // Check if already connected (idempotent - reuse existing queue 0)
-  if (channels.find(dstDeviceId) != channels.end() && !channels[dstDeviceId].empty()) {
-    return true; // Already connected
+bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
+                       bool allocateOnHost) {
+  if (numChannels <= 0) {
+    throw std::invalid_argument("connect(): numChannels must be positive");
   }
 
-  uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto& channel_map = allocateOnHost ? host_sdma_channels_ : sdma_channels_;
+
+  const uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
+  auto& queues = channel_map[key];
+  const int existingChannels = static_cast<int>(queues.size());
+
+  if (existingChannels > 0) {
+    if (numChannels == existingChannels) {
+      return true; // idempotent
+    }
+
+    std::cout << "Extending connection " << srcDeviceId << " -> "
+              << dstDeviceId << " from " << existingChannels << " to "
+              << numChannels << " channel(s) using engine " << engineId
+              << (allocateOnHost ? " (host allocation)" : " (device allocation)")
+              << std::endl;
+
+    queues.reserve(static_cast<std::size_t>(numChannels));
+    for (int channel = existingChannels; channel < numChannels; ++channel) {
+      queues.emplace_back(std::make_unique<SdmaQueue>(
+          srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId], engineId,
+          allocateOnHost));
+    }
+    return true;
+  }
+
   std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
-            << " with 1 channel using engine " << engineId
+            << " with " << numChannels << " channel(s) using engine "
+            << engineId
             << (allocateOnHost ? " (host allocation)" : " (device allocation)")
             << std::endl;
 
-  // Create exactly one channel (queue 0)
-  channels[dstDeviceId].emplace_back(
-      std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId],
-                                  engineId, allocateOnHost));
+  queues.reserve(static_cast<std::size_t>(numChannels));
+  for (int channel = 0; channel < numChannels; ++channel) {
+    queues.emplace_back(std::make_unique<SdmaQueue>(
+        srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId], engineId,
+        allocateOnHost));
+  }
 
   return true;
 }
 
 SdmaQueue* AnvilLib::getSdmaQueue(int srcDeviceId, int dstDeviceId,
                                   int channel_idx) {
-  if (sdma_channels_.find(dstDeviceId) == sdma_channels_.end()) {
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto it = sdma_channels_.find(key);
+  if (it == sdma_channels_.end()) {
     return nullptr;
   }
 
-  const auto& channels = sdma_channels_[dstDeviceId];
-  if (channel_idx < 0 || static_cast<size_t>(channel_idx) >= channels.size()) {
+  const auto& channels = it->second;
+  if (channel_idx < 0 ||
+      static_cast<std::size_t>(channel_idx) >= channels.size()) {
     return nullptr;
   }
 
-  return channels[static_cast<size_t>(channel_idx)].get();
+  return channels[static_cast<std::size_t>(channel_idx)].get();
 }
 
 AnvilLib& AnvilLib::getInstance() {
@@ -544,10 +576,11 @@ SdmaQueuePythonDeviceCtx AnvilLib::get_queue_device_ctx(int srcDeviceId, int dst
 
 SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
   // Try host channels first, then device channels
-  auto& host_channels = host_sdma_channels_;
-  if (host_channels.find(dstDeviceId) != host_channels.end() &&
-      static_cast<size_t>(channelIdx) < host_channels[dstDeviceId].size()) {
-    return host_channels[dstDeviceId][channelIdx]->hostHandle();
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto host_it = host_sdma_channels_.find(key);
+  if (host_it != host_sdma_channels_.end() &&
+      static_cast<std::size_t>(channelIdx) < host_it->second.size()) {
+    return host_it->second[static_cast<std::size_t>(channelIdx)]->hostHandle();
   }
 
   // Fallback to device channels
@@ -586,6 +619,105 @@ void AnvilLib::host_put_tile(int srcDevice, int dstDevice, int channelIdx, const
                              size_t dst_stride) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.put_tile(tile, dst_ptr, dst_stride);
+}
+
+void AnvilLib::host_put_ex(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
+                           const std::vector<Tile>& tiles, const std::vector<uintptr_t>& dst_ptrs,
+                           const std::vector<size_t>& dst_strides, void* wait_flag, int wait_flag_bits,
+                           uint32_t wait_value, void* signal_flag, int signal_flag_bits, uint64_t signal_value) {
+  auto atomic_add = [&](int bits) {
+    if (signal_flag == nullptr)
+      return;
+
+    if (bits == 0)
+      bits = 32;
+
+    if (bits == 32) {
+      if (signal_value > std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument("signal_value exceeds 32-bit range");
+      }
+      host_atomic_add_u32(srcDevice, dstDevice, channelIdx, signal_flag,
+                          static_cast<uint32_t>(signal_value));
+    } else if (bits == 64) {
+      host_atomic_add_u64(srcDevice, dstDevice, channelIdx, signal_flag, signal_value);
+    } else {
+      throw std::invalid_argument("signal_flag_bits must be 0, 32, or 64");
+    }
+  };
+
+  const bool has_tiles = !tiles.empty();
+  const bool has_linear = (src != nullptr && dst != nullptr && size > 0);
+  const bool has_wait = wait_flag != nullptr;
+  const bool has_signal = signal_flag != nullptr;
+
+  if (has_tiles && has_linear) {
+    throw std::invalid_argument("host_put_ex: specify either linear parameters or tiles, not both");
+  }
+  if (!has_tiles && !has_linear) {
+    throw std::invalid_argument("host_put_ex: missing data description");
+  }
+
+  if (has_tiles) {
+    if (dst_ptrs.size() != tiles.size()) {
+      throw std::invalid_argument("host_put_ex: dst_ptrs length must match tiles length");
+    }
+    if (dst_strides.size() != tiles.size()) {
+      throw std::invalid_argument("host_put_ex: dst_strides length must match tiles length");
+    }
+
+    std::vector<void*> dst_ptr_vec;
+    dst_ptr_vec.reserve(dst_ptrs.size());
+    for (uintptr_t addr : dst_ptrs) {
+      dst_ptr_vec.push_back(reinterpret_cast<void*>(addr));
+    }
+
+    if (has_wait) {
+      if (wait_flag_bits == 0)
+        wait_flag_bits = 32;
+      if (wait_flag_bits != 32) {
+        throw std::invalid_argument("host_put_ex: tile waits support only 32-bit flags");
+      }
+      host_wait_flag_then_put_tiles_u32(srcDevice, dstDevice, channelIdx, wait_flag, wait_value,
+                                        tiles, dst_ptr_vec, dst_strides);
+    } else {
+      for (size_t i = 0; i < tiles.size(); ++i) {
+        host_put_tile(srcDevice, dstDevice, channelIdx, tiles[i], dst_ptr_vec[i], dst_strides[i]);
+      }
+    }
+
+    if (has_signal) {
+      atomic_add(signal_flag_bits);
+    }
+    return;
+  }
+
+  if (has_wait) {
+    if (wait_flag_bits == 0)
+      wait_flag_bits = 32;
+    if (wait_flag_bits != 32) {
+      throw std::invalid_argument("host_put_ex: wait_flag must be 32 bits");
+    }
+    host_wait_flag_then_put_u32(srcDevice, dstDevice, channelIdx, wait_flag, wait_value, src, dst, size);
+    if (has_signal) {
+      atomic_add(signal_flag_bits);
+    }
+    return;
+  }
+
+  if (has_signal && (signal_flag_bits == 0 || signal_flag_bits == 32)) {
+    if (signal_value > std::numeric_limits<uint32_t>::max()) {
+      throw std::invalid_argument("host_put_ex: signal_value exceeds 32-bit range");
+    }
+    host_put_signal_u32(srcDevice, dstDevice, channelIdx, src, dst, size, signal_flag,
+                        static_cast<uint32_t>(signal_value));
+    return;
+  }
+
+  host_put(srcDevice, dstDevice, channelIdx, src, dst, size);
+
+  if (has_signal) {
+    atomic_add(signal_flag_bits);
+  }
 }
 
 void AnvilLib::host_put_signal_u32(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,

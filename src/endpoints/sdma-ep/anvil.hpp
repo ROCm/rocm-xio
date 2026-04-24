@@ -2,10 +2,12 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 #include "anvil_device.hpp"
 #include "anvil-host-api.hpp"
@@ -82,6 +84,10 @@ public:
 
   void host_put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
                      size_t dst_stride);
+  void host_put_ex(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
+                   const std::vector<Tile>& tiles, const std::vector<uintptr_t>& dst_ptrs,
+                   const std::vector<size_t>& dst_strides, void* wait_flag, int wait_flag_bits, uint32_t wait_value,
+                   void* signal_flag, int signal_flag_bits, uint64_t signal_value);
 
   // Combined put + atomic_add in one SDMA submission (linear memory)
   void host_put_signal_u32(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
@@ -108,6 +114,16 @@ public:
   void host_quiet(int srcDevice, int dstDevice, int channelIdx);
 
 private:
+  using ChannelKey = std::pair<int, int>;
+  struct ChannelKeyHash {
+    std::size_t operator()(const ChannelKey& key) const noexcept {
+      const auto a = static_cast<std::uint32_t>(key.first);
+      const auto b = static_cast<std::uint32_t>(key.second);
+      return (static_cast<std::size_t>(a) << 32) ^ static_cast<std::size_t>(b);
+    }
+  };
+  using ChannelVector = std::vector<std::unique_ptr<SdmaQueue>>;
+
   /*
    * MI300X OAM MAP (XGMI topology -> SDMA engine)
    * src\dst  0  1  2  3  4  5  6  7
@@ -132,8 +148,8 @@ private:
   int getOamId(int deviceId);
 
   std::once_flag init_flag;
-  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>> sdma_channels_;
-  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>> host_sdma_channels_;
+  std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> sdma_channels_;
+  std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> host_sdma_channels_;
 };
 
 extern AnvilLib& anvil;
