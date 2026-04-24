@@ -1,0 +1,14 @@
+/*
+ * Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
+ * @mainpage ROCm XIO API
+ *
+ * ROCm XIO is a library for GPU-initiated I/O. The public C/C++ API is
+ * documented from headers under @c src/include and endpoint-specific
+ * directories. See the Sphinx site section **API reference** for curated
+ * groupings of classes and functions.
+ */

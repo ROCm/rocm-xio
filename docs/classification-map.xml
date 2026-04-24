@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+
+  SPDX-License-Identifier: MIT
+
+  Lightweight classification metadata (rocPRIM docs carry a richer map).
+-->
+<classification-map version="1.0">
+  <map>
+    <document id="rocm-xio"
+              title="ROCm XIO"
+              doc-type="reference"
+              categories="rocm;gpu;i;xio"/>
+  </map>
+</classification-map>

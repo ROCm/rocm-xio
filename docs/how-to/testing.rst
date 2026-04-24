@@ -29,7 +29,7 @@ CMake test presets
 The project provides six test presets in ``CMakePresets.json``:
 
 =================  ==============================  ================
-Preset             Description                     Hardware 
+Preset             Description                     Hardware
 =================  ==============================  ================
 ``unit``           CPU-only unit tests             None
 ``system``         System tests (emulation)        HIP-capable GPU
