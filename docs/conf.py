@@ -73,7 +73,7 @@ extensions = [
 # rocPRIM-style Doxygen layout: working tree under build/docs-doxygen/, paths
 # relative to this file after configure_file(..., docs-sphinx/conf.py).
 doxygen_root = "doxygen"
-doxyfile = "doxygen/Doxyfile"
+doxyfile = "doxygen/Doxyfile.in"
 doxygen_project = {
     "name": "ROCm XIO",
     "path": "doxygen/xml",
