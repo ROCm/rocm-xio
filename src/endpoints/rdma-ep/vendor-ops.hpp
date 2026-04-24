@@ -17,7 +17,8 @@
 
 #include <hip/hip_runtime.h>
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 constexpr uint32_t WF_SIZE = 64;
 constexpr uint32_t SPIN_LOCK_UNLOCKED = 0;

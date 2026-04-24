@@ -18,7 +18,8 @@ extern "C" {
 #include "rocm-ernic/rocm-ernic-dv.h"
 }
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 /* Device-side work queue (GPU-visible) */
 struct ernic_device_wq {

@@ -13,7 +13,8 @@
 
 #if defined(GDA_IONIC)
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 // --- IONIC locking helpers ---
 

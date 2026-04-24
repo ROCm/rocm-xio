@@ -33,7 +33,8 @@ extern "C" {
 
 #include "endian.hpp"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 union gda_mlx5_wqe_segment {
   mlx5_wqe_ctrl_seg ctrl;

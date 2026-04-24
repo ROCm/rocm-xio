@@ -21,7 +21,8 @@
 
 #if defined(GDA_ERNIC)
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 /* WQE opcode mapping for ERNIC PVRDMA-style ops */
 constexpr uint32_t ERNIC_WR_RDMA_WRITE = 0;

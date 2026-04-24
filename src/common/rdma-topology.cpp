@@ -28,7 +28,8 @@
 #include "ibv-wrapper.hpp"
 #include "rdma-numa-wrapper.hpp"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 [[maybe_unused]] static const char* GidPriorityStr[] = {
   "RoCEv1 Link-local", "RoCEv2 Link-local",  "RoCEv1 IPv6",

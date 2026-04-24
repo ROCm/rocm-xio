@@ -34,7 +34,8 @@
 #include "xio-rdma-check.h"
 #include "xio.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 namespace {
 

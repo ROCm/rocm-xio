@@ -50,7 +50,8 @@ static void lfsr_fill_chunk(void* buf, size_t size, uint32_t state) {
   }
 }
 
-namespace xio { namespace sdma_ep {
+namespace xio {
+namespace sdma_ep {
 
 static bool s_initialized = false;
 

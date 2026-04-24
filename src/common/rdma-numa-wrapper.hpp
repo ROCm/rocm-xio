@@ -13,7 +13,8 @@
 
 struct bitmask;
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 class NUMAWrapper {
 public:

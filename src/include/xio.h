@@ -6,8 +6,6 @@
 #ifndef XIO_H
 #define XIO_H
 
-#include "xio-export.h"
-
 #include <climits>
 #include <cstdint>
 #include <iostream>
@@ -24,6 +22,7 @@
 #include "rocm-xio-uapi.h"
 #include "xio-endpoint-includes-gen.h"
 #include "xio-endpoint-registry.h"
+#include "xio-export.h"
 
 // ROCm-XIO kernel module device path (same as kernel uapi header convention)
 #ifndef ROCM_XIO_DEVICE_PATH
@@ -86,6 +85,13 @@
 #define PCI_MMIO_BRIDGE_STATUS_ERROR 2
 
 #include "xio-endpoint-core.h"
+
+// Export free functions and types declared below when building
+// librocm-xio.so (-fvisibility=hidden); xio-tester and other
+// consumers link against these symbols.
+#if defined(ROCM_XIO_BUILDING_LIBRARY) && defined(ROCM_XIO_SHARED)
+#pragma GCC visibility push(default)
+#endif
 
 namespace xio {
 
@@ -977,5 +983,9 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
                                              uint8_t size);
 
 } // namespace xio
+
+#if defined(ROCM_XIO_BUILDING_LIBRARY) && defined(ROCM_XIO_SHARED)
+#pragma GCC visibility pop
+#endif
 
 #endif // XIO_H

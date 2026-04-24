@@ -29,7 +29,8 @@
 #include "queue-pair.hpp"
 #include "xio-rdma-check.h"
 
-namespace xio { namespace rdma_ep {
+namespace xio {
+namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
   _XIO_CHECK_ZERO("rdma_ep::ionic", (expr), (msg), return)
