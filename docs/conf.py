@@ -78,7 +78,7 @@ doxygen_project = {
     "name": "ROCm XIO",
     "path": "doxygen/xml",
 }
-doxysphinx_enabled = False
+doxysphinx_enabled = True
 
 external_projects = []
 # Standalone XIO is not in rocm-docs-core's bundled projects.yaml yet; use a
