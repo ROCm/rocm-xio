@@ -17,8 +17,7 @@ Prerequisites
 .. moved these prerequisites towards the top of the page
 
 - CMake 3.21 or later
-- ROCm HIP SDK
-- HSA runtime libraries
+- ROCm 7.2 or later
 - ``libdrm`` and ``libdrm_amdgpu`` development packages
 
 You need these library dependencies:
