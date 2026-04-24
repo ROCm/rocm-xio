@@ -34,6 +34,7 @@
 #include "xio-rdma-check.h"
 #include "xio.h"
 
+namespace xio {
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
@@ -480,3 +481,4 @@ int bnxt_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
 #undef XIO_CHECK_NNULL
 
 } // namespace rdma_ep
+} // namespace xio

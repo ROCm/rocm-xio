@@ -24,3 +24,17 @@ xio_add_test(
   LABELS unit common
   TIMEOUT 30
 )
+
+xio_add_test(
+  NAME test-rocm-xio-uapi-layout
+  SOURCE test-rocm-xio-uapi-layout.hip
+  LABELS unit common
+  TIMEOUT 30
+)
+
+xio_add_test(
+  NAME test-endpoint-registry
+  SOURCE test-endpoint-registry.hip
+  LABELS unit common
+  TIMEOUT 30
+)

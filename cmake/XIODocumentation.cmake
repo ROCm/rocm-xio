@@ -3,21 +3,22 @@
 # SPDX-License-Identifier: MIT
 
 # XIODocumentation.cmake
-# Sphinx + Breathe + Doxygen documentation pipeline (following ROCm best
-# practices)
-#
-# A Python venv is created automatically in the build tree and populated from
-# requirements.txt.
+# Sphinx + rocm_docs.doxygen + Doxygen (ROCm rocPRIM-style layout:
+# docs/doxygen/, XML under the build tree, Breathe wired by rocm_docs.doxygen).
 
 option(XIO_BUILD_DOCS
-  "Build documentation with Sphinx + Breathe + Doxygen"
+  "Build documentation with Sphinx + rocm_docs.doxygen + Doxygen"
   OFF)
 
 if(XIO_BUILD_DOCS)
+  # Docs-only configures skip the main library block where GNUInstallDirs
+  # is normally included.
+  include(GNUInstallDirs)
+
   find_package(Doxygen REQUIRED)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-  # ── Python venv with Sphinx + Breathe ──────────────────
+  # ── Python venv with rocm-docs-core (Sphinx + Breathe + optional doxysphinx)
   set(XIO_DOCS_VENV "${CMAKE_BINARY_DIR}/docs-venv")
   set(XIO_DOCS_VENV_STAMP
     "${XIO_DOCS_VENV}/stamp")
@@ -50,61 +51,64 @@ if(XIO_BUILD_DOCS)
     DEPENDS ${XIO_DOCS_VENV_STAMP}
   )
 
-  # ── Paths ──────────────────────────────────────────────
+  # ── Doxygen: configured tree (rocPRIM-style cwd = doxygen output root)
   set(XIO_DOC_PATH "${CMAKE_BINARY_DIR}/docs")
-  set(BREATHE_DOC_XML_DIR
-    "${XIO_DOC_PATH}/xml")
+  set(XIO_DOXYGEN_WORKDIR "${CMAKE_BINARY_DIR}/docs-doxygen")
 
-  set(XIO_DOXYFILE_INPUT
-    "${CMAKE_SOURCE_DIR}/src/include \
-     ${CMAKE_SOURCE_DIR}/src/endpoints/nvme-ep \
-     ${CMAKE_SOURCE_DIR}/src/endpoints/test-ep \
-     ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep \
-     ${CMAKE_SOURCE_DIR}/src/endpoints/sdma-ep \
-     ${CMAKE_SOURCE_DIR}/src/endpoints/common \
-     ${CMAKE_SOURCE_DIR}/src/common"
+  file(MAKE_DIRECTORY "${XIO_DOXYGEN_WORKDIR}")
+
+  set(_xio_doxygen_inputs
+    "${CMAKE_SOURCE_DIR}/src/include"
+    "${CMAKE_SOURCE_DIR}/src/endpoints/nvme-ep"
+    "${CMAKE_SOURCE_DIR}/src/endpoints/test-ep"
+    "${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep"
+    "${CMAKE_SOURCE_DIR}/src/endpoints/sdma-ep"
+    "${CMAKE_SOURCE_DIR}/src/endpoints/common"
+    "${CMAKE_SOURCE_DIR}/src/common"
+    "${CMAKE_SOURCE_DIR}/docs/doxygen"
   )
+  string(REPLACE ";" " " XIO_DOXYFILE_INPUT "${_xio_doxygen_inputs}")
 
-  # Configure Doxyfile (substitutes @VARIABLES@)
   configure_file(
-    ${CMAKE_SOURCE_DIR}/docs/Doxyfile.in
-    ${CMAKE_BINARY_DIR}/Doxyfile
+    ${CMAKE_SOURCE_DIR}/docs/doxygen/Doxyfile.in
+    ${XIO_DOXYGEN_WORKDIR}/Doxyfile
     @ONLY
   )
 
-  # Configure conf.py (substitutes Breathe XML path)
   configure_file(
     ${CMAKE_SOURCE_DIR}/docs/conf.py
     ${CMAKE_BINARY_DIR}/docs-sphinx/conf.py
     @ONLY
   )
 
-  # ── Doxygen target: source headers -> XML ──────────────
+  # ── Doxygen target (optional pre-build; sphinx-html also runs Doxygen via
+  # rocm_docs.doxygen)
   add_custom_target(doxygen
-    COMMAND ${DOXYGEN_EXECUTABLE}
-      ${CMAKE_BINARY_DIR}/Doxyfile
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Generating Doxygen XML"
+    COMMAND ${DOXYGEN_EXECUTABLE} Doxyfile
+    WORKING_DIRECTORY ${XIO_DOXYGEN_WORKDIR}
+    COMMENT "Generating Doxygen XML in docs-doxygen/xml"
     VERBATIM
   )
 
-  # ── Sphinx target: RST + Doxygen XML -> HTML ───────────
-  # Target name follows ROCm convention (ROCMSphinxDoc)
+  # ── Sphinx target: RST + Doxygen XML -> HTML
   add_custom_target(sphinx-html
     COMMAND ${SPHINX_BUILD}
       -b html
       -c ${CMAKE_BINARY_DIR}/docs-sphinx
       ${CMAKE_SOURCE_DIR}/docs
       ${XIO_DOC_PATH}/html
-    DEPENDS doxygen docs-venv
+    DEPENDS docs-venv
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Building Sphinx HTML documentation"
     VERBATIM
   )
 
-  # ── Serve target: launch a local HTTP server ────────────
-  # Usage: cmake --build build --target docs-serve
-  # Then browse http://<hostname>:8080
+  install(
+    DIRECTORY "${XIO_DOC_PATH}/html/"
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}
+  )
+
+  # ── Serve target: launch a local HTTP server
   set(XIO_DOCS_PORT "8080" CACHE STRING
     "Port for the docs-serve HTTP server")
   add_custom_target(docs-serve

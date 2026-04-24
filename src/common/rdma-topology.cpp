@@ -28,6 +28,7 @@
 #include "ibv-wrapper.hpp"
 #include "rdma-numa-wrapper.hpp"
 
+namespace xio {
 namespace rdma_ep {
 
 [[maybe_unused]] static const char* GidPriorityStr[] = {
@@ -376,3 +377,4 @@ std::set<int> GetNearestDevicesInTree(
 }
 
 } // namespace rdma_ep
+} // namespace xio

@@ -17,6 +17,7 @@
 
 #include "ibv-core.hpp"
 
+namespace xio {
 namespace rdma_ep {
 
 enum GidPriority {
@@ -102,5 +103,6 @@ int GetNumDevices(DeviceType type);
 int SelectBestGid(struct ibv_context* ctx, uint8_t port_num);
 
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // ROCM_XIO_RDMA_TOPOLOGY_HPP

@@ -30,6 +30,7 @@ extern "C" {
 #include "bnxt/bnxt-re-hsi.h"
 }
 
+namespace xio {
 namespace rdma_ep {
 namespace bnxt_sizing {
 
@@ -132,5 +133,6 @@ inline uint32_t cqe_size() {
 
 } // namespace bnxt_sizing
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // RDMA_EP_BNXT_DV_SIZING_HPP

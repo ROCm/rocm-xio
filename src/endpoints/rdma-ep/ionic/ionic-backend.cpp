@@ -29,6 +29,7 @@
 #include "queue-pair.hpp"
 #include "xio-rdma-check.h"
 
+namespace xio {
 namespace rdma_ep {
 
 #define XIO_CHECK_ZERO(expr, msg)                                              \
@@ -301,3 +302,4 @@ void Backend::ionic_initialize_gpu_qp() {
 #undef XIO_CHECK_NNULL
 
 } // namespace rdma_ep
+} // namespace xio

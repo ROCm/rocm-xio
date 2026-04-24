@@ -50,6 +50,7 @@ static void lfsr_fill_chunk(void* buf, size_t size, uint32_t state) {
   }
 }
 
+namespace xio {
 namespace sdma_ep {
 
 static bool s_initialized = false;
@@ -157,6 +158,7 @@ unsigned getIterations(void* endpointConfig) {
 }
 
 } // namespace sdma_ep
+} // namespace xio
 
 // Single-thread kernel: one thread does all transfers to avoid queue
 // contention (multi-thread submit can stall on anvil's committedWptr ordering).
@@ -466,10 +468,13 @@ __global__ void sdma_buffer_reuse_kernel(
 }
 
 // SDMA-ep run function - sets up real hardware SDMA queues
-hipError_t sdma_ep_run(XioEndpointConfig* config) {
+namespace xio {
+namespace sdma_ep {
+
+hipError_t run(XioEndpointConfig* config) {
   hipError_t err;
 
-  if (sdma_ep::initEndpoint() != 0) {
+  if (initEndpoint() != 0) {
     std::cerr << "Failed to initialize SDMA endpoint" << std::endl;
     return hipErrorInitializationError;
   }
@@ -483,7 +488,7 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
   bool useCounter = false;
   bool useFlush = false;
   if (config->endpointConfig) {
-    const auto* epConfig = static_cast<const sdma_ep::SdmaEpConfig*>(
+    const auto* epConfig = static_cast<const SdmaEpConfig*>(
       config->endpointConfig);
     testType = epConfig->testType;
     useHostDst = epConfig->useHostDst;
@@ -573,24 +578,24 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
     }
   }
 
-  sdma_ep::SdmaConnectionInfo connFwd, connRev;
-  if (sdma_ep::createConnection(srcGpu, dstGpu, &connFwd) != 0) {
+  SdmaConnectionInfo connFwd, connRev;
+  if (createConnection(srcGpu, dstGpu, &connFwd) != 0) {
     std::cerr << "Failed to create SDMA connection " << srcGpu << " -> "
               << dstGpu << std::endl;
     return hipErrorInvalidDevice;
   }
-  if (sdma_ep::createConnection(dstGpu, srcGpu, &connRev) != 0) {
+  if (createConnection(dstGpu, srcGpu, &connRev) != 0) {
     std::cerr << "Failed to create SDMA connection " << dstGpu << " -> "
               << srcGpu << std::endl;
     return hipErrorInvalidDevice;
   }
 
-  sdma_ep::SdmaQueueInfo qInfo0, qInfo1;
-  if (sdma_ep::createQueue(srcGpu, dstGpu, &qInfo0) != 0) {
+  SdmaQueueInfo qInfo0, qInfo1;
+  if (createQueue(srcGpu, dstGpu, &qInfo0) != 0) {
     std::cerr << "Failed to create SDMA queue (rank 0)" << std::endl;
     return hipErrorInvalidValue;
   }
-  if (sdma_ep::createQueue(dstGpu, srcGpu, &qInfo1) != 0) {
+  if (createQueue(dstGpu, srcGpu, &qInfo1) != 0) {
     std::cerr << "Failed to create SDMA queue (rank 1)" << std::endl;
     return hipErrorInvalidValue;
   }
@@ -1108,6 +1113,9 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
 
   return hipSuccess;
 }
+
+} // namespace sdma_ep
+} // namespace xio
 
 // Legacy driveEndpoint function - not used with anvil integration
 __device__ void sdma_ep_driveEndpoint(const XioEndpointConfig& config,

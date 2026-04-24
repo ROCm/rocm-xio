@@ -16,6 +16,7 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'cmake/XIODocumentation.cmake'
       - 'src/**/*.h'
       - 'requirements.txt'
       - '.github/workflows/docs-deploy.yml'

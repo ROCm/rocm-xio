@@ -19,88 +19,40 @@
 #include <hsa/hsa_ext_amd.h>
 #include <linux/ioctl.h>
 
+#include "rocm-xio-uapi.h"
 #include "xio-endpoint-includes-gen.h"
 #include "xio-endpoint-registry.h"
+#include "xio-export.h"
 
-// ROCm-XIO kernel module device path
+// ROCm-XIO kernel module device path (same as kernel uapi header convention)
+#ifndef ROCM_XIO_DEVICE_PATH
 #define ROCM_XIO_DEVICE_PATH "/dev/rocm-xio"
+#endif
 
+/**
+ * @brief Log HIP failures to stderr (does not return or alter control flow).
+ *
+ * @internal Legacy diagnostic macro.  Prefer checking hipError_t and
+ *           propagating errors per project style (see STYLEGUIDE.md).
+ * @see XIO_HIP_TRY for a discardable-result wrapper.
+ */
 #define HIP_CHECK(expression)                                                  \
-  {                                                                            \
-    const hipError_t status = expression;                                      \
+  do {                                                                         \
+    const hipError_t status = (expression);                                    \
     if (status != hipSuccess) {                                                \
       std::cerr << "HIP error " << status << ": " << hipGetErrorString(status) \
                 << " at " << __FILE__ << ":" << __LINE__ << std::endl;         \
     }                                                                          \
-  }
+  } while (0)
 
-// ---------------------------------------------------------
-// Kernel module IOCTL interface
-// (merged from rocm-xio-kmod.h)
-// ---------------------------------------------------------
-
-#define ROCM_XIO_IOC_MAGIC 'R'
-
-#define ROCM_XIO_FLAG_EMULATED (1 << 0)
-#define ROCM_XIO_FLAG_PASSTHROUGH (1 << 1)
-
-struct rocm_axiio_vram_req {
-  int dmabuf_fd;
-  uint16_t nvme_bdf;
-  uint32_t flags;
-  uint64_t phys_addr;
-  uint64_t size;
-};
-
-struct rocm_axiio_register_queue_addr_req {
-  uint64_t virt_addr;
-  uint64_t phys_addr;
-  uint64_t size;
-  uint64_t prp2;
-  uint16_t nvme_bdf;
-  uint8_t queue_type;
-  uint8_t reserved[5];
-};
-
-struct rocm_axiio_register_buffer_req {
-  int dmabuf_fd;
-  uint64_t virt_addr;
-  uint64_t phys_addr;
-  uint64_t size;
-  uint16_t nvme_bdf;
-  uint32_t flags;
-};
-
-struct rocm_axiio_mmio_bridge_shadow_req {
-  uint16_t bridge_bdf;
-  uint64_t shadow_gpa;
-  uint64_t shadow_size;
-};
-
-#define ROCM_XIO_GET_VRAM_PHYS_ADDR                                            \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_axiio_vram_req)
-#define ROCM_XIO_REGISTER_QUEUE_ADDR                                           \
-  _IOW(ROCM_XIO_IOC_MAGIC, 6, struct rocm_axiio_register_queue_addr_req)
-#define ROCM_XIO_REGISTER_BUFFER                                               \
-  _IOW(ROCM_XIO_IOC_MAGIC, 8, struct rocm_axiio_register_buffer_req)
-#define ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER                                 \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 10, struct rocm_axiio_mmio_bridge_shadow_req)
-
-struct rocm_axiio_alloc_contig_req {
-  uint64_t size;
-  uint16_t nvme_bdf;
-  uint64_t phys_addr;
-  uint32_t mmap_offset;
-};
-
-struct rocm_axiio_free_contig_req {
-  uint32_t mmap_offset;
-};
-
-#define ROCM_XIO_ALLOC_CONTIG_QUEUE                                            \
-  _IOWR(ROCM_XIO_IOC_MAGIC, 11, struct rocm_axiio_alloc_contig_req)
-#define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
-  _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_axiio_free_contig_req)
+/**
+ * @brief Evaluate a HIP call and return its status (for explicit checking).
+ */
+#define XIO_HIP_TRY(expression)                                                \
+  (__extension__({                                                             \
+    hipError_t _xio_hip_status = (expression);                                 \
+    _xio_hip_status;                                                           \
+  }))
 
 // Memory mode flags (bits in memoryMode field)
 #define XIO_MEM_MODE_SQ_DEVICE 0x1
@@ -132,196 +84,16 @@ struct rocm_axiio_free_contig_req {
 #define PCI_MMIO_BRIDGE_STATUS_COMPLETE 1
 #define PCI_MMIO_BRIDGE_STATUS_ERROR 2
 
+#include "xio-endpoint-core.h"
+
+// Export free functions and types declared below when building
+// librocm-xio.so (-fvisibility=hidden); xio-tester and other
+// consumers link against these symbols.
+#if defined(ROCM_XIO_BUILDING_LIBRARY) && defined(ROCM_XIO_SHARED)
+#pragma GCC visibility push(default)
+#endif
+
 namespace xio {
-
-/**
- * @brief Timing statistics for less-timing mode.
- *
- * Tracks min, max, sum, and count of IO completion times.
- */
-struct XioTimingStats {
-  unsigned long long int minDuration = ULLONG_MAX;
-  unsigned long long int maxDuration = 0;
-  unsigned long long int sumDuration = 0;
-  unsigned long long int count = 0;
-};
-
-/**
- * @brief Per-sub-step cycle breakdown for hot-path
- *        profiling.
- *
- * Each field accumulates GPU clock cycles spent in a
- * specific phase of an IO operation.  Enable by setting
- * XioEndpointConfig::substepStats to a GPU-accessible
- * instance of this struct.
- */
-struct XioSubstepStats {
-  unsigned long long int sqeBuild = 0;   ///< Cycles in SQE/WQE
-                                         ///< field formulation
-                                         ///< (LBA hash, PRP
-                                         ///< lookup, sqeSetup).
-  unsigned long long int sqeEnqueue = 0; ///< Cycles in
-                                         ///< XioComEnqueue wide
-                                         ///< stores to queue
-                                         ///< slot.
-  unsigned long long int doorbell = 0;   ///< Cycles in SQ
-                                         ///< doorbell write
-                                         ///< (fence + atomic
-                                         ///< store).
-  unsigned long long int cqPoll = 0;     ///< Cycles polling CQ
-                                         ///< for completions
-                                         ///< (device latency).
-  unsigned long long int cqDoorbell = 0; ///< Cycles in CQ
-                                         ///< doorbell write
-                                         ///< (fence + atomic
-                                         ///< store).
-  unsigned long long int count = 0;      ///< Number of IO
-                                         ///< completions
-                                         ///< measured.
-  unsigned long long int buildCount = 0; ///< Number of SQE
-                                         ///< builds measured
-                                         ///< (may differ from
-                                         ///< count in batch
-                                         ///< mode).
-};
-
-/**
- * @brief Base configuration structure for all endpoints.
- *
- * Contains common testing parameters that apply to all
- * endpoints. Endpoints can extend this with their own
- * configuration structures via the endpointConfig pointer.
- */
-struct XioEndpointConfig {
-  unsigned iterations = 128;
-  unsigned numThreads = 1;
-  long long delayNs = 0;
-  unsigned memoryMode = 0;
-  bool verbose = false;
-  bool pciMmioBridge = false;
-
-  unsigned long long int* startTimes = nullptr;
-  unsigned long long int* endTimes = nullptr;
-  XioTimingStats* timingStats = nullptr;
-  XioSubstepStats* substepStats = nullptr;
-
-  void* submissionQueue = nullptr;
-  void* completionQueue = nullptr;
-  volatile bool* stopRequested = nullptr;
-  void* endpointConfig = nullptr;
-
-  uint32_t verifyPass = 0;
-  uint32_t verifyFail = 0;
-
-  XioEndpointConfig() = default;
-  XioEndpointConfig(unsigned iter, unsigned threads = 1)
-    : iterations(iter), numThreads(threads) {
-  }
-};
-
-/**
- * @brief Base class for all endpoint implementations.
- *
- * Uses polymorphism to eliminate switch statements and
- * function pointers.
- */
-class XioEndpoint {
-public:
-  virtual ~XioEndpoint() = default;
-
-  /** @brief Get the endpoint type identifier. */
-  __host__ virtual EndpointType getType() const = 0;
-
-  /** @brief Get the endpoint name string. */
-  __host__ virtual const char* getName() const = 0;
-
-  /** @brief Get a human-readable description. */
-  __host__ virtual const char* getDescription() const = 0;
-
-  /** @brief Get submission queue entry size in bytes. */
-  __host__ virtual size_t getSubmissionQueueEntrySize() const = 0;
-
-  /** @brief Get completion queue entry size in bytes. */
-  __host__ virtual size_t getCompletionQueueEntrySize() const = 0;
-
-  /**
-   * @brief Get number of submission queue entries.
-   * @param config Base endpoint configuration.
-   * @return Number of entries (default: numThreads).
-   */
-  __host__ virtual size_t getSubmissionQueueLength(
-    const XioEndpointConfig* config) const;
-
-  /**
-   * @brief Get number of completion queue entries.
-   * @param config Base endpoint configuration.
-   * @return Number of entries (default: numThreads).
-   */
-  __host__ virtual size_t getCompletionQueueLength(
-    const XioEndpointConfig* config) const;
-
-  /**
-   * @brief Run the endpoint test.
-   * @param config Endpoint configuration.
-   * @return hipSuccess on success, error code on failure.
-   */
-  __host__ virtual hipError_t run(XioEndpointConfig* config) = 0;
-
-  /**
-   * @brief Initialize endpoint-specific configuration.
-   * @return Pointer to config object, or nullptr.
-   */
-  __host__ virtual void* initializeEndpointConfig();
-
-  /**
-   * @brief Apply common config to endpoint config.
-   * @param endpointConfig Endpoint-specific config pointer.
-   * @param baseConfig Base configuration.
-   */
-  __host__ virtual void applyCommonConfig(void* endpointConfig,
-                                          const XioEndpointConfig* baseConfig);
-
-  /**
-   * @brief Validate endpoint-specific configuration.
-   * @param endpointConfig Endpoint config to validate.
-   * @return Empty string if valid, error message otherwise.
-   */
-  __host__ virtual std::string validateConfig(void* endpointConfig);
-
-  /**
-   * @brief Get iteration count for this endpoint.
-   * @param endpointConfig Endpoint config pointer.
-   * @return Number of iterations to run.
-   */
-  __host__ virtual unsigned getIterations(void* endpointConfig) const;
-
-  /**
-   * @brief Check if endpoint is in emulate mode.
-   * @return true if emulate mode is enabled.
-   */
-  __host__ virtual bool isEmulateMode() const;
-
-  /**
-   * @brief Get doorbell queue length.
-   * @return Doorbell queue length, or 0 if disabled.
-   */
-  __host__ virtual unsigned getDoorbellQueueLength() const;
-};
-
-/**
- * @brief Create an endpoint instance by type enum.
- * @param type Endpoint type identifier.
- * @return Unique pointer to the created endpoint.
- */
-__host__ std::unique_ptr<XioEndpoint> createEndpoint(EndpointType type);
-
-/**
- * @brief Create an endpoint instance by name string.
- * @param endpointName Name of the endpoint.
- * @return Unique pointer to the created endpoint.
- */
-__host__ std::unique_ptr<XioEndpoint> createEndpoint(
-  const std::string& endpointName);
 
 /**
  * @brief Print information about all available GPU devices.
@@ -1211,5 +983,9 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
                                              uint8_t size);
 
 } // namespace xio
+
+#if defined(ROCM_XIO_BUILDING_LIBRARY) && defined(ROCM_XIO_SHARED)
+#pragma GCC visibility pop
+#endif
 
 #endif // XIO_H

@@ -21,6 +21,7 @@
 
 #if defined(GDA_ERNIC)
 
+namespace xio {
 namespace rdma_ep {
 
 /* WQE opcode mapping for ERNIC PVRDMA-style ops */
@@ -349,5 +350,6 @@ __device__ uint64_t Ops::post_wqe_amo_single(QueuePair& qp, uintptr_t raddr,
 
 } // namespace ernic
 } // namespace rdma_ep
+} // namespace xio
 
 #endif // defined(GDA_ERNIC)

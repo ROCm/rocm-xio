@@ -34,6 +34,7 @@
 #include "xio-rdma-check.h"
 #include "xio.h"
 
+namespace xio {
 namespace rdma_ep {
 
 namespace {
@@ -428,3 +429,4 @@ void Backend::mlx5_cleanup() {
 #endif // defined(GDA_MLX5)
 
 } // namespace rdma_ep
+} // namespace xio
