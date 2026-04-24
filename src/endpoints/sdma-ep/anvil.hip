@@ -184,11 +184,11 @@ std::ostream& operator<<(std::ostream& os, const SDMA_PKT_FENCE_MI4& cmd) {
 #endif /* XIO_SDMA_OSS7 */
 
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
-                     hsa_agent_t& localAgent, uint32_t engineId) {
-  (void)remoteDeviceId;
+                     hsa_agent_t& localAgent, uint32_t engineId,
+                     bool allocateOnHost)
+    : remoteDeviceId_(remoteDeviceId), hostAllocated_(allocateOnHost) {
   int originalDeviceId;
   CHECK_HIP_ERROR(hipGetDevice(&originalDeviceId));
-  (void)originalDeviceId;
 
   uint32_t localNodeId;
   hsa_status_t status = hsa_agent_get_info(localAgent, HSA_AGENT_INFO_NODE,
@@ -198,98 +198,139 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
     // return status;
   }
 
-  // std::cout << "Allocating queue for engine " << engineId << " on device " <<
-  // localDeviceId << " to device "
-  //           << remoteDeviceId << std::endl;
-  // std::cout << "original device id: " << originalDeviceId << " local " <<
-  // localDeviceId << " remote " << remoteDeviceId
-  //           << " local node " << localNodeId << std::endl;
-
-  // Allocate SDMA queue buffer on device side, requires ExecuteAccess
-  HsaMemFlags memFlags = {};
-  memFlags.ui32.NonPaged = 1;
-  memFlags.ui32.HostAccess = 1;
-  memFlags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
-  memFlags.ui32.NoNUMABind = 1;
-  memFlags.ui32.ExecuteAccess = 1;
-  memFlags.ui32.Uncached = 1;
-  // std::cout << "Allocating SDMA Queue Buffer for device: " << localNodeId <<
-  // std::endl << std::flush;
-  CHECK_HSAKMT_SUCCESS(hsaKmtAllocMemory(localNodeId, SDMA_QUEUE_SIZE, memFlags,
-                                         &queueBuffer_),
-                       "Failed");
-  CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_, SDMA_QUEUE_SIZE,
-                                            NULL),
-                       "Failed");
+  // Allocate SDMA queue buffer
+  if (allocateOnHost) {
+    // Use pinned host memory for CPU-only access
+    CHECK_HIP_ERROR(hipHostMalloc(&queueBuffer_, SDMA_QUEUE_SIZE,
+                                  hipHostMallocWriteCombined |
+                                      hipHostMallocPortable));
+  } else {
+    // Use device memory (existing path)
+    HsaMemFlags memFlags = {};
+    memFlags.ui32.NonPaged = 1;
+    memFlags.ui32.HostAccess = 1;
+    memFlags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    memFlags.ui32.NoNUMABind = 1;
+    memFlags.ui32.ExecuteAccess = 1;
+    memFlags.ui32.Uncached = 1;
+    CHECK_HSAKMT_SUCCESS(
+        hsaKmtAllocMemory(localNodeId, SDMA_QUEUE_SIZE, memFlags,
+                          &queueBuffer_),
+        "Failed");
+    CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_, SDMA_QUEUE_SIZE,
+                                              NULL),
+                         "Failed");
+  }
 
   // Create SDMA Queue
-  // TODO needed here?
   std::memset(&queue_, 0, sizeof(HsaQueueResource));
 
   CHECK_HSAKMT_SUCCESS(
-    hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
-                         DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
-                         queueBuffer_, SDMA_QUEUE_SIZE, nullptr, &queue_),
-    "Failed");
+      hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
+                           DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
+                           queueBuffer_, SDMA_QUEUE_SIZE, nullptr, &queue_),
+      "Failed");
 
-  // Populate Device Handle
-  // TODO uncached
-  {
-    hsa_status_t s;
-    s = xio::allocDeviceMemory(sizeof(SdmaQueueDeviceHandle),
-                               (void**)&deviceHandle_, "SDMA queue handle",
-                               XIO_DEVICE_MEM_HIP);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(deviceHandle_) failed");
-    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&cachedWptr_,
-                               "SDMA cached wptr", XIO_DEVICE_MEM_UNCACHED);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
-    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
-                               "SDMA committed wptr", XIO_DEVICE_MEM_UNCACHED);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
-  }
+  // Initialize host-side state (always needed)
+  uint64_t initial_wptr = *queue_.Queue_write_ptr_aql;
+  hostCachedWptr_.store(initial_wptr, std::memory_order_relaxed);
+  hostCommittedWptr_.store(initial_wptr, std::memory_order_relaxed);
+  hostCachedHwReadIndex_ = *queue_.Queue_read_ptr_aql;
+
+  if (allocateOnHost) {
+    // Host-only queue: Skip device-side structures
+    cachedWptr_ = nullptr;
+    committedWptr_ = nullptr;
+    deviceHandle_ = nullptr;
+  } else {
+    // Device queue: Allocate device-side structures for GPU kernel access
+    {
+      hsa_status_t s;
+      s = xio::allocDeviceMemory(sizeof(SdmaQueueDeviceHandle),
+                                 (void**)&deviceHandle_, "SDMA queue handle",
+                                 XIO_DEVICE_MEM_HIP);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(deviceHandle_) failed");
+      s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&cachedWptr_,
+                                 "SDMA cached wptr", XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
+      s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
+                                 "SDMA committed wptr", XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
+    }
 
   uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
     queue_.Queue_write_ptr_aql);
   uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
     queue_.Queue_write_ptr_aql);
-  SdmaQueueDeviceHandle handle = {
-    .queueBuf = static_cast<uint32_t*>(queueBuffer_),
-    .rptr = queue_.Queue_read_ptr_aql,
-    .wptr = queue_.Queue_write_ptr_aql,
-    .doorbell = queue_.Queue_DoorBell_aql,
-    .cachedWptr = cachedWptr_,
-    .committedWptr = committedWptr_,
-    .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
-      queue_.Queue_read_ptr_aql),
-    .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
-  };
+    SdmaQueueDeviceHandle handle = {
+        .queueBuf = static_cast<uint32_t*>(queueBuffer_),
+        .rptr = queue_.Queue_read_ptr_aql,
+        .wptr = queue_.Queue_write_ptr_aql,
+        .doorbell = queue_.Queue_DoorBell_aql,
+        .cachedWptr = cachedWptr_,
+        .committedWptr = committedWptr_,
+        .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
+          queue_.Queue_read_ptr_aql),
+        .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
+    };
 
-  CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
-                            sizeof(SdmaQueueDeviceHandle),
-                            hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(cachedWptr_, &cachedWptr, sizeof(uint64_t),
-                            hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
+                              sizeof(SdmaQueueDeviceHandle),
+                              hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(cachedWptr_, &cachedWptr, sizeof(uint64_t),
+                              hipMemcpyHostToDevice));
   CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
-                            hipMemcpyHostToDevice));
+                              hipMemcpyHostToDevice));
+  }
 }
 
 SdmaQueue::~SdmaQueue() {
   // TODO catch exception?
   CHECK_HSAKMT_SUCCESS(hsaKmtDestroyQueue(queue_.QueueId),
                        "Failed to destroy queue.");
-  xio::freeDeviceMemory(deviceHandle_, XIO_DEVICE_MEM_HIP);
-  xio::freeDeviceMemory(cachedWptr_, XIO_DEVICE_MEM_UNCACHED);
-  xio::freeDeviceMemory(committedWptr_, XIO_DEVICE_MEM_UNCACHED);
-  CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
-  CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, SDMA_QUEUE_SIZE),
-                       "Failed");
+
+  // Only free device-side pointers if they were allocated
+  if (deviceHandle_ != nullptr) {
+    xio::freeDeviceMemory(deviceHandle_, XIO_DEVICE_MEM_HIP);
+  }
+  if (cachedWptr_ != nullptr) {
+    xio::freeDeviceMemory(cachedWptr_, XIO_DEVICE_MEM_UNCACHED);
+  }
+  if (committedWptr_ != nullptr) {
+    xio::freeDeviceMemory(committedWptr_, XIO_DEVICE_MEM_UNCACHED);
+  }
+
+  // Free queue buffer based on allocation type
+  if (hostAllocated_) {
+    CHECK_HIP_ERROR(hipHostFree(queueBuffer_));
+  } else {
+    CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
+    CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, SDMA_QUEUE_SIZE),
+                         "Failed");
+  }
 }
 
 SdmaQueueDeviceHandle* SdmaQueue::deviceHandle() const {
   return deviceHandle_;
+}
+
+SdmaQueuePythonDeviceCtx SdmaQueue::deviceCtx() const {
+  if (deviceHandle_ == nullptr) {
+    throw std::runtime_error("deviceCtx() called on host-only queue");
+  }
+  return {.queueBuf = reinterpret_cast<uintptr_t>(deviceHandle_->queueBuf),
+          .rptr = reinterpret_cast<uintptr_t>(deviceHandle_->rptr),
+          .wptr = reinterpret_cast<uintptr_t>(deviceHandle_->wptr),
+          .doorbell = reinterpret_cast<uintptr_t>(deviceHandle_->doorbell),
+          .cachedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->cachedWptr),
+          .committedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->committedWptr)};
+}
+
+SdmaQueueHostHandle SdmaQueue::hostHandle() const {
+  return SdmaQueueHostHandle(const_cast<SdmaQueue*>(this));
 }
 
 void SdmaQueue::dump(std::ofstream& logFile) {
@@ -379,6 +420,9 @@ AnvilLib::~AnvilLib() {
   for (auto& p : sdma_channels_) {
     p.second.clear();
   }
+  for (auto& p : host_sdma_channels_) {
+    p.second.clear();
+  }
   if (s_kfd_opened) {
     CloseKFD();
     hsa_shut_down();
@@ -422,14 +466,26 @@ SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
   return vec.back().get();
 }
 
-bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
+bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels, bool allocateOnHost) {
+  // Use separate storage based on allocation type
+  auto& channels = allocateOnHost ? host_sdma_channels_ : sdma_channels_;
+
+  // Check if already connected (idempotent - reuse existing queue 0)
+  if (channels.find(dstDeviceId) != channels.end() && !channels[dstDeviceId].empty()) {
+    return true; // Already connected
+  }
+
   uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
   std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
-            << " with " << numChannels << " channels using engine " << engineId
+            << " with 1 channel using engine " << engineId
+            << (allocateOnHost ? " (host allocation)" : " (device allocation)")
             << std::endl;
-  for (int c = 0; c < numChannels; ++c) {
-    createSdmaQueue(srcDeviceId, dstDeviceId, engineId);
-  }
+
+  // Create exactly one channel (queue 0)
+  channels[dstDeviceId].emplace_back(
+      std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId],
+                                  engineId, allocateOnHost));
+
   return true;
 }
 
@@ -474,6 +530,100 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
 
   // Use even engines only
   return mi300xOamMap[srcOamId][dstOamId] * 2;
+}
+
+// ==================== Host API Methods ====================
+
+SdmaQueuePythonDeviceCtx AnvilLib::get_queue_device_ctx(int srcDeviceId, int dstDeviceId) {
+  SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, 0);
+  if (!queue) {
+    throw std::runtime_error("get_queue_device_ctx: queue not found");
+  }
+  return queue->deviceCtx();
+}
+
+SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
+  // Try host channels first, then device channels
+  auto& host_channels = host_sdma_channels_;
+  if (host_channels.find(dstDeviceId) != host_channels.end() &&
+      static_cast<size_t>(channelIdx) < host_channels[dstDeviceId].size()) {
+    return host_channels[dstDeviceId][channelIdx]->hostHandle();
+  }
+
+  // Fallback to device channels
+  SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, channelIdx);
+  if (!queue) {
+    throw std::runtime_error("getHostHandle: queue not found");
+  }
+  return queue->hostHandle();
+}
+
+void AnvilLib::host_put(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.put(src, dst, size);
+}
+
+template <typename T>
+void AnvilLib::host_atomic_add(int srcDevice, int dstDevice, int channelIdx, T* ptr, T value) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.atomic_add(ptr, value);
+}
+
+void AnvilLib::host_atomic_add_u32(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint32_t value) {
+  host_atomic_add(srcDevice, dstDevice, channelIdx, static_cast<uint32_t*>(ptr), value);
+}
+
+void AnvilLib::host_atomic_add_u64(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint64_t value) {
+  host_atomic_add(srcDevice, dstDevice, channelIdx, static_cast<uint64_t*>(ptr), value);
+}
+
+void AnvilLib::host_timestamp(int srcDevice, int dstDevice, int channelIdx, void* timestamp_ptr) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.timestamp(static_cast<uint64_t*>(timestamp_ptr));
+}
+
+void AnvilLib::host_put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                             size_t dst_stride) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.put_tile(tile, dst_ptr, dst_stride);
+}
+
+void AnvilLib::host_put_signal_u32(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
+                                   void* flag_ptr, uint32_t flag_value) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.put_signal(src, dst, size, static_cast<uint32_t*>(flag_ptr), flag_value);
+}
+
+void AnvilLib::host_put_tile_signal_u32(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                                        size_t dst_stride, void* flag_ptr, uint32_t flag_value) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.put_tile_signal(tile, dst_ptr, dst_stride, static_cast<uint32_t*>(flag_ptr), flag_value);
+}
+
+void AnvilLib::host_wait_flag_then_put_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                           uint32_t expected_value, void* src, void* dst, size_t size) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.wait_flag_then_put(static_cast<uint32_t*>(flag_ptr), expected_value, src, dst, size);
+}
+
+void AnvilLib::host_wait_flag_then_put_tile_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                                uint32_t expected_value, const Tile& tile, void* dst_ptr,
+                                                size_t dst_stride) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.wait_flag_then_put_tile(static_cast<uint32_t*>(flag_ptr), expected_value, tile, dst_ptr, dst_stride);
+}
+
+void AnvilLib::host_wait_flag_then_put_tiles_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                                 uint32_t expected_value, const std::vector<Tile>& tiles,
+                                                 const std::vector<void*>& dst_ptrs,
+                                                 const std::vector<size_t>& dst_strides) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.wait_flag_then_put_tiles(static_cast<uint32_t*>(flag_ptr), expected_value, tiles, dst_ptrs, dst_strides);
+}
+
+void AnvilLib::host_quiet(int srcDevice, int dstDevice, int channelIdx) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  handle.quiet();
 }
 
 AnvilLib& anvil = anvil.getInstance();

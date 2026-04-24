@@ -1,12 +1,14 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
 #include "anvil_device.hpp"
+#include "anvil-host-api.hpp"
 #include "hsa/hsa_ext_amd.h"
 #include "hsakmt/hsakmt.h"
 #include "hsakmt/hsakmttypes.h"
@@ -16,19 +18,30 @@ namespace anvil {
 class SdmaQueue {
 public:
   SdmaQueue(int localDeviceId, int remoteDeviceId, hsa_agent_t& localAgent,
-            uint32_t engineId);
+            uint32_t engineId, bool allocateOnHost = false);
   ~SdmaQueue();
 
   SdmaQueueDeviceHandle* deviceHandle() const;
+  SdmaQueuePythonDeviceCtx deviceCtx() const;
+  SdmaQueueHostHandle hostHandle() const;
 
   void dump(std::ofstream&);
 
 private:
-  uint64_t* cachedWptr_;
-  uint64_t* committedWptr_;
+  friend class SdmaQueueHostHandle;
+
+  int remoteDeviceId_;
+  bool hostAllocated_;
+  uint64_t* cachedWptr_;      // Device-side pointer
+  uint64_t* committedWptr_;   // Device-side pointer
   void* queueBuffer_;
   HsaQueueResource queue_;
   SdmaQueueDeviceHandle* deviceHandle_;
+
+  // Host-side state
+  std::atomic<uint64_t> hostCachedWptr_;
+  std::atomic<uint64_t> hostCommittedWptr_;
+  uint64_t hostCachedHwReadIndex_;
 };
 
 class AnvilLib {
@@ -46,11 +59,53 @@ public:
 
 public:
   void init();
-  bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1);
+  bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1, bool allocateOnHost = false);
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
                              uint32_t engineId, int* channelIdx = nullptr);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
+  SdmaQueuePythonDeviceCtx get_queue_device_ctx(int srcDeviceId, int dstDeviceId);
+  SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
+
+  // Host-initiated SDMA operations (Python API)
+  void host_put(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size);
+
+  // Generic template
+  template <typename T>
+  void host_atomic_add(int srcDevice, int dstDevice, int channelIdx, T* ptr, T value);
+
+  // Convenience wrappers for Python bindings
+  void host_atomic_add_u32(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint32_t value);
+  void host_atomic_add_u64(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint64_t value);
+
+  void host_timestamp(int srcDevice, int dstDevice, int channelIdx, void* timestamp_ptr);
+
+  void host_put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                     size_t dst_stride);
+
+  // Combined put + atomic_add in one SDMA submission (linear memory)
+  void host_put_signal_u32(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
+                           void* flag_ptr, uint32_t flag_value);
+
+  // Combined put_tile + atomic_add in one SDMA submission
+  void host_put_tile_signal_u32(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                                size_t dst_stride, void* flag_ptr, uint32_t flag_value);
+
+  // Wait on flag, then perform put (POLL + COPY in one submission)
+  void host_wait_flag_then_put_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                   uint32_t expected_value, void* src, void* dst, size_t size);
+
+  // Wait on flag, then perform put_tile (POLL + SUB_WINDOW_COPY in one submission)
+  void host_wait_flag_then_put_tile_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                        uint32_t expected_value, const Tile& tile, void* dst_ptr, size_t dst_stride);
+
+  // Wait on flag, then perform many put_tile operations in one submission
+  void host_wait_flag_then_put_tiles_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                         uint32_t expected_value, const std::vector<Tile>& tiles,
+                                         const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides);
+
+  // Wait for all SDMA operations to complete
+  void host_quiet(int srcDevice, int dstDevice, int channelIdx);
 
 private:
   /*
@@ -77,8 +132,8 @@ private:
   int getOamId(int deviceId);
 
   std::once_flag init_flag;
-  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>>
-    sdma_channels_;
+  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>> sdma_channels_;
+  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>> host_sdma_channels_;
 };
 
 extern AnvilLib& anvil;
