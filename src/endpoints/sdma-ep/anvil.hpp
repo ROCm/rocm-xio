@@ -9,7 +9,14 @@
 #include <vector>
 #include <utility>
 
+// Only include device header when compiling with HIP compiler
+#ifdef __HIPCC__
 #include "anvil_device.hpp"
+#else
+// Forward declarations for host-only compilation
+namespace anvil { struct SdmaQueueDeviceHandle; }
+#endif
+
 #include "anvil-host-api.hpp"
 #include "hsa/hsa_ext_amd.h"
 #include "hsakmt/hsakmt.h"

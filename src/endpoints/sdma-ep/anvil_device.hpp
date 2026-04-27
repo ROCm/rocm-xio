@@ -11,6 +11,7 @@
 #include "hsakmt/hsakmt.h"
 #include "hsakmt/hsakmttypes.h"
 #include "sdma-ep.h"
+#include "sdma_packets.hpp"
 #include "sdma_pkt_struct_mi4.h"
 
 namespace anvil {
@@ -27,7 +28,9 @@ using SdmaQueueSingleProducerDeviceHandle =
 
 __device__ __forceinline__ SDMA_PKT_COPY_LINEAR
 CreateCopyPacket(void* srcBuf, void* dstBuf, long long int packetSize) {
-  return sdma_ep::CreateCopyPacket(srcBuf, dstBuf, packetSize);
+  anvil::packets::CopyLinearPacket pkt(srcBuf, dstBuf,
+                                       static_cast<size_t>(packetSize));
+  return pkt.value;
 }
 
 __device__ __forceinline__ SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
@@ -35,15 +38,17 @@ CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
                                uint32_t tile_height, uint32_t src_buffer_pitch,
                                uint32_t dst_buffer_pitch, uint32_t src_x,
                                uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
-  return sdma_ep::CreateLargeSubWindowCopyPacket(srcBuf, dstBuf, tile_width,
-                                                 tile_height, src_buffer_pitch,
-                                                 dst_buffer_pitch, src_x, src_y,
-                                                 dst_x, dst_y);
+  anvil::packets::LargeSubWindowCopyPacket pkt(
+      srcBuf, dstBuf, tile_width, tile_height, src_buffer_pitch,
+      dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
+  return pkt.value;
 }
 
 __device__ __forceinline__ SDMA_PKT_ATOMIC
 CreateAtomicIncPacket(HSAuint64* signal) {
-  return sdma_ep::CreateAtomicIncPacket(reinterpret_cast<uint64_t*>(signal));
+  anvil::packets::AtomicAddPacket<uint64_t> pkt(
+      reinterpret_cast<uint64_t*>(signal), 1);
+  return pkt.value;
 }
 
 __device__ __forceinline__ SDMA_PKT_FENCE CreateFencePacket(HSAuint64* address,
