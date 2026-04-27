@@ -127,10 +127,47 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
   }
 }
 
+int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
+  if (!s_initialized) {
+    std::cerr << "sdma_ep::createHostQueue: " << "call initEndpoint() first"
+              << std::endl;
+    return -1;
+  }
+  try {
+    if (!anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, true)) {
+      std::cerr << "sdma_ep::createHostQueue: " << "queue creation failed"
+                << std::endl;
+      return -1;
+    }
+    if (info) {
+      info->deviceHandle = nullptr;
+      info->srcDeviceId = srcDeviceId;
+      info->dstDeviceId = dstDeviceId;
+      info->channelIdx = 0;
+    }
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "sdma_ep::createHostQueue: " << e.what() << std::endl;
+    return -1;
+  }
+}
+
 void destroyQueue(SdmaQueueInfo* info) {
   if (info) {
     info->deviceHandle = nullptr;
   }
+}
+
+void put_signal(int srcDeviceId, int dstDeviceId, int channelIdx,
+                void* src, void* dst, size_t size,
+                void* flag_ptr, uint64_t flag_value, int flag_bits) {
+  anvil::AnvilLib::getInstance().put_signal(srcDeviceId, dstDeviceId, channelIdx,
+                                            src, dst, size, flag_ptr, flag_value,
+                                            flag_bits);
+}
+
+void quiet(int srcDeviceId, int dstDeviceId, int channelIdx) {
+  anvil::AnvilLib::getInstance().quiet(srcDeviceId, dstDeviceId, channelIdx);
 }
 
 std::string validateConfig(SdmaEpConfig* config) {
