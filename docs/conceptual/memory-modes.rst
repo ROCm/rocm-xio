@@ -14,7 +14,7 @@ considerations, and the DMA-BUF export architecture in ROCm XIO.
 Fine-grained vs. coarse-grained memory
 ---------------------------------------
 
-**Coarse-grained** memory means that a store to a memory location may only
+**Coarse-grained** memory means that storing to a memory location might only
 become visible to the CPU once the GPU kernel finishes. **Fine-grained**
 memory means stores are visible with system-level coherence (not just at
 kernel completion).
@@ -26,7 +26,7 @@ the environment variable is set:
 
    export HSA_FORCE_FINE_GRAIN_PCIE=1
 
-On MI-series accelerators (MI300X, etc.) fine-grained memory is available
+On MI-series GPUs (MI300X, etc.) fine-grained memory is available
 by default.
 
 Host memory allocation
@@ -39,7 +39,7 @@ All host allocation in ROCm XIO goes through ``allocHostMemory()`` with
   fallback. Default for queues, timing buffers, and GPU-accessible host
   memory.
 - ``XIO_HOST_MEM_COHERENT`` (0x1) -- adds ``hipHostMallocCoherent`` for
-  cross-device visibility (e.g. 2-node RDMA buffers on MI250).
+  cross-device visibility (for example, 2-node RDMA buffers on MI250).
 - ``XIO_HOST_MEM_PINNED`` (0x2) -- ``posix_memalign`` +
   ``hipHostRegister``. Required for RDMA verbs paths where
   ``ib_umem_get`` needs real CPU pages.
@@ -48,7 +48,7 @@ All host allocation in ROCm XIO goes through ``allocHostMemory()`` with
 - ``XIO_HOST_MEM_DEFAULT`` (0x8) -- ``hipHostMalloc(Default)`` without
   ``Mapped`` flag. Used for SDMA host destination buffers.
 
-On MI300X the host allocation should be **UNCACHED**.
+On MI300X, the host allocation should be **UNCACHED**.
 
 .. list-table:: Host Allocation Call Sites
    :header-rows: 1
@@ -158,7 +158,7 @@ When a bit is **set**, the corresponding buffer is allocated with
 NVMe-EP memory mode
 ^^^^^^^^^^^^^^^^^^^^
 
-Bits 0, 1, and 3 are honoured independently. The SQ and CQ are
+Bits 0, 1, and 3 are honored independently. The SQ and CQ are
 allocated by ``createQueue()`` based on bits 0 and 1. Bit 2
 (``XIO_MEM_MODE_DOORBELL_DEVICE``) is defined but not read by the
 NVMe implementation; doorbell routing is controlled by the
@@ -259,7 +259,7 @@ cleanup of dmabuf file descriptors, replacing raw ``close(fd)`` calls.
 HIP virtual memory management
 ------------------------------
 
-ROCm 7 introduces `HIP Virtual Memory Management`_ built on HSA
+ROCm 7 introduced `HIP Virtual Memory Management`_ built on HSA
 ``hsa_amd_vmem_*`` APIs. Key benefits for ROCm XIO:
 
 - **No device sync on free** --

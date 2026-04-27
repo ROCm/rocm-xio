@@ -14,7 +14,7 @@ example is a self-contained CMake project that uses
 Building examples
 -----------------
 
-All examples follow the same build pattern. First install
+All examples follow the same build pattern. First, install
 ROCm XIO to a temporary prefix, then configure and build the
 example against that prefix:
 
@@ -141,7 +141,7 @@ device path argument (defaults to ``/dev/nvme0``).
 
 **Requirements**:
 
-- An NVMe device (e.g., ``/dev/nvme0``)
+- An NVMe device (for example, ``/dev/nvme0``)
 - Root access (NVMe admin commands require
   ``CAP_SYS_ADMIN``)
 

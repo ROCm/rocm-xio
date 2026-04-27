@@ -195,7 +195,7 @@ Variable                Description
 ``QEMU_PATH``           QEMU binary prefix (empty =
                         system ``qemu-system-x86_64``)
 ``XIO_VM_GPU``          GPU BDF for passthrough
-                        (e.g. ``10:00.0``); auto-
+                        (for example, ``10:00.0``); auto-
                         detected if not set
 ``XIO_VM_USERNAME``     VM user (default: ``$USER``)
 ``XIO_VM_PASS``         VM password (default:

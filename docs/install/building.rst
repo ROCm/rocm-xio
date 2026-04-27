@@ -18,6 +18,7 @@ Prerequisites
 
 - CMake 3.21 or later
 - ROCm 7.2 or later
+- HSA runtime libraries
 - ``libdrm`` and ``libdrm_amdgpu`` development packages
 
 You need these library dependencies:
@@ -155,8 +156,8 @@ Build system details
 Install ROCm XIO
 ================
 
-Default location (typically ``/opt/rocm``)
-------------------------------------------
+Default location (``/opt/rocm``)
+--------------------------------
 
 .. code-block:: bash
 

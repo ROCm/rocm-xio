@@ -9,8 +9,8 @@ Run ROCm XIO tests
 ******************
 
 ROCm XIO uses `CTest`_ with CMake presets, label-based filtering,
-hardware fixture setup, and runtime skip detection. This page
-documents how to run tests, what labels and presets exist, and how
+hardware fixture setup, and runtime skip detection. This topic
+explains how to run tests, what labels and presets exist, and how
 hardware-gated tests behave when the required NIC or GPU is absent.
 
 Prerequisites
@@ -47,7 +47,7 @@ Run a preset:
    ctest --preset hardware
    ctest --preset sweep
 
-Or equivalently without presets:
+Or equivalently, without presets:
 
 .. code-block:: bash
 
@@ -64,10 +64,10 @@ Every test carries one or more CTest labels for filtering with
 Label         Definition
 ============  =========================================
 ``unit``      CPU-only, no GPU or NIC (runs in CI)
-``system``    Needs a HIP-capable GPU
+``system``    Needs a `HIP-capable GPU <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html#supported-gpus>`_
 ``hardware``  Needs a GPU and a specific RDMA NIC
 ``sweep``     Parameterized multi-seed loopback runs
-``stress``    Long-running (timeout: 600 s)
+``stress``    Long-running (timeout: 600 seconds)
 ``rdma``      RDMA-related test
 ``common``    Common library utilities
 ``fixture``   CTest fixture (setup/teardown)

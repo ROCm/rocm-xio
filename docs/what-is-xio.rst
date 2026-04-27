@@ -16,7 +16,7 @@ Supported endpoints
 ============  ==================  ================================
 Endpoint      Device              Description
 ============  ==================  ================================
-``nvme-ep``   NVMe SSDs           NVMe command submission /
+``nvme-ep``   NVMe SSDs           NVMe command submission/
                                   completion
 ``rdma-ep``   RDMA NICs           GPU-Direct RDMA (4 vendors)
 ``sdma-ep``   AMD SDMA engines    GPU-initiated DMA transfers

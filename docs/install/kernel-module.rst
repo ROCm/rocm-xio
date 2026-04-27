@@ -48,4 +48,4 @@ automatic creation.
     system and uses its own Makefile following Linux kernel
     conventions.
   - The module must be loaded before running endpoints that
-    require hardware queue registration (e.g., ``nvme-ep``).
+    require hardware queue registration (for example, ``nvme-ep``).

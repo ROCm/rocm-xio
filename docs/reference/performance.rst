@@ -68,7 +68,7 @@ will achieve higher aggregate IOPS.
 
 .. note::
 
-   Transfer sizes below 32 bytes cause the GPU kernel to hang on both BNXT and
+   Transfer sizes less than 32 bytes cause the GPU kernel to hang on both BNXT and
    IONIC hardware. The minimum working transfer size for loopback RDMA WRITE
    is 32 bytes.
 
@@ -93,8 +93,8 @@ Mode          Description
 ============  ========================================
 
 BNXT always uses VRAM for its CQ (allocated via DMA-BUF UMEM in the DV backend)
-regardless of this setting. IONIC uses host coherent memory by default; the
-IONIC kernel driver does not currently support VRAM-backed queues through
+regardless of this setting. IONIC uses host coherent memory by default. The
+IONIC kernel driver doesn't currently support VRAM-backed queues through
 ``ib_umem_get``.
 
 RDMA-EP loopback results
