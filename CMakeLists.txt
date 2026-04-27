@@ -383,7 +383,8 @@ target_compile_options(rocm-xio PRIVATE
 )
 
 # HIP-specific compilation flags (relocatable device code)
-target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
+# Only apply -fgpu-rdc to HIP files, not regular CXX files
+target_compile_options(rocm-xio PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
 
 # Shared library needs -fgpu-rdc at link time too so
 # the device linker resolves cross-TU device calls and
@@ -632,7 +633,9 @@ install(FILES
 
 # Install endpoint headers
 foreach(ep ${VALID_ENDPOINTS})
-    file(GLOB EP_HEADERS ${ENDPOINTS_DIR}/${ep}/*.h)
+    file(GLOB EP_HEADERS CONFIGURE_DEPENDS
+      ${ENDPOINTS_DIR}/${ep}/*.h
+      ${ENDPOINTS_DIR}/${ep}/*.hpp)
     if(ep STREQUAL "rdma-ep")
         list(FILTER EP_HEADERS EXCLUDE REGEX ".*/rdma-common\\.h$")
     endif()

@@ -349,13 +349,14 @@ multiple of 4.
 Host-side setup (Library API)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Applications that want to use shader-initiated SDMA from their own
+Applications that want to use device-initiated SDMA from their own
 GPU kernels (outside the xio-tester) use the three-step host-side
 setup API:
 
 .. code-block:: cpp
 
-   #include "sdma-ep.h"
+   #include "sdma_host.hpp"
+   #include "sdma_device.hpp"
 
    // 1. Initialize the SDMA subsystem (HSA + KFD)
    sdma_ep::initEndpoint();
@@ -392,7 +393,7 @@ functions are ``__device__ __forceinline__`` and operate on a
 
 .. code-block:: cpp
 
-   #include "sdma-ep.h"
+   #include "sdma_device.hpp"
 
    __global__ void myKernel(
        sdma_ep::SdmaQueueHandle* handle,
