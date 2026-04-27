@@ -2,15 +2,15 @@
 
 /* Backward-compatibility shim.
  *
- * All public types and device-side operations have moved
- * to sdma-ep.h under namespace sdma_ep. This header
+ * All public types and device-side operations now live
+ * in sdma_device.hpp under namespace sdma_ep. This header
  * provides anvil:: aliases so existing internal code
  * (sdma-ep.hip, anvil.hip) compiles without changes.
  */
 
 #include "hsakmt/hsakmt.h"
 #include "hsakmt/hsakmttypes.h"
-#include "sdma-ep.h"
+#include "sdma_device.hpp"
 #include "sdma_packets.hpp"
 #include "sdma_pkt_struct_mi4.h"
 

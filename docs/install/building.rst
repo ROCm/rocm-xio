@@ -205,6 +205,9 @@ Install layout
    │       ├── rdma-ep/
    │       │   └── rdma-ep.h
    │       ├── sdma-ep/
+   │       │   ├── sdma_device.hpp
+   │       │   ├── sdma_host.hpp
+   │       │   ├── sdma_tester.hpp
    │       │   ├── sdma-ep.h
    │       │   └── sdma_pkt_struct.h
    │       └── test-ep/

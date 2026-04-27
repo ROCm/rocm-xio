@@ -2,24 +2,16 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * SDMA Endpoint -- GPU-initiated DMA via AMD SDMA engines
+ * SDMA Endpoint Device API
  *
- * This header provides the complete public API for the SDMA
- * endpoint, including:
- *   - Host-side setup: init, connect, queue creation
- *   - Device-side operations: put, signal, wait, flush
- *   - CLI/validation helpers for the xio-tester
- *
- * The device handle (SdmaQueueHandle) and all device-side
- * operations are derived from the anvil library (AMD RAD).
+ * Defines the GPU-facing queue handle structures and helper
+ * operations used by kernels to interact with AMD SDMA engines.
  */
 
-#ifndef SDMA_EP_H
-#define SDMA_EP_H
+#pragma once
 
 #include <cassert>
 #include <cstdint>
-#include <string>
 
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
@@ -27,99 +19,16 @@
 #include "sdma_constants.h"
 
 #include "sdma_pkt_struct.h"
+#include "sdma_pkt_struct_mi4.h"
 #include "sdma_packets.hpp"
 
 namespace sdma_ep {
-
-/* ================================================================
- * Configuration
- * ================================================================ */
-
-/**
- * @brief SDMA endpoint test configuration.
- *
- * Contains all user-facing options for the xio-tester
- * sdma-ep subcommand. Validated by validateConfig().
- */
-struct SdmaEpConfig {
-  std::string testType = "";  /**< Test subcommand name:
-                                   "p2p", "ping-pong", or
-                                   "buffer-reuse". */
-  bool useHostDst = false;    /**< If true, destination is
-                                   pinned host memory (single
-                                   GPU, no P2P required). */
-  bool verifyData = false;    /**< If true, validate the
-                                   destination buffer after
-                                   transfer. */
-  bool useCounter = false;    /**< Use counter-based
-                                   completion tracking. */
-  bool useFlush = false;      /**< Use flush-based
-                                   completion tracking. */
-  int srcDeviceId = -1;       /**< Source HIP device ID.
-                                   -1 = default (0). */
-  int dstDeviceId = -1;       /**< Destination HIP device ID.
-                                   -1 = default (1 for P2P,
-                                   0 for --to-host). */
-  size_t transferSize = 4096; /**< Per-iteration transfer
-                                   size in bytes. Must be a
-                                   multiple of 4. */
-  unsigned iterations = 128;  /**< Number of SDMA transfers
-                                    per run. */
-};
-
-/* ================================================================
- * Host-Side Setup Types
- * ================================================================ */
-
-/**
- * @brief Information about an established SDMA connection.
- *
- * Returned by createConnection(). Contains the resolved
- * SDMA engine ID for the GPU pair, which is determined by
- * the XGMI/Infinity Fabric topology (MI300X OAM map).
- */
-struct SdmaConnectionInfo {
-  int srcDeviceId;   /**< Source HIP device ID. */
-  int dstDeviceId;   /**< Destination HIP device ID. */
-  uint32_t engineId; /**< XGMI-optimal SDMA engine ID
-                          for this GPU pair. */
-};
-
-/**
- * @brief Information about a created SDMA queue.
- *
- * Returned by createQueue(). The deviceHandle pointer
- * is GPU-accessible and should be passed to GPU kernels
- * that use the device-side SDMA operations (put, signal,
- * waitSignal, flush, quiet).
- */
-struct SdmaQueueInfo {
-  void* deviceHandle; /**< GPU-accessible pointer to a
-                           SdmaQueueHandle. Cast to
-                           SdmaQueueHandle* in kernel
-                           code. */
-  int srcDeviceId;    /**< Source HIP device ID. */
-  int dstDeviceId;    /**< Destination HIP device ID. */
-  int channelIdx;     /**< Channel index within the
-                           connection (0-based). */
-};
-
-/* ================================================================
- * Device-Side Constants
- * ================================================================ */
-
-// SDMA_QUEUE_SIZE is now defined in sdma_constants.h (shared with host code)
-using sdma_ep::SDMA_QUEUE_SIZE;
 
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;
 
 /** If true, assert on retry limit in device code. */
 constexpr bool BREAK_ON_RETRIES = false;
-
-/* ================================================================
- * Device-Side Packet Helpers (internal)
- * ================================================================ */
 
 /**
  * @brief Build an SDMA linear copy packet.
@@ -164,7 +73,8 @@ __device__ __forceinline__ SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
 CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
                                uint32_t tile_height, uint32_t src_buffer_pitch,
                                uint32_t dst_buffer_pitch, uint32_t src_x,
-                               uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
+                               uint32_t src_y, uint32_t dst_x,
+                               uint32_t dst_y) {
   anvil::packets::LargeSubWindowCopyPacket pkt(
       srcBuf, dstBuf, tile_width, tile_height, src_buffer_pitch,
       dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
@@ -564,50 +474,12 @@ __device__ __forceinline__ void put_signal_counter_impl(
  * Device-Side Operations -- Data Transfer
  * ================================================================ */
 
-/**
- * @brief DMA copy via SDMA engine.
- *
- * Submits an SDMA_PKT_COPY_LINEAR to transfer size
- * bytes from src to dst. The transfer is non-blocking:
- * it completes asynchronously after the SDMA engine
- * processes the packet.
- *
- * @param handle Queue handle (multi-producer safe).
- * @param dst    Destination address (GPU virtual).
- * @param src    Source address (GPU virtual).
- * @param size   Number of bytes to transfer.
- *
- * @note Device-only. Thread-safe for multi-producer
- *       queues (uses atomic CAS for reservation).
- * @note Use flush() or quiet() to wait for completion.
- */
 __device__ __forceinline__ void put(SdmaQueueHandle& handle, void* dst,
                                     void* src, size_t size) {
   put_signal_counter_impl<true, false, false>(handle, dst, src, size, nullptr,
                                               nullptr);
 }
 
-/**
- * @brief 2D sub-window DMA copy via SDMA engine.
- *
- * Copies a rectangular tile from a source buffer to a
- * destination buffer using
- * SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY.
- *
- * @param handle    Queue handle.
- * @param dst       Destination buffer base address.
- * @param src       Source buffer base address.
- * @param tileWidth   Tile width in bytes.
- * @param tileHeight  Tile height in rows.
- * @param srcPitch  Source row stride in bytes.
- * @param dstPitch  Destination row stride in bytes.
- * @param srcX      Source X offset in bytes.
- * @param srcY      Source Y offset in rows.
- * @param dstX      Destination X offset in bytes.
- * @param dstY      Destination Y offset in rows.
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void putTile(SdmaQueueHandle& handle, void* dst,
                                         void* src, uint32_t tileWidth,
                                         uint32_t tileHeight, uint32_t srcPitch,
@@ -630,40 +502,12 @@ __device__ __forceinline__ void putTile(SdmaQueueHandle& handle, void* dst,
  * Device-Side Operations -- Signaling
  * ================================================================ */
 
-/**
- * @brief Atomically increment a signal via SDMA engine.
- *
- * Submits an SDMA_PKT_ATOMIC that adds 1 to the 64-bit
- * value at *signal. The increment is performed by the
- * SDMA engine, not the shader ALU.
- *
- * @param handle Queue handle.
- * @param signal Address of a 64-bit signal counter in
- *               device memory (uncached recommended).
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void signal(SdmaQueueHandle& handle,
                                        uint64_t* signal) {
   put_signal_counter_impl<false, true, false>(handle, nullptr, nullptr, 0,
                                               signal, nullptr);
 }
 
-/**
- * @brief DMA copy with completion signal (batched).
- *
- * Combines a linear copy and an atomic signal increment
- * into a single queue submission. The signal is
- * incremented after the copy completes.
- *
- * @param handle Queue handle.
- * @param dst    Destination address (GPU virtual).
- * @param src    Source address (GPU virtual).
- * @param size   Number of bytes to transfer.
- * @param signal Address of a 64-bit signal counter.
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void putSignal(SdmaQueueHandle& handle, void* dst,
                                           void* src, size_t size,
                                           uint64_t* signal) {
@@ -671,21 +515,6 @@ __device__ __forceinline__ void putSignal(SdmaQueueHandle& handle, void* dst,
                                              nullptr);
 }
 
-/**
- * @brief DMA copy with signal and counter (batched).
- *
- * Combines a linear copy, a signal increment, and a
- * counter increment into a single queue submission.
- *
- * @param handle  Queue handle.
- * @param dst     Destination address (GPU virtual).
- * @param src     Source address (GPU virtual).
- * @param size    Number of bytes to transfer.
- * @param signal  Address of a 64-bit signal counter.
- * @param counter Address of a 64-bit counter.
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void putSignalCounter(SdmaQueueHandle& handle,
                                                  void* dst, void* src,
                                                  size_t size, uint64_t* signal,
@@ -694,17 +523,6 @@ __device__ __forceinline__ void putSignalCounter(SdmaQueueHandle& handle,
                                             counter);
 }
 
-/**
- * @brief DMA copy with counter only (batched).
- *
- * @param handle  Queue handle.
- * @param dst     Destination address (GPU virtual).
- * @param src     Source address (GPU virtual).
- * @param size    Number of bytes to transfer.
- * @param counter Address of a 64-bit counter.
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void putCounter(SdmaQueueHandle& handle, void* dst,
                                            void* src, size_t size,
                                            uint64_t* counter) {
@@ -712,15 +530,6 @@ __device__ __forceinline__ void putCounter(SdmaQueueHandle& handle, void* dst,
                                              counter);
 }
 
-/**
- * @brief Signal and counter increment (no copy).
- *
- * @param handle  Queue handle.
- * @param signal  Address of a 64-bit signal counter.
- * @param counter Address of a 64-bit counter.
- *
- * @note Device-only. Non-blocking.
- */
 __device__ __forceinline__ void signalCounter(SdmaQueueHandle& handle,
                                               uint64_t* signal,
                                               uint64_t* counter) {
@@ -732,21 +541,6 @@ __device__ __forceinline__ void signalCounter(SdmaQueueHandle& handle,
  * Device-Side Operations -- Completion Tracking
  * ================================================================ */
 
-/**
- * @brief Wait for a signal to reach a value.
- *
- * Spin-polls the 64-bit value at *addr until it is >=
- * expected. Use after putSignal() or signal() to wait
- * for remote completion.
- *
- * @param addr     Address of a 64-bit signal in device
- *                 memory (uncached recommended).
- * @param expected Minimum value to wait for. Typically
- *                 the number of signals sent.
- *
- * @note Device-only. Blocking (spins until condition
- *       met). Uses agent-scope relaxed atomics.
- */
 __device__ __forceinline__ void waitSignal(uint64_t* addr, uint64_t expected) {
   if constexpr (BREAK_ON_RETRIES) {
     poll_until_ge<MAX_RETRIES>(addr, expected);
@@ -755,18 +549,6 @@ __device__ __forceinline__ void waitSignal(uint64_t* addr, uint64_t expected) {
   }
 }
 
-/**
- * @brief Wait for a counter to reach a value.
- *
- * Identical semantics to waitSignal(); provided as a
- * separate function for clarity when waiting on a
- * counter rather than a signal.
- *
- * @param addr     Address of a 64-bit counter.
- * @param expected Minimum value to wait for.
- *
- * @note Device-only. Blocking.
- */
 __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   if constexpr (BREAK_ON_RETRIES) {
     poll_until_ge<MAX_RETRIES>(addr, expected);
@@ -775,154 +557,13 @@ __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   }
 }
 
-/**
- * @brief Wait for a specific operation to complete.
- *
- * Spin-polls the hardware read pointer until it reaches
- * or passes upToIndex. Use with the put_index output of
- * put_signal_counter_impl to wait for a specific put
- * without waiting for subsequent signals.
- *
- * @param handle    Queue handle.
- * @param upToIndex Write pointer value to wait for
- *                  (from put_index tracking).
- *
- * @note Device-only. Blocking.
- */
 __device__ __forceinline__ void flush(SdmaQueueHandle& handle,
                                       uint64_t upToIndex) {
   handle.flushTo(upToIndex);
 }
 
-/**
- * @brief Wait for ALL submitted operations to complete.
- *
- * Spin-polls the hardware read pointer until it reaches
- * maxWritePtr, meaning every packet submitted to this
- * queue has been consumed by the SDMA engine.
- *
- * @param handle Queue handle.
- *
- * @note Device-only. Blocking.
- */
 __device__ __forceinline__ void quiet(SdmaQueueHandle& handle) {
   handle.quietAll();
 }
 
-/* ================================================================
- * Host-Side Setup Functions
- * ================================================================ */
-
-/**
- * @brief Initialize the SDMA endpoint subsystem.
- *
- * Sets up the HSA runtime, enumerates GPU and CPU
- * agents, and opens the KFD (Kernel Fusion Driver)
- * interface. Must be called before createConnection()
- * or createQueue().
- *
- * Idempotent: safe to call multiple times; subsequent
- * calls are no-ops.
- *
- * @return 0 on success, negative error code on failure.
- */
-__host__ int initEndpoint();
-
-/**
- * @brief Mark the SDMA endpoint subsystem as inactive.
- *
- * Resets the internal initialization flag so that
- * subsequent createConnection() / createQueue() calls
- * will fail until initEndpoint() is called again.
- *
- * @note This does NOT destroy existing SDMA queues or
- *       shut down HSA/KFD. Queue and HSA resources are
- *       released when the AnvilLib singleton is
- *       destroyed at process exit. Call destroyQueue()
- *       on individual queues for explicit cleanup.
- * @note Because the underlying HSA init uses
- *       std::call_once, calling initEndpoint() after
- *       shutdownEndpoint() re-enables the flag but
- *       does not re-run HSA/KFD initialization.
- */
-__host__ void shutdownEndpoint();
-
-/**
- * @brief Create an SDMA connection between two GPUs.
- *
- * Enables P2P peer access from the source GPU to the
- * destination GPU and resolves the XGMI-topology-
- * optimal SDMA engine ID for this GPU pair (using the
- * MI300X OAM map). For bidirectional transfers, call
- * once for each direction.
- *
- * Must be called after initEndpoint() and before
- * createQueue() for the same GPU pair.
- *
- * @param srcDeviceId Source HIP device ID.
- * @param dstDeviceId Destination HIP device ID.
- * @param info        Output connection information.
- * @return 0 on success, negative error code on failure.
- */
-__host__ int createConnection(int srcDeviceId, int dstDeviceId,
-                              SdmaConnectionInfo* info);
-
-/**
- * @brief Create an SDMA queue for a GPU pair.
- *
- * Allocates a 1 MiB ring buffer in device memory,
- * creates an SDMA queue via hsakmt, and populates a
- * GPU-accessible device handle (SdmaQueueHandle).
- *
- * Must be called after createConnection() for the same
- * GPU pair. The returned SdmaQueueInfo::deviceHandle is
- * a pointer in device memory that can be passed directly
- * to GPU kernels.
- *
- * @param srcDeviceId Source HIP device ID.
- * @param dstDeviceId Destination HIP device ID.
- * @param info        Output queue information.
- * @return 0 on success, negative error code on failure.
- */
-__host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
-
-/**
- * @brief Destroy an SDMA queue.
- *
- * Releases the ring buffer, device handle memory, and
- * hsakmt queue resources associated with the given
- * queue.
- *
- * @param info Queue information from createQueue().
- *             The deviceHandle becomes invalid after
- *             this call.
- */
-__host__ void destroyQueue(SdmaQueueInfo* info);
-
-/* ================================================================
- * CLI and Validation
- * ================================================================ */
-
-/**
- * @brief Validate SDMA endpoint configuration.
- *
- * Checks that a test subcommand was selected, that
- * --use-counter and --use-flush are not both set, and
- * that transfer-size is > 0 and a multiple of 4.
- *
- * @param config Configuration to validate.
- * @return Empty string if valid, error message otherwise.
- */
-__host__ std::string validateConfig(SdmaEpConfig* config);
-
-/**
- * @brief Get the iteration count for this configuration.
- *
- * @param endpointConfig Opaque pointer to SdmaEpConfig.
- * @return Number of iterations to run.
- */
-__host__ unsigned getIterations(void* endpointConfig);
-
 } // namespace sdma_ep
-
-#endif // SDMA_EP_H

@@ -28,6 +28,9 @@ Thunk) interface.
 
 ### Components
 
+- **sdma_device.hpp**: Kernel-facing queue handle and helper operations
+- **sdma_host.hpp**: Host-side connection and queue management API
+- **sdma_tester.hpp**: CLI configuration structure and validation helpers
 - **sdma-ep.hip**: XIO endpoint interface implementation (uses anvil);
   nominal SQE/CQE sizes for the registry are defined in xio-endpoint.hip
 - **anvil.hpp / anvil.hip**: Host-side SDMA queue management and
