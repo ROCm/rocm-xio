@@ -7,7 +7,7 @@ ROCm XIO endpoints
 ******************
 
 Endpoints define hardware interfaces and protocols for different IO
-devices. Each endpoint provides its own queue entry formats and IO
+devices. Each endpoint provides its own queue-entry formats and IO
 semantics.
 
 List available endpoints
@@ -146,7 +146,7 @@ or an emulated device inside a virtual machine.
 **PCI MMIO bridge (emulated devices in VMs only)**
   Routes doorbell writes through a QEMU virtual PCI device that
   forwards them to the emulated NVMe controller's BAR0. This mode
-  is *essential* when the NVMe device is emulated by QEMU (e.g.
+  is *essential* when the NVMe device is emulated by QEMU (for example,
   the built-in ``nvme`` device model) because the emulated BAR0
   lives in QEMU's address space and cannot be reached by a direct
   GPU store. Enable with ``--pci-mmio-bridge``:
@@ -177,7 +177,7 @@ IONIC        Pensando Ionic RDMA (SmartNIC)
 rocm-ernic   AMD Emulated RDMA NIC
 ===========  ====================================
 
-By default the endpoint runs in loopback mode, which exercises the
+By default, the endpoint runs in loopback mode, which exercises the
 full RDMA path on a single node without requiring a second machine.
 Pass ``--no-loopback`` to run in two-node mode where a real remote
 peer is expected.
@@ -306,8 +306,8 @@ on the anvil library from AMD's RAD team.
 Hardware requirements
 ^^^^^^^^^^^^^^^^^^^^^
 
-- AMD Instinct datacenter GPUs
-- ROCm 6.0+ with hsakmt library
+- AMD Instinct GPUs
+- ROCm 6.0 and latear with hsakmt library
 - P2P mode: multi-GPU system with XGMI/Infinity Fabric
 - Single-GPU mode: use ``--to-host``
 
@@ -437,7 +437,7 @@ Limitations
 Environment variables
 ---------------------
 
-On consumer Radeon GPUs (RX series), set the following before
+On Radeon GPUs (RX series), set the following before
 running any tests:
 
 .. code-block:: bash
@@ -448,5 +448,5 @@ This enables fine-grained memory coherence required for GPU-to-CPU
 memory visibility. Without it the GPU will encounter page faults
 when accessing host memory.
 
-On MI-series accelerators (MI300X, etc.) this is typically not
+On AMD instinct GPUs (MI300X, etc.) this is typically not
 required.

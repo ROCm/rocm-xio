@@ -48,7 +48,7 @@ Device configuration
 --------------------
 
 ``ROCXIO_NVME_DEVICE``
-  Default NVMe controller device path (e.g.,
+  Default NVMe controller device path (for example,
   ``/dev/nvme0``). Used by unit tests when no
   ``--controller`` argument is supplied. Falls back to the
   legacy ``NVME_DEVICE`` environment variable for backward
