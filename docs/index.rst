@@ -11,6 +11,10 @@ for an AMD GPU ``__device__`` code.
 It enables AMD GPUs to perform direct
 IO operations to hardware devices without CPU intervention.
 
+.. note::
+
+  ROCm XIO is in beta. Running production workloads is not recommended.
+
 .. grid:: 2
   :gutter: 3
 
