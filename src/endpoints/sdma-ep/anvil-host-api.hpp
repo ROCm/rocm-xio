@@ -1,11 +1,33 @@
 #pragma once
 
 #include <vector>
+#include <variant>
+#include <initializer_list>
 #include <cstddef>
 #include <cstdint>
 
 namespace anvil
 {
+
+// Forward declarations for packet types
+namespace packets
+{
+struct CopyLinearPacket;
+struct TimestampPacket;
+struct LargeSubWindowCopyPacket;
+template <typename T> struct AtomicAddPacket;
+template <typename T> struct PollRegmemPacket;
+} // namespace packets
+
+// Variant type for heterogeneous packet collections
+using SdmaPacket = std::variant<
+    packets::CopyLinearPacket,
+    packets::TimestampPacket,
+    packets::LargeSubWindowCopyPacket,
+    packets::AtomicAddPacket<uint32_t>,
+    packets::AtomicAddPacket<uint64_t>,
+    packets::PollRegmemPacket<uint32_t>
+>;
 
 // Forward declaration
 class SdmaQueue;
@@ -69,16 +91,13 @@ class SdmaQueueHostHandle
    // Host-initiated SDMA operations
    void put(void* src, void* dst, size_t size);
 
-   template <typename T> void atomic_add(T* ptr, T value);
-
-   void put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride);
-
-   // Write GPU timestamp to memory location
-   void timestamp(uint64_t* timestamp_ptr);
+   template <typename T> void signal(T* ptr, T value);
 
    // Combined put + atomic_add in one SDMA submission (linear memory)
    template <typename T>
    void put_signal(void* src, void* dst, size_t size, T* flag_ptr, T flag_value);
+
+   void put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride);
 
    // Combined put_tile + atomic_add in one SDMA submission
    template <typename T>
@@ -102,6 +121,14 @@ class SdmaQueueHostHandle
 
    // Wait for all submitted SDMA operations to complete
    void quiet();
+   // Write GPU timestamp to memory location
+   void timestamp(uint64_t* timestamp_ptr);
+
+   // Submit a batch of heterogeneous packets (vector)
+   void submit(const std::vector<SdmaPacket>& packets);
+
+   // Submit a batch of heterogeneous packets (initializer_list)
+   void submit(std::initializer_list<SdmaPacket> packets);
 
  private:
    // Queue management helpers

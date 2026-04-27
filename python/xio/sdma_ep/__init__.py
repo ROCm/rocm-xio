@@ -13,6 +13,7 @@ from .sdma_ep_py import (
     SDMA_PKT_COPY_LINEAR_BYTES,
     SDMA_PKT_LINEAR_SUB_WINDOW_BYTES,
     SDMA_PKT_ATOMIC_BYTES,
+    SDMA_QUEUE_SIZE,
 )
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     'SDMA_PKT_COPY_LINEAR_BYTES',
     'SDMA_PKT_LINEAR_SUB_WINDOW_BYTES',
     'SDMA_PKT_ATOMIC_BYTES',
+    'SDMA_QUEUE_SIZE',
 ]
 
 __version__ = '0.1.0'

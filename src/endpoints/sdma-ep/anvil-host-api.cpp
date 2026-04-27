@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <thread>
 #include <string>
+#include <type_traits>
 
 namespace anvil
 {
@@ -222,38 +223,15 @@ void SdmaQueueHostHandle::submitPacket(uint64_t base, uint64_t pending_wptr)
 void SdmaQueueHostHandle::put(void* src, void* dst, size_t size)
 {
    validate_linear_args(src, dst, size, "put");
-
-   // Reserve space for SDMA_PKT_COPY_LINEAR (7 dwords = 28 bytes)
-   uint64_t base = reserveQueueSpace(packets::CopyLinearPacket::size_bytes());
-
-   // Create copy packet
-   packets::CopyLinearPacket packet(src, dst, size);
-
-   // Place and submit packet
-   placePacket(packet.data(), packets::CopyLinearPacket::size_bytes(), base);
-   submitPacket(base, base + packets::CopyLinearPacket::size_bytes());
+   submit({packets::CopyLinearPacket(src, dst, size)});
 }
 
-template <typename T> void SdmaQueueHostHandle::atomic_add(T* ptr, T value)
+template <typename T>
+void SdmaQueueHostHandle::signal(T* ptr, T value)
 {
-   static_assert(sizeof(T) == 4 || sizeof(T) == 8, "atomic_add only supports 32-bit or 64-bit types");
-
-   // Reserve space for SDMA_PKT_ATOMIC (8 dwords = 32 bytes)
-   uint64_t base = reserveQueueSpace(packets::AtomicAddPacket<T>::size_bytes());
-
-   // Create atomic packet
-   auto packet = build_atomic_packet(ptr, value, "atomic_add");
-
-   // Place and submit packet
-   placePacket(packet.data(), packets::AtomicAddPacket<T>::size_bytes(), base);
-   submitPacket(base, base + packets::AtomicAddPacket<T>::size_bytes());
+   static_assert(sizeof(T) == 4 || sizeof(T) == 8, "signal only supports 32-bit or 64-bit types");
+   submit({build_atomic_packet(ptr, value, "signal")});
 }
-
-// Explicit template instantiations
-template void SdmaQueueHostHandle::atomic_add<uint32_t>(uint32_t* ptr, uint32_t value);
-template void SdmaQueueHostHandle::atomic_add<uint64_t>(uint64_t* ptr, uint64_t value);
-template void SdmaQueueHostHandle::atomic_add<int32_t>(int32_t* ptr, int32_t value);
-template void SdmaQueueHostHandle::atomic_add<int64_t>(int64_t* ptr, int64_t value);
 
 void SdmaQueueHostHandle::timestamp(uint64_t* timestamp_ptr)
 {
@@ -262,87 +240,39 @@ void SdmaQueueHostHandle::timestamp(uint64_t* timestamp_ptr)
       throw std::invalid_argument("Invalid timestamp() parameters");
    }
 
-   // Reserve space for SDMA_PKT_TIMESTAMP (3 dwords = 12 bytes)
-   uint64_t base = reserveQueueSpace(packets::TimestampPacket::size_bytes());
-
-   // Create timestamp packet
-   packets::TimestampPacket packet(timestamp_ptr);
-
-   // Place and submit packet
-   placePacket(packet.data(), packets::TimestampPacket::size_bytes(), base);
-   submitPacket(base, base + packets::TimestampPacket::size_bytes());
-}
-
-void SdmaQueueHostHandle::put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride)
-{
-   // Reserve space for SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
-   uint64_t base = reserveQueueSpace(packets::LargeSubWindowCopyPacket::size_bytes());
-
-   // Create sub-window copy packet
-   auto packet = build_tile_packet(tile, dst_ptr, dst_stride, "put_tile");
-
-   // Place and submit packet
-   placePacket(packet.data(), packets::LargeSubWindowCopyPacket::size_bytes(), base);
-   submitPacket(base, base + packets::LargeSubWindowCopyPacket::size_bytes());
+   submit({packets::TimestampPacket(timestamp_ptr)});
 }
 
 template <typename T>
 void SdmaQueueHostHandle::put_signal(void* src, void* dst, size_t size, T* flag_ptr, T flag_value)
 {
-   static_assert(sizeof(T) == 4 || sizeof(T) == 8, "put_signal only supports 32-bit or 64-bit types");
-
    validate_linear_args(src, dst, size, "put_signal");
 
-   // Reserve space for BOTH packets in one call
-   constexpr size_t LINEAR_SIZE = packets::CopyLinearPacket::size_bytes();
-   constexpr size_t ATOMIC_SIZE = packets::AtomicAddPacket<T>::size_bytes();
-   constexpr size_t TOTAL_SIZE = LINEAR_SIZE + ATOMIC_SIZE;
+   submit({
+      packets::CopyLinearPacket(src, dst, size),
+      build_atomic_packet(flag_ptr, flag_value, "put_signal")
+   });
+}
 
-   uint64_t base = reserveQueueSpace(TOTAL_SIZE);
-
-   // Build copy packet
-   packets::CopyLinearPacket linear_pkt(src, dst, size);
-
-   // Build atomic packet
-   auto atomic_pkt = build_atomic_packet(flag_ptr, flag_value, "put_signal");
-
-   // Place both packets
-   placePacket(linear_pkt.data(), packets::CopyLinearPacket::size_bytes(), base);
-   placePacket(atomic_pkt.data(), packets::AtomicAddPacket<T>::size_bytes(),
-               base + packets::CopyLinearPacket::size_bytes());
-
-   // Submit both packets together
-   submitPacket(base, base + TOTAL_SIZE);
+void SdmaQueueHostHandle::put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride)
+{
+   submit({build_tile_packet(tile, dst_ptr, dst_stride, "put_tile")});
 }
 
 template <typename T>
 void SdmaQueueHostHandle::put_tile_signal(const Tile& tile, void* dst_ptr, size_t dst_stride, T* flag_ptr,
                                           T flag_value)
 {
-   static_assert(sizeof(T) == 4 || sizeof(T) == 8, "put_tile_signal only supports 32-bit or 64-bit types");
-
-   // Reserve space for BOTH packets in one call
-   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
-   constexpr size_t ATOMIC_SIZE = packets::AtomicAddPacket<T>::size_bytes();
-   constexpr size_t TOTAL_SIZE = SUBWIN_SIZE + ATOMIC_SIZE;
-
-   uint64_t base = reserveQueueSpace(TOTAL_SIZE);
-
-   // Build SUB_WINDOW packet
-   auto subwin_pkt = build_tile_packet(tile, dst_ptr, dst_stride, "put_tile_signal");
-
-   // Build ATOMIC packet
-   auto atomic_pkt = build_atomic_packet(flag_ptr, flag_value, "put_tile_signal");
-
-   // Place both packets sequentially
-   placePacket(subwin_pkt.data(), SUBWIN_SIZE, base);
-   placePacket(atomic_pkt.data(), ATOMIC_SIZE, base + SUBWIN_SIZE);
-
-   // Submit both packets in one doorbell ring
-   submitPacket(base, base + TOTAL_SIZE);
+   submit({
+      build_tile_packet(tile, dst_ptr, dst_stride, "put_tile_signal"),
+      build_atomic_packet(flag_ptr, flag_value, "put_tile_signal")
+   });
 }
 
 // Explicit template instantiations
+template void SdmaQueueHostHandle::signal<uint32_t>(uint32_t* ptr, uint32_t value);
+template void SdmaQueueHostHandle::signal<uint64_t>(uint64_t* ptr, uint64_t value);
+
 template void SdmaQueueHostHandle::put_signal<uint32_t>(void* src, void* dst, size_t size, uint32_t* flag_ptr,
                                                         uint32_t flag_value);
 template void SdmaQueueHostHandle::put_signal<uint64_t>(void* src, void* dst, size_t size, uint64_t* flag_ptr,
@@ -356,56 +286,22 @@ template void SdmaQueueHostHandle::put_tile_signal<uint64_t>(const Tile& tile, v
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value, void* src, void* dst, size_t size)
 {
-   static_assert(sizeof(T) == 4, "wait_flag_then_put only supports 32-bit types");
-
    validate_linear_args(src, dst, size, "wait_flag_then_put");
 
-   // Reserve space for BOTH packets in one call
-   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
-   constexpr size_t COPY_SIZE = packets::CopyLinearPacket::size_bytes();
-   constexpr size_t TOTAL_SIZE = POLL_SIZE + COPY_SIZE;
-
-   uint64_t base = reserveQueueSpace(TOTAL_SIZE);
-
-   // Build POLL packet
-   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put");
-
-   // Build COPY packet
-   packets::CopyLinearPacket copy_pkt(src, dst, size);
-
-   // Place both packets sequentially
-   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
-   placePacket(copy_pkt.data(), packets::CopyLinearPacket::size_bytes(), base + POLL_SIZE);
-
-   // Submit both packets in one doorbell ring
-   submitPacket(base, base + TOTAL_SIZE);
+   submit({
+      build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put"),
+      packets::CopyLinearPacket(src, dst, size)
+   });
 }
 
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put_tile(T* flag_ptr, T expected_value, const Tile& tile, void* dst_ptr,
                                                    size_t dst_stride)
 {
-   static_assert(sizeof(T) == 4, "wait_flag_then_put_tile only supports 32-bit types");
-
-   // Reserve space for BOTH packets in one call
-   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
-   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
-   constexpr size_t TOTAL_SIZE = POLL_SIZE + SUBWIN_SIZE;
-
-   uint64_t base = reserveQueueSpace(TOTAL_SIZE);
-
-   // Build POLL packet
-   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tile");
-
-   // Build SUB_WINDOW_COPY packet
-   auto subwin_pkt = build_tile_packet(tile, dst_ptr, dst_stride, "wait_flag_then_put_tile");
-
-   // Place both packets sequentially
-   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
-   placePacket(subwin_pkt.data(), packets::LargeSubWindowCopyPacket::size_bytes(), base + POLL_SIZE);
-
-   // Submit both packets in one doorbell ring
-   submitPacket(base, base + TOTAL_SIZE);
+   submit({
+      build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tile"),
+      build_tile_packet(tile, dst_ptr, dst_stride, "wait_flag_then_put_tile")
+   });
 }
 
 template <typename T>
@@ -415,29 +311,22 @@ void SdmaQueueHostHandle::wait_flag_then_put_tiles(T* flag_ptr, T expected_value
 {
    static_assert(sizeof(T) == 4, "wait_flag_then_put_tiles only supports 32-bit types");
 
-   if (!flag_ptr || tiles.empty() || tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size())
+   if (tiles.empty() || tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size())
    {
       throw std::invalid_argument("Invalid wait_flag_then_put_tiles() parameters");
    }
 
-   constexpr size_t POLL_SIZE = packets::PollRegmemPacket<T>::size_bytes();
-   constexpr size_t SUBWIN_SIZE = packets::LargeSubWindowCopyPacket::size_bytes();
-   const size_t total_size = POLL_SIZE + tiles.size() * SUBWIN_SIZE;
+   std::vector<SdmaPacket> packets;
+   packets.reserve(1 + tiles.size());
 
-   uint64_t base = reserveQueueSpace(total_size);
+   packets.emplace_back(build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tiles"));
 
-   auto poll_pkt = build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tiles");
-   placePacket(poll_pkt.data(), packets::PollRegmemPacket<T>::size_bytes(), base);
-
-   uint64_t offset = base + POLL_SIZE;
    for (size_t i = 0; i < tiles.size(); ++i)
    {
-      auto subwin_pkt = build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "wait_flag_then_put_tiles");
-      placePacket(subwin_pkt.data(), packets::LargeSubWindowCopyPacket::size_bytes(), offset);
-      offset += SUBWIN_SIZE;
+      packets.emplace_back(build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "wait_flag_then_put_tiles"));
    }
 
-   submitPacket(base, base + total_size);
+   submit(packets);
 }
 
 // Explicit template instantiations
@@ -467,6 +356,64 @@ void SdmaQueueHostHandle::quiet()
 
    // Ensure all memory operations from SDMA are visible
    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+void SdmaQueueHostHandle::submit(const std::vector<SdmaPacket>& packets)
+{
+   if (packets.empty())
+   {
+      return;
+   }
+
+   // Calculate total size
+   size_t total_size = 0;
+   for (const auto& pkt : packets)
+   {
+      total_size += std::visit([](const auto& p) { return p.size_bytes(); }, pkt);
+   }
+
+   // Reserve, place, submit
+   uint64_t offset = reserveQueueSpace(total_size);
+   uint64_t current = offset;
+
+   for (const auto& pkt : packets)
+   {
+      std::visit([&](const auto& p) {
+         placePacket(p.data(), p.size_bytes(), current);
+         current += p.size_bytes();
+      }, pkt);
+   }
+
+   submitPacket(offset, offset + total_size);
+}
+
+void SdmaQueueHostHandle::submit(std::initializer_list<SdmaPacket> packets)
+{
+   if (packets.size() == 0)
+   {
+      return;
+   }
+
+   // Calculate total size
+   size_t total_size = 0;
+   for (const auto& pkt : packets)
+   {
+      total_size += std::visit([](const auto& p) { return p.size_bytes(); }, pkt);
+   }
+
+   // Reserve, place, submit
+   uint64_t offset = reserveQueueSpace(total_size);
+   uint64_t current = offset;
+
+   for (const auto& pkt : packets)
+   {
+      std::visit([&](const auto& p) {
+         placePacket(p.data(), p.size_bytes(), current);
+         current += p.size_bytes();
+      }, pkt);
+   }
+
+   submitPacket(offset, offset + total_size);
 }
 
 } // namespace anvil

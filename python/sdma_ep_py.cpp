@@ -30,70 +30,111 @@ void register_sdma_ep(nb::module_& m)
             "Get device context handles for the queue (queue 0)")
        .def(
            "put",
-           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t src, uintptr_t dst,
-              size_t size, uintptr_t wait_flag, int wait_flag_bits, uint32_t wait_value, uintptr_t signal_flag,
-              int signal_flag_bits, uint64_t signal_value) {
-              self.host_put_ex(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(src),
-                               reinterpret_cast<void*>(dst), size, std::vector<Tile>{}, std::vector<uintptr_t>{},
-                               std::vector<size_t>{}, reinterpret_cast<void*>(wait_flag), wait_flag_bits, wait_value,
-                               reinterpret_cast<void*>(signal_flag), signal_flag_bits, signal_value);
-            },
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t src, uintptr_t dst, size_t size) {
+              self.put(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(src),
+                           reinterpret_cast<void*>(dst), size);
+           },
            "src_device"_a, "dst_device"_a, "channel_idx"_a, "src"_a, "dst"_a, "size"_a,
-           "wait_flag"_a = 0, "wait_flag_bits"_a = 0, "wait_value"_a = 0, "signal_flag"_a = 0,
-           "signal_flag_bits"_a = 0, "signal_value"_a = 0,
-           "Host-initiated 1D memory copy with optional wait/signal hooks")
+           "Host-initiated 1D memory copy")
        .def(
-           "host_atomic_add",
-           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t ptr, uint64_t value) {
-              self.host_atomic_add_u64(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(ptr), value);
+           "put_signal",
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t src, uintptr_t dst, size_t size,
+              uintptr_t flag_ptr, uint64_t flag_value, int flag_bits) {
+              self.put_signal(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(src),
+                                  reinterpret_cast<void*>(dst), size, reinterpret_cast<void*>(flag_ptr),
+                                  flag_value, flag_bits);
            },
-           "src_device"_a, "dst_device"_a, "channel_idx"_a, "ptr"_a, "value"_a,
-           "Host-initiated 64-bit atomic add operation")
+           "src_device"_a, "dst_device"_a, "channel_idx"_a, "src"_a, "dst"_a, "size"_a, "flag_ptr"_a,
+           "flag_value"_a, "flag_bits"_a = 32,
+           "Host-initiated linear memory copy with atomic signal in one submission")
        .def(
-           "host_atomic_add_32",
-           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t ptr, uint32_t value) {
-              self.host_atomic_add_u32(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(ptr), value);
+           "wait_flag_then_put",
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr, uint32_t expected_value,
+              uintptr_t src, uintptr_t dst, size_t size, int flag_bits) {
+              self.wait_flag_then_put(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(flag_ptr),
+                                      expected_value, reinterpret_cast<void*>(src),
+                                      reinterpret_cast<void*>(dst), size, flag_bits);
            },
-           "src_device"_a, "dst_device"_a, "channel_idx"_a, "ptr"_a, "value"_a,
-           "Host-initiated 32-bit atomic add operation")
+           "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a, "expected_value"_a, "src"_a, "dst"_a,
+           "size"_a, "flag_bits"_a = 32,
+           "Host-initiated wait-on-flag then linear memory copy (POLL + COPY in one submission)")
+      .def(
+          "signal",
+          [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr, uint64_t value,
+             int flag_bits) {
+             self.signal(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(flag_ptr), value, flag_bits);
+          },
+          "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a, "value"_a = 1, "flag_bits"_a = 32,
+          "Atomic increment of a flag (32- or 64-bit)")
        .def(
            "timestamp",
            [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t timestamp_ptr) {
-              self.host_timestamp(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(timestamp_ptr));
+              self.timestamp(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(timestamp_ptr));
            },
            "src_device"_a, "dst_device"_a, "channel_idx"_a, "timestamp_ptr"_a,
            "Host-initiated timestamp write to 64-bit memory location")
        .def(
            "put_tile",
            [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, const Tile& tile, uintptr_t dst_ptr,
-              size_t dst_stride, uintptr_t wait_flag, int wait_flag_bits, uint32_t wait_value, uintptr_t signal_flag,
-              int signal_flag_bits, uint64_t signal_value) {
-              std::vector<Tile> tiles{tile};
-              std::vector<uintptr_t> dst_ptrs{dst_ptr};
-              std::vector<size_t> dst_strides{dst_stride};
-              self.host_put_ex(srcDevice, dstDevice, channelIdx, nullptr, nullptr, 0, tiles, dst_ptrs, dst_strides,
-                               reinterpret_cast<void*>(wait_flag), wait_flag_bits, wait_value,
-                               reinterpret_cast<void*>(signal_flag), signal_flag_bits, signal_value);
+              size_t dst_stride) {
+              self.put_tile(srcDevice, dstDevice, channelIdx, tile, reinterpret_cast<void*>(dst_ptr), dst_stride);
            },
            "src_device"_a, "dst_device"_a, "channel_idx"_a, "tile"_a, "dst_ptr"_a, "dst_stride"_a,
-           "wait_flag"_a = 0, "wait_flag_bits"_a = 0, "wait_value"_a = 0, "signal_flag"_a = 0,
-           "signal_flag_bits"_a = 0, "signal_value"_a = 0,
-           "Host-initiated 2D tile transfer with optional wait/signal hooks")
+           "Host-initiated 2D tile transfer using sub-window copy")
        .def(
-           "put_tiles",
-           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
-              const std::vector<uintptr_t>& dst_ptrs, const std::vector<size_t>& dst_strides, uintptr_t wait_flag,
-              int wait_flag_bits, uint32_t wait_value, uintptr_t signal_flag, int signal_flag_bits,
-              uint64_t signal_value) {
-              self.host_put_ex(srcDevice, dstDevice, channelIdx, nullptr, nullptr, 0, tiles, dst_ptrs, dst_strides,
-                               reinterpret_cast<void*>(wait_flag), wait_flag_bits, wait_value,
-                               reinterpret_cast<void*>(signal_flag), signal_flag_bits, signal_value);
+           "put_tile_signal",
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, const Tile& tile, uintptr_t dst_ptr,
+              size_t dst_stride, uintptr_t flag_ptr, uint64_t flag_value, int flag_bits) {
+              self.put_tile_signal(srcDevice, dstDevice, channelIdx, tile, reinterpret_cast<void*>(dst_ptr),
+                                       dst_stride, reinterpret_cast<void*>(flag_ptr), flag_value, flag_bits);
+           },
+           "src_device"_a, "dst_device"_a, "channel_idx"_a, "tile"_a, "dst_ptr"_a, "dst_stride"_a, "flag_ptr"_a,
+           "flag_value"_a, "flag_bits"_a = 32,
+           "Host-initiated 2D tile transfer with atomic signal in one submission")
+       .def(
+           "wait_flag_then_put_tile",
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr, uint32_t expected_value,
+              const Tile& tile, uintptr_t dst_ptr, size_t dst_stride, int flag_bits) {
+              self.wait_flag_then_put_tile(srcDevice, dstDevice, channelIdx, reinterpret_cast<void*>(flag_ptr),
+                                           expected_value, tile, reinterpret_cast<void*>(dst_ptr), dst_stride,
+                                           flag_bits);
+           },
+           "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a, "expected_value"_a, "tile"_a, "dst_ptr"_a,
+           "dst_stride"_a, "flag_bits"_a = 32,
+           "Host-initiated wait-on-flag then 2D tile transfer (POLL + SUB_WINDOW_COPY in one submission)")
+      .def(
+          "put_tiles",
+          [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
+             const std::vector<uintptr_t>& dst_ptrs_uintptr, const std::vector<size_t>& dst_strides) {
+              // Convert uintptr_t to void*
+              std::vector<void*> dst_ptrs;
+              dst_ptrs.reserve(dst_ptrs_uintptr.size());
+              for (uintptr_t ptr : dst_ptrs_uintptr) {
+                 dst_ptrs.push_back(reinterpret_cast<void*>(ptr));
+              }
+              self.put_tiles(srcDevice, dstDevice, channelIdx, tiles, dst_ptrs, dst_strides);
            },
            "src_device"_a, "dst_device"_a, "channel_idx"_a, "tiles"_a, "dst_ptrs"_a, "dst_strides"_a,
-           "wait_flag"_a = 0, "wait_flag_bits"_a = 0, "wait_value"_a = 0, "signal_flag"_a = 0,
-           "signal_flag_bits"_a = 0, "signal_value"_a = 0,
-           "Host-initiated batched 2D tile transfers with optional wait/signal hooks")
-       .def("quiet", &AnvilLib::host_quiet, "src_device"_a, "dst_device"_a, "channel_idx"_a,
+           "Host-initiated batched 2D tile transfers")
+       .def(
+           "wait_flag_then_put_tiles",
+           [](AnvilLib& self, int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr, uint32_t expected_value,
+              const std::vector<Tile>& tiles, const std::vector<uintptr_t>& dst_ptrs_uintptr,
+              const std::vector<size_t>& dst_strides, int flag_bits) {
+              // Convert uintptr_t to void*
+              std::vector<void*> dst_ptrs;
+              dst_ptrs.reserve(dst_ptrs_uintptr.size());
+              for (uintptr_t ptr : dst_ptrs_uintptr) {
+                 dst_ptrs.push_back(reinterpret_cast<void*>(ptr));
+              }
+              self.wait_flag_then_put_tiles(srcDevice, dstDevice, channelIdx,
+                                            reinterpret_cast<void*>(flag_ptr), expected_value,
+                                            tiles, dst_ptrs, dst_strides, flag_bits);
+           },
+           "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a, "expected_value"_a, "tiles"_a,
+           "dst_ptrs"_a, "dst_strides"_a, "flag_bits"_a = 32,
+           "Host-initiated wait-on-flag then many 2D tile transfers (one POLL + many SUB_WINDOW_COPY packets)")
+       .def("quiet", &AnvilLib::quiet, "src_device"_a, "dst_device"_a, "channel_idx"_a,
             "Block until all submitted SDMA operations complete");
 
    nb::class_<SdmaQueuePythonDeviceCtx>(m, "SdmaQueuePythonDeviceCtx")
@@ -126,6 +167,7 @@ void register_sdma_ep(nb::module_& m)
    m.attr("SDMA_PKT_COPY_LINEAR_BYTES") = nb::int_(kCopyLinearCommandBytes);
    m.attr("SDMA_PKT_LINEAR_SUB_WINDOW_BYTES") = nb::int_(kCopyLinearSubWindowCommandBytes);
    m.attr("SDMA_PKT_ATOMIC_BYTES") = nb::int_(kAtomicCommandBytes);
+   m.attr("SDMA_QUEUE_SIZE") = nb::int_(sdma_ep::SDMA_QUEUE_SIZE);
 }
 
 NB_MODULE(sdma_ep_py, m)
