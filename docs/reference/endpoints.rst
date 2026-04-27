@@ -307,7 +307,7 @@ Hardware requirements
 ^^^^^^^^^^^^^^^^^^^^^
 
 - AMD Instinct GPUs
-- ROCm 6.0 and latar with hsakmt library
+- ROCm 6.0 and later with hsakmt library
 - P2P mode: multi-GPU system with XGMI/Infinity Fabric
 - Single-GPU mode: use ``--to-host``
 
