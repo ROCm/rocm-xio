@@ -508,6 +508,25 @@ set_source_files_properties(
 
 option(BUILD_CLIENTS "Build client tools (xio-tester)" ON)
 
+# Building Clients require the CLI11 library
+find_package(CLI11 QUIET)
+
+if(CLI11_FOUND)
+  message(STATUS "CLI11 found via find_package")
+else()
+  include(CheckIncludeFileCXX)
+  check_include_file_cxx("CLI/CLI.hpp" HAVE_CLI11)
+
+  if(HAVE_CLI11)
+    message(STATUS "CLI11 header found, but no CMake package")
+  else()
+    message(STATUS "CLI11 not found")
+  endif()
+  message(STATUS "CLI11 can be installed with 'apt install libcli11-dev'")
+  message(STATUS "Setting BUILD_CLIENTS=OFF")
+  set(BUILD_CLIENTS OFF CACHE BOOL "Build client tools (xio-tester)" FORCE)
+endif()
+
 if(BUILD_CLIENTS)
 
 file(GLOB TESTER_SOURCES ${TESTER_DIR}/*.cpp)
