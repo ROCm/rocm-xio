@@ -591,169 +591,116 @@ SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, in
   return queue->hostHandle();
 }
 
-void AnvilLib::host_put(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size) {
+void AnvilLib::put(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.put(src, dst, size);
 }
 
-template <typename T>
-void AnvilLib::host_atomic_add(int srcDevice, int dstDevice, int channelIdx, T* ptr, T value) {
-  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
-  handle.atomic_add(ptr, value);
-}
-
-void AnvilLib::host_atomic_add_u32(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint32_t value) {
-  host_atomic_add(srcDevice, dstDevice, channelIdx, static_cast<uint32_t*>(ptr), value);
-}
-
-void AnvilLib::host_atomic_add_u64(int srcDevice, int dstDevice, int channelIdx, void* ptr, uint64_t value) {
-  host_atomic_add(srcDevice, dstDevice, channelIdx, static_cast<uint64_t*>(ptr), value);
-}
-
-void AnvilLib::host_timestamp(int srcDevice, int dstDevice, int channelIdx, void* timestamp_ptr) {
+void AnvilLib::timestamp(int srcDevice, int dstDevice, int channelIdx, void* timestamp_ptr) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.timestamp(static_cast<uint64_t*>(timestamp_ptr));
 }
 
-void AnvilLib::host_put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
-                             size_t dst_stride) {
+void AnvilLib::put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                        size_t dst_stride) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.put_tile(tile, dst_ptr, dst_stride);
 }
 
-void AnvilLib::host_put_ex(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
-                           const std::vector<Tile>& tiles, const std::vector<uintptr_t>& dst_ptrs,
-                           const std::vector<size_t>& dst_strides, void* wait_flag, int wait_flag_bits,
-                           uint32_t wait_value, void* signal_flag, int signal_flag_bits, uint64_t signal_value) {
-  auto atomic_add = [&](int bits) {
-    if (signal_flag == nullptr)
-      return;
-
-    if (bits == 0)
-      bits = 32;
-
-    if (bits == 32) {
-      if (signal_value > std::numeric_limits<uint32_t>::max()) {
-        throw std::invalid_argument("signal_value exceeds 32-bit range");
-      }
-      host_atomic_add_u32(srcDevice, dstDevice, channelIdx, signal_flag,
-                          static_cast<uint32_t>(signal_value));
-    } else if (bits == 64) {
-      host_atomic_add_u64(srcDevice, dstDevice, channelIdx, signal_flag, signal_value);
-    } else {
-      throw std::invalid_argument("signal_flag_bits must be 0, 32, or 64");
-    }
-  };
-
-  const bool has_tiles = !tiles.empty();
-  const bool has_linear = (src != nullptr && dst != nullptr && size > 0);
-  const bool has_wait = wait_flag != nullptr;
-  const bool has_signal = signal_flag != nullptr;
-
-  if (has_tiles && has_linear) {
-    throw std::invalid_argument("host_put_ex: specify either linear parameters or tiles, not both");
-  }
-  if (!has_tiles && !has_linear) {
-    throw std::invalid_argument("host_put_ex: missing data description");
+void AnvilLib::put_tiles(int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
+                         const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides) {
+  if (tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size()) {
+    throw std::invalid_argument("put_tiles: tiles, dst_ptrs, and dst_strides must have same length");
   }
 
-  if (has_tiles) {
-    if (dst_ptrs.size() != tiles.size()) {
-      throw std::invalid_argument("host_put_ex: dst_ptrs length must match tiles length");
-    }
-    if (dst_strides.size() != tiles.size()) {
-      throw std::invalid_argument("host_put_ex: dst_strides length must match tiles length");
-    }
-
-    std::vector<void*> dst_ptr_vec;
-    dst_ptr_vec.reserve(dst_ptrs.size());
-    for (uintptr_t addr : dst_ptrs) {
-      dst_ptr_vec.push_back(reinterpret_cast<void*>(addr));
-    }
-
-    if (has_wait) {
-      if (wait_flag_bits == 0)
-        wait_flag_bits = 32;
-      if (wait_flag_bits != 32) {
-        throw std::invalid_argument("host_put_ex: tile waits support only 32-bit flags");
-      }
-      host_wait_flag_then_put_tiles_u32(srcDevice, dstDevice, channelIdx, wait_flag, wait_value,
-                                        tiles, dst_ptr_vec, dst_strides);
-    } else {
-      for (size_t i = 0; i < tiles.size(); ++i) {
-        host_put_tile(srcDevice, dstDevice, channelIdx, tiles[i], dst_ptr_vec[i], dst_strides[i]);
-      }
-    }
-
-    if (has_signal) {
-      atomic_add(signal_flag_bits);
-    }
-    return;
-  }
-
-  if (has_wait) {
-    if (wait_flag_bits == 0)
-      wait_flag_bits = 32;
-    if (wait_flag_bits != 32) {
-      throw std::invalid_argument("host_put_ex: wait_flag must be 32 bits");
-    }
-    host_wait_flag_then_put_u32(srcDevice, dstDevice, channelIdx, wait_flag, wait_value, src, dst, size);
-    if (has_signal) {
-      atomic_add(signal_flag_bits);
-    }
-    return;
-  }
-
-  if (has_signal && (signal_flag_bits == 0 || signal_flag_bits == 32)) {
-    if (signal_value > std::numeric_limits<uint32_t>::max()) {
-      throw std::invalid_argument("host_put_ex: signal_value exceeds 32-bit range");
-    }
-    host_put_signal_u32(srcDevice, dstDevice, channelIdx, src, dst, size, signal_flag,
-                        static_cast<uint32_t>(signal_value));
-    return;
-  }
-
-  host_put(srcDevice, dstDevice, channelIdx, src, dst, size);
-
-  if (has_signal) {
-    atomic_add(signal_flag_bits);
-  }
-}
-
-void AnvilLib::host_put_signal_u32(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
-                                   void* flag_ptr, uint32_t flag_value) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
-  handle.put_signal(src, dst, size, static_cast<uint32_t*>(flag_ptr), flag_value);
+  for (size_t i = 0; i < tiles.size(); ++i) {
+    handle.put_tile(tiles[i], dst_ptrs[i], dst_strides[i]);
+  }
 }
 
-void AnvilLib::host_put_tile_signal_u32(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
-                                        size_t dst_stride, void* flag_ptr, uint32_t flag_value) {
+void AnvilLib::put_signal(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
+                          void* flag_ptr, uint64_t flag_value, int flag_bits) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
-  handle.put_tile_signal(tile, dst_ptr, dst_stride, static_cast<uint32_t*>(flag_ptr), flag_value);
+  if (!flag_ptr) {
+    throw std::invalid_argument("put_signal: flag pointer is null");
+  }
+  if (flag_bits == 32) {
+    auto* ptr = static_cast<uint32_t*>(flag_ptr);
+    handle.put_signal(src, dst, size, ptr, static_cast<uint32_t>(flag_value));
+  } else if (flag_bits == 64) {
+    auto* ptr = static_cast<uint64_t*>(flag_ptr);
+    handle.put_signal(src, dst, size, ptr, flag_value);
+  } else {
+    throw std::invalid_argument("put_signal: flag_bits must be 32 or 64");
+  }
 }
 
-void AnvilLib::host_wait_flag_then_put_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                                           uint32_t expected_value, void* src, void* dst, size_t size) {
+void AnvilLib::put_tile_signal(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
+                               size_t dst_stride, void* flag_ptr, uint64_t flag_value, int flag_bits) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  if (!flag_ptr) {
+    throw std::invalid_argument("put_tile_signal: flag pointer is null");
+  }
+  if (flag_bits == 32) {
+    auto* ptr = static_cast<uint32_t*>(flag_ptr);
+    handle.put_tile_signal(tile, dst_ptr, dst_stride, ptr, static_cast<uint32_t>(flag_value));
+  } else if (flag_bits == 64) {
+    auto* ptr = static_cast<uint64_t*>(flag_ptr);
+    handle.put_tile_signal(tile, dst_ptr, dst_stride, ptr, flag_value);
+  } else {
+    throw std::invalid_argument("put_tile_signal: flag_bits must be 32 or 64");
+  }
+}
+
+void AnvilLib::wait_flag_then_put(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                   uint32_t expected_value, void* src, void* dst, size_t size, int flag_bits) {
+  if (flag_bits != 32) {
+    throw std::invalid_argument("wait_flag_then_put: wait_flag_bits must be 32");
+  }
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.wait_flag_then_put(static_cast<uint32_t*>(flag_ptr), expected_value, src, dst, size);
 }
 
-void AnvilLib::host_wait_flag_then_put_tile_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                                                uint32_t expected_value, const Tile& tile, void* dst_ptr,
-                                                size_t dst_stride) {
+void AnvilLib::wait_flag_then_put_tile(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                        uint32_t expected_value, const Tile& tile, void* dst_ptr,
+                                        size_t dst_stride, int flag_bits) {
+  if (flag_bits != 32) {
+    throw std::invalid_argument("wait_flag_then_put_tile: wait_flag_bits must be 32");
+  }
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.wait_flag_then_put_tile(static_cast<uint32_t*>(flag_ptr), expected_value, tile, dst_ptr, dst_stride);
 }
 
-void AnvilLib::host_wait_flag_then_put_tiles_u32(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                                                 uint32_t expected_value, const std::vector<Tile>& tiles,
-                                                 const std::vector<void*>& dst_ptrs,
-                                                 const std::vector<size_t>& dst_strides) {
+void AnvilLib::wait_flag_then_put_tiles(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
+                                         uint32_t expected_value, const std::vector<Tile>& tiles,
+                                         const std::vector<void*>& dst_ptrs,
+                                         const std::vector<size_t>& dst_strides, int flag_bits) {
+  if (flag_bits != 32) {
+    throw std::invalid_argument("wait_flag_then_put_tiles: wait_flag_bits must be 32");
+  }
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.wait_flag_then_put_tiles(static_cast<uint32_t*>(flag_ptr), expected_value, tiles, dst_ptrs, dst_strides);
 }
 
-void AnvilLib::host_quiet(int srcDevice, int dstDevice, int channelIdx) {
+void AnvilLib::signal(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr, uint64_t flag_value,
+                      int flag_bits) {
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+  if (!flag_ptr) {
+    throw std::invalid_argument("signal: flag pointer is null");
+  }
+  if (flag_bits == 32) {
+    auto* ptr = static_cast<uint32_t*>(flag_ptr);
+    handle.signal(ptr, static_cast<uint32_t>(flag_value));
+  } else if (flag_bits == 64) {
+    auto* ptr = static_cast<uint64_t*>(flag_ptr);
+    handle.signal(ptr, flag_value);
+  } else {
+    throw std::invalid_argument("signal: flag_bits must be 32 or 64");
+  }
+}
+
+void AnvilLib::quiet(int srcDevice, int dstDevice, int channelIdx) {
   SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
   handle.quiet();
 }
