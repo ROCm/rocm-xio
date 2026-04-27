@@ -59,7 +59,17 @@ __host__ void shutdownEndpoint();
 __host__ int createConnection(int srcDeviceId, int dstDeviceId,
                               SdmaConnectionInfo* info);
 __host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
+__host__ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
 __host__ void destroyQueue(SdmaQueueInfo* info);
+
+/* ================================================================
+ * Host-Side Data Transfer Operations
+ * ================================================================ */
+
+__host__ void put_signal(int srcDeviceId, int dstDeviceId, int channelIdx,
+                         void* src, void* dst, size_t size,
+                         void* flag_ptr, uint64_t flag_value, int flag_bits = 64);
+__host__ void quiet(int srcDeviceId, int dstDeviceId, int channelIdx);
 
 } // namespace sdma_ep
 
