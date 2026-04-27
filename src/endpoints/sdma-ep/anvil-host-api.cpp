@@ -1,6 +1,7 @@
 #include "anvil-host-api.hpp"
 #include "anvil.hpp"
 #include "sdma_packets.hpp"
+#include "sdma_constants.h"
 
 #include <cstring>
 #include <limits>
@@ -14,6 +15,8 @@ namespace anvil
 
 namespace
 {
+using sdma_ep::SDMA_QUEUE_SIZE;
+using sdma_ep::SDMA_OP_NOP;
 constexpr uint64_t kMaxSdmaDword = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxLinearSize = 0x1'0000'0000ULL; // 32-bit count field -> size-1 fits in uint32_t
 

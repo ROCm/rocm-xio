@@ -24,7 +24,10 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+#include "sdma_constants.h"
+
 #include "sdma_pkt_struct.h"
+#include "sdma_packets.hpp"
 
 namespace xio {
 
@@ -109,8 +112,8 @@ struct SdmaQueueInfo {
  * Device-Side Constants
  * ================================================================ */
 
-/** SDMA queue ring buffer size (matches ROCr). */
-constexpr uint64_t SDMA_QUEUE_SIZE = 1024 * 1024;
+// SDMA_QUEUE_SIZE is now defined in sdma_constants.h (shared with host code)
+using sdma_ep::SDMA_QUEUE_SIZE;
 
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;
@@ -141,15 +144,9 @@ CreateCopyPacket(void* srcBuf, void* dstBuf, long long int packetSize) {
   assert(packetSize > 0 && "CreateCopyPacket: packetSize must be > 0");
   assert(packetSize <= 0xFFFFFFFFLL &&
          "CreateCopyPacket: packetSize exceeds 4 GiB");
-  SDMA_PKT_COPY_LINEAR pkt = {};
-  pkt.HEADER_UNION.op = SDMA_OP_COPY;
-  pkt.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR;
-  pkt.COUNT_UNION.count = (uint32_t)(packetSize - 1);
-  pkt.SRC_ADDR_LO_UNION.src_addr_31_0 = (uint32_t)(uintptr_t)srcBuf;
-  pkt.SRC_ADDR_HI_UNION.src_addr_63_32 = (uint32_t)((uintptr_t)srcBuf >> 32);
-  pkt.DST_ADDR_LO_UNION.dst_addr_31_0 = (uint32_t)(uintptr_t)dstBuf;
-  pkt.DST_ADDR_HI_UNION.dst_addr_63_32 = (uint32_t)((uintptr_t)dstBuf >> 32);
-  return pkt;
+  anvil::packets::CopyLinearPacket pkt(srcBuf, dstBuf,
+                                       static_cast<size_t>(packetSize));
+  return pkt.value;
 }
 
 /**
@@ -172,36 +169,10 @@ CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
                                uint32_t tile_height, uint32_t src_buffer_pitch,
                                uint32_t dst_buffer_pitch, uint32_t src_x,
                                uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
-  SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY pkt = {};
-  pkt.HEADER_UNION.op = SDMA_OP_COPY;
-  pkt.HEADER_UNION.sub_op = SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW;
-  pkt.SRC_ADDR_LO_UNION.src_base_addr_31_0 = (uint32_t)(uintptr_t)srcBuf;
-  pkt.SRC_ADDR_HI_UNION.src_base_addr_63_32 = (uint32_t)((uintptr_t)srcBuf >>
-                                                         32);
-  pkt.SRC_X_UNION.src_x = src_x;
-  pkt.SRC_Y_UNION.src_y = src_y;
-  pkt.SRC_Z_UNION.src_z = 0;
-  pkt.SRC_PITCH_UNION.src_pitch = src_buffer_pitch - 1;
-  uint64_t src_slice_pitch = 0;
-  pkt.SRC_SLICE_PITCH_LO_UNION.src_slice_pitch_31_0 =
-    (uint32_t)(src_slice_pitch & 0xFFFFFFFF);
-  pkt.SRC_SLICE_PITCH_HI_UNION.src_slice_pitch_47_32 =
-    (uint16_t)((src_slice_pitch >> 32) & 0xFFFF);
-  pkt.DST_ADDR_LO_UNION.dst_data_31_0 = (uint32_t)(uintptr_t)dstBuf;
-  pkt.DST_ADDR_HI_UNION.src_data_63_32 = (uint32_t)((uintptr_t)dstBuf >> 32);
-  pkt.DST_X_UNION.dst_x = dst_x;
-  pkt.DST_Y_UNION.dst_y = dst_y;
-  pkt.DST_Z_UNION.dst_z = 0;
-  pkt.DST_PITCH_UNION.dst_pitch = dst_buffer_pitch - 1;
-  uint64_t dst_slice_pitch = 0;
-  pkt.DST_SLICE_PITCH_LO_UNION.dst_slice_pitch_31_0 =
-    (uint32_t)(dst_slice_pitch & 0xFFFFFFFF);
-  pkt.DST_SLICE_PITCH_HI_UNION.dst_slice_pitch_47_32 =
-    (uint16_t)((dst_slice_pitch >> 32) & 0xFFFF);
-  pkt.RECT_X_UNION.rect_x = tile_width - 1;
-  pkt.RECT_Y_UNION.rect_y = tile_height - 1;
-  pkt.RECT_Z_UNION.rect_z = 0;
-  return pkt;
+  anvil::packets::LargeSubWindowCopyPacket pkt(
+      srcBuf, dstBuf, tile_width, tile_height, src_buffer_pitch,
+      dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
+  return pkt.value;
 }
 
 /**
@@ -215,14 +186,8 @@ CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
  */
 __device__ __forceinline__ SDMA_PKT_ATOMIC
 CreateAtomicIncPacket(uint64_t* addr) {
-  SDMA_PKT_ATOMIC pkt = {};
-  pkt.HEADER_UNION.op = SDMA_OP_ATOMIC;
-  pkt.HEADER_UNION.operation = SDMA_ATOMIC_ADD64;
-  pkt.ADDR_LO_UNION.addr_31_0 = (uint32_t)((uintptr_t)addr);
-  pkt.ADDR_HI_UNION.addr_63_32 = (uint32_t)((uintptr_t)addr >> 32);
-  pkt.SRC_DATA_LO_UNION.src_data_31_0 = 0x1;
-  pkt.SRC_DATA_HI_UNION.src_data_63_32 = 0x0;
-  return pkt;
+  anvil::packets::AtomicAddPacket<uint64_t> pkt(addr, 1);
+  return pkt.value;
 }
 
 /**
