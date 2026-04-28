@@ -224,3 +224,7 @@ void register_sdma_ep(nb::module_& m)
    m.attr("COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES") = kCopyLinearSubWindowCommandBytes;
    m.attr("ATOMIC_COMMAND_BYTES") = kAtomicCommandBytes;
 }
+
+NB_MODULE(sdma_ep_py, m) {
+   register_sdma_ep(m);
+}
