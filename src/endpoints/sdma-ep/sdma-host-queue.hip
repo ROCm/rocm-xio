@@ -115,12 +115,12 @@ inline packets::PollRegmemPacket<T> build_poll_packet(T* ptr, T expected, const 
 
 uint64_t SdmaQueueHostHandle::wrapIntoRing(uint64_t index) const
 {
-   return index % SDMA_QUEUE_SIZE;
+   return index % sdma_ep::SDMA_QUEUE_SIZE;
 }
 
 void SdmaQueueHostHandle::padRingToEnd(uint64_t cur_index)
 {
-   const uint32_t queue_size_in_bytes = SDMA_QUEUE_SIZE;
+   const uint32_t queue_size_in_bytes = sdma_ep::SDMA_QUEUE_SIZE;
    uint64_t padding_size = queue_size_in_bytes - wrapIntoRing(cur_index);
    uint64_t new_index = cur_index + padding_size;
 
@@ -150,14 +150,14 @@ void SdmaQueueHostHandle::padRingToEnd(uint64_t cur_index)
 
 bool SdmaQueueHostHandle::canWriteUpto(uint64_t uptoIndex)
 {
-   const uint64_t queue_size_in_bytes = SDMA_QUEUE_SIZE;
+   const uint64_t queue_size_in_bytes = sdma_ep::SDMA_QUEUE_SIZE;
    uint64_t hw_read_index = *queue->queue_.Queue_read_ptr_aql;
    return (uptoIndex - hw_read_index) < queue_size_in_bytes;
 }
 
 uint64_t SdmaQueueHostHandle::reserveQueueSpace(size_t size_in_bytes)
 {
-   const uint32_t queue_size_in_bytes = SDMA_QUEUE_SIZE;
+   const uint32_t queue_size_in_bytes = sdma_ep::SDMA_QUEUE_SIZE;
    uint64_t cur_index;
 
    while (true)
@@ -272,6 +272,34 @@ void SdmaQueueHostHandle::put_tile_signal(const Tile& tile, void* dst_ptr, size_
    });
 }
 
+template <typename T>
+void SdmaQueueHostHandle::put_tiles_signal(const std::vector<Tile>& tiles,
+                                           const std::vector<void*>& dst_ptrs,
+                                           const std::vector<size_t>& dst_strides,
+                                           T* flag_ptr, T flag_value)
+{
+   if (tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size())
+   {
+      throw std::invalid_argument("put_tiles_signal: tiles, dst_ptrs, and dst_strides must have same size");
+   }
+   if (tiles.empty())
+   {
+      return;
+   }
+
+   // Build all tile packets + final signal into one batch
+   std::vector<SdmaPacket> packets;
+   packets.reserve(tiles.size() + 1);
+
+   for (size_t i = 0; i < tiles.size(); ++i)
+   {
+      packets.push_back(build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "put_tiles_signal"));
+   }
+   packets.push_back(build_atomic_packet(flag_ptr, flag_value, "put_tiles_signal"));
+
+   submit(packets);
+}
+
 // Explicit template instantiations
 template void SdmaQueueHostHandle::signal<uint32_t>(uint32_t* ptr, uint32_t value);
 template void SdmaQueueHostHandle::signal<uint64_t>(uint64_t* ptr, uint64_t value);
@@ -285,6 +313,15 @@ template void SdmaQueueHostHandle::put_tile_signal<uint32_t>(const Tile& tile, v
                                                              uint32_t* flag_ptr, uint32_t flag_value);
 template void SdmaQueueHostHandle::put_tile_signal<uint64_t>(const Tile& tile, void* dst_ptr, size_t dst_stride,
                                                              uint64_t* flag_ptr, uint64_t flag_value);
+
+template void SdmaQueueHostHandle::put_tiles_signal<uint32_t>(const std::vector<Tile>& tiles,
+                                                              const std::vector<void*>& dst_ptrs,
+                                                              const std::vector<size_t>& dst_strides,
+                                                              uint32_t* flag_ptr, uint32_t flag_value);
+template void SdmaQueueHostHandle::put_tiles_signal<uint64_t>(const std::vector<Tile>& tiles,
+                                                              const std::vector<void*>& dst_ptrs,
+                                                              const std::vector<size_t>& dst_strides,
+                                                              uint64_t* flag_ptr, uint64_t flag_value);
 
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value, void* src, void* dst, size_t size)

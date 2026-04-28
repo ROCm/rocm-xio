@@ -95,6 +95,11 @@ public:
   void put_tile_signal(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
                        size_t dst_stride, void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
 
+  // Combined put_tiles + atomic_add in one SDMA submission
+  void put_tiles_signal(int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
+                        const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides,
+                        void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
+
   // Wait on flag, then perform put (POLL + COPY in one submission)
   void wait_flag_then_put(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
                           uint32_t expected_value, void* src, void* dst, size_t size, int flag_bits = 32);

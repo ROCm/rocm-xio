@@ -6,8 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "sdma-ep.h"
+
 namespace anvil
 {
+
+// Backward compatibility aliases
+using Tile = sdma_ep::Tile;
+using SdmaQueuePythonDeviceCtx = sdma_ep::SdmaQueuePythonDeviceCtx;
 
 // Forward declarations for packet types
 namespace packets
@@ -32,54 +38,6 @@ using SdmaPacket = std::variant<
 // Forward declaration
 class SdmaQueue;
 
-// Tile representation for 2D transfers
-struct Tile
-{
-   int32_t pid_m;     // Tile coordinate in M dimension
-   int32_t pid_n;     // Tile coordinate in N dimension
-   int32_t block_m;   // Block size in M dimension
-   int32_t block_n;   // Block size in N dimension
-   void* data;        // Pointer to tile data
-   size_t elem_size;  // Element size in bytes (e.g., 4 for float)
-   size_t src_stride; // Source row stride in bytes (0 = contiguous)
-
-   size_t width_bytes() const
-   {
-      return block_n * elem_size;
-   }
-   size_t height() const
-   {
-      return block_m;
-   }
-   size_t offset_m() const
-   {
-      return pid_m * block_m;
-   }
-   size_t offset_n() const
-   {
-      return pid_n * block_n;
-   }
-   size_t src_pitch() const
-   {
-      return src_stride > 0 ? src_stride : width_bytes();
-   }
-};
-
-// Python device context structure (uintptr_t-based for Python bindings)
-struct SdmaQueuePythonDeviceCtx
-{
-   uintptr_t queueBuf;
-   uintptr_t rptr;
-   uintptr_t wptr;
-   uintptr_t doorbell;
-
-   // Shared variables
-   uintptr_t cachedWptr;
-   uintptr_t committedWptr;
-};
-static_assert(sizeof(SdmaQueuePythonDeviceCtx) == 48,
-              "SdmaQueuePythonDeviceCtx must be 48 bytes (6 * sizeof(uintptr_t))");
-
 // Host-side handle for CPU-initiated SDMA operations
 class SdmaQueueHostHandle
 {
@@ -103,6 +61,11 @@ class SdmaQueueHostHandle
    template <typename T>
    void put_tile_signal(const Tile& tile, void* dst_ptr, size_t dst_stride,
                         T* flag_ptr, T flag_value);
+
+   // Combined put_tiles + atomic_add in one SDMA submission
+   template <typename T>
+   void put_tiles_signal(const std::vector<Tile>& tiles, const std::vector<void*>& dst_ptrs,
+                         const std::vector<size_t>& dst_strides, T* flag_ptr, T flag_value);
 
    // Wait on flag, then perform put (POLL + COPY in one submission)
    template <typename T>
