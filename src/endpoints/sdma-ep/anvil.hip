@@ -653,6 +653,26 @@ void AnvilLib::put_tile_signal(int srcDevice, int dstDevice, int channelIdx, con
   }
 }
 
+void AnvilLib::put_tiles_signal(int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
+                                 const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides,
+                                 void* flag_ptr, uint64_t flag_value, int flag_bits) {
+  if (!flag_ptr) {
+    throw std::invalid_argument("put_tiles_signal: flag pointer is null");
+  }
+
+  SdmaQueueHostHandle handle = getHostHandle(srcDevice, dstDevice, channelIdx);
+
+  if (flag_bits == 32) {
+    auto* ptr = static_cast<uint32_t*>(flag_ptr);
+    handle.put_tiles_signal(tiles, dst_ptrs, dst_strides, ptr, static_cast<uint32_t>(flag_value));
+  } else if (flag_bits == 64) {
+    auto* ptr = static_cast<uint64_t*>(flag_ptr);
+    handle.put_tiles_signal(tiles, dst_ptrs, dst_strides, ptr, flag_value);
+  } else {
+    throw std::invalid_argument("put_tiles_signal: flag_bits must be 32 or 64");
+  }
+}
+
 void AnvilLib::wait_flag_then_put(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
                                    uint32_t expected_value, void* src, void* dst, size_t size, int flag_bits) {
   if (flag_bits != 32) {

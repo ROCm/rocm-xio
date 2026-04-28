@@ -11,6 +11,7 @@
 #include "nvme-ep.h"
 #include "rdma-ep.h"
 #include "sdma-ep.h"
+#include "sdma-tester.h"
 #include "test-ep.h"
 
 void registerTestEpCliOptions(CLI::App& app, xio::test_ep::TestEpConfig* cfg);

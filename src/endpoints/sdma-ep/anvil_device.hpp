@@ -163,7 +163,7 @@ CreateFence64BPacketMI4(uint64_t* address, uint64_t data = 1) {
 // Original anvil name was poll_until_lt but the semantics
 // are "poll until *addr >= expected" (ge). Both aliases are
 // provided for backward compatibility.
-template <int64_t MAX_SPIN_COUNT = -1>
+/*template <int64_t MAX_SPIN_COUNT = -1>
 __device__ __forceinline__ void poll_until_lt(uint64_t* addr,
                                               uint64_t expected) {
   sdma_ep::poll_until_ge<MAX_SPIN_COUNT>(addr, expected);
@@ -181,7 +181,7 @@ __device__ __forceinline__ void waitSignal(uint64_t* addr, uint64_t expected) {
 
 __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   sdma_ep::waitCounter(addr, expected);
-}
+}*/
 
 template <bool PUT_EN, bool SIGNAL_EN, bool COUNTER_EN>
 __device__ __forceinline__ void put_signal_counter_impl(
@@ -257,7 +257,7 @@ __device__ __forceinline__ void put_signal_counter_impl(
   handle.submitPacket(base, pendingWptr);
 }
 
-__device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
+/*__device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
                                     void* src, size_t size) {
   sdma_ep::put(handle, dst, src, size);
 }
@@ -306,6 +306,6 @@ __device__ __forceinline__ void flush(SdmaQueueDeviceHandle& handle,
 
 __device__ __forceinline__ void quiet(SdmaQueueDeviceHandle& handle) {
   sdma_ep::quiet(handle);
-}
+}*/
 
 } // namespace anvil
