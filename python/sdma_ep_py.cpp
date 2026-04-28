@@ -3,6 +3,7 @@
 #include <cstddef>
 
 #include "sdma-ep.h"
+#include "sdma_packets.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -202,6 +203,16 @@ void register_sdma_ep(nb::module_& m)
          "src_device"_a, "dst_device"_a, "channel_idx"_a,
          "Wait for all SDMA operations to complete");
 
+   // SdmaQueuePythonDeviceCtx struct
+   nb::class_<sdma_ep::SdmaQueuePythonDeviceCtx>(m, "SdmaQueuePythonDeviceCtx")
+       .def(nb::init<>())
+       .def_rw("queue_buf", &sdma_ep::SdmaQueuePythonDeviceCtx::queueBuf, "Queue buffer pointer")
+       .def_rw("rptr", &sdma_ep::SdmaQueuePythonDeviceCtx::rptr, "Read pointer")
+       .def_rw("wptr", &sdma_ep::SdmaQueuePythonDeviceCtx::wptr, "Write pointer")
+       .def_rw("doorbell", &sdma_ep::SdmaQueuePythonDeviceCtx::doorbell, "Doorbell pointer")
+       .def_rw("cached_wptr", &sdma_ep::SdmaQueuePythonDeviceCtx::cachedWptr, "Cached write pointer")
+       .def_rw("committed_wptr", &sdma_ep::SdmaQueuePythonDeviceCtx::committedWptr, "Committed write pointer");
+
    // Tile class
    nb::class_<sdma_ep::Tile>(m, "Tile")
        .def(nb::init<>())
@@ -223,6 +234,7 @@ void register_sdma_ep(nb::module_& m)
    m.attr("COPY_LINEAR_COMMAND_BYTES") = kCopyLinearCommandBytes;
    m.attr("COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES") = kCopyLinearSubWindowCommandBytes;
    m.attr("ATOMIC_COMMAND_BYTES") = kAtomicCommandBytes;
+   m.attr("SDMA_QUEUE_SIZE") = sdma_ep::SDMA_QUEUE_SIZE;
 }
 
 NB_MODULE(sdma_ep_py, m) {

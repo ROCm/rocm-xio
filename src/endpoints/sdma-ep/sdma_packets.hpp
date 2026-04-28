@@ -20,6 +20,11 @@
 #include "sdma_pkt_struct.h"
 #include "sdma_opcodes.h"
 
+namespace sdma_ep {
+/** SDMA queue size in bytes (8 MiB). */
+constexpr uint64_t SDMA_QUEUE_SIZE = 8 * 1024 * 1024;
+}
+
 namespace anvil::packets
 {
 
