@@ -7,8 +7,8 @@
  * This header provides the complete public API for the SDMA
  * endpoint, including:
  *   - Host-side setup: init, connect, queue creation
- *   - Device-side operations: put, signal, wait, flush
- *   - Host-side operations: 
+ *   - Device-side operations: put, signal, wait, flush (via sdma_device.hpp)
+ *   - Host-side operations: put, put_signal, put_tile, signal, quiet, etc.
  *
  * The device handle (SdmaQueueHandle) and all device-side
  * operations are derived from the anvil library (AMD RAD).
