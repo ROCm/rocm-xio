@@ -16,13 +16,14 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
-#include "sdma_constants.h"
-
 #include "sdma_pkt_struct.h"
 #include "sdma_pkt_struct_mi4.h"
 #include "sdma_packets.hpp"
 
 namespace sdma_ep {
+
+/** SDMA queue size in bytes (8 MiB). */
+constexpr uint64_t SDMA_QUEUE_SIZE = 8 * 1024 * 1024;
 
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;

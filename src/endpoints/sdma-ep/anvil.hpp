@@ -17,7 +17,7 @@
 namespace anvil { struct SdmaQueueDeviceHandle; }
 #endif
 
-#include "anvil-host-api.hpp"
+#include "sdma-host-queue.h"
 #include "hsa/hsa_ext_amd.h"
 #include "hsakmt/hsakmt.h"
 #include "hsakmt/hsakmttypes.h"

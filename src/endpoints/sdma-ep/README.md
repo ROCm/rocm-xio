@@ -28,14 +28,15 @@ Thunk) interface.
 
 ### Components
 
-- **sdma_device.hpp**: Kernel-facing queue handle and helper operations
-- **sdma_host.hpp**: Host-side connection and queue management API
-- **sdma_tester.hpp**: CLI configuration structure and validation helpers
+- **sdma-tester.h**: CLI configuration structure and validation helpers
+- **sdma-tester.hip**: Tester implementation (kernels and runtime)
 - **sdma-ep.hip**: XIO endpoint interface implementation (uses anvil);
   nominal SQE/CQE sizes for the registry are defined in xio-endpoint.hip
+  operations (batched packet submission)
 - **anvil.hpp / anvil.hip**: Host-side SDMA queue management and
   initialization
 - **anvil_device.hpp**: Device-side SDMA queue primitives for GPU kernels
+  (backward-compatibility shim)
 - **sdma_opcodes.h**: Shared SDMA opcode and sub-opcode constants
   for all generations; OSS7.0 sub-opcodes gated by `XIO_SDMA_OSS7`
 - **sdma_pkt_struct.h**: Pre-OSS7 (MI300X) SDMA packet structures
