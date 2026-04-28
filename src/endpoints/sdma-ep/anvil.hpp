@@ -76,51 +76,6 @@ public:
   SdmaQueuePythonDeviceCtx get_queue_device_ctx(int srcDeviceId, int dstDeviceId);
   SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
 
-  // Host-initiated SDMA operations (Python API)
-  void put(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size);
-
-  void timestamp(int srcDevice, int dstDevice, int channelIdx, void* timestamp_ptr);
-
-  void put_tile(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
-                size_t dst_stride);
-
-  void put_tiles(int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
-                 const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides);
-
-  // Combined put + atomic_add in one SDMA submission (linear memory)
-  void put_signal(int srcDevice, int dstDevice, int channelIdx, void* src, void* dst, size_t size,
-                  void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-  // Combined put_tile + atomic_add in one SDMA submission
-  void put_tile_signal(int srcDevice, int dstDevice, int channelIdx, const Tile& tile, void* dst_ptr,
-                       size_t dst_stride, void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-  // Combined put_tiles + atomic_add in one SDMA submission
-  void put_tiles_signal(int srcDevice, int dstDevice, int channelIdx, const std::vector<Tile>& tiles,
-                        const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides,
-                        void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-  // Wait on flag, then perform put (POLL + COPY in one submission)
-  void wait_flag_then_put(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                          uint32_t expected_value, void* src, void* dst, size_t size, int flag_bits = 32);
-
-  // Wait on flag, then perform put_tile (POLL + SUB_WINDOW_COPY in one submission)
-  void wait_flag_then_put_tile(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                                uint32_t expected_value, const Tile& tile, void* dst_ptr, size_t dst_stride,
-                                int flag_bits = 32);
-
-  // Wait on flag, then perform many put_tile operations in one submission
-  void wait_flag_then_put_tiles(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr,
-                                 uint32_t expected_value, const std::vector<Tile>& tiles,
-                                 const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides,
-                                 int flag_bits = 32);
-
-  void signal(int srcDevice, int dstDevice, int channelIdx, void* flag_ptr, uint64_t flag_value,
-              int flag_bits = 32);
-
-  // Wait for all SDMA operations to complete
-  void quiet(int srcDevice, int dstDevice, int channelIdx);
-
 private:
   using ChannelKey = std::pair<int, int>;
   struct ChannelKeyHash {

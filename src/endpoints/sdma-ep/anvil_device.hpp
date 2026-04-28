@@ -160,29 +160,6 @@ CreateFence64BPacketMI4(uint64_t* address, uint64_t data = 1) {
 
 #endif /* XIO_SDMA_OSS7 */
 
-// Original anvil name was poll_until_lt but the semantics
-// are "poll until *addr >= expected" (ge). Both aliases are
-// provided for backward compatibility.
-/*template <int64_t MAX_SPIN_COUNT = -1>
-__device__ __forceinline__ void poll_until_lt(uint64_t* addr,
-                                              uint64_t expected) {
-  sdma_ep::poll_until_ge<MAX_SPIN_COUNT>(addr, expected);
-}
-
-template <int64_t MAX_SPIN_COUNT = -1>
-__device__ __forceinline__ void poll_until_ge(uint64_t* addr,
-                                              uint64_t expected) {
-  sdma_ep::poll_until_ge<MAX_SPIN_COUNT>(addr, expected);
-}
-
-__device__ __forceinline__ void waitSignal(uint64_t* addr, uint64_t expected) {
-  sdma_ep::waitSignal(addr, expected);
-}
-
-__device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
-  sdma_ep::waitCounter(addr, expected);
-}*/
-
 template <bool PUT_EN, bool SIGNAL_EN, bool COUNTER_EN>
 __device__ __forceinline__ void put_signal_counter_impl(
   SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
@@ -256,56 +233,5 @@ __device__ __forceinline__ void put_signal_counter_impl(
   }
   handle.submitPacket(base, pendingWptr);
 }
-
-/*__device__ __forceinline__ void put(SdmaQueueDeviceHandle& handle, void* dst,
-                                    void* src, size_t size) {
-  sdma_ep::put(handle, dst, src, size);
-}
-
-__device__ __forceinline__ void signal(SdmaQueueDeviceHandle& handle,
-                                       uint64_t* signal) {
-  sdma_ep::signal(handle, signal);
-}
-
-__device__ __forceinline__ void put_tile(
-  SdmaQueueDeviceHandle& handle, void* dst, void* src, uint32_t tile_width,
-  uint32_t tile_height, uint32_t src_buffer_pitch, uint32_t dst_buffer_pitch,
-  uint32_t src_x, uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
-  sdma_ep::putTile(handle, dst, src, tile_width, tile_height, src_buffer_pitch,
-                   dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
-}
-
-__device__ __forceinline__ void put_signal(SdmaQueueDeviceHandle& handle,
-                                           void* dst, void* src, size_t size,
-                                           uint64_t* signal) {
-  sdma_ep::putSignal(handle, dst, src, size, signal);
-}
-
-__device__ __forceinline__ void put_signal_counter(
-  SdmaQueueDeviceHandle& handle, void* dst, void* src, size_t size,
-  uint64_t* signal, uint64_t* counter) {
-  sdma_ep::putSignalCounter(handle, dst, src, size, signal, counter);
-}
-
-__device__ __forceinline__ void put_counter(SdmaQueueDeviceHandle& handle,
-                                            void* dst, void* src, size_t size,
-                                            uint64_t* counter) {
-  sdma_ep::putCounter(handle, dst, src, size, counter);
-}
-
-__device__ __forceinline__ void signal_counter(SdmaQueueDeviceHandle& handle,
-                                               uint64_t* signal,
-                                               uint64_t* counter) {
-  sdma_ep::signalCounter(handle, signal, counter);
-}
-
-__device__ __forceinline__ void flush(SdmaQueueDeviceHandle& handle,
-                                      uint64_t up_to_index) {
-  sdma_ep::flush(handle, up_to_index);
-}
-
-__device__ __forceinline__ void quiet(SdmaQueueDeviceHandle& handle) {
-  sdma_ep::quiet(handle);
-}*/
 
 } // namespace anvil
