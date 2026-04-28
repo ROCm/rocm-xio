@@ -26,9 +26,6 @@ struct XioEndpointConfig;
 
 namespace sdma_ep {
 
-/** SDMA queue size in bytes (8 MiB). */
-constexpr uint64_t SDMA_QUEUE_SIZE = 8 * 1024 * 1024;
-
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;
 

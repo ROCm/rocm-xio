@@ -25,11 +25,6 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
-// Device-side implementation (only included when compiling .hip files)
-#ifdef __HIPCC__
-#include "sdma_device.hpp"
-#endif
-
 namespace sdma_ep {
 
 /* ================================================================
