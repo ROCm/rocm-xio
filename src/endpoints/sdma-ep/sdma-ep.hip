@@ -79,11 +79,6 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
     return -1;
   }
   try {
-    // Enable peer access
-    if (srcDeviceId != dstDeviceId) {
-      anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
-    }
-
     uint32_t engineId =
       anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
     int channelIdx = 0;
@@ -115,10 +110,6 @@ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
     return -1;
   }
   try {
-    // Enable peer access
-    if (srcDeviceId != dstDeviceId) {
-      anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
-    }
     uint32_t engineId =
       anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
     int channelIdx = 0;

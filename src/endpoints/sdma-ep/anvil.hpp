@@ -117,6 +117,4 @@ private:
 
 extern AnvilLib& anvil;
 
-void EnablePeerAccess(int deviceId, int peerDeviceId);
-
 } // namespace anvil

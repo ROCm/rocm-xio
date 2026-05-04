@@ -45,23 +45,6 @@ inline void checkHipError(hipError_t err, const char* msg, const char* file,
 #define CHECK_HIP_ERROR(cmd) checkHipError((cmd), #cmd, __FILE__, __LINE__)
 
 // Allow access to peerDeviceId from deviceId
-void EnablePeerAccess(int const deviceId, int const peerDeviceId) {
-  int canAccess;
-  CHECK_HIP_ERROR(hipDeviceCanAccessPeer(&canAccess, deviceId, peerDeviceId));
-  if (!canAccess) {
-    std::cerr << "Unable to enable peer access from GPU devices " << deviceId
-              << " to " << peerDeviceId << "\n";
-  }
-
-  CHECK_HIP_ERROR(hipSetDevice(deviceId));
-  hipError_t error = hipDeviceEnablePeerAccess(peerDeviceId, 0);
-  if (error != hipSuccess && error != hipErrorPeerAccessAlreadyEnabled) {
-    std::cerr << "Unable to enable peer to peer access from " << deviceId
-              << "  to " << peerDeviceId << " (" << hipGetErrorString(error)
-              << ")\n";
-  }
-}
-
 // HSA agents
 std::vector<hsa_agent_t> cpuAgents_;
 std::vector<hsa_agent_t> gpuAgents_;

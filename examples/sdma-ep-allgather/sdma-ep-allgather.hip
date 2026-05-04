@@ -31,17 +31,10 @@
 
 #include <mpi.h>
 
+#include "xio.h"
 #include "endpoints/sdma-ep/sdma-ep.h"
-
-#define HIP_CHECK(expr)                                                        \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "[rank %d] HIP error %d (%s) at %s:%d\n", g_myrank,      \
-              _err, hipGetErrorString(_err), __FILE__, __LINE__);              \
-      MPI_Abort(MPI_COMM_WORLD, 1);                                            \
-    }                                                                          \
-  } while (0)
+#include "endpoints/sdma-ep/sdma-host-queue.h"
+#include "endpoints/sdma-ep/sdma_device.hpp"
 
 static int g_myrank = 0;
 
@@ -166,19 +159,21 @@ int main(int argc, char* argv[]) {
   args.chunkBytes = chunkBytes;
 
   sdma_ep::SdmaQueueInfo queueInfos[MAX_GPUS] = {};
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == myrank)
-      continue;
+  std::vector<anvil::SdmaQueueHostHandle> hostHandles;
+  if (hostInitiated) {
+    hostHandles.reserve(nranks);
+  }
 
-    sdma_ep::SdmaConnectionInfo connInfo = {};
-    rc = sdma_ep::createConnection(myrank, peer, &connInfo);
-    if (rc != 0) {
-      fprintf(stderr,
-              "[rank %d] createConnection(%d->%d) "
-              "failed (%d)\n",
-              myrank, myrank, peer, rc);
-      MPI_Abort(MPI_COMM_WORLD, 1);
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == myrank) {
+      if (hostInitiated) {
+        hostHandles.push_back(anvil::SdmaQueueHostHandle(nullptr)); // Placeholder
+      }
+      continue;
     }
+
+    // Enable peer access
+    xio::enablePeerAccess(myrank, peer);
 
     if (hostInitiated) {
       rc = sdma_ep::createHostQueue(myrank, peer, &queueInfos[peer]);
@@ -189,6 +184,7 @@ int main(int argc, char* argv[]) {
                 myrank, myrank, peer, rc);
         MPI_Abort(MPI_COMM_WORLD, 1);
       }
+      hostHandles.push_back(sdma_ep::getHostHandle(myrank, peer, 0));
     } else {
       rc = sdma_ep::createQueue(myrank, peer, &queueInfos[peer]);
       if (rc != 0) {
@@ -272,14 +268,15 @@ int main(int argc, char* argv[]) {
       char* dst = static_cast<char*>(args.remoteDst[peer]) +
                   static_cast<size_t>(myrank) * chunkBytes;
 
-      sdma_ep::put_signal(myrank, peer, 0, args.localInput, dst, chunkBytes,
-                          args.remoteSignals[peer] + myrank, 1, 64);
+      hostHandles[peer].put_signal(args.localInput, dst, chunkBytes,
+                                   args.remoteSignals[peer] + myrank,
+                                   static_cast<uint64_t>(1));
     }
 
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == myrank)
         continue;
-      sdma_ep::quiet(myrank, peer, 0);
+      hostHandles[peer].quiet();
     }
 
     hipLaunchKernelGGL(waitForAllgatherCompletion, dim3(1), dim3(1), 0, nullptr,

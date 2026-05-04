@@ -25,17 +25,8 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+#include "xio.h"
 #include "endpoints/sdma-ep/sdma-ep.h"
-
-#define HIP_CHECK(expr)                                                        \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "HIP error %d (%s) at %s:%d\n", _err,                    \
-              hipGetErrorString(_err), __FILE__, __LINE__);                    \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
 
 static constexpr int SRC_GPU = 0;
 static constexpr int DST_GPU = 1;
@@ -81,6 +72,9 @@ int main() {
     fprintf(stderr, "ERROR: initEndpoint failed (%d)\n", rc);
     return 1;
   }
+
+  // Enable peer access
+  xio::enablePeerAccess(SRC_GPU, DST_GPU);
 
   sdma_ep::SdmaQueueInfo queueInfo = {};
   rc = sdma_ep::createQueue(SRC_GPU, DST_GPU, &queueInfo);

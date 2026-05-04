@@ -3,6 +3,7 @@
 #include <cstddef>
 
 #include "sdma-ep.h"
+#include "sdma-host-queue.h"
 #include "sdma_packets.hpp"
 
 namespace nb = nanobind;
