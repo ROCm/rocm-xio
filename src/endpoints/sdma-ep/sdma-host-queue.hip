@@ -261,6 +261,31 @@ void SdmaQueueHostHandle::put_tile(const Tile& tile, void* dst_ptr, size_t dst_s
    submit({build_tile_packet(tile, dst_ptr, dst_stride, "put_tile")});
 }
 
+void SdmaQueueHostHandle::put_tiles(const std::vector<Tile>& tiles,
+                                    const std::vector<void*>& dst_ptrs,
+                                    const std::vector<size_t>& dst_strides)
+{
+   if (tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size())
+   {
+      throw std::invalid_argument("put_tiles: tiles, dst_ptrs, and dst_strides must have same size");
+   }
+   if (tiles.empty())
+   {
+      return;
+   }
+
+   // Build all tile packets into one batch
+   std::vector<SdmaPacket> packets;
+   packets.reserve(tiles.size());
+
+   for (size_t i = 0; i < tiles.size(); ++i)
+   {
+      packets.push_back(build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "put_tiles"));
+   }
+
+   submit(packets);
+}
+
 template <typename T>
 void SdmaQueueHostHandle::put_tile_signal(const Tile& tile, void* dst_ptr, size_t dst_stride, T* flag_ptr,
                                           T flag_value)

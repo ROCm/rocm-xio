@@ -31,8 +31,8 @@ public:
   ~SdmaQueue();
 
   SdmaQueueDeviceHandle* deviceHandle() const;
-  SdmaQueuePythonDeviceCtx deviceCtx() const;
-  SdmaQueueHostHandle hostHandle() const;
+  SdmaQueuePythonDeviceCtx pythonDeviceContext() const;
+  SdmaQueueHostHandle hostHandle();
 
   void dump(std::ofstream&);
 
@@ -71,9 +71,9 @@ public:
   bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1, bool allocateOnHost = false);
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
-                             uint32_t engineId, int* channelIdx = nullptr);
+                             uint32_t engineId, int* channelIdx = nullptr, bool isHostQueue = false);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
-  SdmaQueuePythonDeviceCtx get_queue_device_ctx(int srcDeviceId, int dstDeviceId);
+  SdmaQueuePythonDeviceCtx getPythonDeviceCtx(int srcDeviceId, int dstDeviceId);
   SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
 
 private:
