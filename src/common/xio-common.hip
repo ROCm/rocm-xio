@@ -2638,4 +2638,22 @@ __host__ bool validateGpuPointer(void* ptr, const char* name,
   return true;
 }
 
+void enablePeerAccess(int deviceId, int peerDeviceId) {
+  int canAccess;
+  HIP_CHECK(hipDeviceCanAccessPeer(&canAccess, deviceId, peerDeviceId));
+  if (!canAccess) {
+    std::cerr << "Unable to enable peer access from GPU devices " << deviceId
+              << " to " << peerDeviceId << std::endl;
+    return;
+  }
+
+  HIP_CHECK(hipSetDevice(deviceId));
+  hipError_t error = hipDeviceEnablePeerAccess(peerDeviceId, 0);
+  if (error != hipSuccess && error != hipErrorPeerAccessAlreadyEnabled) {
+    std::cerr << "Unable to enable peer to peer access from " << deviceId
+              << " to " << peerDeviceId << " (" << hipGetErrorString(error)
+              << ")" << std::endl;
+  }
+}
+
 } // namespace xio
