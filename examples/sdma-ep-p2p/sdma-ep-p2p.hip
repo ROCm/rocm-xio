@@ -82,22 +82,15 @@ int main() {
     return 1;
   }
 
-  sdma_ep::SdmaConnectionInfo connInfo = {};
-  rc = sdma_ep::createConnection(SRC_GPU, DST_GPU, &connInfo);
-  if (rc != 0) {
-    fprintf(stderr, "ERROR: createConnection failed (%d)\n", rc);
-    return 1;
-  }
-  printf("Connection: GPU %d -> GPU %d (engine %u)\n", connInfo.srcDeviceId,
-         connInfo.dstDeviceId, connInfo.engineId);
-
   sdma_ep::SdmaQueueInfo queueInfo = {};
   rc = sdma_ep::createQueue(SRC_GPU, DST_GPU, &queueInfo);
   if (rc != 0) {
     fprintf(stderr, "ERROR: createQueue failed (%d)\n", rc);
     return 1;
   }
-  printf("Queue created (channel %d)\n\n", queueInfo.channelIdx);
+  printf("Queue created: GPU %d -> GPU %d (engine %u, channel %d)\n\n",
+         queueInfo.srcDeviceId, queueInfo.dstDeviceId,
+         queueInfo.engineId, queueInfo.channelIdx);
 
   HIP_CHECK(hipSetDevice(SRC_GPU));
   uint8_t* srcBuf = nullptr;

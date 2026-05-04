@@ -25,25 +25,16 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+// Forward declarations to avoid circular dependency
+namespace anvil {
+class SdmaQueueHostHandle;
+}
+
 namespace sdma_ep {
 
 /* ================================================================
  * Host-Side Setup Types
  * ================================================================ */
-
-/**
- * @brief Information about an established SDMA connection.
- *
- * Returned by createConnection(). Contains the resolved
- * SDMA engine ID for the GPU pair, which is determined by
- * the XGMI/Infinity Fabric topology (MI300X OAM map).
- */
-struct SdmaConnectionInfo {
-  int srcDeviceId;   /**< Source HIP device ID. */
-  int dstDeviceId;   /**< Destination HIP device ID. */
-  uint32_t engineId; /**< XGMI-optimal SDMA engine ID
-                          for this GPU pair. */
-};
 
 /**
  * @brief Information about a created SDMA queue.
@@ -60,6 +51,8 @@ struct SdmaQueueInfo {
                            code. */
   int srcDeviceId;    /**< Source HIP device ID. */
   int dstDeviceId;    /**< Destination HIP device ID. */
+  uint32_t engineId;  /**< XGMI-optimal SDMA engine ID
+                           for this GPU pair. */
   int channelIdx;     /**< Channel index within the
                            connection (0-based). */
 };
@@ -151,26 +144,6 @@ __host__ int initEndpoint();
 __host__ void shutdownEndpoint();
 
 /**
- * @brief Create an SDMA connection between two GPUs.
- *
- * Enables P2P peer access from the source GPU to the
- * destination GPU and resolves the XGMI-topology-
- * optimal SDMA engine ID for this GPU pair (using the
- * MI300X OAM map). For bidirectional transfers, call
- * once for each direction.
- *
- * Must be called after initEndpoint() and before
- * createQueue() for the same GPU pair.
- *
- * @param srcDeviceId Source HIP device ID.
- * @param dstDeviceId Destination HIP device ID.
- * @param info        Output connection information.
- * @return 0 on success, negative error code on failure.
- */
-__host__ int createConnection(int srcDeviceId, int dstDeviceId,
-                              SdmaConnectionInfo* info);
-
-/**
  * @brief Create an SDMA queue for a GPU pair.
  *
  * Allocates a 1 MiB ring buffer in device memory,
@@ -219,61 +192,24 @@ __host__ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* in
  */
 __host__ void destroyQueue(SdmaQueueInfo* info);
 
-__host__ SdmaQueuePythonDeviceCtx get_queue_device_ctx(int srcDeviceId, int dstDeviceId);
+__host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int dstDeviceId);
 
-
-/* ================================================================
- * Host-Side Data Transfer Operations
- * ================================================================ */
-
-__host__ void put(int srcDeviceId, int dstDeviceId, int channelIdx,
-                  void* src, void* dst, size_t size);
-
-__host__ void put_signal(int srcDeviceId, int dstDeviceId, int channelIdx,
-                         void* src, void* dst, size_t size,
-                         void* flag_ptr, uint64_t flag_value, int flag_bits = 64);
-
-__host__ void put_tile(int srcDeviceId, int dstDeviceId, int channelIdx,
-                       const Tile& tile, void* dst_ptr, size_t dst_stride);
-
-__host__ void put_tiles(int srcDeviceId, int dstDeviceId, int channelIdx,
-                        const std::vector<Tile>& tiles,
-                        const std::vector<void*>& dst_ptrs,
-                        const std::vector<size_t>& dst_strides);
-
-__host__ void put_tile_signal(int srcDeviceId, int dstDeviceId, int channelIdx,
-                               const Tile& tile, void* dst_ptr, size_t dst_stride,
-                               void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-__host__ void put_tiles_signal(int srcDeviceId, int dstDeviceId, int channelIdx,
-                                const std::vector<Tile>& tiles,
-                                const std::vector<void*>& dst_ptrs,
-                                const std::vector<size_t>& dst_strides,
-                                void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-__host__ void wait_flag_then_put(int srcDeviceId, int dstDeviceId, int channelIdx,
-                                  void* flag_ptr, uint32_t expected_value,
-                                  void* src, void* dst, size_t size, int flag_bits = 32);
-
-__host__ void wait_flag_then_put_tile(int srcDeviceId, int dstDeviceId, int channelIdx,
-                                       void* flag_ptr, uint32_t expected_value,
-                                       const Tile& tile, void* dst_ptr,
-                                       size_t dst_stride, int flag_bits = 32);
-
-__host__ void wait_flag_then_put_tiles(int srcDeviceId, int dstDeviceId, int channelIdx,
-                                        void* flag_ptr, uint32_t expected_value,
-                                        const std::vector<Tile>& tiles,
-                                        const std::vector<void*>& dst_ptrs,
-                                        const std::vector<size_t>& dst_strides,
-                                        int flag_bits = 32);
-
-__host__ void signal(int srcDeviceId, int dstDeviceId, int channelIdx,
-                     void* flag_ptr, uint64_t flag_value, int flag_bits = 32);
-
-__host__ void timestamp(int srcDeviceId, int dstDeviceId, int channelIdx,
-                        void* timestamp_ptr);
-
-__host__ void quiet(int srcDeviceId, int dstDeviceId, int channelIdx);
+/**
+ * @brief Get a host handle for SDMA operations.
+ *
+ * Returns a handle that can be used to perform host-initiated
+ * SDMA operations (put, signal, etc.). The handle is lightweight
+ * and can be copied freely.
+ *
+ * @param srcDeviceId Source HIP device ID.
+ * @param dstDeviceId Destination HIP device ID.
+ * @param channelIdx  Channel index (default 0).
+ * @return SdmaQueueHostHandle for performing transfers.
+ *
+ * @note The corresponding queue must have been created with
+ *       createHostQueue() first.
+ */
+__host__ anvil::SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
 
 } // namespace sdma_ep
 

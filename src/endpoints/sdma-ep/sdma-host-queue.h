@@ -57,6 +57,9 @@ class SdmaQueueHostHandle
 
    void put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride);
 
+   void put_tiles(const std::vector<Tile>& tiles, const std::vector<void*>& dst_ptrs,
+                  const std::vector<size_t>& dst_strides);
+
    // Combined put_tile + atomic_add in one SDMA submission
    template <typename T>
    void put_tile_signal(const Tile& tile, void* dst_ptr, size_t dst_stride,

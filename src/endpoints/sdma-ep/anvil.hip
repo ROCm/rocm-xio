@@ -319,9 +319,9 @@ SdmaQueueDeviceHandle* SdmaQueue::deviceHandle() const {
   return deviceHandle_;
 }
 
-SdmaQueuePythonDeviceCtx SdmaQueue::deviceCtx() const {
+SdmaQueuePythonDeviceCtx SdmaQueue::pythonDeviceContext() const {
   if (deviceHandle_ == nullptr) {
-    throw std::runtime_error("deviceCtx() called on host-only queue");
+    throw std::runtime_error("pythonDeviceContext() called on host-only queue");
   }
   return {.queueBuf = reinterpret_cast<uintptr_t>(deviceHandle_->queueBuf),
           .rptr = reinterpret_cast<uintptr_t>(deviceHandle_->rptr),
@@ -331,8 +331,8 @@ SdmaQueuePythonDeviceCtx SdmaQueue::deviceCtx() const {
           .committedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->committedWptr)};
 }
 
-SdmaQueueHostHandle SdmaQueue::hostHandle() const {
-  return SdmaQueueHostHandle(const_cast<SdmaQueue*>(this));
+SdmaQueueHostHandle SdmaQueue::hostHandle() {
+  return SdmaQueueHostHandle(this);
 }
 
 void SdmaQueue::dump(std::ofstream& logFile) {
@@ -458,18 +458,20 @@ void AnvilLib::init() {
 }
 
 SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
-                                     uint32_t engineId, int* channelIdx) {
-  // Use connect internally - device-allocated, single channel
-  if (!connect(srcDeviceId, dstDeviceId, 1, false)) {
-    return nullptr;
-  }
-
+                                     uint32_t engineId, int* channelIdx, bool isHostQueue) {
+  auto& channel_map = isHostQueue ? host_sdma_channels_ : sdma_channels_;
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
-  auto& vec = sdma_channels_[key];
+  auto& vec = channel_map[key];
 
-  if (channelIdx)
-    *channelIdx = 0;
-  return vec[0].get();
+    vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                               gpuAgents_[srcDeviceId],
+                                               engineId,
+                                               isHostQueue));
+
+  if (channelIdx) {
+    *channelIdx = static_cast<int>(vec.size() - 1);
+  }
+  return vec.back().get();
 }
 
 bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
@@ -569,12 +571,12 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
 
 // ==================== Host API Methods ====================
 
-SdmaQueuePythonDeviceCtx AnvilLib::get_queue_device_ctx(int srcDeviceId, int dstDeviceId) {
+SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(int srcDeviceId, int dstDeviceId) {
   SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, 0);
   if (!queue) {
-    throw std::runtime_error("get_queue_device_ctx: queue not found");
+    throw std::runtime_error("getPythonDeviceCtx: queue not found");
   }
-  return queue->deviceCtx();
+  return queue->pythonDeviceContext();
 }
 
 SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {

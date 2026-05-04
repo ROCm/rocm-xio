@@ -497,18 +497,6 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
     }
   }
 
-  sdma_ep::SdmaConnectionInfo connFwd, connRev;
-  if (sdma_ep::createConnection(srcGpu, dstGpu, &connFwd) != 0) {
-    std::cerr << "Failed to create SDMA connection " << srcGpu << " -> "
-              << dstGpu << std::endl;
-    return hipErrorInvalidDevice;
-  }
-  if (sdma_ep::createConnection(dstGpu, srcGpu, &connRev) != 0) {
-    std::cerr << "Failed to create SDMA connection " << dstGpu << " -> "
-              << srcGpu << std::endl;
-    return hipErrorInvalidDevice;
-  }
-
   sdma_ep::SdmaQueueInfo qInfo0, qInfo1;
   if (sdma_ep::createQueue(srcGpu, dstGpu, &qInfo0) != 0) {
     std::cerr << "Failed to create SDMA queue (rank 0)" << std::endl;
