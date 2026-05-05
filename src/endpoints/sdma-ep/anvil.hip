@@ -446,7 +446,7 @@ SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
   auto& vec = channel_map[key];
 
-    vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+  vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
                                                gpuAgents_[srcDeviceId],
                                                engineId,
                                                isHostQueue));
@@ -563,7 +563,6 @@ SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(int srcDeviceId, int dstDe
 }
 
 SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
-  // Try host channels first, then device channels
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
   auto host_it = host_sdma_channels_.find(key);
   if (host_it != host_sdma_channels_.end() &&
@@ -571,12 +570,7 @@ SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, in
     return host_it->second[static_cast<std::size_t>(channelIdx)]->hostHandle();
   }
 
-  // Fallback to device channels
-  SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, channelIdx);
-  if (!queue) {
-    throw std::runtime_error("getHostHandle: queue not found");
-  }
-  return queue->hostHandle();
+  throw std::runtime_error("getHostHandle: queue not found");
 }
 
 } // namespace anvil
