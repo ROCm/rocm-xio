@@ -15,15 +15,431 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 
 #include <fcntl.h>
 #include <linux/nvme_ioctl.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif // __HIP_DEVICE_COMPILE__
 
 namespace xio::nvme_ep {
+
+#ifndef __HIP_DEVICE_COMPILE__
+struct nvmePersistentSession {
+  nvmePersistentOptions opts = {};
+  nvmePersistentInfo info = {};
+  nvme_queue_info queue = {};
+  XioEndpointConfig baseConfig = {};
+  nvmeDoorbellParams doorbell = {};
+  xioBufferInfo readBuffer = {};
+  xioBufferInfo writeBuffer = {};
+  uint32_t readBufferSize = 0;
+  uint32_t writeBufferSize = 0;
+  void* prpPool = nullptr;
+  void* prpPoolGpu = nullptr;
+  uint64_t prpPoolDma = 0;
+  uint32_t prpEntriesPerCmd = 0;
+  size_t prpPoolSize = 0;
+  int gpuWallClockRateKHz = 0;
+  nvmePersistentControl* control = nullptr;
+  nvmePersistentControl* controlGpu = nullptr;
+  nvmePersistentWorkDesc* descs = nullptr;
+  nvmePersistentWorkDesc* descsGpu = nullptr;
+  nvmePersistentWorkCompletion* comps = nullptr;
+  nvmePersistentWorkCompletion* compsGpu = nullptr;
+  uint32_t ringDepth = 1;
+  uint32_t batchSize = 1;
+  uint64_t nextSeq = 1;
+  uint64_t reapSeq = 1;
+  hipStream_t stream = nullptr;
+  int nvmeFd = -1;
+  bool queueCreated = false;
+  bool workerStarted = false;
+};
+
+static void freePersistentBuffers(nvmePersistentSession* s) {
+  if (!s)
+    return;
+
+  freeGpuAccessibleBuffer(&s->readBuffer);
+  freeGpuAccessibleBuffer(&s->writeBuffer);
+  s->readBufferSize = 0;
+  s->writeBufferSize = 0;
+  if (s->prpPool) {
+    (void)hipHostFree(s->prpPool);
+    s->prpPool = nullptr;
+    s->prpPoolGpu = nullptr;
+    s->prpPoolDma = 0;
+    s->prpPoolSize = 0;
+  }
+}
+
+static int allocatePersistentBuffers(nvmePersistentSession* s, uint32_t len) {
+  if (!s || !len)
+    return -EINVAL;
+
+  if (len <= s->readBufferSize && len <= s->writeBufferSize)
+    return 0;
+
+  freePersistentBuffers(s);
+
+  uint32_t alloc_len = s->opts.maxTransferBytes;
+  if (alloc_len < len)
+    alloc_len = len;
+
+  hipError_t err = allocateGpuAccessibleBuffer(alloc_len, s->opts.memoryMode,
+                                               s->doorbell.nvmeTargetBdf,
+                                               s->opts.controller,
+                                               &s->readBuffer);
+  if (err != hipSuccess)
+    return -ENOMEM;
+  s->readBufferSize = alloc_len;
+
+  err = allocateGpuAccessibleBuffer(alloc_len, s->opts.memoryMode,
+                                    s->doorbell.nvmeTargetBdf,
+                                    s->opts.controller, &s->writeBuffer);
+  if (err != hipSuccess)
+    return -ENOMEM;
+  s->writeBufferSize = alloc_len;
+
+  const uint32_t pages = (alloc_len + NVME_PAGE_SIZE - 1) / NVME_PAGE_SIZE;
+  s->prpEntriesPerCmd = alloc_len > NVME_PAGE_SIZE ? pages + 1 : 0;
+  if (s->prpEntriesPerCmd) {
+    s->prpPoolSize = s->prpEntriesPerCmd * sizeof(uint64_t);
+    long host_page = sysconf(_SC_PAGESIZE);
+    size_t align = host_page > 0 ? (size_t)host_page : 4096;
+    s->prpPoolSize = (s->prpPoolSize + align - 1) & ~(align - 1);
+    err = hipHostMalloc(&s->prpPool, s->prpPoolSize, hipHostMallocMapped);
+    if (err != hipSuccess || !s->prpPool)
+      return -ENOMEM;
+    memset(s->prpPool, 0, s->prpPoolSize);
+    s->prpPoolDma = getPhysAddr(s->prpPool);
+    (void)hipHostGetDevicePointer(&s->prpPoolGpu, s->prpPool, 0);
+    if (!s->prpPoolGpu)
+      s->prpPoolGpu = s->prpPool;
+  }
+
+  return 0;
+}
+
+static int allocatePersistentRing(nvmePersistentSession* s) {
+  if (!s)
+    return -EINVAL;
+
+  hipError_t err = hipHostMalloc((void**)&s->control, sizeof(*s->control),
+                                 hipHostMallocMapped);
+  if (err != hipSuccess || !s->control)
+    return -ENOMEM;
+  memset(s->control, 0, sizeof(*s->control));
+  s->control->ringSize = s->ringDepth;
+  (void)hipHostGetDevicePointer((void**)&s->controlGpu, s->control, 0);
+  if (!s->controlGpu)
+    s->controlGpu = s->control;
+
+  err = hipHostMalloc((void**)&s->descs, sizeof(*s->descs) * s->ringDepth,
+                      hipHostMallocMapped);
+  if (err != hipSuccess || !s->descs)
+    return -ENOMEM;
+  memset(s->descs, 0, sizeof(*s->descs) * s->ringDepth);
+  (void)hipHostGetDevicePointer((void**)&s->descsGpu, s->descs, 0);
+  if (!s->descsGpu)
+    s->descsGpu = s->descs;
+
+  err = hipHostMalloc((void**)&s->comps, sizeof(*s->comps) * s->ringDepth,
+                      hipHostMallocMapped);
+  if (err != hipSuccess || !s->comps)
+    return -ENOMEM;
+  memset(s->comps, 0, sizeof(*s->comps) * s->ringDepth);
+  (void)hipHostGetDevicePointer((void**)&s->compsGpu, s->comps, 0);
+  if (!s->compsGpu)
+    s->compsGpu = s->comps;
+
+  return 0;
+}
+
+static int startPersistentWorker(nvmePersistentSession* s) {
+  if (!s)
+    return -EINVAL;
+
+  int ret = allocatePersistentBuffers(s, s->opts.maxTransferBytes ?
+                                           s->opts.maxTransferBytes : 4096);
+  if (ret < 0)
+    return ret;
+  ret = allocatePersistentRing(s);
+  if (ret < 0)
+    return ret;
+
+  nvmeIoParams ioParams = {};
+  ioParams.lbaSize = s->info.lbaSize;
+  ioParams.lbaRangeLbas = s->info.capacityLbas;
+  ioParams.lfsrSeed = s->opts.lfsrSeed;
+  ioParams.nsid = s->opts.nsid;
+  ioParams.queueSize = s->info.queueLength;
+  ioParams.batchSize = s->batchSize;
+
+  nvmeBufferParams buf = {};
+  buf.readBuffer = s->readBuffer.gpuPtr ? static_cast<uint8_t*>(s->readBuffer.gpuPtr)
+                                        : static_cast<uint8_t*>(s->readBuffer.hostPtr);
+  buf.writeBuffer = s->writeBuffer.gpuPtr ? static_cast<uint8_t*>(s->writeBuffer.gpuPtr)
+                                          : static_cast<uint8_t*>(s->writeBuffer.hostPtr);
+  buf.bufferSize = s->readBufferSize;
+  buf.readBufferDma = s->readBuffer.dmaAddr;
+  buf.writeBufferDma = s->writeBuffer.dmaAddr;
+  buf.readPagePhysAddrs = s->readBuffer.pagePhysAddrs;
+  buf.writePagePhysAddrs = s->writeBuffer.pagePhysAddrs;
+  buf.readNumPages = s->readBuffer.numPages;
+  buf.writeNumPages = s->writeBuffer.numPages;
+  buf.prpListPool = static_cast<uint64_t*>(s->prpPoolGpu);
+  buf.prpListPoolDma = s->prpPoolDma;
+  buf.prpEntriesPerCmd = s->prpEntriesPerCmd;
+
+  hipLaunchKernelGGL(nvmePersistentWorkerKernel, dim3(1), dim3(1), 0, s->stream,
+                     s->baseConfig, ioParams, s->doorbell, buf, s->controlGpu,
+                     s->descsGpu, s->compsGpu);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    return -EIO;
+  s->workerStarted = true;
+  return 0;
+}
+
+__host__ int openPersistentSession(const nvmePersistentOptions* opts,
+                                   nvmePersistentSession** out) {
+  if (!opts || !opts->controller || !out)
+    return -EINVAL;
+
+  *out = nullptr;
+  std::unique_ptr<nvmePersistentSession> s(new nvmePersistentSession());
+  s->opts = *opts;
+  if (!s->opts.queueLength)
+    s->opts.queueLength = 64;
+  if (!s->opts.nsid)
+    s->opts.nsid = 1;
+  if (!s->opts.maxTransferBytes)
+    s->opts.maxTransferBytes = 1024 * 1024;
+  s->ringDepth = s->opts.ringDepth ? s->opts.ringDepth : 1;
+  s->batchSize = s->opts.batchSize ? s->opts.batchSize : s->ringDepth;
+  if (s->batchSize > s->ringDepth)
+    s->batchSize = s->ringDepth;
+
+  if (s->opts.gpuId >= 0) {
+    hipError_t hret = hipSetDevice(s->opts.gpuId);
+    if (hret != hipSuccess)
+      return -EINVAL;
+  }
+  {
+    int device_id = 0;
+    (void)hipGetDevice(&device_id);
+    (void)hipDeviceGetAttribute(&s->gpuWallClockRateKHz,
+                                hipDeviceAttributeWallClockRate, device_id);
+  }
+
+  unsigned lba_size = 0;
+  if (queryLbaSize(s->opts.controller, s->opts.nsid, &lba_size) < 0)
+    return -EIO;
+  s->info.lbaSize = lba_size;
+  if (queryNamespaceCapacity(s->opts.controller, s->opts.nsid,
+                             &s->info.capacityLbas) == 0)
+    s->info.capacityBytes = s->info.capacityLbas * s->info.lbaSize;
+
+  uint16_t qid = s->opts.queueId;
+  if (!qid && queryMaxQueueId(s->opts.controller, &qid) < 0)
+    return -EIO;
+  s->info.queueId = qid;
+  s->info.queueLength = s->opts.queueLength;
+
+  if (detectBdfFromDevice(s->opts.controller, &s->doorbell.nvmeTargetBdf) < 0)
+    return -EIO;
+  s->doorbell.usePciMmioBridge = s->opts.usePciMmioBridge;
+
+  if (s->doorbell.usePciMmioBridge) {
+    uint16_t bridge_bdf = 0;
+    if (detectPciMmioBridgeBdf(&bridge_bdf) < 0)
+      return -EIO;
+    void* shadow_virt = nullptr;
+    if (mapMmioBridgeShadowBuffer(bridge_bdf, &shadow_virt) < 0)
+      return -EIO;
+    if (registerMmioBridgeShadowBufferForGpu(shadow_virt, 8192,
+                                             &s->doorbell.shadowBufferVirt) < 0)
+      return -EIO;
+  } else {
+    void* bar0_cpu = nullptr;
+    if (mapPciBar(s->doorbell.nvmeTargetBdf, 0, &bar0_cpu,
+                  &s->doorbell.nvmeBar0Gpu, 8192) < 0)
+      return -EIO;
+  }
+
+  if (createQueue(s->opts.controller, ROCM_XIO_DEVICE_PATH, qid,
+                  s->opts.queueLength, s->doorbell.nvmeTargetBdf,
+                  s->opts.memoryMode, &s->queue) < 0)
+    return -EIO;
+
+  s->queueCreated = true;
+  s->doorbell.doorbellOffset = doorbellBase + (2 * qid * doorBellStride);
+
+  hipError_t herr = hipStreamCreate(&s->stream);
+  if (herr != hipSuccess)
+    return -EIO;
+
+  s->baseConfig.numThreads = 1;
+  s->baseConfig.memoryMode = s->opts.memoryMode;
+  s->baseConfig.verbose = s->opts.verbose;
+  s->baseConfig.submissionQueue = s->queue.sq_gpu ? s->queue.sq_gpu
+                                                  : s->queue.sq_virt;
+  s->baseConfig.completionQueue = s->queue.cq_gpu ? s->queue.cq_gpu
+                                                  : s->queue.cq_virt;
+  s->nvmeFd = openDeviceWithRetry(s->opts.controller, O_RDWR, "NVMe device", 3,
+                                  50);
+
+  if (startPersistentWorker(s.get()) < 0)
+    return -EIO;
+
+  *out = s.release();
+  return 0;
+}
+
+__host__ void closePersistentSession(nvmePersistentSession* s) {
+  if (!s)
+    return;
+
+  if (s->control) {
+    s->control->stop = 1;
+    __sync_synchronize();
+  }
+  if (s->workerStarted && s->stream)
+    (void)hipStreamSynchronize(s->stream);
+  if (s->control)
+    (void)hipHostFree(s->control);
+  if (s->descs)
+    (void)hipHostFree(s->descs);
+  if (s->comps)
+    (void)hipHostFree(s->comps);
+  freePersistentBuffers(s);
+  if (s->stream)
+    (void)hipStreamDestroy(s->stream);
+  if (s->queueCreated && s->nvmeFd >= 0)
+    deleteQueue(s->nvmeFd, s->info.queueId);
+  if (s->nvmeFd >= 0)
+    close(s->nvmeFd);
+  delete s;
+}
+
+__host__ int getPersistentInfo(nvmePersistentSession* s,
+                               nvmePersistentInfo* info) {
+  if (!s || !info)
+    return -EINVAL;
+  *info = s->info;
+  return 0;
+}
+
+__host__ int submitPersistent(nvmePersistentSession* s,
+                              const nvmePersistentIo* io,
+                              nvmePersistentCompletion* completion) {
+  if (!s || !io || !completion || !io->len)
+    return -EINVAL;
+
+  memset(completion, 0, sizeof(*completion));
+  completion->userData = io->userData;
+  completion->bytes = io->len;
+
+  if ((io->offset % s->info.lbaSize) || (io->len % s->info.lbaSize)) {
+    completion->error = EINVAL;
+    return -EINVAL;
+  }
+
+  if (io->len > s->readBufferSize || io->len > s->writeBufferSize) {
+    completion->error = EMSGSIZE;
+    return -EMSGSIZE;
+  }
+
+  int ret = postPersistent(s, io);
+  if (ret < 0) {
+    completion->error = -ret;
+    return ret;
+  }
+
+  do {
+    ret = reapPersistent(s, 1, 1, completion);
+    if (ret == 0)
+      sched_yield();
+  } while (ret == 0);
+
+  if (ret < 0)
+    return ret;
+  return completion->error ? -EIO : 0;
+}
+
+__host__ int postPersistent(nvmePersistentSession* s,
+                            const nvmePersistentIo* io) {
+  if (!s || !io || !io->len)
+    return -EINVAL;
+
+  if ((io->offset % s->info.lbaSize) || (io->len % s->info.lbaSize))
+    return -EINVAL;
+
+  if (io->len > s->readBufferSize || io->len > s->writeBufferSize)
+    return -EMSGSIZE;
+
+  uint64_t producer = s->control->producer;
+  uint64_t consumer = s->control->consumer;
+  if (producer - consumer >= s->ringDepth)
+    return -EAGAIN;
+
+  uint64_t seq = s->nextSeq++;
+  uint32_t slot = (uint32_t)(producer % s->ringDepth);
+  s->comps[slot].seq = 0;
+  s->descs[slot].userData = io->userData;
+  s->descs[slot].offset = io->offset;
+  s->descs[slot].len = io->len;
+  s->descs[slot].isWrite = io->isWrite;
+  s->descs[slot].verify = io->verify;
+  s->descs[slot].seq = seq;
+  __sync_synchronize();
+  s->control->producer = producer + 1;
+  return 0;
+}
+
+__host__ int reapPersistent(nvmePersistentSession* s, uint32_t min,
+                            uint32_t max,
+                            nvmePersistentCompletion* completions) {
+  if (!s || !completions || !max)
+    return -EINVAL;
+
+  uint32_t done = 0;
+  while (done < max) {
+    uint32_t slot = (uint32_t)((s->reapSeq - 1) % s->ringDepth);
+    if (s->comps[slot].seq != s->reapSeq)
+      break;
+
+    nvmePersistentCompletion& completion = completions[done];
+    memset(&completion, 0, sizeof(completion));
+    completion.userData = s->comps[slot].userData;
+    completion.bytes = s->comps[slot].bytes;
+    completion.error = s->comps[slot].error;
+    completion.nvmeStatus = s->comps[slot].nvmeStatus;
+    completion.gpuStart = s->comps[slot].gpuStart;
+    completion.gpuEnd = s->comps[slot].gpuEnd;
+    if (completion.gpuEnd > completion.gpuStart &&
+        s->gpuWallClockRateKHz > 0) {
+      completion.gpuElapsedNs =
+        ((completion.gpuEnd - completion.gpuStart) * 1000000ULL) /
+        (uint64_t)s->gpuWallClockRateKHz;
+    }
+    completion.verifyPass = s->comps[slot].verifyPass;
+    completion.verifyFail = s->comps[slot].verifyFail;
+    s->comps[slot].seq = 0;
+    s->reapSeq++;
+    done++;
+  }
+
+  if (done < min && done == 0)
+    return 0;
+  return (int)done;
+}
+#endif // __HIP_DEVICE_COMPILE__
 
 /**
  * @brief Read an NVMe SQE from a volatile queue slot
@@ -844,6 +1260,128 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
 
   // Call driveEndpoint with struct parameters
   driveEndpoint(config, ioParams, doorbellParams, bufferParams);
+}
+
+extern "C" __global__ void nvmePersistentWorkerKernel(
+  XioEndpointConfig config, nvmeIoParams baseParams,
+  nvmeDoorbellParams doorbellParams, nvmeBufferParams bufferParams,
+  volatile nvmePersistentControl* control,
+  volatile nvmePersistentWorkDesc* descs,
+  volatile nvmePersistentWorkCompletion* comps) {
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+  uint16_t sq_tail = 0;
+  uint16_t cq_head = 0;
+  uint8_t expected_phase = 1;
+  uint16_t cmd_id = 1;
+
+  while (!control->stop) {
+    uint64_t consumer = control->consumer;
+    if (consumer == control->producer)
+      continue;
+
+    uint32_t slot = (uint32_t)(consumer % control->ringSize);
+    nvmePersistentWorkDesc desc = {};
+    desc.seq = descs[slot].seq;
+    desc.userData = descs[slot].userData;
+    desc.offset = descs[slot].offset;
+    desc.len = descs[slot].len;
+    desc.isWrite = descs[slot].isWrite;
+    desc.verify = descs[slot].verify;
+
+    nvmePersistentWorkCompletion comp = {};
+    comp.userData = desc.userData;
+    comp.bytes = desc.len;
+
+    if ((desc.offset % baseParams.lbaSize) || (desc.len % baseParams.lbaSize) ||
+        desc.len == 0) {
+      comp.error = 22;
+    } else {
+      uint32_t blocks = desc.len / baseParams.lbaSize;
+      uint64_t transfer_size = (uint64_t)blocks * baseParams.lbaSize;
+      uint64_t addr;
+      if (desc.isWrite) {
+        if (bufferParams.writeBuffer != nullptr) {
+          xio::DataPatternParams pp{bufferParams.writeBuffer, desc.len, 0,
+                                    baseParams.lbaSize, baseParams.lfsrSeed,
+                                    nullptr};
+          xio::dataPattern(false, pp);
+        }
+        addr = bufferParams.writeBufferDma;
+      } else {
+        addr = bufferParams.readBufferDma;
+      }
+
+      sqeType sqeLocal = {};
+      comp.gpuStart = wall_clock64();
+      sqeLocal.opcode = desc.isWrite ? nvme_cmd_write : nvme_cmd_read;
+      sqeLocal.command_id = cmd_id++;
+      if (cmd_id == 0)
+        cmd_id = 1;
+      sqeLocal.nsid = baseParams.nsid;
+      calculatePrps(addr, transfer_size, &sqeLocal, bufferParams.prpListPool,
+                    bufferParams.prpListPoolDma,
+                    desc.isWrite ? bufferParams.writePagePhysAddrs
+                                 : bufferParams.readPagePhysAddrs,
+                    0);
+      sqeSetup(&sqeLocal, desc.offset / baseParams.lbaSize, blocks);
+      sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+      sq_tail = (sq_tail + 1) % baseParams.queueSize;
+      __threadfence_system();
+      ringDoorbell(sq_tail, doorbellParams);
+
+      unsigned poll_count = 0;
+      cqeType cqe_new = {};
+      while (true) {
+        cqe_new = cqeRead(&cqeAddr[cq_head]);
+        if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase)
+          break;
+        if (control->stop || ++poll_count >= NVME_EP_MAX_POLLS) {
+          comp.error = 110;
+          break;
+        }
+      }
+
+      if (!comp.error && !cqeOk(&cqe_new)) {
+        comp.error = 5;
+        comp.nvmeStatus = cqe_new.status;
+      }
+
+      if (!comp.error && desc.verify && !desc.isWrite &&
+          bufferParams.readBuffer) {
+        xio::DataPatternParams vp{bufferParams.readBuffer, desc.len, 0,
+                                  baseParams.lbaSize, baseParams.lfsrSeed,
+                                  nullptr};
+        if (xio::dataPattern(true, vp))
+          comp.verifyPass = 1;
+        else {
+          comp.verifyFail = 1;
+          comp.error = 5;
+        }
+      }
+      comp.gpuEnd = wall_clock64();
+
+      if (!comp.error) {
+        cq_head = (cq_head + 1) % baseParams.queueSize;
+        if (cq_head == 0)
+          expected_phase ^= 1;
+        ringDoorbell(cq_head, doorbellParams,
+                     doorbellParams.doorbellOffset + doorBellStride);
+      }
+    }
+
+    comps[slot].userData = comp.userData;
+    comps[slot].bytes = comp.bytes;
+    comps[slot].error = comp.error;
+    comps[slot].nvmeStatus = comp.nvmeStatus;
+    comps[slot].gpuStart = comp.gpuStart;
+    comps[slot].gpuEnd = comp.gpuEnd;
+    comps[slot].verifyPass = comp.verifyPass;
+    comps[slot].verifyFail = comp.verifyFail;
+    __threadfence_system();
+    comps[slot].seq = desc.seq;
+    control->consumer = consumer + 1;
+  }
 }
 
 } // namespace xio::nvme_ep

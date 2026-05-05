@@ -480,7 +480,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(nvme_host_read_commands{device=~\"/dev/(${nvme})\",server_name=\"${hostname}\"}[$__rate_interval])",
+          "expr": "rate(nvme_host_read_commands_total{device=~\"${nvme}\"}[$__rate_interval])",
           "format": "time_series",
           "legendFormat": "{{device}} read",
           "range": true,
@@ -492,7 +492,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(nvme_host_write_commands{device=~\"/dev/(${nvme})\",server_name=\"${hostname}\"}[$__rate_interval])",
+          "expr": "rate(nvme_host_write_commands_total{device=~\"${nvme}\"}[$__rate_interval])",
           "format": "time_series",
           "legendFormat": "{{device}} write",
           "range": true,
@@ -703,7 +703,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(nvme_data_units_read{device=~\"/dev/(${nvme})\",server_name=\"${hostname}\"}[$__rate_interval])*512",
+          "expr": "rate(nvme_data_units_read_total{device=~\"${nvme}\"}[$__rate_interval])*512000",
           "format": "time_series",
           "legendFormat": "{{device}} read",
           "range": true,
@@ -715,7 +715,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(nvme_data_units_written{device=~\"/dev/(${nvme})\",server_name=\"${hostname}\"}[$__rate_interval])*512",
+          "expr": "rate(nvme_data_units_written_total{device=~\"${nvme}\"}[$__rate_interval])*512000",
           "format": "time_series",
           "legendFormat": "{{device}} write",
           "range": true,
@@ -928,7 +928,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "nvme_num_err_log_entries{device=~\"/dev/(${nvme})\"}",
+          "expr": "nvme_num_err_log_entries_total{device=~\"${nvme}\"}",
           "format": "time_series",
           "legendFormat": "{{device}}",
           "refId": "A"
@@ -1152,7 +1152,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "nvme_temperature{device=~\"/dev/(${nvme})\"} - 273.15",
+          "expr": "nvme_temperature_celsius{device=~\"${nvme}\"}",
           "format": "time_series",
           "legendFormat": "{{device}}",
           "range": true,
@@ -1244,14 +1244,14 @@
       },
       {
         "current": {
-          "text": "nvme0n1",
-          "value": "nvme0n1"
+          "text": "nvme2n1",
+          "value": "nvme2n1"
         },
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(node_disk_read_bytes_total{device=~\"nvme.*\", server_name=\"$hostname\"},device)",
+        "definition": "label_values(nvme_device_info,device)",
         "description": "The NVMe device that we want to query",
         "includeAll": true,
         "label": "NVMe Device",
@@ -1260,7 +1260,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(node_disk_read_bytes_total{device=~\"nvme.*\", server_name=\"$hostname\"},device)",
+          "query": "label_values(nvme_device_info,device)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

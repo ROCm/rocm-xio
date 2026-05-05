@@ -110,6 +110,124 @@ struct nvmeBufferParams {
 };
 
 /**
+ * Persistent NVMe endpoint session options.
+ *
+ * Describes the controller, queue, GPU, memory, and verification settings used
+ * to create a long-lived NVMe queue pair and GPU worker.  Unlike run(), a
+ * persistent session keeps queue resources alive across submitPersistent()
+ * calls.
+ */
+struct nvmePersistentOptions {
+  const char* controller;    ///< NVMe controller path, e.g. /dev/nvme2.
+  uint16_t queueId;          ///< I/O queue ID to create; 0 selects max queue.
+  uint16_t queueLength;      ///< Queue length in entries; power of two.
+  uint32_t nsid;             ///< Namespace identifier used for commands.
+  uint32_t memoryMode;       ///< ROCm XIO memory mode bitmap.
+  uint32_t lfsrSeed;         ///< LFSR seed for generated write/verify data.
+  uint32_t maxTransferBytes; ///< Persistent data-buffer allocation size.
+  uint32_t ringDepth;        ///< Host/GPU work ring entries.
+  uint32_t batchSize;        ///< Max descriptors processed before yielding.
+  int gpuId;                 ///< HIP GPU ID; negative leaves current device.
+  bool usePciMmioBridge;     ///< Use PCI MMIO bridge instead of direct BAR0.
+  bool verbose;              ///< Enable verbose ROCm XIO logging.
+};
+
+/**
+ * Persistent NVMe endpoint information returned after session creation.
+ */
+struct nvmePersistentInfo {
+  uint32_t lbaSize;       ///< Logical block size in bytes.
+  uint64_t capacityLbas;  ///< Namespace capacity in LBAs.
+  uint64_t capacityBytes; ///< Namespace capacity in bytes.
+  uint16_t queueId;       ///< Queue ID owned by the session.
+  uint16_t queueLength;   ///< Queue length in entries.
+};
+
+/**
+ * Host-to-GPU persistent work descriptor.
+ *
+ * Each descriptor represents one NVMe read or write.  The persistent worker
+ * converts this compact request into an SQE, rings the queue doorbell, polls
+ * for the CQE, and writes a matching nvmePersistentCompletion.
+ */
+struct nvmePersistentIo {
+  uint64_t userData; ///< Opaque caller tag returned in completion.
+  uint64_t offset;   ///< Byte offset within the namespace.
+  uint32_t len;      ///< Transfer length in bytes.
+  bool isWrite;      ///< true for write, false for read.
+  bool verify;       ///< Enable LFSR verification for this request.
+};
+
+/**
+ * Completion returned by submitPersistent().
+ */
+struct nvmePersistentCompletion {
+  uint64_t userData;    ///< Opaque caller tag from the descriptor.
+  int error;            ///< 0 on success, errno-style value on failure.
+  uint64_t bytes;       ///< Requested byte count.
+  uint16_t nvmeStatus;  ///< Raw NVMe CQE status when available.
+  uint64_t gpuStart;    ///< GPU wall-clock tick when SQE submission begins.
+  uint64_t gpuEnd;      ///< GPU wall-clock tick when CQE processing completes.
+  uint64_t gpuElapsedNs; ///< GPU-measured I/O elapsed time in nanoseconds.
+  uint32_t verifyPass;  ///< Number of successful LFSR verify checks.
+  uint32_t verifyFail;  ///< Number of failed LFSR verify checks.
+};
+
+/**
+ * Device-visible work descriptor used by the persistent worker ring.
+ *
+ * This is public so integrations can reason about the ABI, but callers should
+ * prefer submitPersistent() unless they intentionally own ring management.
+ */
+struct nvmePersistentWorkDesc {
+  volatile uint64_t seq; ///< Producer sequence number.
+  uint64_t userData;     ///< Opaque caller tag.
+  uint64_t offset;       ///< Byte offset within the namespace.
+  uint32_t len;          ///< Transfer length in bytes.
+  uint8_t isWrite;       ///< Non-zero for write.
+  uint8_t verify;        ///< Non-zero to request LFSR verify.
+  uint8_t reserved[6];   ///< Reserved, must be zero.
+};
+
+/**
+ * Device-visible completion descriptor used by the persistent worker ring.
+ */
+struct nvmePersistentWorkCompletion {
+  volatile uint64_t seq; ///< Completion sequence number.
+  uint64_t userData;     ///< Opaque caller tag.
+  uint64_t bytes;        ///< Requested byte count.
+  int error;             ///< 0 on success, errno-style value on failure.
+  uint16_t nvmeStatus;   ///< Raw NVMe CQE status when available.
+  uint8_t reserved[2];   ///< Reserved, must be zero.
+  uint64_t gpuStart;     ///< GPU wall-clock tick at submit.
+  uint64_t gpuEnd;       ///< GPU wall-clock tick at completion.
+  uint32_t verifyPass;   ///< Number of successful LFSR verify checks.
+  uint32_t verifyFail;   ///< Number of failed LFSR verify checks.
+};
+
+/**
+ * Device-visible ring control block for persistent work submission.
+ */
+struct nvmePersistentControl {
+  volatile uint64_t producer; ///< Next producer sequence.
+  volatile uint64_t consumer; ///< Next consumer sequence.
+  volatile uint32_t stop;     ///< Non-zero asks the worker to exit.
+  uint32_t ringSize;          ///< Number of descriptors/completions.
+};
+
+/**
+ * Opaque persistent NVMe endpoint session handle.
+ */
+struct nvmePersistentSession;
+
+extern "C" __global__ void nvmePersistentWorkerKernel(
+  xio::XioEndpointConfig config, nvmeIoParams baseParams,
+  nvmeDoorbellParams doorbellParams, nvmeBufferParams bufferParams,
+  volatile nvmePersistentControl* control,
+  volatile nvmePersistentWorkDesc* descs,
+  volatile nvmePersistentWorkCompletion* comps);
+
+/**
  * Drive NVMe endpoint I/O operations from GPU device code
  *
  * Executes NVMe read/write operations directly from GPU kernels
@@ -296,6 +414,81 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig);
 __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
                                  uint16_t queue_size, void* sq_virt,
                                  void* cq_virt, bool sq_pc, bool cq_pc);
+
+/**
+ * Create a persistent NVMe endpoint session.
+ *
+ * Allocates and creates one NVMe I/O queue pair, maps doorbells, allocates
+ * persistent data buffers and work rings, and launches a long-lived GPU worker
+ * that waits for submitPersistent() descriptors.
+ *
+ * @param opts Session options.
+ * @param out Output session handle.
+ * @return 0 on success, negative errno-style value on failure.
+ */
+__host__ int openPersistentSession(const nvmePersistentOptions* opts,
+                                   nvmePersistentSession** out);
+
+/**
+ * Destroy a persistent NVMe endpoint session.
+ *
+ * Requests worker shutdown, synchronizes the HIP stream, deletes the NVMe queue
+ * pair, and releases buffers and ring memory.
+ *
+ * @param session Session returned by openPersistentSession().
+ */
+__host__ void closePersistentSession(nvmePersistentSession* session);
+
+/**
+ * Query namespace and queue information for a persistent session.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @param info Output information structure.
+ * @return 0 on success, negative errno-style value on failure.
+ */
+__host__ int getPersistentInfo(nvmePersistentSession* session,
+                               nvmePersistentInfo* info);
+
+/**
+ * Submit one read or write to a persistent NVMe worker and wait for completion.
+ *
+ * The current implementation uses a single-entry ring and synchronous host
+ * wait.  It avoids queue create/delete overhead but preserves a simple API for
+ * fio integration.  Future versions can extend the ring size and expose
+ * separate post/reap calls without changing descriptor layout.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @param io Work descriptor.
+ * @param completion Completion descriptor.
+ * @return 0 on success, negative errno-style value on failure.
+ */
+__host__ int submitPersistent(nvmePersistentSession* session,
+                              const nvmePersistentIo* io,
+                              nvmePersistentCompletion* completion);
+
+/**
+ * Post one descriptor to a persistent NVMe worker without waiting.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @param io Work descriptor.
+ * @return 0 on success, -EAGAIN if the ring is full, or another negative
+ *         errno-style value on failure.
+ */
+__host__ int postPersistent(nvmePersistentSession* session,
+                            const nvmePersistentIo* io);
+
+/**
+ * Reap completions from a persistent NVMe worker.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @param min Minimum completions desired.
+ * @param max Maximum completions to copy.
+ * @param completions Completion output array.
+ * @return Number of completions copied, or a negative errno-style value.
+ */
+__host__ int reapPersistent(nvmePersistentSession* session, uint32_t min,
+                            uint32_t max,
+                            nvmePersistentCompletion* completions);
 
 /**
  * Read NVMe Submission Queue Entry (SQE) from memory
