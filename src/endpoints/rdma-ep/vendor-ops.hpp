@@ -2,11 +2,10 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Vendor abstraction layer for rdma-ep. Consolidates shared patterns
- * identified across MLX5, BNXT, and IONIC vendor queue_pair implementations
- * from rocSHMEM GDA. Each vendor still implements its own WQE builder,
- * doorbell, and CQE parser; this layer provides the shared control flow,
- * locking, and logical descriptors.
+ * Vendor abstraction layer for rdma-ep. Common host orchestration helpers live
+ * in rdma-common.h; this layer keeps shared device descriptors, wave helpers,
+ * locking, provider IDs, and provider string conversion close to the
+ * vendor-specific QueuePair code that consumes them.
  */
 
 #ifndef RDMA_EP_VENDOR_OPS_HPP

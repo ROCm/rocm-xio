@@ -12,6 +12,7 @@
 
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
+#include "rdma-common.h"
 #include "xio.h"
 
 #if defined(GDA_BNXT)
@@ -62,8 +63,10 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_rdma_read_ = BNXT_RE_WR_OPCD_RDMA_READ;
       op_atomic_fa_ = BNXT_RE_WR_OPCD_ATOMIC_FA;
       op_atomic_cs_ = BNXT_RE_WR_OPCD_ATOMIC_CS;
-      nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
-      fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+      nonfetching_atomic_lkey_ = normalize_qp_key(provider,
+                                                  mr_nonfetching_atomic_->lkey);
+      fetching_atomic_lkey_ = normalize_qp_key(provider,
+                                               mr_fetching_atomic_->lkey);
       break;
 #endif
 #if defined(GDA_MLX5)
@@ -73,8 +76,10 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_rdma_read_ = 0x10;      // MLX5_OPCODE_RDMA_READ
       op_atomic_fa_ = 0x13;      // MLX5_OPCODE_ATOMIC_FA
       op_atomic_cs_ = 0x12;      // MLX5_OPCODE_ATOMIC_CS
-      nonfetching_atomic_lkey_ = htobe32(mr_nonfetching_atomic_->lkey);
-      fetching_atomic_lkey_ = htobe32(mr_fetching_atomic_->lkey);
+      nonfetching_atomic_lkey_ = normalize_qp_key(provider,
+                                                  mr_nonfetching_atomic_->lkey);
+      fetching_atomic_lkey_ = normalize_qp_key(provider,
+                                               mr_fetching_atomic_->lkey);
       break;
 #endif
 #if defined(GDA_IONIC)
@@ -92,8 +97,10 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_atomic_fa_ = IONIC_V1_OP_ATOMIC_FA;
       op_atomic_cs_ = IONIC_V1_OP_ATOMIC_CS;
 #endif
-      nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
-      fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+      nonfetching_atomic_lkey_ = normalize_qp_key(provider,
+                                                  mr_nonfetching_atomic_->lkey);
+      fetching_atomic_lkey_ = normalize_qp_key(provider,
+                                               mr_fetching_atomic_->lkey);
       break;
 #endif
 #if defined(GDA_ERNIC)
@@ -103,8 +110,10 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_rdma_read_ = 4;      // ROCM_ERNIC_WR_RDMA_READ
       op_atomic_fa_ = 6;      // ROCM_ERNIC_WR_ATOMIC_FA
       op_atomic_cs_ = 5;      // ROCM_ERNIC_WR_ATOMIC_CS
-      nonfetching_atomic_lkey_ = mr_nonfetching_atomic_->lkey;
-      fetching_atomic_lkey_ = mr_fetching_atomic_->lkey;
+      nonfetching_atomic_lkey_ = normalize_qp_key(provider,
+                                                  mr_nonfetching_atomic_->lkey);
+      fetching_atomic_lkey_ = normalize_qp_key(provider,
+                                               mr_fetching_atomic_->lkey);
       break;
 #endif
     default:

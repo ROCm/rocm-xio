@@ -8,7 +8,9 @@
  * @file rdma-ep.h
  * @brief RDMA Endpoint -- GPU-Direct Access (GDA) for RDMA NICs.
  *
- * Derived from ROCm/rocSHMEM GDA backend, adapted for rocm-xio.
+ * Derived from ROCm/rocSHMEM GDA backend, adapted for rocm-xio. Shared
+ * vendor-independent helpers live in rdma-common.h; provider-specific hardware
+ * operations remain in the vendor subdirectories.
  * Supports four RDMA vendors:
  *   - BNXT   (Broadcom Thor 2)
  *   - MLX5   (Mellanox/NVIDIA ConnectX)
@@ -29,7 +31,7 @@
 
 #include <hip/hip_runtime.h>
 
-#include "vendor-ops.hpp"
+#include "rdma-common.h"
 
 #define RDMA_EP_SQE_SIZE 0
 #define RDMA_EP_CQE_SIZE 0
