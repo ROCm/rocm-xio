@@ -180,6 +180,32 @@ __host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
 __host__ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
 
 /**
+ * @brief Initialize a device-initiated SDMA queue (idempotent).
+ *
+ * Idempotent version of createQueue(). If a queue already exists for the
+ * given device pair, returns success without creating a new queue.
+ * Used by Python bindings to avoid creating duplicate queues.
+ *
+ * @param srcDeviceId Source HIP device ID.
+ * @param dstDeviceId Destination HIP device ID.
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int initQueue(int srcDeviceId, int dstDeviceId);
+
+/**
+ * @brief Initialize a host-initiated SDMA queue (idempotent).
+ *
+ * Idempotent version of createHostQueue(). If a queue already exists for the
+ * given device pair, returns success without creating a new queue.
+ * Used by Python bindings to avoid creating duplicate queues.
+ *
+ * @param srcDeviceId Source HIP device ID.
+ * @param dstDeviceId Destination HIP device ID.
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int initHostQueue(int srcDeviceId, int dstDeviceId);
+
+/**
  * @brief Destroy an SDMA queue.
  *
  * Releases the ring buffer, device handle memory, and

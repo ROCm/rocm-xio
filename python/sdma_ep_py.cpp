@@ -25,27 +25,27 @@ void register_sdma_ep(nb::module_& m)
 
    m.def("create_queue",
          [](int srcDevice, int dstDevice) {
-            sdma_ep::SdmaQueueInfo info;
-            int rc = sdma_ep::createQueue(srcDevice, dstDevice, &info);
+            // Use idempotent init for Python path
+            int rc = sdma_ep::initQueue(srcDevice, dstDevice);
             if (rc != 0) {
-               throw std::runtime_error("createQueue failed");
+               throw std::runtime_error("initQueue failed");
             }
-            return info.channelIdx;
+            return 0; // Always channel 0 for Python
          },
          "src_device"_a, "dst_device"_a,
-         "Create device-initiated SDMA queue");
+         "Create device-initiated SDMA queue (idempotent)");
 
    m.def("create_host_queue",
          [](int srcDevice, int dstDevice) {
-            sdma_ep::SdmaQueueInfo info;
-            int rc = sdma_ep::createHostQueue(srcDevice, dstDevice, &info);
+            // Use idempotent init for Python path
+            int rc = sdma_ep::initHostQueue(srcDevice, dstDevice);
             if (rc != 0) {
-               throw std::runtime_error("createHostQueue failed");
+               throw std::runtime_error("initHostQueue failed");
             }
-            return info.channelIdx;
+            return 0; // Always channel 0 for Python
          },
          "src_device"_a, "dst_device"_a,
-         "Create host-initiated SDMA queue");
+         "Create host-initiated SDMA queue (idempotent)");
 
    m.def("get_queue_device_ctx",
          [](int srcDevice, int dstDevice) {
