@@ -147,8 +147,8 @@ struct nvmePersistentInfo {
  * Host-to-GPU persistent work descriptor.
  *
  * Each descriptor represents one NVMe read or write.  The persistent worker
- * converts this compact request into an SQE, rings the queue doorbell, polls
- * for the CQE, and writes a matching nvmePersistentCompletion.
+ * converts compact requests into SQEs, batching up to batchSize descriptors
+ * per SQ/CQ doorbell pair when a persistent session enables batching.
  */
 struct nvmePersistentIo {
   uint64_t userData; ///< Opaque caller tag returned in completion.

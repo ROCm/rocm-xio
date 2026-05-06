@@ -86,9 +86,19 @@ static int allocatePersistentBuffers(nvmePersistentSession* s, uint32_t len) {
 
   freePersistentBuffers(s);
 
-  uint32_t alloc_len = s->opts.maxTransferBytes;
-  if (alloc_len < len)
-    alloc_len = len;
+  uint64_t per_cmd_len64 = s->opts.maxTransferBytes;
+  if (per_cmd_len64 < len)
+    per_cmd_len64 = len;
+  if (per_cmd_len64 > 0xffffffffULL)
+    return -ENOMEM;
+
+  uint32_t batch_capacity = s->batchSize ? s->batchSize : 1;
+  uint64_t alloc_len64 = per_cmd_len64 * batch_capacity;
+  if (alloc_len64 > 0xffffffffULL)
+    return -ENOMEM;
+
+  uint32_t per_cmd_len = (uint32_t)per_cmd_len64;
+  uint32_t alloc_len = (uint32_t)alloc_len64;
 
   hipError_t err = allocateGpuAccessibleBuffer(alloc_len, s->opts.memoryMode,
                                                s->doorbell.nvmeTargetBdf,
@@ -105,10 +115,11 @@ static int allocatePersistentBuffers(nvmePersistentSession* s, uint32_t len) {
     return -ENOMEM;
   s->writeBufferSize = alloc_len;
 
-  const uint32_t pages = (alloc_len + NVME_PAGE_SIZE - 1) / NVME_PAGE_SIZE;
+  const uint32_t pages = (per_cmd_len + NVME_PAGE_SIZE - 1) / NVME_PAGE_SIZE;
   s->prpEntriesPerCmd = alloc_len > NVME_PAGE_SIZE ? pages + 1 : 0;
   if (s->prpEntriesPerCmd) {
-    s->prpPoolSize = s->prpEntriesPerCmd * sizeof(uint64_t);
+    s->prpPoolSize = (size_t)s->prpEntriesPerCmd * batch_capacity *
+                     sizeof(uint64_t);
     long host_page = sysconf(_SC_PAGESIZE);
     size_t align = host_page > 0 ? (size_t)host_page : 4096;
     s->prpPoolSize = (s->prpPoolSize + align - 1) & ~(align - 1);
@@ -1277,58 +1288,143 @@ extern "C" __global__ void nvmePersistentWorkerKernel(
 
   while (!control->stop) {
     uint64_t consumer = control->consumer;
-    if (consumer == control->producer)
+    uint64_t producer = control->producer;
+    if (consumer == producer)
       continue;
 
-    uint32_t slot = (uint32_t)(consumer % control->ringSize);
-    nvmePersistentWorkDesc desc = {};
-    desc.seq = descs[slot].seq;
-    desc.userData = descs[slot].userData;
-    desc.offset = descs[slot].offset;
-    desc.len = descs[slot].len;
-    desc.isWrite = descs[slot].isWrite;
-    desc.verify = descs[slot].verify;
+    uint32_t batch_limit = baseParams.batchSize ? baseParams.batchSize : 1;
+    if (batch_limit > control->ringSize)
+      batch_limit = control->ringSize;
+    if (batch_limit > (uint32_t)(baseParams.queueSize - 1))
+      batch_limit = baseParams.queueSize - 1;
 
-    nvmePersistentWorkCompletion comp = {};
-    comp.userData = desc.userData;
-    comp.bytes = desc.len;
+    uint64_t available64 = producer - consumer;
+    uint32_t batch_count = available64 < batch_limit ? (uint32_t)available64
+                                                     : batch_limit;
+    if (batch_count == 0)
+      continue;
 
-    if ((desc.offset % baseParams.lbaSize) || (desc.len % baseParams.lbaSize) ||
-        desc.len == 0) {
-      comp.error = 22;
-    } else {
+    uint32_t buffer_stride = bufferParams.bufferSize / batch_limit;
+    uint32_t submitted = 0;
+
+    for (uint32_t b = 0; b < batch_count; b++) {
+      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
+      nvmePersistentWorkDesc desc = {};
+      desc.seq = descs[slot].seq;
+      desc.userData = descs[slot].userData;
+      desc.offset = descs[slot].offset;
+      desc.len = descs[slot].len;
+      desc.isWrite = descs[slot].isWrite;
+      desc.verify = descs[slot].verify;
+
+      nvmePersistentWorkCompletion comp = {};
+      comp.userData = desc.userData;
+      comp.bytes = desc.len;
+
+      if (desc.verify && submitted)
+        break;
+
+      bool invalid_desc = (desc.offset % baseParams.lbaSize) ||
+                          (desc.len % baseParams.lbaSize) || desc.len == 0 ||
+                          buffer_stride == 0 || desc.len > buffer_stride;
+      if (invalid_desc) {
+        if (submitted)
+          break;
+
+        comp.error = ((desc.offset % baseParams.lbaSize) ||
+                      (desc.len % baseParams.lbaSize) || desc.len == 0)
+                       ? 22
+                       : 90;
+        comps[slot].userData = comp.userData;
+        comps[slot].bytes = comp.bytes;
+        comps[slot].error = comp.error;
+        comps[slot].nvmeStatus = comp.nvmeStatus;
+        comps[slot].gpuStart = comp.gpuStart;
+        comps[slot].gpuEnd = comp.gpuEnd;
+        comps[slot].verifyPass = comp.verifyPass;
+        comps[slot].verifyFail = comp.verifyFail;
+        __threadfence_system();
+        comps[slot].seq = desc.seq;
+        control->consumer = consumer + 1;
+        submitted = 0;
+        break;
+      }
+
       uint32_t blocks = desc.len / baseParams.lbaSize;
       uint64_t transfer_size = (uint64_t)blocks * baseParams.lbaSize;
+      uint64_t buf_off = (uint64_t)b * buffer_stride;
+      uint32_t page_off = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+      uint64_t intra_page_off = buf_off % NVME_PAGE_SIZE;
       uint64_t addr;
+      uint64_t* prp_slot = bufferParams.prpListPool
+                             ? bufferParams.prpListPool +
+                                 b * bufferParams.prpEntriesPerCmd
+                             : nullptr;
+      uint64_t prp_slot_dma = bufferParams.prpListPoolDma
+                                ? bufferParams.prpListPoolDma +
+                                    b * bufferParams.prpEntriesPerCmd *
+                                      sizeof(uint64_t)
+                                : 0;
+
       if (desc.isWrite) {
         if (bufferParams.writeBuffer != nullptr) {
-          xio::DataPatternParams pp{bufferParams.writeBuffer, desc.len, 0,
-                                    baseParams.lbaSize, baseParams.lfsrSeed,
-                                    nullptr};
+          xio::DataPatternParams pp{bufferParams.writeBuffer + buf_off,
+                                    desc.len, 0, baseParams.lbaSize,
+                                    baseParams.lfsrSeed, nullptr};
           xio::dataPattern(false, pp);
         }
-        addr = bufferParams.writeBufferDma;
+        addr = bufferParams.writePagePhysAddrs
+                 ? bufferParams.writePagePhysAddrs[page_off] + intra_page_off
+               : bufferParams.writeBufferDma
+                 ? bufferParams.writeBufferDma + buf_off
+                 : (uint64_t)(bufferParams.writeBuffer + buf_off);
       } else {
-        addr = bufferParams.readBufferDma;
+        addr = bufferParams.readPagePhysAddrs
+                 ? bufferParams.readPagePhysAddrs[page_off] + intra_page_off
+               : bufferParams.readBufferDma
+                 ? bufferParams.readBufferDma + buf_off
+                 : (uint64_t)(bufferParams.readBuffer + buf_off);
       }
 
       sqeType sqeLocal = {};
-      comp.gpuStart = wall_clock64();
+      comps[slot].gpuStart = wall_clock64();
       sqeLocal.opcode = desc.isWrite ? nvme_cmd_write : nvme_cmd_read;
       sqeLocal.command_id = cmd_id++;
       if (cmd_id == 0)
         cmd_id = 1;
       sqeLocal.nsid = baseParams.nsid;
-      calculatePrps(addr, transfer_size, &sqeLocal, bufferParams.prpListPool,
-                    bufferParams.prpListPoolDma,
+      calculatePrps(addr, transfer_size, &sqeLocal, prp_slot, prp_slot_dma,
                     desc.isWrite ? bufferParams.writePagePhysAddrs
                                  : bufferParams.readPagePhysAddrs,
-                    0);
+                    page_off);
       sqeSetup(&sqeLocal, desc.offset / baseParams.lbaSize, blocks);
       sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
       sq_tail = (sq_tail + 1) % baseParams.queueSize;
-      __threadfence_system();
-      ringDoorbell(sq_tail, doorbellParams);
+      submitted++;
+      if (desc.verify)
+        break;
+    }
+
+    if (!submitted)
+      continue;
+
+    __threadfence_system();
+    ringDoorbell(sq_tail, doorbellParams);
+
+    uint32_t completed = 0;
+    for (uint32_t b = 0; b < submitted; b++) {
+      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
+      nvmePersistentWorkDesc desc = {};
+      desc.seq = descs[slot].seq;
+      desc.userData = descs[slot].userData;
+      desc.len = descs[slot].len;
+      desc.isWrite = descs[slot].isWrite;
+      desc.verify = descs[slot].verify;
+
+      nvmePersistentWorkCompletion comp = {};
+      comp.userData = desc.userData;
+      comp.bytes = desc.len;
+      comp.gpuStart = comps[slot].gpuStart;
 
       unsigned poll_count = 0;
       cqeType cqe_new = {};
@@ -1365,22 +1461,30 @@ extern "C" __global__ void nvmePersistentWorkerKernel(
         cq_head = (cq_head + 1) % baseParams.queueSize;
         if (cq_head == 0)
           expected_phase ^= 1;
-        ringDoorbell(cq_head, doorbellParams,
-                     doorbellParams.doorbellOffset + doorBellStride);
+        completed++;
       }
+
+      comps[slot].userData = comp.userData;
+      comps[slot].bytes = comp.bytes;
+      comps[slot].error = comp.error;
+      comps[slot].nvmeStatus = comp.nvmeStatus;
+      comps[slot].gpuStart = comp.gpuStart;
+      comps[slot].gpuEnd = comp.gpuEnd;
+      comps[slot].verifyPass = comp.verifyPass;
+      comps[slot].verifyFail = comp.verifyFail;
     }
 
-    comps[slot].userData = comp.userData;
-    comps[slot].bytes = comp.bytes;
-    comps[slot].error = comp.error;
-    comps[slot].nvmeStatus = comp.nvmeStatus;
-    comps[slot].gpuStart = comp.gpuStart;
-    comps[slot].gpuEnd = comp.gpuEnd;
-    comps[slot].verifyPass = comp.verifyPass;
-    comps[slot].verifyFail = comp.verifyFail;
+    if (completed) {
+      ringDoorbell(cq_head, doorbellParams,
+                   doorbellParams.doorbellOffset + doorBellStride);
+    }
+
     __threadfence_system();
-    comps[slot].seq = desc.seq;
-    control->consumer = consumer + 1;
+    for (uint32_t b = 0; b < submitted; b++) {
+      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
+      comps[slot].seq = descs[slot].seq;
+    }
+    control->consumer = consumer + submitted;
   }
 }
 

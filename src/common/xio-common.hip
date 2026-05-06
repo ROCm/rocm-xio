@@ -2522,10 +2522,9 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                         hipHostMallocMapped);
       if (pa_err == hipSuccess && pa) {
         memset(pa, 0, pa_bytes);
-        uint64_t sys_addrs[1024];
-        uint32_t max_sys = (sys_np <= 1024) ? sys_np : 1024;
-        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs,
-                                   max_sys);
+        std::vector<uint64_t> sys_addrs(sys_np);
+        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs.data(),
+                                   sys_addrs.size());
         if (ret < 0) {
           ROCXIO_LOG_WARN("Failed to resolve per-page "
                           "phys addrs: %s\n",

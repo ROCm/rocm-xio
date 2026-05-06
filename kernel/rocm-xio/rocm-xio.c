@@ -80,6 +80,7 @@ struct queue_addr_entry {
   __u8 queue_type; /* 0=SQ, 1=CQ */
   __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
   __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
+  struct file* owner;
   struct list_head list;
 };
 
@@ -95,6 +96,7 @@ struct vram_buffer_entry {
   struct sg_table* sgt;
   struct pci_dev* nvme_pdev; // Keep reference to NVMe device
   bool is_passthrough;       // Track if this needs cleanup
+  struct file* owner;
 };
 
 static LIST_HEAD(queue_addrs);
@@ -118,6 +120,20 @@ struct contig_alloc_entry {
 static LIST_HEAD(contig_allocs);
 static DEFINE_SPINLOCK(contig_allocs_lock);
 static __u32 contig_alloc_next_id = 1;
+
+static void cleanup_vram_buffer_entry(struct vram_buffer_entry* entry) {
+  if (!entry)
+    return;
+
+  if (entry->is_passthrough && entry->sgt && entry->attach && entry->dmabuf) {
+    dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+    dma_buf_detach(entry->dmabuf, entry->attach);
+    dma_buf_put(entry->dmabuf);
+    if (entry->nvme_pdev)
+      pci_dev_put(entry->nvme_pdev);
+  }
+  kfree(entry);
+}
 
 static void contig_alloc_release(struct kref* ref) {
   struct contig_alloc_entry* ca = container_of(ref, struct contig_alloc_entry,
@@ -967,6 +983,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->queue_type = req.queue_type;
       entry->nvme_bdf = req.nvme_bdf;
       entry->prp2 = req.prp2;
+      entry->owner = file;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
@@ -1003,7 +1020,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&queue_addrs_lock);
       list_for_each_entry_safe(entry, tmp, &queue_addrs, list) {
-        if (entry->virt_addr == req.virt_addr) {
+        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
           list_del(&entry->list);
           kfree(entry);
           found = true;
@@ -1108,6 +1125,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->phys_addr = phys_addr;
       entry->size = req.size;
       entry->is_passthrough = !is_emulated;
+      entry->owner = file;
 
       /* Store attachment info for passthrough (keep alive) */
       if (!is_emulated) {
@@ -1187,7 +1205,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&vram_buffers_lock);
       list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
-        if (entry->virt_addr == req.virt_addr) {
+        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
           list_del(&entry->list);
           found = true;
           break;
@@ -1510,19 +1528,55 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 }
 
 static int rocm_xio_release(struct inode* inode, struct file* file) {
-  struct contig_alloc_entry *ca, *tmp;
-  LIST_HEAD(to_release);
+  struct contig_alloc_entry *ca, *ca_tmp;
+  struct queue_addr_entry *qa, *qa_tmp;
+  struct vram_buffer_entry *vb, *vb_tmp;
+  LIST_HEAD(contig_to_release);
+  LIST_HEAD(queue_to_release);
+  LIST_HEAD(buffer_to_release);
+
+  spin_lock(&queue_addrs_lock);
+  list_for_each_entry_safe(qa, qa_tmp, &queue_addrs, list) {
+    if (qa->owner == file) {
+      list_del(&qa->list);
+      list_add(&qa->list, &queue_to_release);
+    }
+  }
+  spin_unlock(&queue_addrs_lock);
+
+  spin_lock(&vram_buffers_lock);
+  list_for_each_entry_safe(vb, vb_tmp, &vram_buffers, list) {
+    if (vb->owner == file) {
+      list_del(&vb->list);
+      list_add(&vb->list, &buffer_to_release);
+    }
+  }
+  spin_unlock(&vram_buffers_lock);
 
   spin_lock(&contig_allocs_lock);
-  list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
+  list_for_each_entry_safe(ca, ca_tmp, &contig_allocs, list) {
     if (ca->owner == file) {
       list_del(&ca->list);
-      list_add(&ca->list, &to_release);
+      list_add(&ca->list, &contig_to_release);
     }
   }
   spin_unlock(&contig_allocs_lock);
 
-  list_for_each_entry_safe(ca, tmp, &to_release, list) {
+  list_for_each_entry_safe(qa, qa_tmp, &queue_to_release, list) {
+    list_del(&qa->list);
+    pr_info("rocm-axiio: release: unregistering queue address virt=0x%016llx\n",
+            (unsigned long long)qa->virt_addr);
+    kfree(qa);
+  }
+
+  list_for_each_entry_safe(vb, vb_tmp, &buffer_to_release, list) {
+    list_del(&vb->list);
+    pr_info("rocm-axiio: release: unregistering buffer virt=0x%016llx\n",
+            (unsigned long long)vb->virt_addr);
+    cleanup_vram_buffer_entry(vb);
+  }
+
+  list_for_each_entry_safe(ca, ca_tmp, &contig_to_release, list) {
     list_del(&ca->list);
     pr_info("rocm-axiio: release: freeing "
             "contig id=%u dma=0x%llx "
