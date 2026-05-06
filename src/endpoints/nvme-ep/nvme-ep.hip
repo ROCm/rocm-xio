@@ -50,8 +50,15 @@ struct nvmePersistentSession {
   nvmePersistentWorkDesc* descsGpu = nullptr;
   nvmePersistentWorkCompletion* comps = nullptr;
   nvmePersistentWorkCompletion* compsGpu = nullptr;
+  nvmePersistentPhaseStats* phaseStats = nullptr;
+  nvmePersistentPhaseStats* phaseStatsGpu = nullptr;
   uint32_t ringDepth = 1;
   uint32_t batchSize = 1;
+  uint32_t sqBatchSize = 1;
+  uint32_t cqBatchSize = 1;
+  uint32_t wavefrontSize = 1;
+  uint32_t maxThreadsPerBlock = 1;
+  bool precomputePrps = false;
   uint64_t nextSeq = 1;
   uint64_t reapSeq = 1;
   hipStream_t stream = nullptr;
@@ -168,6 +175,16 @@ static int allocatePersistentRing(nvmePersistentSession* s) {
   if (!s->compsGpu)
     s->compsGpu = s->comps;
 
+  err = hipHostMalloc((void**)&s->phaseStats, sizeof(*s->phaseStats),
+                      hipHostMallocMapped);
+  if (err != hipSuccess || !s->phaseStats)
+    return -ENOMEM;
+  memset(s->phaseStats, 0, sizeof(*s->phaseStats));
+  s->phaseStats->gpuClockKHz = (uint32_t)s->gpuWallClockRateKHz;
+  (void)hipHostGetDevicePointer((void**)&s->phaseStatsGpu, s->phaseStats, 0);
+  if (!s->phaseStatsGpu)
+    s->phaseStatsGpu = s->phaseStats;
+
   return 0;
 }
 
@@ -207,9 +224,19 @@ static int startPersistentWorker(nvmePersistentSession* s) {
   buf.prpListPoolDma = s->prpPoolDma;
   buf.prpEntriesPerCmd = s->prpEntriesPerCmd;
 
-  hipLaunchKernelGGL(nvmePersistentWorkerKernel, dim3(1), dim3(1), 0, s->stream,
+  uint32_t wavefront = s->wavefrontSize ? s->wavefrontSize : 1;
+  uint32_t sq_threads = s->sqBatchSize + 1;
+  uint32_t cq_base = ((sq_threads + wavefront - 1) / wavefront) * wavefront;
+  uint32_t worker_threads = cq_base + s->cqBatchSize + 1;
+  if (worker_threads > s->maxThreadsPerBlock)
+    return -EINVAL;
+
+  hipLaunchKernelGGL(nvmePersistentWorkerKernel, dim3(1),
+                     dim3(worker_threads), 0, s->stream,
                      s->baseConfig, ioParams, s->doorbell, buf, s->controlGpu,
-                     s->descsGpu, s->compsGpu);
+                     s->descsGpu, s->compsGpu, s->phaseStatsGpu,
+                     s->sqBatchSize, s->cqBatchSize, wavefront,
+                     s->precomputePrps);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     return -EIO;
@@ -236,6 +263,8 @@ __host__ int openPersistentSession(const nvmePersistentOptions* opts,
   if (s->batchSize > s->ringDepth)
     s->batchSize = s->ringDepth;
 
+  s->precomputePrps = s->opts.precomputePrps;
+
   if (s->opts.gpuId >= 0) {
     hipError_t hret = hipSetDevice(s->opts.gpuId);
     if (hret != hipSuccess)
@@ -246,6 +275,13 @@ __host__ int openPersistentSession(const nvmePersistentOptions* opts,
     (void)hipGetDevice(&device_id);
     (void)hipDeviceGetAttribute(&s->gpuWallClockRateKHz,
                                 hipDeviceAttributeWallClockRate, device_id);
+    hipDeviceProp_t device_prop = {};
+    if (hipGetDeviceProperties(&device_prop, device_id) == hipSuccess) {
+      s->wavefrontSize = device_prop.warpSize ? device_prop.warpSize : 1;
+      s->maxThreadsPerBlock = device_prop.maxThreadsPerBlock
+                                 ? device_prop.maxThreadsPerBlock
+                                 : 1;
+    }
   }
 
   unsigned lba_size = 0;
@@ -261,6 +297,26 @@ __host__ int openPersistentSession(const nvmePersistentOptions* opts,
     return -EIO;
   s->info.queueId = qid;
   s->info.queueLength = s->opts.queueLength;
+
+  s->sqBatchSize = s->opts.sqBatchSize ? s->opts.sqBatchSize : s->batchSize;
+  s->cqBatchSize = s->opts.cqBatchSize ? s->opts.cqBatchSize : s->batchSize;
+  uint32_t max_batch = s->ringDepth;
+  if (max_batch > (uint32_t)(s->info.queueLength - 1))
+    max_batch = s->info.queueLength - 1;
+  if (max_batch > 256)
+    max_batch = 256;
+  if (!max_batch)
+    max_batch = 1;
+  if (s->batchSize > max_batch)
+    s->batchSize = max_batch;
+  if (s->sqBatchSize > max_batch)
+    s->sqBatchSize = max_batch;
+  if (s->cqBatchSize > max_batch)
+    s->cqBatchSize = max_batch;
+  if (!s->sqBatchSize)
+    s->sqBatchSize = 1;
+  if (!s->cqBatchSize)
+    s->cqBatchSize = 1;
 
   if (detectBdfFromDevice(s->opts.controller, &s->doorbell.nvmeTargetBdf) < 0)
     return -EIO;
@@ -328,6 +384,8 @@ __host__ void closePersistentSession(nvmePersistentSession* s) {
     (void)hipHostFree(s->descs);
   if (s->comps)
     (void)hipHostFree(s->comps);
+  if (s->phaseStats)
+    (void)hipHostFree(s->phaseStats);
   freePersistentBuffers(s);
   if (s->stream)
     (void)hipStreamDestroy(s->stream);
@@ -343,6 +401,25 @@ __host__ int getPersistentInfo(nvmePersistentSession* s,
   if (!s || !info)
     return -EINVAL;
   *info = s->info;
+  return 0;
+}
+
+__host__ int getPersistentPhaseStats(nvmePersistentSession* s,
+                                     nvmePersistentPhaseStats* stats) {
+  if (!s || !stats || !s->phaseStats)
+    return -EINVAL;
+
+  *stats = *s->phaseStats;
+  stats->gpuClockKHz = (uint32_t)s->gpuWallClockRateKHz;
+  return 0;
+}
+
+__host__ int resetPersistentPhaseStats(nvmePersistentSession* s) {
+  if (!s || !s->phaseStats)
+    return -EINVAL;
+
+  memset(s->phaseStats, 0, sizeof(*s->phaseStats));
+  s->phaseStats->gpuClockKHz = (uint32_t)s->gpuWallClockRateKHz;
   return 0;
 }
 
@@ -1273,105 +1350,235 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
   driveEndpoint(config, ioParams, doorbellParams, bufferParams);
 }
 
+__device__ static inline void persistentStatsAdd(
+  volatile uint64_t* field, uint64_t value) {
+  if (field != nullptr && value)
+    atomicAdd((unsigned long long int*)field,
+              (unsigned long long int)value);
+}
+
+__device__ static inline void persistentStatsMax(
+  volatile uint64_t* field, uint64_t value) {
+  if (field != nullptr)
+    atomicMax((unsigned long long int*)field,
+              (unsigned long long int)value);
+}
+
 extern "C" __global__ void nvmePersistentWorkerKernel(
   XioEndpointConfig config, nvmeIoParams baseParams,
   nvmeDoorbellParams doorbellParams, nvmeBufferParams bufferParams,
   volatile nvmePersistentControl* control,
   volatile nvmePersistentWorkDesc* descs,
-  volatile nvmePersistentWorkCompletion* comps) {
+  volatile nvmePersistentWorkCompletion* comps,
+  volatile nvmePersistentPhaseStats* stats, uint32_t sqBatchSize,
+  uint32_t cqBatchSize, uint32_t wavefrontSize, bool precomputePrps) {
+  constexpr uint32_t kMaxPersistentBatch = 256;
+  const uint32_t tid = threadIdx.x;
+  const bool coordinator = tid == 0;
+  uint32_t sq_batch_limit = sqBatchSize ? sqBatchSize : baseParams.batchSize;
+  uint32_t cq_batch_limit = cqBatchSize ? cqBatchSize : baseParams.batchSize;
+  if (!sq_batch_limit)
+    sq_batch_limit = 1;
+  if (!cq_batch_limit)
+    cq_batch_limit = sq_batch_limit;
+  if (sq_batch_limit > kMaxPersistentBatch)
+    sq_batch_limit = kMaxPersistentBatch;
+  if (cq_batch_limit > kMaxPersistentBatch)
+    cq_batch_limit = kMaxPersistentBatch;
+  uint32_t wavefront = wavefrontSize ? wavefrontSize : 1;
+  uint32_t cq_base_lane = ((sq_batch_limit + 1 + wavefront - 1) / wavefront) *
+                          wavefront;
+  uint32_t cq_lane = tid >= cq_base_lane ? tid - cq_base_lane : UINT32_MAX;
   sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
   cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
   uint16_t sq_tail = 0;
   uint16_t cq_head = 0;
   uint8_t expected_phase = 1;
   uint16_t cmd_id = 1;
+  uint64_t idle_start = 0;
+  __shared__ uint64_t sh_consumer;
+  __shared__ uint64_t sh_producer;
+  __shared__ uint32_t sh_batch_limit;
+  __shared__ uint32_t sh_cq_batch_limit;
+  __shared__ uint32_t sh_batch_count;
+  __shared__ uint32_t sh_buffer_stride;
+  __shared__ uint32_t sh_submitted;
+  __shared__ uint32_t sh_completed;
+  __shared__ uint32_t sh_cq_chunk;
+  __shared__ uint16_t sh_cq_head_base;
+  __shared__ uint8_t sh_cq_expected_phase;
+  __shared__ bool sh_has_work;
+  __shared__ bool sh_stop_kernel;
+  __shared__ bool sh_error_published;
+  __shared__ uint32_t batchSlots[kMaxPersistentBatch];
+  __shared__ uint64_t batchSeqs[kMaxPersistentBatch];
+  __shared__ uint64_t batchUserData[kMaxPersistentBatch];
+  __shared__ uint64_t batchOffsets[kMaxPersistentBatch];
+  __shared__ uint32_t batchLens[kMaxPersistentBatch];
+  __shared__ uint8_t batchIsWrite[kMaxPersistentBatch];
+  __shared__ uint8_t batchVerify[kMaxPersistentBatch];
+  __shared__ uint16_t batchSqSlots[kMaxPersistentBatch];
+  __shared__ uint16_t batchCmdIds[kMaxPersistentBatch];
+  __shared__ uint64_t batchGpuStart[kMaxPersistentBatch];
+  __shared__ cqeType batchCqes[kMaxPersistentBatch];
+  __shared__ uint32_t batchPollCounts[kMaxPersistentBatch];
+  __shared__ uint8_t batchPollErrors[kMaxPersistentBatch];
 
-  while (!control->stop) {
-    uint64_t consumer = control->consumer;
-    uint64_t producer = control->producer;
-    if (consumer == producer)
+  while (true) {
+    if (coordinator) {
+      sh_stop_kernel = control->stop != 0;
+      sh_has_work = false;
+      sh_error_published = false;
+      sh_submitted = 0;
+
+      if (!sh_stop_kernel) {
+        sh_consumer = control->consumer;
+        sh_producer = control->producer;
+        if (sh_consumer == sh_producer) {
+          if (stats != nullptr && !idle_start)
+            idle_start = wall_clock64();
+        } else {
+          if (stats != nullptr && idle_start) {
+            persistentStatsAdd(&stats->idleWait, wall_clock64() - idle_start);
+            idle_start = 0;
+          }
+
+          sh_batch_limit = sq_batch_limit;
+          if (sh_batch_limit > control->ringSize)
+            sh_batch_limit = control->ringSize;
+          if (sh_batch_limit > (uint32_t)(baseParams.queueSize - 1))
+            sh_batch_limit = baseParams.queueSize - 1;
+          if (!sh_batch_limit)
+            sh_batch_limit = 1;
+          sh_cq_batch_limit = cq_batch_limit;
+          if (sh_cq_batch_limit > sh_batch_limit)
+            sh_cq_batch_limit = sh_batch_limit;
+          if (!sh_cq_batch_limit)
+            sh_cq_batch_limit = 1;
+
+          uint64_t available64 = sh_producer - sh_consumer;
+          sh_batch_count = available64 < sh_batch_limit
+                             ? (uint32_t)available64
+                             : sh_batch_limit;
+          sh_buffer_stride = bufferParams.bufferSize / sh_batch_limit;
+          sh_has_work = sh_batch_count != 0;
+        }
+      }
+    }
+    __syncthreads();
+
+    if (sh_stop_kernel)
+      break;
+    if (!sh_has_work)
       continue;
 
-    uint32_t batch_limit = baseParams.batchSize ? baseParams.batchSize : 1;
-    if (batch_limit > control->ringSize)
-      batch_limit = control->ringSize;
-    if (batch_limit > (uint32_t)(baseParams.queueSize - 1))
-      batch_limit = baseParams.queueSize - 1;
+    uint32_t worker = tid - 1;
 
-    uint64_t available64 = producer - consumer;
-    uint32_t batch_count = available64 < batch_limit ? (uint32_t)available64
-                                                     : batch_limit;
-    if (batch_count == 0)
-      continue;
+    if (coordinator) {
+      uint32_t submitted = 0;
+      persistentStatsAdd(&stats->batchCount, 1);
 
-    uint32_t buffer_stride = bufferParams.bufferSize / batch_limit;
-    uint32_t submitted = 0;
+      for (uint32_t b = 0; b < sh_batch_count; b++) {
+        uint64_t desc_t0 = stats != nullptr ? wall_clock64() : 0;
+        uint32_t slot = (uint32_t)((sh_consumer + b) % control->ringSize);
+        nvmePersistentWorkDesc desc = {};
+        desc.seq = descs[slot].seq;
+        desc.userData = descs[slot].userData;
+        desc.offset = descs[slot].offset;
+        desc.len = descs[slot].len;
+        desc.isWrite = descs[slot].isWrite;
+        desc.verify = descs[slot].verify;
 
-    for (uint32_t b = 0; b < batch_count; b++) {
-      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
-      nvmePersistentWorkDesc desc = {};
-      desc.seq = descs[slot].seq;
-      desc.userData = descs[slot].userData;
-      desc.offset = descs[slot].offset;
-      desc.len = descs[slot].len;
-      desc.isWrite = descs[slot].isWrite;
-      desc.verify = descs[slot].verify;
-
-      nvmePersistentWorkCompletion comp = {};
-      comp.userData = desc.userData;
-      comp.bytes = desc.len;
-
-      if (desc.verify && submitted)
-        break;
-
-      bool invalid_desc = (desc.offset % baseParams.lbaSize) ||
-                          (desc.len % baseParams.lbaSize) || desc.len == 0 ||
-                          buffer_stride == 0 || desc.len > buffer_stride;
-      if (invalid_desc) {
-        if (submitted)
+        if (desc.verify && submitted)
           break;
 
-        comp.error = ((desc.offset % baseParams.lbaSize) ||
-                      (desc.len % baseParams.lbaSize) || desc.len == 0)
-                       ? 22
-                       : 90;
-        comps[slot].userData = comp.userData;
-        comps[slot].bytes = comp.bytes;
-        comps[slot].error = comp.error;
-        comps[slot].nvmeStatus = comp.nvmeStatus;
-        comps[slot].gpuStart = comp.gpuStart;
-        comps[slot].gpuEnd = comp.gpuEnd;
-        comps[slot].verifyPass = comp.verifyPass;
-        comps[slot].verifyFail = comp.verifyFail;
-        __threadfence_system();
-        comps[slot].seq = desc.seq;
-        control->consumer = consumer + 1;
-        submitted = 0;
-        break;
-      }
+        batchSlots[b] = slot;
+        batchSeqs[b] = desc.seq;
+        batchUserData[b] = desc.userData;
+        batchOffsets[b] = desc.offset;
+        batchLens[b] = desc.len;
+        batchIsWrite[b] = desc.isWrite;
+        batchVerify[b] = desc.verify;
 
-      uint32_t blocks = desc.len / baseParams.lbaSize;
+        nvmePersistentWorkCompletion comp = {};
+        comp.userData = desc.userData;
+        comp.bytes = desc.len;
+
+        bool invalid_desc = (desc.offset % baseParams.lbaSize) ||
+                            (desc.len % baseParams.lbaSize) || desc.len == 0 ||
+                            sh_buffer_stride == 0 ||
+                            desc.len > sh_buffer_stride;
+        persistentStatsAdd(&stats->descLoad,
+                           stats != nullptr ? wall_clock64() - desc_t0 : 0);
+        if (invalid_desc) {
+          if (submitted)
+            break;
+
+          persistentStatsAdd(&stats->errorCount, 1);
+          comp.error = ((desc.offset % baseParams.lbaSize) ||
+                        (desc.len % baseParams.lbaSize) || desc.len == 0)
+                         ? 22
+                         : 90;
+          comps[slot].userData = comp.userData;
+          comps[slot].bytes = comp.bytes;
+          comps[slot].error = comp.error;
+          comps[slot].nvmeStatus = comp.nvmeStatus;
+          comps[slot].gpuStart = comp.gpuStart;
+          comps[slot].gpuEnd = comp.gpuEnd;
+          comps[slot].verifyPass = comp.verifyPass;
+          comps[slot].verifyFail = comp.verifyFail;
+          __threadfence_system();
+          comps[slot].seq = desc.seq;
+          control->consumer = sh_consumer + 1;
+          sh_error_published = true;
+          submitted = 0;
+          break;
+        }
+
+        batchSqSlots[b] = (sq_tail + submitted) % baseParams.queueSize;
+        batchCmdIds[b] = cmd_id++;
+        if (cmd_id == 0)
+          cmd_id = 1;
+        submitted++;
+        if (desc.verify)
+          break;
+      }
+      sh_submitted = submitted;
+    }
+    __syncthreads();
+
+    if (sh_error_published)
+      continue;
+    if (!sh_submitted)
+      continue;
+
+    if (tid > 0 && worker < sh_submitted) {
+      uint32_t slot = batchSlots[worker];
+      uint32_t blocks = batchLens[worker] / baseParams.lbaSize;
       uint64_t transfer_size = (uint64_t)blocks * baseParams.lbaSize;
-      uint64_t buf_off = (uint64_t)b * buffer_stride;
+      uint64_t buf_off = (uint64_t)worker * sh_buffer_stride;
       uint32_t page_off = (uint32_t)(buf_off / NVME_PAGE_SIZE);
       uint64_t intra_page_off = buf_off % NVME_PAGE_SIZE;
       uint64_t addr;
       uint64_t* prp_slot = bufferParams.prpListPool
                              ? bufferParams.prpListPool +
-                                 b * bufferParams.prpEntriesPerCmd
+                                 worker * bufferParams.prpEntriesPerCmd
                              : nullptr;
       uint64_t prp_slot_dma = bufferParams.prpListPoolDma
                                 ? bufferParams.prpListPoolDma +
-                                    b * bufferParams.prpEntriesPerCmd *
+                                    worker * bufferParams.prpEntriesPerCmd *
                                       sizeof(uint64_t)
                                 : 0;
 
-      if (desc.isWrite) {
+      if (batchIsWrite[worker]) {
         if (bufferParams.writeBuffer != nullptr) {
+          uint64_t verify_t0 = stats != nullptr ? wall_clock64() : 0;
           xio::DataPatternParams pp{bufferParams.writeBuffer + buf_off,
-                                    desc.len, 0, baseParams.lbaSize,
+                                    batchLens[worker], 0, baseParams.lbaSize,
                                     baseParams.lfsrSeed, nullptr};
           xio::dataPattern(false, pp);
+          persistentStatsAdd(&stats->verify,
+                             stats != nullptr ? wall_clock64() - verify_t0 : 0);
         }
         addr = bufferParams.writePagePhysAddrs
                  ? bufferParams.writePagePhysAddrs[page_off] + intra_page_off
@@ -1387,104 +1594,186 @@ extern "C" __global__ void nvmePersistentWorkerKernel(
       }
 
       sqeType sqeLocal = {};
-      comps[slot].gpuStart = wall_clock64();
-      sqeLocal.opcode = desc.isWrite ? nvme_cmd_write : nvme_cmd_read;
-      sqeLocal.command_id = cmd_id++;
-      if (cmd_id == 0)
-        cmd_id = 1;
+      uint64_t gpu_start = wall_clock64();
+      batchGpuStart[worker] = gpu_start;
+      comps[slot].gpuStart = gpu_start;
+      sqeLocal.opcode = batchIsWrite[worker] ? nvme_cmd_write : nvme_cmd_read;
+      sqeLocal.command_id = batchCmdIds[worker];
       sqeLocal.nsid = baseParams.nsid;
-      calculatePrps(addr, transfer_size, &sqeLocal, prp_slot, prp_slot_dma,
-                    desc.isWrite ? bufferParams.writePagePhysAddrs
-                                 : bufferParams.readPagePhysAddrs,
-                    page_off);
-      sqeSetup(&sqeLocal, desc.offset / baseParams.lbaSize, blocks);
-      sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-      sq_tail = (sq_tail + 1) % baseParams.queueSize;
-      submitted++;
-      if (desc.verify)
-        break;
-    }
 
-    if (!submitted)
-      continue;
-
-    __threadfence_system();
-    ringDoorbell(sq_tail, doorbellParams);
-
-    uint32_t completed = 0;
-    for (uint32_t b = 0; b < submitted; b++) {
-      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
-      nvmePersistentWorkDesc desc = {};
-      desc.seq = descs[slot].seq;
-      desc.userData = descs[slot].userData;
-      desc.len = descs[slot].len;
-      desc.isWrite = descs[slot].isWrite;
-      desc.verify = descs[slot].verify;
-
-      nvmePersistentWorkCompletion comp = {};
-      comp.userData = desc.userData;
-      comp.bytes = desc.len;
-      comp.gpuStart = comps[slot].gpuStart;
-
-      unsigned poll_count = 0;
-      cqeType cqe_new = {};
-      while (true) {
-        cqe_new = cqeRead(&cqeAddr[cq_head]);
-        if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase)
-          break;
-        if (control->stop || ++poll_count >= NVME_EP_MAX_POLLS) {
-          comp.error = 110;
-          break;
+      uint64_t prp_t0 = stats != nullptr ? wall_clock64() : 0;
+      bool prp_fast_path = false;
+      if (precomputePrps) {
+        uint64_t first_page_size = NVME_PAGE_SIZE - (addr & (NVME_PAGE_SIZE - 1));
+        if (transfer_size <= first_page_size) {
+          sqeLocal.dptr.prp.prp1 = addr;
+          sqeLocal.dptr.prp.prp2 = 0;
+          prp_fast_path = true;
         }
       }
-
-      if (!comp.error && !cqeOk(&cqe_new)) {
-        comp.error = 5;
-        comp.nvmeStatus = cqe_new.status;
+      if (!prp_fast_path) {
+        calculatePrps(addr, transfer_size, &sqeLocal, prp_slot, prp_slot_dma,
+                      batchIsWrite[worker] ? bufferParams.writePagePhysAddrs
+                                           : bufferParams.readPagePhysAddrs,
+                      page_off);
       }
+      persistentStatsAdd(&stats->prpBuild,
+                         stats != nullptr ? wall_clock64() - prp_t0 : 0);
 
-      if (!comp.error && desc.verify && !desc.isWrite &&
-          bufferParams.readBuffer) {
-        xio::DataPatternParams vp{bufferParams.readBuffer, desc.len, 0,
-                                  baseParams.lbaSize, baseParams.lfsrSeed,
-                                  nullptr};
-        if (xio::dataPattern(true, vp))
-          comp.verifyPass = 1;
-        else {
-          comp.verifyFail = 1;
-          comp.error = 5;
+      uint64_t sqe_t0 = stats != nullptr ? wall_clock64() : 0;
+      sqeSetup(&sqeLocal, batchOffsets[worker] / baseParams.lbaSize, blocks);
+      persistentStatsAdd(&stats->sqeBuild,
+                         stats != nullptr ? wall_clock64() - sqe_t0 : 0);
+
+      uint64_t sqe_write_t0 = stats != nullptr ? wall_clock64() : 0;
+      sqeWrite(sqeLocal, &sqeAddr[batchSqSlots[worker]]);
+      persistentStatsAdd(&stats->sqeWrite,
+                         stats != nullptr ? wall_clock64() - sqe_write_t0 : 0);
+    }
+    __syncthreads();
+
+    if (coordinator) {
+      sq_tail = (sq_tail + sh_submitted) % baseParams.queueSize;
+      sh_completed = 0;
+      persistentStatsAdd(&stats->submittedCount, sh_submitted);
+      persistentStatsMax(&stats->maxBatch, sh_submitted);
+      uint64_t fence_t0 = stats != nullptr ? wall_clock64() : 0;
+      __threadfence_system();
+      persistentStatsAdd(&stats->sqFence,
+                         stats != nullptr ? wall_clock64() - fence_t0 : 0);
+      uint64_t doorbell_t0 = stats != nullptr ? wall_clock64() : 0;
+      ringDoorbell(sq_tail, doorbellParams);
+      persistentStatsAdd(&stats->sqDoorbell,
+                         stats != nullptr ? wall_clock64() - doorbell_t0 : 0);
+    }
+    __syncthreads();
+
+    for (uint32_t chunk_base = 0; chunk_base < sh_submitted;
+         chunk_base += sh_cq_batch_limit) {
+      if (coordinator) {
+        sh_cq_head_base = cq_head;
+        sh_cq_expected_phase = expected_phase;
+        uint32_t left = sh_submitted - chunk_base;
+        sh_cq_chunk = left < sh_cq_batch_limit ? left : sh_cq_batch_limit;
+      }
+      __syncthreads();
+
+      uint32_t rel = cq_lane - 1;
+      if (cq_lane != UINT32_MAX && cq_lane > 0 && rel < sh_cq_chunk) {
+        uint32_t b = chunk_base + rel;
+        uint32_t cq_slot = sh_cq_head_base + rel;
+        uint8_t poll_phase = sh_cq_expected_phase;
+        if (cq_slot >= baseParams.queueSize) {
+          cq_slot -= baseParams.queueSize;
+          poll_phase ^= 1;
+        }
+
+        batchPollErrors[b] = 0;
+        unsigned poll_count = 0;
+        cqeType cqe_new = {};
+        uint64_t poll_t0 = stats != nullptr ? wall_clock64() : 0;
+        while (true) {
+          cqe_new = cqeRead(&cqeAddr[cq_slot]);
+          if (NVME_CQE_STATUS_PHASE(cqe_new.status) == poll_phase)
+            break;
+          if (control->stop || ++poll_count >= NVME_EP_MAX_POLLS) {
+            batchPollErrors[b] = 1;
+            break;
+          }
+        }
+        batchCqes[b] = cqe_new;
+        batchPollCounts[b] = poll_count + 1;
+        persistentStatsAdd(&stats->cqPoll,
+                           stats != nullptr ? wall_clock64() - poll_t0 : 0);
+      }
+      __syncthreads();
+
+      if (coordinator) {
+        for (uint32_t rel = 0; rel < sh_cq_chunk; rel++) {
+          uint32_t b = chunk_base + rel;
+          uint32_t slot = batchSlots[b];
+
+          nvmePersistentWorkCompletion comp = {};
+          comp.userData = batchUserData[b];
+          comp.bytes = batchLens[b];
+          comp.gpuStart = batchGpuStart[b];
+
+          cqeType cqe_new = batchCqes[b];
+          persistentStatsAdd(&stats->pollIterations, batchPollCounts[b]);
+          persistentStatsMax(&stats->maxPolls, batchPollCounts[b]);
+
+          if (batchPollErrors[b]) {
+            comp.error = 110;
+            persistentStatsAdd(&stats->timeoutCount, 1);
+          }
+
+          if (!comp.error && !cqeOk(&cqe_new)) {
+            comp.error = 5;
+            comp.nvmeStatus = cqe_new.status;
+          }
+
+          if (!comp.error && batchVerify[b] && !batchIsWrite[b] &&
+              bufferParams.readBuffer) {
+            uint64_t verify_t0 = stats != nullptr ? wall_clock64() : 0;
+            xio::DataPatternParams vp{bufferParams.readBuffer, batchLens[b], 0,
+                                      baseParams.lbaSize, baseParams.lfsrSeed,
+                                      nullptr};
+            if (xio::dataPattern(true, vp))
+              comp.verifyPass = 1;
+            else {
+              comp.verifyFail = 1;
+              comp.error = 5;
+            }
+            persistentStatsAdd(&stats->verify,
+                               stats != nullptr ? wall_clock64() - verify_t0 : 0);
+          }
+          comp.gpuEnd = wall_clock64();
+
+          if (!comp.error) {
+            cq_head = (cq_head + 1) % baseParams.queueSize;
+            if (cq_head == 0)
+              expected_phase ^= 1;
+            sh_completed++;
+          }
+          if (comp.error)
+            persistentStatsAdd(&stats->errorCount, 1);
+          persistentStatsAdd(&stats->ioCount, 1);
+
+          comps[slot].userData = comp.userData;
+          comps[slot].bytes = comp.bytes;
+          comps[slot].error = comp.error;
+          comps[slot].nvmeStatus = comp.nvmeStatus;
+          comps[slot].gpuStart = comp.gpuStart;
+          comps[slot].gpuEnd = comp.gpuEnd;
+          comps[slot].verifyPass = comp.verifyPass;
+          comps[slot].verifyFail = comp.verifyFail;
         }
       }
-      comp.gpuEnd = wall_clock64();
+      __syncthreads();
+    }
 
-      if (!comp.error) {
-        cq_head = (cq_head + 1) % baseParams.queueSize;
-        if (cq_head == 0)
-          expected_phase ^= 1;
-        completed++;
+    if (coordinator) {
+      if (sh_completed) {
+        uint64_t cq_doorbell_t0 = stats != nullptr ? wall_clock64() : 0;
+        ringDoorbell(cq_head, doorbellParams,
+                     doorbellParams.doorbellOffset + doorBellStride);
+        persistentStatsAdd(&stats->cqDoorbell,
+                           stats != nullptr ? wall_clock64() - cq_doorbell_t0
+                                            : 0);
+        persistentStatsAdd(&stats->completedCount, sh_completed);
       }
 
-      comps[slot].userData = comp.userData;
-      comps[slot].bytes = comp.bytes;
-      comps[slot].error = comp.error;
-      comps[slot].nvmeStatus = comp.nvmeStatus;
-      comps[slot].gpuStart = comp.gpuStart;
-      comps[slot].gpuEnd = comp.gpuEnd;
-      comps[slot].verifyPass = comp.verifyPass;
-      comps[slot].verifyFail = comp.verifyFail;
+      uint64_t publish_t0 = stats != nullptr ? wall_clock64() : 0;
+      __threadfence_system();
+      for (uint32_t b = 0; b < sh_submitted; b++) {
+        uint32_t slot = batchSlots[b];
+        comps[slot].seq = batchSeqs[b];
+      }
+      control->consumer = sh_consumer + sh_submitted;
+      persistentStatsAdd(&stats->completionPublish,
+                         stats != nullptr ? wall_clock64() - publish_t0 : 0);
     }
-
-    if (completed) {
-      ringDoorbell(cq_head, doorbellParams,
-                   doorbellParams.doorbellOffset + doorBellStride);
-    }
-
-    __threadfence_system();
-    for (uint32_t b = 0; b < submitted; b++) {
-      uint32_t slot = (uint32_t)((consumer + b) % control->ringSize);
-      comps[slot].seq = descs[slot].seq;
-    }
-    control->consumer = consumer + submitted;
+    __syncthreads();
   }
 }
 

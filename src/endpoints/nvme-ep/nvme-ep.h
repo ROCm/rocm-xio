@@ -127,6 +127,9 @@ struct nvmePersistentOptions {
   uint32_t maxTransferBytes; ///< Persistent data-buffer allocation size.
   uint32_t ringDepth;        ///< Host/GPU work ring entries.
   uint32_t batchSize;        ///< Max descriptors processed before yielding.
+  uint32_t sqBatchSize;      ///< Max SQ descriptors built/submitted per pass.
+  uint32_t cqBatchSize;      ///< Max CQEs polled/published per pass.
+  bool precomputePrps;       ///< Use persistent-worker fast PRP setup path.
   int gpuId;                 ///< HIP GPU ID; negative leaves current device.
   bool usePciMmioBridge;     ///< Use PCI MMIO bridge instead of direct BAR0.
   bool verbose;              ///< Enable verbose ROCm XIO logging.
@@ -141,6 +144,38 @@ struct nvmePersistentInfo {
   uint64_t capacityBytes; ///< Namespace capacity in bytes.
   uint16_t queueId;       ///< Queue ID owned by the session.
   uint16_t queueLength;   ///< Queue length in entries.
+};
+
+/**
+ * Aggregate persistent-worker phase counters.
+ *
+ * Time fields are GPU wall-clock cycles accumulated by the persistent worker.
+ * Count fields are raw event counts used to normalize per-I/O and per-batch
+ * costs on the host.
+ */
+struct nvmePersistentPhaseStats {
+  uint64_t idleWait;          ///< Cycles waiting for host work.
+  uint64_t descLoad;          ///< Cycles loading/validating descriptors.
+  uint64_t prpBuild;          ///< Cycles selecting buffers and building PRPs.
+  uint64_t sqeBuild;          ///< Cycles filling SQE fields and LBA setup.
+  uint64_t sqeWrite;          ///< Cycles writing SQEs into the submission queue.
+  uint64_t sqFence;           ///< Cycles in the pre-doorbell system fence.
+  uint64_t sqDoorbell;        ///< Cycles ringing the SQ tail doorbell.
+  uint64_t cqPoll;            ///< Cycles polling CQEs.
+  uint64_t verify;            ///< Cycles spent in optional verify work.
+  uint64_t cqDoorbell;        ///< Cycles ringing the CQ head doorbell.
+  uint64_t completionPublish; ///< Cycles publishing completions to host.
+  uint64_t ioCount;           ///< Number of completions published.
+  uint64_t batchCount;        ///< Number of non-empty batches processed.
+  uint64_t submittedCount;    ///< Number of SQEs submitted.
+  uint64_t completedCount;    ///< Number of successful CQEs completed.
+  uint64_t pollIterations;    ///< Number of CQ poll iterations.
+  uint64_t timeoutCount;      ///< Number of CQ poll timeouts.
+  uint64_t errorCount;        ///< Number of completion errors.
+  uint64_t maxBatch;          ///< Largest submitted batch.
+  uint64_t maxPolls;          ///< Largest poll count for one CQE.
+  uint32_t gpuClockKHz;       ///< GPU wall-clock frequency for conversion.
+  uint32_t reserved;          ///< Reserved for ABI alignment.
 };
 
 /**
@@ -225,7 +260,9 @@ extern "C" __global__ void nvmePersistentWorkerKernel(
   nvmeDoorbellParams doorbellParams, nvmeBufferParams bufferParams,
   volatile nvmePersistentControl* control,
   volatile nvmePersistentWorkDesc* descs,
-  volatile nvmePersistentWorkCompletion* comps);
+  volatile nvmePersistentWorkCompletion* comps,
+  volatile nvmePersistentPhaseStats* stats, uint32_t sqBatchSize,
+  uint32_t cqBatchSize, uint32_t wavefrontSize, bool precomputePrps);
 
 /**
  * Drive NVMe endpoint I/O operations from GPU device code
@@ -448,6 +485,24 @@ __host__ void closePersistentSession(nvmePersistentSession* session);
  */
 __host__ int getPersistentInfo(nvmePersistentSession* session,
                                nvmePersistentInfo* info);
+
+/**
+ * Query aggregate persistent-worker phase counters.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @param stats Output statistics structure.
+ * @return 0 on success, negative errno-style value on failure.
+ */
+__host__ int getPersistentPhaseStats(nvmePersistentSession* session,
+                                     nvmePersistentPhaseStats* stats);
+
+/**
+ * Reset aggregate persistent-worker phase counters.
+ *
+ * @param session Session returned by openPersistentSession().
+ * @return 0 on success, negative errno-style value on failure.
+ */
+__host__ int resetPersistentPhaseStats(nvmePersistentSession* session);
 
 /**
  * Submit one read or write to a persistent NVMe worker and wait for completion.

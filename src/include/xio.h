@@ -671,11 +671,20 @@ __host__ __device__ static inline void XioComEnqueue(const void* src,
   static_assert(Size % sizeof(uint64_t) == 0, "Size must be a multiple of 8");
   static_assert(Size > 0 && Size <= 256, "Size out of expected range");
   const uint64_t* s = reinterpret_cast<const uint64_t*>(src);
-  volatile uint64_t* d = reinterpret_cast<volatile uint64_t*>(dst);
   constexpr uint32_t N = Size / sizeof(uint64_t);
+  if constexpr (Size % 16 == 0) {
+    using u64x2 __attribute__((vector_size(16))) = uint64_t;
+    volatile u64x2* d = reinterpret_cast<volatile u64x2*>(dst);
 #pragma unroll
-  for (uint32_t i = 0; i < N; i++) {
-    d[i] = s[i];
+    for (uint32_t i = 0; i < N / 2; i++) {
+      d[i] = u64x2{s[2 * i], s[2 * i + 1]};
+    }
+  } else {
+    volatile uint64_t* d = reinterpret_cast<volatile uint64_t*>(dst);
+#pragma unroll
+    for (uint32_t i = 0; i < N; i++) {
+      d[i] = s[i];
+    }
   }
 #ifdef __HIP_DEVICE_COMPILE__
   if constexpr (Fence)
