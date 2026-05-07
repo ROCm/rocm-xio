@@ -246,6 +246,7 @@ int main(int argc, char** argv) {
   unsigned iterations = DEFAULT_ITERATIONS;
   const char* provider_str = "auto";
   const char* device_name = nullptr;
+  char auto_device_name[256] = {};
   const char* env_provider = getenv("PROVIDER");
   const char* env_device = getenv("ROCXIO_RDMA_DEVICE");
   if (env_provider && env_provider[0] != '\0')
@@ -296,6 +297,7 @@ int main(int argc, char** argv) {
   }
 
   Provider prov;
+  bool auto_provider = strcmp(provider_str, "auto") == 0;
   if (strcmp(provider_str, "bnxt") == 0) {
 #if defined(GDA_BNXT)
     prov = Provider::BNXT;
@@ -319,19 +321,22 @@ int main(int argc, char** argv) {
 #endif
   } else if (strcmp(provider_str, "auto") == 0) {
 #if defined(GDA_IONIC)
-    if (detect_pci_vendor(VENDOR_ID_PENSANDO)) {
+    if (detect_pci_vendor_device(VENDOR_ID_PENSANDO, auto_device_name,
+                                 sizeof(auto_device_name))) {
       prov = Provider::IONIC;
       printf("Auto-detected: ionic (0x%04x)\n", VENDOR_ID_PENSANDO);
     } else
 #endif
 #if defined(GDA_MLX5)
-      if (detect_pci_vendor(VENDOR_ID_MELLANOX)) {
+      if (detect_pci_vendor_device(VENDOR_ID_MELLANOX, auto_device_name,
+                                   sizeof(auto_device_name))) {
       prov = Provider::MLX5;
       printf("Auto-detected: mlx5 (0x%04x)\n", VENDOR_ID_MELLANOX);
     } else
 #endif
 #if defined(GDA_BNXT)
-      if (detect_pci_vendor(VENDOR_ID_BROADCOM)) {
+      if (detect_pci_vendor_device(VENDOR_ID_BROADCOM, auto_device_name,
+                                   sizeof(auto_device_name))) {
       prov = Provider::BNXT;
       printf("Auto-detected: bnxt (0x%04x)\n", VENDOR_ID_BROADCOM);
     } else
@@ -345,6 +350,9 @@ int main(int argc, char** argv) {
     print_usage(argv[0]);
     return 1;
   }
+
+  if (auto_provider && !device_name && auto_device_name[0] != '\0')
+    device_name = auto_device_name;
 
   const char* prov_name = provider_name(prov);
 

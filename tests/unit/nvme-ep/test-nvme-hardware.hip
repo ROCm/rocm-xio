@@ -13,6 +13,7 @@
  */
 
 #include <cassert>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -152,6 +153,11 @@ int main(int argc, char** argv) {
 
   if (access(g_controller.c_str(), F_OK) != 0) {
     printf("SKIP: NVMe device %s not found\n", g_controller.c_str());
+    return 77;
+  }
+  if (access(g_controller.c_str(), R_OK) != 0) {
+    printf("SKIP: NVMe device %s is not readable: %s\n", g_controller.c_str(),
+           strerror(errno));
     return 77;
   }
 

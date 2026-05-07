@@ -28,31 +28,19 @@ if(CLANG_FORMAT)
   add_custom_target(lint-format
     COMMAND ${CLANG_FORMAT} --version
     COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
-      find . -type f \\( -name \\*.cpp -o -name \\*.h -o -name \\*.hpp
-        -o -name \\*.c -o -name \\*.cc -o -name \\*.hip \\)
-        -not -path ./build/*
-        -not -path ./.git/*
-        -not -path ./src/include/external/*
-        -not -path ./gda-experiments/rocSHMEM/*
-        -not -name \\*.mod.c
-        -not -name \\*.mod
-        | xargs ${CLANG_FORMAT} --dry-run --Werror --style=file
+      bash -c
+      "find . -type f \\( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' -o -name '*.hip' \\) -not -path './build/*' -not -path './build-*/*' -not -path './.git/*' -not -path './.venv/*' -not -path './src/include/external/*' -not -path './gda-experiments/rocSHMEM/*' -not -name '*-generated.h' -not -name '*-gen.h' -not -name '*.mod.c' -not -name '*.mod' -print0 | xargs -0 ${CLANG_FORMAT} --dry-run --Werror --style=file"
     COMMENT "Checking code formatting with clang-format"
+    VERBATIM
   )
 
   # Format fix
   add_custom_target(format
     COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
-      find . -type f \\( -name \\*.cpp -o -name \\*.h -o -name \\*.hpp
-        -o -name \\*.c -o -name \\*.cc -o -name \\*.hip \\)
-        -not -path ./build/*
-        -not -path ./.git/*
-        -not -path ./src/include/external/*
-        -not -path ./gda-experiments/rocSHMEM/*
-        -not -name \\*.mod.c
-        -not -name \\*.mod
-        | xargs ${CLANG_FORMAT} -i --style=file
+      bash -c
+      "find . -type f \\( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' -o -name '*.hip' \\) -not -path './build/*' -not -path './build-*/*' -not -path './.git/*' -not -path './.venv/*' -not -path './src/include/external/*' -not -path './gda-experiments/rocSHMEM/*' -not -name '*-generated.h' -not -name '*-gen.h' -not -name '*.mod.c' -not -name '*.mod' -print0 | xargs -0 ${CLANG_FORMAT} -i --style=file"
     COMMENT "Formatting code with clang-format"
+    VERBATIM
   )
 else()
   add_custom_target(lint-format
