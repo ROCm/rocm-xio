@@ -19,6 +19,7 @@
 
 #include "endian.hpp"
 #include "ibv-core.hpp"
+#include "rdma-ep.h"
 #include "vendor-ops.hpp"
 
 #if defined(GDA_BNXT)

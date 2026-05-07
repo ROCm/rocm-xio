@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "ibv-core.hpp"
+#include "rdma-ep.h"
 #include "vendor-ops.hpp"
 
 namespace xio {

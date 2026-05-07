@@ -38,7 +38,12 @@ namespace xio {
 namespace rdma_ep {
 
 __host__ const char* provider_allowed_names() {
-  return "bnxt, mlx5, ionic, or ernic";
+  static char names[64];
+  snprintf(names, sizeof(names), "%s, %s, %s, or %s",
+           provider_name(Provider::BNXT), provider_name(Provider::MLX5),
+           provider_name(Provider::IONIC),
+           provider_name(Provider::ROCM_ERNIC));
+  return names;
 }
 
 __host__ BackendConfig make_backend_config(const XioEndpointConfig& config,

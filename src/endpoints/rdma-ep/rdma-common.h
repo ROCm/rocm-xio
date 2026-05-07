@@ -23,8 +23,14 @@
 
 #include <hip/hip_runtime.h>
 
-#include "ibv-core.hpp"
-#include "vendor-ops.hpp"
+#include "rdma-ep.h"
+
+struct ibv_cq;
+struct ibv_device_attr;
+struct ibv_pd;
+struct ibv_qp;
+struct ibv_qp_attr;
+struct ibv_qp_init_attr_ex;
 
 namespace xio {
 
