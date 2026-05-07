@@ -8,6 +8,7 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import os
 import re
 from pathlib import Path
 
@@ -63,20 +64,21 @@ copyright = "Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved
 version = version_number
 release = version_number
 
-external_toc_path = "./sphinx/_toc.yml" # Defines Table of Content structure definition path
+# Defines Table of Content structure definition path.
+external_toc_path = "./sphinx/_toc.yml"
 
 extensions = [
     "rocm_docs",
     "rocm_docs.doxygen",
 ]
 
-# rocPRIM-style Doxygen layout: working tree under build/docs-doxygen/, paths
-# relative to this file after configure_file(..., docs-sphinx/conf.py).
-doxygen_root = "doxygen"
-doxyfile = "doxygen/Doxyfile.in"
+# Defaults are source-tree paths for Read the Docs. CMake docs builds set
+# ROCM_XIO_* overrides so generated Doxygen files live under the build tree.
+doxygen_root = os.environ.get("ROCM_XIO_DOXYGEN_ROOT", "doxygen")
+doxyfile = os.environ.get("ROCM_XIO_DOXYFILE", "doxygen/Doxyfile.in")
 doxygen_project = {
     "name": "ROCm XIO",
-    "path": "doxygen/xml",
+    "path": os.environ.get("ROCM_XIO_DOXYGEN_XML", "doxygen/xml"),
 }
 doxysphinx_enabled = False
 

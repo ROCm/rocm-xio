@@ -23,7 +23,7 @@ if(XIO_BUILD_DOCS)
   set(XIO_DOCS_VENV_STAMP
     "${XIO_DOCS_VENV}/stamp")
   set(XIO_DOCS_REQUIREMENTS
-    "${CMAKE_SOURCE_DIR}/requirements.txt")
+    "${CMAKE_SOURCE_DIR}/docs/sphinx/requirements.txt")
 
   if(WIN32)
     set(XIO_VENV_BIN "${XIO_DOCS_VENV}/Scripts")
@@ -92,7 +92,11 @@ if(XIO_BUILD_DOCS)
 
   # ── Sphinx target: RST + Doxygen XML -> HTML
   add_custom_target(sphinx-html
-    COMMAND ${SPHINX_BUILD}
+    COMMAND ${CMAKE_COMMAND} -E env
+      ROCM_XIO_DOXYGEN_ROOT=${XIO_DOXYGEN_WORKDIR}
+      ROCM_XIO_DOXYFILE=${XIO_DOXYGEN_WORKDIR}/Doxyfile
+      ROCM_XIO_DOXYGEN_XML=${XIO_DOXYGEN_WORKDIR}/xml
+      ${SPHINX_BUILD}
       -b html
       -c ${CMAKE_BINARY_DIR}/docs-sphinx
       ${CMAKE_SOURCE_DIR}/docs

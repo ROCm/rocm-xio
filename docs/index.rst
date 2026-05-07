@@ -40,6 +40,9 @@ IO operations to hardware devices without CPU intervention.
     * :doc:`Environment variables <reference/environment-variables>`
     * :doc:`API reference <reference/api>`
 
-To contribute to the documentation, refer to the `Contributing guide in the GitHub repo <https://github.com/ROCm/rocm-xio/blob/main/CONTRIBUTING.md>`_.
+To contribute to the documentation, refer to the `Contributing guide`_ in the
+GitHub repo.
 
 You can find licensing information on the :doc:`License <license>` page.
+
+.. _Contributing guide: https://github.com/ROCm/rocm-xio/blob/main/CONTRIBUTING.md

@@ -470,8 +470,8 @@ int main(int argc, char** argv) {
                                         (void**)&substepStats, "substep stats",
                                         XIO_HOST_MEM_MAPPED);
     if (hipErr != hipSuccess) {
-      std::cerr << "Error: Failed to allocate "
-                << "substep stats buffer" << std::endl;
+      std::cerr << "Error: Failed to allocate " << "substep stats buffer"
+                << std::endl;
       return EXIT_FAILURE;
     }
     memset(substepStats, 0, sizeof(XioSubstepStats));
@@ -701,8 +701,8 @@ int main(int argc, char** argv) {
 
   if (substepStats != nullptr && substepStats->count > 0) {
     double cnt = static_cast<double>(substepStats->count);
-    std::cout << "\n--- Sub-step Timing Breakdown "
-              << "(per IO average) ---" << std::endl;
+    std::cout << "\n--- Sub-step Timing Breakdown " << "(per IO average) ---"
+              << std::endl;
     std::cout << std::fixed << std::setprecision(1);
     if (substepStats->buildCount > 0) {
       double bcnt = static_cast<double>(substepStats->buildCount);

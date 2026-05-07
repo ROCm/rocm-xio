@@ -1,5 +1,6 @@
 .. meta::
-  :description: Learn about the unified memory allocation API, memory coherence considerations, and the DMA-BUF export architecture in ROCm XIO
+  :description: Learn about the unified memory allocation API, memory
+    coherence considerations, and the DMA-BUF export architecture in ROCm XIO
   :keywords: ROCm, documentation, memory, allocation, coherence, XIO
 
 .. _memory-modes:
@@ -336,10 +337,10 @@ Thread fences
 Comparison with rocSHMEM
 ------------------------
 
-`rocSHMEM <https://rocm.docs.amd.com/projects/rocSHMEM/en/latest/index.html>`_ has a full allocator hierarchy (``HIPAllocator``,
-``FreeList``, ``Pow2Bins``) managing a symmetric heap shared across
-PEs. Each allocator knows how to allocate memory and export it as
-dmabuf for RDMA registration.
+`rocSHMEM`_ has a full allocator hierarchy (``HIPAllocator``,
+``FreeList``, ``Pow2Bins``) managing a symmetric heap shared across PEs.
+Each allocator knows how to allocate memory and export it as dmabuf for
+RDMA registration.
 
 ROCm XIO deliberately removed this abstraction (see
 ``src/endpoints/rdma-ep/README.md``: "Decoupled from rocshmem
@@ -352,4 +353,5 @@ Upstream tracking
 Monitor ``ROCm/rocm-systems#3762`` for any breaking changes to the
 HSA allocator interface that would require ROCm XIO changes.
 
+.. _rocSHMEM: https://rocm.docs.amd.com/projects/rocSHMEM/en/latest/index.html
 .. _HIP Virtual Memory Management: https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/virtual_memory.html

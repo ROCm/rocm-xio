@@ -11,10 +11,12 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include <dirent.h>
 
-inline bool detect_pci_vendor(uint16_t vendor_id) {
+inline bool detect_pci_vendor_device(uint16_t vendor_id, char* device_name,
+                                     size_t device_name_size) {
   DIR* d = opendir("/sys/class/infiniband");
   if (!d)
     return false;
@@ -30,6 +32,10 @@ inline bool detect_pci_vendor(uint16_t vendor_id) {
       continue;
     unsigned int vid = 0;
     if (fscanf(f, "%x", &vid) == 1 && vid == vendor_id) {
+      if (device_name && device_name_size > 0) {
+        strncpy(device_name, ent->d_name, device_name_size - 1);
+        device_name[device_name_size - 1] = '\0';
+      }
       fclose(f);
       closedir(d);
       return true;
@@ -38,6 +44,10 @@ inline bool detect_pci_vendor(uint16_t vendor_id) {
   }
   closedir(d);
   return false;
+}
+
+inline bool detect_pci_vendor(uint16_t vendor_id) {
+  return detect_pci_vendor_device(vendor_id, nullptr, 0);
 }
 
 #endif // RDMA_EP_TEST_DETECT_PCI_VENDOR_HPP

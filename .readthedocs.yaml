@@ -17,5 +17,7 @@ python:
 # Defines build environment
 build:
    os: ubuntu-22.04
+   apt_packages:
+      - doxygen
    tools:
       python: "3.10"

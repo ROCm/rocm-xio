@@ -64,7 +64,7 @@ Every test carries one or more CTest labels for filtering with
 Label         Definition
 ============  =========================================
 ``unit``      CPU-only, no GPU or NIC (runs in CI)
-``system``    Needs a `HIP-capable GPU <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html#supported-gpus>`_
+``system``    Needs a `HIP-capable GPU`_
 ``hardware``  Needs a GPU and a specific RDMA NIC
 ``sweep``     Parameterized multi-seed loopback runs
 ``stress``    Long-running (timeout: 600 seconds)
@@ -72,6 +72,8 @@ Label         Definition
 ``common``    Common library utilities
 ``fixture``   CTest fixture (setup/teardown)
 ============  =========================================
+
+.. _HIP-capable GPU: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html#supported-gpus
 
 Combine labels to narrow the scope:
 

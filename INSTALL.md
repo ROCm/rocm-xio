@@ -118,16 +118,16 @@ cmake --install build --prefix /tmp/rocm-xio-test
 
 ### Documentation
 
-Build the documentation with Sphinx + Breathe + Doxygen:
+Build the documentation without configuring the HIP/ROCm library targets:
 
 ```
-cmake -S . -B build -DXIO_BUILD_DOCS=ON
-cmake --build build --target sphinx-html
+cmake -S . -B build-docs -DXIO_DOCS_ONLY=ON -DXIO_BUILD_DOCS=ON
+cmake --build build-docs --target sphinx-html
 ```
 
-Output appears in `build/docs/html/index.html`.
+Output appears in `build-docs/docs/html/index.html`.
 
-For full build details see [docs/building.rst](docs/building.rst).
+For full build details see [docs/install/building.rst](docs/install/building.rst).
 
 [rocm-install]: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/quick-start.html
 [rocm-gpus]: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html

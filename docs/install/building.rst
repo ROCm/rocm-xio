@@ -66,7 +66,11 @@ CMake configuration options
    # Build library only (no tester, no CLI11 dependency)
    cmake -S . -B build -DBUILD_CLIENTS=OFF
 
-   # Build documentation (Sphinx + Breathe + Doxygen)
+   # Build documentation only (Sphinx + Breathe + Doxygen, no HIP required)
+   cmake -S . -B build-docs -DXIO_DOCS_ONLY=ON -DXIO_BUILD_DOCS=ON
+   cmake --build build-docs --target sphinx-html
+
+   # Build documentation as part of a normal ROCm XIO build
    cmake -S . -B build -DXIO_BUILD_DOCS=ON
 
 CMake build targets
