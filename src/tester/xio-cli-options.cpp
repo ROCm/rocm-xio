@@ -88,7 +88,7 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->group(nvme_group);
   app
     .add_option("--controller", cfg->controller,
-                "NVMe controller device path (required).")
+                "NVMe controller or namespace device path (required).")
     ->required()
     ->group(nvme_group);
   app

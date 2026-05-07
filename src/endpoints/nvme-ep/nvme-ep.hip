@@ -17,6 +17,7 @@
 #include <cstring>
 
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -876,12 +877,29 @@ static int ioctlEintrSafe(int fd, unsigned long request, void* arg) {
  * @return Empty string if valid, error message otherwise
  */
 __host__ std::string validateConfig(nvmeEpConfig* config) {
+  // Validate and normalize --controller before querying controller sysfs.
+  if (config->controller.empty()) {
+    return "--controller must be specified";
+  }
+
+  NvmeDevicePath nvme_path;
+  int path_ret = xio::resolveNvmeDevicePath(config->controller.c_str(),
+                                            config->ioParams.nsid, &nvme_path);
+  if (path_ret != 0) {
+    return "Failed to resolve NVMe device path: " +
+           std::string(strerror(-path_ret));
+  }
+  if (config->controller != nvme_path.controllerPath) {
+    ROCXIO_LOG_INFO("Resolved NVMe path %s to controller %s "
+                    "(namespace %s)\n",
+                    config->controller.c_str(),
+                    nvme_path.controllerPath.c_str(),
+                    nvme_path.namespacePath.c_str());
+    config->controller = nvme_path.controllerPath;
+  }
+
   // Auto-detect maximum queue ID if queueId is 0 (default)
   if (config->queueId == 0) {
-    if (config->controller.empty()) {
-      return "Cannot auto-detect queue ID: "
-             "--controller not specified";
-    }
     uint16_t max_queue_id = 0;
     int ret = queryMaxQueueId(config->controller.c_str(), &max_queue_id);
     if (ret != 0) {
@@ -968,11 +986,6 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       return "--verify requires --batch-size 1 (wavefront "
              "batching intermixes write and read ops, "
              "preventing correct read-back verification)";
-  }
-
-  // Validate that --controller is specified
-  if (config->controller.empty()) {
-    return "--controller must be specified";
   }
 
   // Detect LBA size from controller/namespace
@@ -1729,6 +1742,11 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     return -EINVAL;
   }
 
+  NvmeDevicePath nvme_path;
+  ret = xio::resolveNvmeDevicePath(nvme_device, nsid, &nvme_path);
+  if (ret != 0)
+    return ret;
+
   {
     hipError_t herr = xio::allocHostMemory(nvme_ep::nvmeAdminRespSize,
                                            (void**)&id_ns, "Identify Namespace",
@@ -1737,7 +1755,8 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
       return -ENOMEM;
   }
 
-  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
+  nvme_fd = openDeviceWithRetry(nvme_path.controllerPath.c_str(), O_RDONLY,
+                                "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
@@ -1856,6 +1875,11 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     return -EINVAL;
   }
 
+  NvmeDevicePath nvme_path;
+  ret = xio::resolveNvmeDevicePath(nvme_device, nsid, &nvme_path);
+  if (ret != 0)
+    return ret;
+
   {
     hipError_t herr = xio::allocHostMemory(nvme_ep::nvmeAdminRespSize,
                                            (void**)&id_ns,
@@ -1865,7 +1889,8 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
       return -ENOMEM;
   }
 
-  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
+  nvme_fd = openDeviceWithRetry(nvme_path.controllerPath.c_str(), O_RDONLY,
+                                "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ret = -errno;
     goto cleanup;
@@ -1947,8 +1972,19 @@ cleanup:
 }
 
 __host__ int checkRootfs(const char* nvme_device) {
-  char ns_device[256];
-  snprintf(ns_device, sizeof(ns_device), "%sn1", nvme_device);
+  NvmeDevicePath nvme_path;
+  int resolve_ret = xio::resolveNvmeDevicePath(nvme_device, 1, &nvme_path);
+  if (resolve_ret != 0) {
+    ROCXIO_LOG_WARN("Failed to resolve NVMe path %s for rootfs check: %s\n",
+                    nvme_device, strerror(-resolve_ret));
+    return 0;
+  }
+
+  char ns_real[PATH_MAX] = {};
+  const char* ns_device = nvme_path.namespacePath.c_str();
+  const char* ns_compare = ns_device;
+  if (realpath(ns_device, ns_real) != nullptr)
+    ns_compare = ns_real;
 
   // Check /proc/mounts for root mount
   FILE* f = fopen("/proc/mounts", "r");
@@ -1966,7 +2002,8 @@ __host__ int checkRootfs(const char* nvme_device) {
       if (strcmp(mount_point, "/") == 0) {
         // Check if this device matches our NVMe device
         if (strstr(device, ns_device) != nullptr ||
-            strstr(device, nvme_device) != nullptr) {
+            strstr(device, ns_compare) != nullptr ||
+            strstr(device, nvme_path.controllerPath.c_str()) != nullptr) {
           is_rootfs = true;
           break;
         }
@@ -1977,7 +2014,7 @@ __host__ int checkRootfs(const char* nvme_device) {
 
   if (is_rootfs) {
     ROCXIO_LOG_ERROR("NVMe device %s appears to be the root filesystem!\n",
-                     nvme_device);
+                     ns_device);
     ROCXIO_LOG_ERROR("This operation will NOT proceed on rootfs to prevent "
                      "data corruption.\n");
     ROCXIO_LOG_ERROR("Please specify a different NVMe device.\n");
@@ -1990,8 +2027,14 @@ __host__ int checkRootfs(const char* nvme_device) {
 __host__ int readSmartLog(const char* nvme_device,
                           struct nvme_smart_log* smart_log) {
   int nvme_fd = -1;
+  NvmeDevicePath nvme_path;
+  int resolve_ret = xio::resolveNvmeDevicePath(nvme_device, 1, &nvme_path);
+  if (resolve_ret != 0)
+    return resolve_ret;
+
   // Open NVMe device with retry (device may be temporarily busy)
-  nvme_fd = openDeviceWithRetry(nvme_device, O_RDONLY, "NVMe device", 5, 100);
+  nvme_fd = openDeviceWithRetry(nvme_path.controllerPath.c_str(), O_RDONLY,
+                                "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     return -errno;
   }
@@ -2049,18 +2092,15 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id) {
     return -EINVAL;
   }
 
-  // Extract device name from path (e.g., "/dev/nvme1" -> "nvme1")
-  const char* device_name = strrchr(nvme_device, '/');
-  if (!device_name) {
-    device_name = nvme_device;
-  } else {
-    device_name++; // Skip the '/'
-  }
+  NvmeDevicePath nvme_path;
+  int resolve_ret = xio::resolveNvmeDevicePath(nvme_device, 1, &nvme_path);
+  if (resolve_ret != 0)
+    return resolve_ret;
 
   // Build sysfs path: /sys/class/nvme/nvme1/queue_count
   char sysfs_path[256];
   snprintf(sysfs_path, sizeof(sysfs_path), "/sys/class/nvme/%s/queue_count",
-           device_name);
+           nvme_path.controllerName.c_str());
 
   FILE* f = fopen(sysfs_path, "r");
   if (!f) {

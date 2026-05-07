@@ -1056,23 +1056,96 @@ int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
   return 0;
 }
 
+static std::string xioBasename(const std::string& path) {
+  size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos)
+    return path;
+  return path.substr(slash + 1);
+}
+
+static bool isNvmeNamespaceName(const std::string& name) {
+  if (name.rfind("nvme", 0) != 0)
+    return false;
+
+  size_t pos = 4;
+  while (pos < name.size() && name[pos] >= '0' && name[pos] <= '9')
+    pos++;
+
+  if (pos == 4 || pos >= name.size() || name[pos] != 'n')
+    return false;
+
+  pos++;
+  size_t ns_start = pos;
+  while (pos < name.size() && name[pos] >= '0' && name[pos] <= '9')
+    pos++;
+
+  return pos > ns_start && pos == name.size();
+}
+
+static std::string realpathOrOriginal(const char* path) {
+  char resolved[PATH_MAX];
+  if (realpath(path, resolved) != nullptr)
+    return resolved;
+  return path ? std::string(path) : std::string();
+}
+
+__host__ int resolveNvmeDevicePath(const char* device_path, uint32_t nsid,
+                                   NvmeDevicePath* resolved) {
+  if (!device_path || !resolved || device_path[0] == '\0')
+    return -EINVAL;
+
+  std::string real_path = realpathOrOriginal(device_path);
+  std::string node_name = xioBasename(real_path);
+  if (node_name.empty())
+    return -EINVAL;
+
+  resolved->namespacePath.clear();
+  resolved->controllerPath.clear();
+  resolved->controllerName.clear();
+
+  if (isNvmeNamespaceName(node_name)) {
+    std::string ns_sysfs = "/sys/class/block/" + node_name + "/device";
+    char controller_real[PATH_MAX];
+    if (realpath(ns_sysfs.c_str(), controller_real) == nullptr) {
+      std::cerr << "Error: Failed to resolve " << ns_sysfs << ": "
+                << strerror(errno) << std::endl;
+      return -errno;
+    }
+
+    resolved->namespacePath = device_path;
+    resolved->controllerName = xioBasename(controller_real);
+    resolved->controllerPath = "/dev/" + resolved->controllerName;
+  } else {
+    std::string controller_sysfs = "/sys/class/nvme/" + node_name;
+    char controller_real[PATH_MAX];
+    if (realpath(controller_sysfs.c_str(), controller_real) == nullptr) {
+      std::cerr << "Error: Failed to resolve " << controller_sysfs << ": "
+                << strerror(errno) << std::endl;
+      return -errno;
+    }
+
+    resolved->controllerName = xioBasename(controller_real);
+    resolved->controllerPath = "/dev/" + resolved->controllerName;
+    resolved->namespacePath = resolved->controllerPath + "n" +
+                              std::to_string(nsid);
+  }
+
+  return 0;
+}
+
 __host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
   if (!device_path || !bdf_out) {
     return -EINVAL;
   }
 
-  // Extract device name from path (e.g., "nvme0" from "/dev/nvme0")
-  std::string dev_path = device_path;
-  size_t last_slash = dev_path.find_last_of('/');
-  if (last_slash == std::string::npos || last_slash == dev_path.length() - 1) {
-    std::cerr << "Error: Invalid device path: " << device_path << std::endl;
-    return -EINVAL;
-  }
-
-  std::string device_name = dev_path.substr(last_slash + 1);
+  NvmeDevicePath nvme_path;
+  int resolve_ret = resolveNvmeDevicePath(device_path, 1, &nvme_path);
+  if (resolve_ret != 0)
+    return resolve_ret;
 
   // Build sysfs device symlink path: /sys/class/nvme/nvme0/device
-  std::string sysfs_path = "/sys/class/nvme/" + device_name + "/device";
+  std::string sysfs_path = "/sys/class/nvme/" + nvme_path.controllerName +
+                           "/device";
 
   // Read the symlink to get PCI device path
   char link_target[256];
@@ -1129,7 +1202,8 @@ __host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
 
   *bdf_out = bdf;
 
-  std::cout << "Detected PCI BDF for " << device_path << ": 0000:" << std::hex
+  std::cout << "Detected PCI BDF for " << device_path << " ("
+            << nvme_path.controllerPath << "): 0000:" << std::hex
             << std::setfill('0') << std::setw(2) << static_cast<unsigned>(bus)
             << ":" << std::setw(2) << static_cast<unsigned>(device) << "."
             << std::dec << static_cast<unsigned>(function) << " (BDF: 0x"
@@ -1145,18 +1219,14 @@ __host__ int detectEmulatedNvme(const char* device_path,
     return -EINVAL;
   }
 
-  // Extract device name from path (e.g., "nvme0" from "/dev/nvme0")
-  std::string dev_path = device_path;
-  size_t last_slash = dev_path.find_last_of('/');
-  if (last_slash == std::string::npos || last_slash == dev_path.length() - 1) {
-    std::cerr << "Error: Invalid device path: " << device_path << std::endl;
-    return -EINVAL;
-  }
-
-  std::string device_name = dev_path.substr(last_slash + 1);
+  NvmeDevicePath nvme_path;
+  int resolve_ret = resolveNvmeDevicePath(device_path, 1, &nvme_path);
+  if (resolve_ret != 0)
+    return resolve_ret;
 
   // Build sysfs device symlink path: /sys/class/nvme/nvme0/device
-  std::string sysfs_path = "/sys/class/nvme/" + device_name + "/device";
+  std::string sysfs_path = "/sys/class/nvme/" + nvme_path.controllerName +
+                           "/device";
 
   // Read the symlink to get PCI device path
   char link_target[256];
@@ -1248,7 +1318,8 @@ __host__ int detectEmulatedNvme(const char* device_path,
 
   *is_emulated_out = is_emulated;
 
-  std::cout << "NVMe controller " << device_path << " (PCI " << pci_addr
+  std::cout << "NVMe controller " << device_path << " ("
+            << nvme_path.controllerPath << ", PCI " << pci_addr
             << "): VID=0x" << std::hex << std::setfill('0') << std::setw(4)
             << vendor_id << ", DID=0x" << std::setw(4) << device_id << std::dec
             << " -> " << (is_emulated ? "EMULATED" : "PASSTHROUGH")
