@@ -41,8 +41,7 @@ __host__ const char* provider_allowed_names() {
   static char names[64];
   snprintf(names, sizeof(names), "%s, %s, %s, or %s",
            provider_name(Provider::BNXT), provider_name(Provider::MLX5),
-           provider_name(Provider::IONIC),
-           provider_name(Provider::ROCM_ERNIC));
+           provider_name(Provider::IONIC), provider_name(Provider::ROCM_ERNIC));
   return names;
 }
 

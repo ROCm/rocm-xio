@@ -1319,11 +1319,10 @@ __host__ int detectEmulatedNvme(const char* device_path,
   *is_emulated_out = is_emulated;
 
   std::cout << "NVMe controller " << device_path << " ("
-            << nvme_path.controllerPath << ", PCI " << pci_addr
-            << "): VID=0x" << std::hex << std::setfill('0') << std::setw(4)
-            << vendor_id << ", DID=0x" << std::setw(4) << device_id << std::dec
-            << " -> " << (is_emulated ? "EMULATED" : "PASSTHROUGH")
-            << std::endl;
+            << nvme_path.controllerPath << ", PCI " << pci_addr << "): VID=0x"
+            << std::hex << std::setfill('0') << std::setw(4) << vendor_id
+            << ", DID=0x" << std::setw(4) << device_id << std::dec << " -> "
+            << (is_emulated ? "EMULATED" : "PASSTHROUGH") << std::endl;
 
   return 0;
 }

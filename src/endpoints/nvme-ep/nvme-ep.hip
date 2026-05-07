@@ -11,13 +11,13 @@
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
 #include <errno.h>
+#include <limits.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include <fcntl.h>
-#include <limits.h>
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>

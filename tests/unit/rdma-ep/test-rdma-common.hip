@@ -33,11 +33,12 @@ int test_normalize_qp_key_native_providers() {
             key);
   ASSERT_EQ(xio::rdma_ep::normalize_qp_key(xio::rdma_ep::Provider::IONIC, key),
             key);
-  ASSERT_EQ(
-    xio::rdma_ep::normalize_qp_key(xio::rdma_ep::Provider::ROCM_ERNIC, key),
-    key);
-  ASSERT_EQ(
-    xio::rdma_ep::normalize_qp_key(xio::rdma_ep::Provider::UNKNOWN, key), key);
+  ASSERT_EQ(xio::rdma_ep::normalize_qp_key(xio::rdma_ep::Provider::ROCM_ERNIC,
+                                           key),
+            key);
+  ASSERT_EQ(xio::rdma_ep::normalize_qp_key(xio::rdma_ep::Provider::UNKNOWN,
+                                           key),
+            key);
   return 0;
 }
 
