@@ -166,6 +166,14 @@ if grep -qi "Couldn't create QP\|create_qp\|Failed to modify QP" \
     exit 77
 fi
 
+if grep -qi "Port number .* state is Down\|Couldn't set the link layer\|Couldn't get context for the device" \
+    "$SRV_LOG" "$CLT_LOG" 2>/dev/null; then
+    echo "SKIP: ib_write_bw cannot open the RDMA port" \
+        "while loopback mode is active" \
+        "(GDA RDMA WRITE loopback is covered by rdma-ep tests)"
+    exit 77
+fi
+
 echo "FAILED: ib_write_bw loopback" \
     "(server=$SERVER_RC, client=$CLIENT_RC)"
 exit 1

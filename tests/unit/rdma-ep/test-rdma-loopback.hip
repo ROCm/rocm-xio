@@ -246,6 +246,12 @@ int main(int argc, char** argv) {
   unsigned iterations = DEFAULT_ITERATIONS;
   const char* provider_str = "auto";
   const char* device_name = nullptr;
+  const char* env_provider = getenv("PROVIDER");
+  const char* env_device = getenv("ROCXIO_RDMA_DEVICE");
+  if (env_provider && env_provider[0] != '\0')
+    provider_str = env_provider;
+  if (env_device && env_device[0] != '\0')
+    device_name = env_device;
   bool diag_mode = false;
   bool write_imm = false;
   bool cpu_poll = false;
