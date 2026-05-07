@@ -1,5 +1,6 @@
 .. meta::
-  :description: Learn about the RDMA-EP loopback measurements collected from ROCm XIO testing
+  :description: Learn about RDMA-EP loopback measurements collected from ROCm
+    XIO testing
   :keywords: ROCm, documentation, XIO, performance, measurements, testing
 
 *********************************
@@ -68,9 +69,9 @@ will achieve higher aggregate IOPS.
 
 .. note::
 
-   Transfer sizes less than 32 bytes cause the GPU kernel to hang on both BNXT and
-   IONIC hardware. The minimum working transfer size for loopback RDMA WRITE
-   is 32 bytes.
+   Transfer sizes less than 32 bytes cause the GPU kernel to hang on both BNXT
+   and IONIC hardware. The minimum working transfer size for loopback RDMA
+   WRITE is 32 bytes.
 
 Queue memory placement
 ----------------------
@@ -483,7 +484,7 @@ All fio tests used ``--direct=1`` (bypass page cache), 30-second runtime, and
 ``--time_based``. Bandwidth / IOPS tests used ``io_uring`` with
 ``--iodepth=32``; latency tests used ``sync`` with ``--iodepth=1``.
 
-MTR_SLC (``/dev/nvme2n1``) -- io_uring QD=32
+MTR_SLC namespace -- io_uring QD=32
 """""""""""""""""""""""""""""""""""""""""""""
 
 .. list-table::
@@ -555,7 +556,7 @@ MTR_SLC (``/dev/nvme2n1``) -- io_uring QD=32
      - 0.2
      - 25.2
 
-MTR_SLC (``/dev/nvme2n1``) -- sync QD=1
+MTR_SLC namespace -- sync QD=1
 """"""""""""""""""""""""""""""""""""""""
 
 .. list-table::
@@ -603,7 +604,7 @@ MTR_SLC (``/dev/nvme2n1``) -- sync QD=1
      - 0.1
      - 7.6
 
-WD_BLACK (``/dev/nvme1n1``) -- io_uring QD=32
+WD_BLACK namespace -- io_uring QD=32
 """""""""""""""""""""""""""""""""""""""""""""
 
 .. list-table::
@@ -675,7 +676,7 @@ WD_BLACK (``/dev/nvme1n1``) -- io_uring QD=32
      - 0.3
      - 24.4
 
-WD_BLACK (``/dev/nvme1n1``) -- sync QD=1
+WD_BLACK namespace -- sync QD=1
 """"""""""""""""""""""""""""""""""""""""
 
 .. list-table::
@@ -1353,7 +1354,7 @@ NVMe-EP performance tests:
 
    # fio CPU baseline (io_uring, QD=32)
    sudo fio --name=bw \
-     --filename=/dev/nvme2n1 \
+     --filename=/dev/disk/by-id/nvme-MTR_SLC_16GB_0400000E3CBC \
      --ioengine=io_uring --direct=1 \
      --bs=4k --iodepth=32 --rw=randread \
      --runtime=30 --time_based \
@@ -1361,7 +1362,7 @@ NVMe-EP performance tests:
 
    # fio CPU baseline (sync, QD=1 latency)
    sudo fio --name=lat \
-     --filename=/dev/nvme2n1 \
+     --filename=/dev/disk/by-id/nvme-MTR_SLC_16GB_0400000E3CBC \
      --ioengine=sync --direct=1 \
      --bs=512 --iodepth=1 --rw=randread \
      --runtime=30 --time_based \

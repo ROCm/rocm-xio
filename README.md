@@ -36,10 +36,10 @@ site][docs-site].
 <!-- References -->
 
 [docs-site]: https://rocm.docs.amd.com/projects/rocm-xio/en/beta-0.1.0/
-[ep-nvme]: https://rocm.github.io/rocm-xio/endpoints.html#nvme-ep-nvme-endpoint
-[ep-rdma]: https://rocm.github.io/rocm-xio/endpoints.html#rdma-ep-rdma-endpoint
-[ep-sdma]: https://rocm.github.io/rocm-xio/endpoints.html#sdma-ep-sdma-endpoint
-[ep-test]: https://rocm.github.io/rocm-xio/endpoints.html#test-ep-test-endpoint
+[ep-nvme]: https://rocm.docs.amd.com/projects/rocm-xio/en/beta-0.1.0/reference/endpoints.html#nvme-ep-nvme-endpoint
+[ep-rdma]: https://rocm.docs.amd.com/projects/rocm-xio/en/beta-0.1.0/reference/endpoints.html#rdma-ep-rdma-endpoint
+[ep-sdma]: https://rocm.docs.amd.com/projects/rocm-xio/en/beta-0.1.0/reference/endpoints.html#sdma-ep-sdma-endpoint
+[ep-test]: https://rocm.docs.amd.com/projects/rocm-xio/en/beta-0.1.0/reference/endpoints.html#test-ep-test-endpoint
 
 ## License
 
