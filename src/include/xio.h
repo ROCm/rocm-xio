@@ -317,6 +317,30 @@ hsa_status_t closeDmabuf(int fd);
 __host__ std::string extractEndpointName(int argc, char** argv);
 
 /**
+ * @brief Resolved NVMe controller and namespace paths.
+ */
+struct NvmeDevicePath {
+  std::string namespacePath;
+  std::string controllerPath;
+  std::string controllerName;
+};
+
+/**
+ * @brief Resolve an NVMe controller or namespace path.
+ *
+ * Accepts controller nodes such as /dev/nvme0 and namespace paths such as
+ * /dev/disk/by-id/... links. Namespace inputs preserve the original namespace
+ * path while deriving the controller path required by NVMe admin ioctls.
+ *
+ * @param device_path Controller or namespace device path.
+ * @param nsid Namespace ID to use when deriving a namespace from a controller.
+ * @param resolved Output resolved path information.
+ * @return 0 on success, negative error code on failure.
+ */
+__host__ int resolveNvmeDevicePath(const char* device_path, uint32_t nsid,
+                                   NvmeDevicePath* resolved);
+
+/**
  * @brief Detect PCI MMIO bridge BDF by scanning PCI sysfs.
  *
  * Looks for Vendor ID 0x1b36 and Device ID 0x0015. Errors

@@ -29,6 +29,25 @@ XIO_TESTER="${XIO_TESTER:-./build/xio-tester}"
 TEMP_DIR="${TEMP_DIR:-/tmp/nvme-ep-test}"
 NVME_CMD="${NVME_CMD:-nvme}"
 
+resolve_nvme_paths() {
+    local device="$1"
+    local real
+    real="$(readlink -f "$device")" || return 1
+    local node
+    node="$(basename "$real")"
+
+    if [[ "$node" =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+        local controller
+        controller="$(basename "$(readlink -f \
+            "/sys/class/block/$node/device")")" || return 1
+        NVME_CONTROLLER="/dev/$controller"
+        NVME_NAMESPACE="$device"
+    else
+        NVME_CONTROLLER="$real"
+        NVME_NAMESPACE="${device}n1"
+    fi
+}
+
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <nvme-controller> [OPTIONS]"
     echo ""
@@ -98,8 +117,7 @@ if ! command -v "$NVME_CMD" &> /dev/null; then
 fi
 
 get_lba_size() {
-    local device=$1
-    local ns="${device}n1"
+    local ns=$1
 
     local lbaf_line
     lbaf_line=$($NVME_CMD id-ns "$ns" 2>/dev/null \
@@ -133,16 +151,25 @@ get_lba_size() {
 
 test_device() {
     local device=$1
-    local ns="${device}n1"
+    local NVME_CONTROLLER=""
+    local NVME_NAMESPACE=""
+    if ! resolve_nvme_paths "$device"; then
+        echo "Error: failed to resolve NVMe paths for $device"
+        return 1
+    fi
+    local ns="$NVME_NAMESPACE"
+    local controller="$NVME_CONTROLLER"
     local device_name
     device_name=$(basename "$device")
 
     echo "========================================"
     echo "Testing NVMe: $device"
+    echo "Controller: $controller"
+    echo "Namespace: $ns"
     echo "========================================"
 
     local lba_size
-    lba_size=$(get_lba_size "$device")
+    lba_size=$(get_lba_size "$ns")
     echo "LBA size: $lba_size bytes"
 
     local total_blocks=$((WRITE_IO * BLOCKS_PER_CMD))
@@ -160,7 +187,7 @@ test_device() {
     if [ "$WRITE_IO" -gt 0 ]; then
         write_cmd="$write_cmd --write-io $WRITE_IO"
     fi
-    write_cmd="$write_cmd --controller $device"
+    write_cmd="$write_cmd --controller $controller"
     if [ "$USE_PCI_MMIO_BRIDGE" = "1" ]; then
         write_cmd="$write_cmd --pci-mmio-bridge"
     fi
@@ -171,6 +198,9 @@ test_device() {
     write_cmd="$write_cmd --access-pattern sequential"
     write_cmd="$write_cmd --batch-size 0"
     write_cmd="$write_cmd -m $MEMORY_MODE"
+    if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
+        write_cmd="$write_cmd --queue-id $ROCXIO_NVME_QUEUE_ID"
+    fi
 
     echo "Command: $write_cmd"
 

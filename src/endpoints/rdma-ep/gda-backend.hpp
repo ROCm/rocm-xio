@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  *
  * Derived from ROCm/rocSHMEM src/gda/backend_gda.hpp, adapted for rocm-xio.
+ * Common config mapping, key normalization, QP init, and QP modify dispatch
+ * live in rdma-common.h.
  * Simplified from full-mesh PE topology to single-endpoint model:
  *   - 1 QP + 1 CQ pair per Backend instance (not num_pes * num_contexts)
  *   - No MPI, no team/context multiplexing
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "ibv-core.hpp"
+#include "rdma-ep.h"
 #include "vendor-ops.hpp"
 
 namespace xio {
@@ -32,6 +35,13 @@ struct DestInfo {
   union ibv_gid gid;
 };
 
+/**
+ * @brief Runtime configuration consumed by the RDMA backend.
+ *
+ * This structure is derived from RdmaEpConfig and XioEndpointConfig by
+ * make_backend_config(). It contains only values needed to open a provider,
+ * create QPs/CQs, allocate queue memory, and connect the local or remote peer.
+ */
 struct BackendConfig {
   Provider provider{Provider::BNXT};
   int gpu_device_id{0};

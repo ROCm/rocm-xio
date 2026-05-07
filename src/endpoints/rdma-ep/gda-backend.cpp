@@ -17,33 +17,21 @@
 #include <hip/hip_runtime.h>
 
 #include <dlfcn.h>
-#include <endian.h>
 #include <unistd.h>
 
 #include "ibv-wrapper.hpp"
 #include "queue-pair.hpp"
+#include "rdma-common.h"
 #include "rdma-topology.hpp"
 #include "xio-rdma-check.h"
 #include "xio.h"
 
 #if defined(GDA_BNXT)
 #include "bnxt/bnxt-provider.hpp"
-namespace xio {
-namespace rdma_ep {
-int bnxt_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
-                      int attr_mask);
-} // namespace rdma_ep
-} // namespace xio
 #endif
 
 #if defined(GDA_ERNIC)
 #include "rocm-ernic/ernic-provider.hpp"
-namespace xio {
-namespace rdma_ep {
-int ernic_dv_modify_qp(struct ibv_qp* qp, struct ibv_qp_attr* attr,
-                       int attr_mask);
-} // namespace rdma_ep
-} // namespace xio
 #endif
 
 namespace xio {
@@ -324,20 +312,8 @@ void Backend::create_queues() {
     }
 
     struct ibv_qp_init_attr_ex qp_init;
-    memset(&qp_init, 0, sizeof(qp_init));
-    qp_init.send_cq = cq_;
-    qp_init.recv_cq = cq_;
-    qp_init.srq = nullptr;
-    qp_init.cap.max_send_wr = config_.sq_depth;
-    // ionic_rdma kernel driver requires >= 1 recv WR
-    qp_init.cap.max_recv_wr = 1;
-    qp_init.cap.max_send_sge = 1;
-    qp_init.cap.max_recv_sge = 1;
-    qp_init.cap.max_inline_data = config_.inline_threshold;
-    qp_init.qp_type = IBV_QPT_RC;
-    qp_init.sq_sig_all = 0;
-    qp_init.comp_mask = IBV_QP_INIT_ATTR_PD;
-    qp_init.pd = pd_parent_ ? pd_parent_ : pd_;
+    fill_rc_qp_init_attr(&qp_init, pd_parent_ ? pd_parent_ : pd_, cq_,
+                         config_.sq_depth, 1, 1, config_.inline_threshold);
 
     errno = 0;
     qp_ = ibv.create_qp_ex(context_, &qp_init);
@@ -362,19 +338,8 @@ void Backend::create_queues() {
   XIO_CHECK_NNULL(cq_, "ibv_create_cq");
 
   struct ibv_qp_init_attr_ex qp_init;
-  memset(&qp_init, 0, sizeof(qp_init));
-  qp_init.send_cq = cq_;
-  qp_init.recv_cq = cq_;
-  qp_init.srq = nullptr;
-  qp_init.cap.max_send_wr = config_.sq_depth;
-  qp_init.cap.max_recv_wr = 0;
-  qp_init.cap.max_send_sge = 1;
-  qp_init.cap.max_recv_sge = 0;
-  qp_init.cap.max_inline_data = config_.inline_threshold;
-  qp_init.qp_type = IBV_QPT_RC;
-  qp_init.sq_sig_all = 0;
-  qp_init.comp_mask = IBV_QP_INIT_ATTR_PD;
-  qp_init.pd = pd_;
+  fill_rc_qp_init_attr(&qp_init, pd_, cq_, config_.sq_depth, 0, 0,
+                       config_.inline_threshold);
 
   errno = 0;
   qp_ = ibv.create_qp_ex(context_, &qp_init);
@@ -421,18 +386,7 @@ void Backend::modify_qp_reset_to_init() {
   int attr_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
                   IBV_QP_ACCESS_FLAGS;
 
-  int err;
-#if defined(GDA_BNXT)
-  if (provider_ == Provider::BNXT)
-    err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-#if defined(GDA_ERNIC)
-    if (provider_ == Provider::ROCM_ERNIC)
-    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-    err = ibv.modify_qp(qp_, &attr, attr_mask);
+  int err = modify_qp_dispatch(provider_, qp_, &attr, attr_mask);
   XIO_CHECK_ZERO(err, "modify_qp (RESET->INIT)");
 }
 
@@ -447,14 +401,7 @@ void Backend::modify_qp_init_to_rtr(const DestInfo& remote) {
   attr.rq_psn = remote.psn;
   attr.dest_qp_num = remote.qpn;
 
-  if (provider_ == Provider::IONIC) {
-    attr.max_dest_rd_atomic = 15;
-  } else if (device_attr_.max_qp_rd_atom > 0) {
-    attr.max_dest_rd_atomic = static_cast<uint8_t>(
-      device_attr_.max_qp_rd_atom > 255 ? 255 : device_attr_.max_qp_rd_atom);
-  } else {
-    attr.max_dest_rd_atomic = 1;
-  }
+  attr.max_dest_rd_atomic = rd_atomic_cap(provider_, device_attr_);
 
   if (port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET) {
     attr.ah_attr.grh.sgid_index = gid_index_;
@@ -477,18 +424,7 @@ void Backend::modify_qp_init_to_rtr(const DestInfo& remote) {
                   IBV_QP_DEST_QPN | IBV_QP_AV | IBV_QP_MAX_DEST_RD_ATOMIC |
                   IBV_QP_MIN_RNR_TIMER;
 
-  int err;
-#if defined(GDA_BNXT)
-  if (provider_ == Provider::BNXT)
-    err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-#if defined(GDA_ERNIC)
-    if (provider_ == Provider::ROCM_ERNIC)
-    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-    err = ibv.modify_qp(qp_, &attr, attr_mask);
+  int err = modify_qp_dispatch(provider_, qp_, &attr, attr_mask);
   XIO_CHECK_ZERO(err, "modify_qp (INIT->RTR)");
 }
 
@@ -502,30 +438,12 @@ void Backend::modify_qp_rtr_to_rts() {
   attr.retry_cnt = 7;
   attr.rnr_retry = 7;
 
-  if (provider_ == Provider::IONIC) {
-    attr.max_rd_atomic = 15;
-  } else if (device_attr_.max_qp_rd_atom > 0) {
-    attr.max_rd_atomic = static_cast<uint8_t>(
-      device_attr_.max_qp_rd_atom > 255 ? 255 : device_attr_.max_qp_rd_atom);
-  } else {
-    attr.max_rd_atomic = 1;
-  }
+  attr.max_rd_atomic = rd_atomic_cap(provider_, device_attr_);
 
   int attr_mask = IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC |
                   IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY;
 
-  int err;
-#if defined(GDA_BNXT)
-  if (provider_ == Provider::BNXT)
-    err = bnxt_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-#if defined(GDA_ERNIC)
-    if (provider_ == Provider::ROCM_ERNIC)
-    err = ernic_dv_modify_qp(qp_, &attr, attr_mask);
-  else
-#endif
-    err = ibv.modify_qp(qp_, &attr, attr_mask);
+  int err = modify_qp_dispatch(provider_, qp_, &attr, attr_mask);
   XIO_CHECK_ZERO(err, "modify_qp (RTR->RTS)");
 }
 
@@ -697,10 +615,7 @@ DestInfo Backend::get_local_dest_info() const {
 int Backend::set_remote_rkey(uint32_t remote_rkey) {
   if (!host_qp_ || !gpu_qp_)
     return -1;
-  if (provider_ == Provider::MLX5)
-    host_qp_->rkey_ = htobe32(remote_rkey);
-  else
-    host_qp_->rkey_ = remote_rkey;
+  host_qp_->rkey_ = normalize_qp_key(provider_, remote_rkey);
   hipError_t err = hipMemcpy(gpu_qp_, host_qp_, sizeof(QueuePair),
                              hipMemcpyDefault);
   if (err != hipSuccess) {
@@ -735,13 +650,8 @@ int Backend::register_data_buffer(void* buf, size_t size) {
     return -1;
   }
 
-  if (provider_ == Provider::MLX5) {
-    host_qp_->lkey_ = htobe32(heap_mr_->lkey);
-    host_qp_->rkey_ = htobe32(heap_mr_->rkey);
-  } else {
-    host_qp_->lkey_ = heap_mr_->lkey;
-    host_qp_->rkey_ = heap_mr_->rkey;
-  }
+  normalize_mr_keys(provider_, heap_mr_->lkey, heap_mr_->rkey, &host_qp_->lkey_,
+                    &host_qp_->rkey_);
   rkey_ = heap_mr_->rkey;
   lkey_ = heap_mr_->lkey;
 

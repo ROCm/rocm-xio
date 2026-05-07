@@ -30,6 +30,9 @@ EXTRA_FLAGS=()
 if [ "${INFINITE}" = "true" ]; then
   EXTRA_FLAGS+=(--infinite)
 fi
+if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
+  EXTRA_FLAGS+=(--queue-id "${ROCXIO_NVME_QUEUE_ID}")
+fi
 
 sudo LD_LIBRARY_PATH=/opt/rocm/lib \
   HSA_FORCE_FINE_GRAIN_PCIE=1 \

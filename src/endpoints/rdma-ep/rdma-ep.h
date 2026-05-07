@@ -9,6 +9,7 @@
  * @brief RDMA Endpoint -- GPU-Direct Access (GDA) for RDMA NICs.
  *
  * Derived from ROCm/rocSHMEM GDA backend, adapted for rocm-xio.
+ * Provider-specific hardware operations remain in the vendor subdirectories.
  * Supports four RDMA vendors:
  *   - BNXT   (Broadcom Thor 2)
  *   - MLX5   (Mellanox/NVIDIA ConnectX)
@@ -25,11 +26,10 @@
 #define RDMA_EP_H
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 #include <hip/hip_runtime.h>
-
-#include "vendor-ops.hpp"
 
 #define RDMA_EP_SQE_SIZE 0
 #define RDMA_EP_CQE_SIZE 0
@@ -39,6 +39,61 @@ namespace xio {
 struct XioEndpointConfig;
 
 namespace rdma_ep {
+
+/**
+ * @brief Queue buffer placement for RDMA send/completion queues.
+ */
+enum class QueueMemMode : uint8_t {
+  HOST_COHERENT = 0,
+  DEVICE_VRAM = 1,
+};
+
+/**
+ * @brief RDMA provider backends supported by rdma-ep.
+ */
+enum class Provider : uint8_t {
+  BNXT = 0,
+  MLX5 = 1,
+  IONIC = 2,
+  ROCM_ERNIC = 3,
+  UNKNOWN = 0xFF,
+};
+
+/**
+ * @brief Return the canonical provider name.
+ */
+__host__ inline const char* provider_name(Provider p) {
+  switch (p) {
+    case Provider::BNXT:
+      return "bnxt";
+    case Provider::MLX5:
+      return "mlx5";
+    case Provider::IONIC:
+      return "ionic";
+    case Provider::ROCM_ERNIC:
+      return "rocm-ernic";
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * @brief Convert a provider string to a Provider value.
+ */
+__host__ inline Provider provider_from_string(const char* s) {
+  if (!s)
+    return Provider::UNKNOWN;
+  if (strcmp(s, "bnxt") == 0 || strcmp(s, "bnxt_re") == 0)
+    return Provider::BNXT;
+  if (strcmp(s, "mlx5") == 0)
+    return Provider::MLX5;
+  if (strcmp(s, "ionic") == 0 || strcmp(s, "pensando") == 0)
+    return Provider::IONIC;
+  if (strcmp(s, "rocm_ernic") == 0 || strcmp(s, "ernic") == 0 ||
+      strcmp(s, "rocm-ernic") == 0)
+    return Provider::ROCM_ERNIC;
+  return Provider::UNKNOWN;
+}
 
 /**
  * @brief Configuration for the RDMA endpoint.

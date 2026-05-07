@@ -29,6 +29,25 @@ NUM_QUEUES="${NUM_QUEUES:-}"
 XIO_TESTER="${XIO_TESTER:-./build/xio-tester}"
 TEMP_DIR="${TEMP_DIR:-/tmp/nvme-ep-rw-verify}"
 
+resolve_nvme_paths() {
+    local device="$1"
+    local real
+    real="$(readlink -f "$device")" || return 1
+    local node
+    node="$(basename "$real")"
+
+    if [[ "$node" =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+        local controller
+        controller="$(basename "$(readlink -f \
+            "/sys/class/block/$node/device")")" || return 1
+        NVME_CONTROLLER="/dev/$controller"
+        NVME_NAMESPACE="$device"
+    else
+        NVME_CONTROLLER="$real"
+        NVME_NAMESPACE="${device}n1"
+    fi
+}
+
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <nvme-controller>"
     echo ""
@@ -81,7 +100,14 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-NS="${NVME_DEVICE}n1"
+NVME_CONTROLLER=""
+NVME_NAMESPACE=""
+if ! resolve_nvme_paths "$NVME_DEVICE"; then
+    echo "Error: failed to resolve NVMe paths for $NVME_DEVICE"
+    exit 1
+fi
+
+NS="$NVME_NAMESPACE"
 if [ ! -e "$NS" ]; then
     echo "Error: namespace $NS not found"
     exit 1
@@ -96,7 +122,7 @@ NS_CAPACITY=$((NS_BYTES / LBA_SIZE))
 echo "========================================"
 echo "Random write-verify test"
 echo "========================================"
-echo "Controller:    $NVME_DEVICE"
+echo "Controller:    $NVME_CONTROLLER"
 echo "Namespace:     $NS"
 echo "LFSR seed:     $LFSR_SEED"
 echo "Base LBA:      $BASE_LBA"
@@ -111,7 +137,7 @@ echo ""
 echo "Step 1: Writing $NUM_WRITES random LBAs..."
 write_cmd="$XIO_TESTER nvme-ep"
 write_cmd="$write_cmd --write-io ${NUM_WRITES}"
-write_cmd="$write_cmd --controller $NVME_DEVICE"
+write_cmd="$write_cmd --controller $NVME_CONTROLLER"
 write_cmd="$write_cmd --access-pattern random"
 write_cmd="$write_cmd --lbas-per-io 1"
 write_cmd="$write_cmd --lfsr-seed $LFSR_SEED"
@@ -123,6 +149,9 @@ if [ -n "$BATCH_SIZE" ]; then
 fi
 if [ -n "$NUM_QUEUES" ]; then
     write_cmd="$write_cmd --num-queues $NUM_QUEUES"
+fi
+if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
+    write_cmd="$write_cmd --queue-id $ROCXIO_NVME_QUEUE_ID"
 fi
 
 echo "Command: $write_cmd"

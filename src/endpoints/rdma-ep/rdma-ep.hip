@@ -5,7 +5,8 @@
  *
  * RDMA Endpoint -- GPU-Direct Access (GDA).
  * Derived from ROCm/rocSHMEM GDA backend,
- * adapted for rocm-xio.
+ * adapted for rocm-xio. Shared RDMA orchestration helpers live in
+ * rdma-common.h and rdma-common.hip.
  *
  * GPU kernels post WQEs directly to NIC send queues
  * and ring hardware doorbells with zero CPU
@@ -20,6 +21,7 @@
 
 #include "gda-backend.hpp"
 #include "queue-pair.hpp"
+#include "rdma-common.h"
 #include "rdma-ep.h"
 #include "xio-data-pattern.hpp"
 #include "xio-timing.h"
@@ -50,14 +52,8 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
   while ((infinite || i < iterations) && (!stopRequested || !*stopRequested)) {
     uint32_t iterSeed = baseSeed + i;
 
-    if (doVerify) {
-      xio::DataPatternParams fp{src,          transferSize, 0,
-                                transferSize, iterSeed,     nullptr};
-      xio::dataPattern(false, fp);
-      for (uint32_t b = 0; b < transferSize; b++)
-        dst[b] = 0;
-      __threadfence_system();
-    }
+    if (doVerify)
+      prepare_verify_buffer(src, dst, transferSize, iterSeed);
 
     unsigned long long int t0 = wall_clock64();
 
@@ -93,22 +89,9 @@ __global__ void rdma_ep_kernel(QueuePair* qp, void* src_ptr, void* dst_ptr,
     if (timingStats && t1 > t0)
       updateTimingStats(timingStats, t1 - t0);
 
-    if (doVerify) {
-      size_t errOff = 0;
-      xio::DataPatternParams vp{dst,          transferSize, 0,
-                                transferSize, iterSeed,     &errOff};
-      bool ok = xio::dataPattern(true, vp);
-      if (ok) {
-        if (verifyPass)
-          atomicAdd(verifyPass, 1u);
-      } else {
-        if (verifyFail)
-          atomicAdd(verifyFail, 1u);
-        printf("rdma-ep: VERIFY FAILED iter=%u"
-               " seed=%u offset=%zu\n",
-               i, iterSeed, errOff);
-      }
-    }
+    if (doVerify)
+      verify_buffer(dst, transferSize, iterSeed, "single", i, verifyPass,
+                    verifyFail);
 
     i++;
   }
@@ -159,13 +142,7 @@ __global__ void rdma_ep_batch_kernel(
         unsigned op = infinite ? b : sh_ops_done + b;
         uint8_t* src = buf + (size_t)b * 2 * transferSize;
         uint8_t* dst = src + transferSize;
-        uint32_t seed = baseSeed + op;
-        xio::DataPatternParams fp{src,          transferSize, 0,
-                                  transferSize, seed,         nullptr};
-        xio::dataPattern(false, fp);
-        for (uint32_t x = 0; x < transferSize; x++)
-          dst[x] = 0;
-        __threadfence_system();
+        prepare_verify_buffer(src, dst, transferSize, baseSeed + op);
       }
     }
     __syncthreads();
@@ -193,21 +170,8 @@ __global__ void rdma_ep_batch_kernel(
         for (unsigned b = 0; b < batch_count; b++) {
           unsigned op = infinite ? b : sh_ops_done + b;
           uint8_t* dst = buf + (size_t)b * 2 * transferSize + transferSize;
-          uint32_t seed = baseSeed + op;
-          size_t errOff = 0;
-          xio::DataPatternParams vp{dst,          transferSize, 0,
-                                    transferSize, seed,         &errOff};
-          bool ok = xio::dataPattern(true, vp);
-          if (ok) {
-            if (verifyPass)
-              atomicAdd(verifyPass, 1u);
-          } else {
-            if (verifyFail)
-              atomicAdd(verifyFail, 1u);
-            printf("rdma-ep: batch VERIFY FAILED"
-                   " op=%u seed=%u off=%zu\n",
-                   op, seed, errOff);
-          }
+          verify_buffer(dst, transferSize, baseSeed + op, "batch", op,
+                        verifyPass, verifyFail);
         }
       }
 
@@ -327,8 +291,8 @@ __host__ std::string validateConfig(RdmaEpConfig* config) {
 
   config->provider = provider_from_string(config->providerStr.c_str());
   if (config->provider == Provider::UNKNOWN)
-    return "Invalid provider."
-           " Must be: bnxt, mlx5, ionic, or ernic";
+    return std::string("Invalid provider. Must be: ") +
+           provider_allowed_names();
 
   if (config->infiniteMode)
     config->iterations = 0;
@@ -388,7 +352,6 @@ __host__ unsigned getIterations(void* endpointConfig) {
 
 static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
                                    rdma_ep::RdmaEpConfig* cfg) {
-  bool sq_on_device = (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
   bool data_on_device = (config->memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   uint16_t numQueues = cfg->numQueues;
@@ -444,20 +407,8 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
 
   // Initialize all backends and buffers
   for (uint16_t q = 0; q < numQueues; q++) {
-    rdma_ep::BackendConfig bcfg;
-    bcfg.provider = cfg->provider;
-    bcfg.gpu_device_id = cfg->gpuDeviceId;
-    bcfg.sq_depth = cfg->sqDepth;
-    bcfg.cq_depth = cfg->cqDepth;
-    bcfg.inline_threshold = cfg->inlineThreshold;
-    bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
-    bcfg.traffic_class = cfg->trafficClass;
-    bcfg.loopback = true;
-    bcfg.queue_mem = sq_on_device ? rdma_ep::QueueMemMode::DEVICE_VRAM
-                                  : rdma_ep::QueueMemMode::HOST_COHERENT;
-    bcfg.pci_mmio_bridge = config->pciMmioBridge;
-    if (!cfg->deviceName.empty())
-      bcfg.hca_list = cfg->deviceName.c_str();
+    rdma_ep::BackendConfig bcfg = rdma_ep::make_backend_config(*config, *cfg,
+                                                               true);
 
     queues[q].backend = new rdma_ep::Backend(bcfg);
     int ret = queues[q].backend->init();
@@ -730,22 +681,7 @@ hipError_t run(XioEndpointConfig* config) {
     // ==========================================================
     // 2-node path -- TCP QP exchange, RDMA WRITE + ping-pong
     // ==========================================================
-    bool sq_on_device = (config->memoryMode & XIO_MEM_MODE_SQ_DEVICE) != 0;
-
-    BackendConfig bcfg;
-    bcfg.provider = cfg->provider;
-    bcfg.gpu_device_id = cfg->gpuDeviceId;
-    bcfg.sq_depth = cfg->sqDepth;
-    bcfg.cq_depth = cfg->cqDepth;
-    bcfg.inline_threshold = cfg->inlineThreshold;
-    bcfg.pcie_relaxed_ordering = cfg->pcieRelaxedOrdering;
-    bcfg.traffic_class = cfg->trafficClass;
-    bcfg.loopback = false;
-    bcfg.queue_mem = sq_on_device ? QueueMemMode::DEVICE_VRAM
-                                  : QueueMemMode::HOST_COHERENT;
-    bcfg.pci_mmio_bridge = config->pciMmioBridge;
-    if (!cfg->deviceName.empty())
-      bcfg.hca_list = cfg->deviceName.c_str();
+    BackendConfig bcfg = make_backend_config(*config, *cfg, false);
 
     Backend backend(bcfg);
     int ret = backend.init();

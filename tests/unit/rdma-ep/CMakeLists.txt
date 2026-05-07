@@ -30,6 +30,14 @@ xio_add_test(
   INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
 )
 
+xio_add_test(
+  NAME test-rdma-common
+  SOURCE test-rdma-common.hip
+  LABELS unit rdma
+  TIMEOUT 30
+  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+)
+
 # BNXT queue sizing math (CPU-only, no GPU or NIC)
 xio_add_test(
   NAME test-bnxt-sizing

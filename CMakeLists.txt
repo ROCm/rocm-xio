@@ -620,6 +620,9 @@ install(FILES
 # Install endpoint headers
 foreach(ep ${VALID_ENDPOINTS})
     file(GLOB EP_HEADERS ${ENDPOINTS_DIR}/${ep}/*.h)
+    if(ep STREQUAL "rdma-ep")
+        list(FILTER EP_HEADERS EXCLUDE REGEX ".*/rdma-common\\.h$")
+    endif()
     if(EP_HEADERS)
         install(FILES ${EP_HEADERS}
             DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio/endpoints/${ep}

@@ -2,18 +2,16 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Vendor abstraction layer for rdma-ep. Consolidates shared patterns
- * identified across MLX5, BNXT, and IONIC vendor queue_pair implementations
- * from rocSHMEM GDA. Each vendor still implements its own WQE builder,
- * doorbell, and CQE parser; this layer provides the shared control flow,
- * locking, and logical descriptors.
+ * Vendor abstraction layer for rdma-ep. Common host orchestration helpers live
+ * in rdma-common.h; this layer keeps shared device descriptors, wave helpers,
+ * locking, provider IDs, and provider string conversion close to the
+ * vendor-specific QueuePair code that consumes them.
  */
 
 #ifndef RDMA_EP_VENDOR_OPS_HPP
 #define RDMA_EP_VENDOR_OPS_HPP
 
 #include <cstdint>
-#include <cstring>
 
 #include <hip/hip_runtime.h>
 
@@ -67,49 +65,6 @@ struct AmoDescriptor {
   uintptr_t fetch_addr;
   uint32_t fetch_lkey;
 };
-
-enum class QueueMemMode : uint8_t {
-  HOST_COHERENT = 0,
-  DEVICE_VRAM = 1,
-};
-
-enum class Provider : uint8_t {
-  BNXT = 0,
-  MLX5 = 1,
-  IONIC = 2,
-  ROCM_ERNIC = 3,
-  UNKNOWN = 0xFF,
-};
-
-__host__ inline const char* provider_name(Provider p) {
-  switch (p) {
-    case Provider::BNXT:
-      return "bnxt";
-    case Provider::MLX5:
-      return "mlx5";
-    case Provider::IONIC:
-      return "ionic";
-    case Provider::ROCM_ERNIC:
-      return "rocm-ernic";
-    default:
-      return "unknown";
-  }
-}
-
-__host__ inline Provider provider_from_string(const char* s) {
-  if (!s)
-    return Provider::UNKNOWN;
-  if (strcmp(s, "bnxt") == 0 || strcmp(s, "bnxt_re") == 0)
-    return Provider::BNXT;
-  if (strcmp(s, "mlx5") == 0)
-    return Provider::MLX5;
-  if (strcmp(s, "ionic") == 0 || strcmp(s, "pensando") == 0)
-    return Provider::IONIC;
-  if (strcmp(s, "rocm_ernic") == 0 || strcmp(s, "ernic") == 0 ||
-      strcmp(s, "rocm-ernic") == 0)
-    return Provider::ROCM_ERNIC;
-  return Provider::UNKNOWN;
-}
 
 // Vendor ID constants for NIC detection
 constexpr uint32_t VENDOR_ID_BROADCOM = 0x14E4;

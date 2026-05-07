@@ -16,6 +16,22 @@ set -euo pipefail
 
 VENDOR=${VENDOR:-all}
 
+require_named_netdev() {
+  local vendor="$1"
+  local nic_if="$2"
+
+  if [ -d "/sys/class/net/${nic_if}" ]; then
+    return 0
+  fi
+
+  echo "ERROR: expected ${vendor} net device '${nic_if}' not found."
+  echo "  Install and trigger the rocm-xio udev naming rules:"
+  echo "    sudo udev/setup-udev-rules.sh --install"
+  echo "    sudo udevadm trigger"
+  echo "  Then reload the ${vendor} RDMA driver or rerun this fixture."
+  return 1
+}
+
 setup_vendor() {
   local vendor="$1"
   local nic_if rdma_dev nic_ip
@@ -51,10 +67,12 @@ setup_vendor() {
       sleep 3
       modprobe bnxt_re
       sleep 5
+      require_named_netdev "${vendor}" "${nic_if}" || return 1
       ip link set "${nic_if}" up 2>/dev/null || true
       sleep 3
       ;;
     ionic)
+      require_named_netdev "${vendor}" "${nic_if}" || return 1
       local pci_bdf
       pci_bdf=$(basename "$(readlink -f \
         "/sys/class/net/${nic_if}/device" \

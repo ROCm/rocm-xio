@@ -45,6 +45,7 @@ if [ -z "${VENDOR:-}" ]; then
   fi
 fi
 
+RDMA_DEVICE="${ROCXIO_RDMA_DEVICE:-rocm-rdma-${VENDOR}0}"
 NIC="rocm-${VENDOR}0"
 
 # Loopback IP per vendor (matches
@@ -88,7 +89,7 @@ sudo LD_LIBRARY_PATH="${LIB}" \
 HSA_FORCE_FINE_GRAIN_PCIE=1 \
 "${BUILD_DIR}/xio-tester" rdma-ep \
   --provider "${VENDOR}" \
-  --device "rocm-rdma-${VENDOR}0" \
+  --device "${RDMA_DEVICE}" \
   --loopback \
   --iterations "${ITERATIONS}" \
   --batch-size "${BATCH_SIZE}" \
