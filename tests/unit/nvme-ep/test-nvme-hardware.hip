@@ -116,6 +116,15 @@ int test_validateConfig() {
 
   ASSERT_GT(cfg.queueId, 0u);
 
+  uint16_t max_qid = 0;
+  ASSERT_EQ(queryMaxQueueId(cfg.controller.c_str(), &max_qid), 0);
+  nvmeEpConfig invalid_cfg = cfg;
+  invalid_cfg.queueId = max_qid + 1;
+  err = validateConfig(&invalid_cfg);
+  ASSERT_TRUE(!err.empty());
+  ASSERT_TRUE(err.find("exceeds last available I/O queue ID") !=
+              std::string::npos);
+
   printf("  validateConfig: OK (lbaSize=%u, "
          "queueId=%u)\n",
          cfg.ioParams.lbaSize, cfg.queueId);

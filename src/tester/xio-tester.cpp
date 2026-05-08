@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <csignal>
 #include <cstring>
 #include <ctime>
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -105,6 +107,12 @@ int main(int argc, char** argv) {
     .add_flag("--less-timing", lessTiming,
               "Use lightweight timing mode (track min/max/mean only, "
               "useful for large iterations)")
+    ->group("Common Options");
+  app
+    .add_flag("--skip-first-io-timing,!--no-skip-first-io-timing",
+              commonConfig.skipFirstIoTiming,
+              "Exclude the first I/O latency from reported timing stats "
+              "(default: on)")
     ->group("Common Options");
 
   bool substepTiming = false;
@@ -400,6 +408,9 @@ int main(int argc, char** argv) {
   void* hostCqeAddr = nullptr;
   unsigned long long int* hostStartTime = nullptr;
   unsigned long long int* hostEndTime = nullptr;
+  uint64_t* hostVerboseLbas = nullptr;
+  uint32_t* hostVerboseXferBytes = nullptr;
+  uint8_t* hostVerboseRwFlags = nullptr;
 
   size_t totalSqeSize = sqeSize * sqeLength;
   size_t totalCqeSize = cqeSize * cqeLength;
@@ -448,7 +459,61 @@ int main(int argc, char** argv) {
                                          XIO_HOST_MEM_MAPPED);
     if (hipErr2 != hipSuccess) {
       std::cerr << "Error: Failed to allocate end time buffer" << std::endl;
+      freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+      hostStartTime = nullptr;
       return EXIT_FAILURE;
+    }
+    if (baseConfig.verbose && endpoint->getType() == EndpointType::NVME_EP) {
+      const size_t ntrace = static_cast<size_t>(baseConfig.iterations) *
+                            static_cast<size_t>(baseConfig.numThreads);
+      const size_t lbBytes = ntrace * sizeof(uint64_t);
+      const size_t xfBytes = ntrace * sizeof(uint32_t);
+      const size_t flBytes = ntrace * sizeof(uint8_t);
+      hipError_t hv1 = allocHostMemory(lbBytes, (void**)&hostVerboseLbas,
+                                       "NVMe verbose LBA buffer",
+                                       XIO_HOST_MEM_MAPPED);
+      if (hv1 != hipSuccess) {
+        std::cerr << "Error: Failed to allocate NVMe verbose LBA buffer"
+                  << std::endl;
+        freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+        hostEndTime = nullptr;
+        hostStartTime = nullptr;
+        return EXIT_FAILURE;
+      }
+      hipError_t hv2 = allocHostMemory(xfBytes, (void**)&hostVerboseXferBytes,
+                                         "NVMe verbose xfer buffer",
+                                         XIO_HOST_MEM_MAPPED);
+      if (hv2 != hipSuccess) {
+        std::cerr << "Error: Failed to allocate NVMe verbose xfer buffer"
+                  << std::endl;
+        freeHostMemory(hostVerboseLbas, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+        hostVerboseLbas = nullptr;
+        hostEndTime = nullptr;
+        hostStartTime = nullptr;
+        return EXIT_FAILURE;
+      }
+      hipError_t hv3 = allocHostMemory(flBytes, (void**)&hostVerboseRwFlags,
+                                         "NVMe verbose RW buffer",
+                                         XIO_HOST_MEM_MAPPED);
+      if (hv3 != hipSuccess) {
+        std::cerr << "Error: Failed to allocate NVMe verbose RW buffer"
+                  << std::endl;
+        freeHostMemory(hostVerboseXferBytes, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostVerboseLbas, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+        freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+        hostVerboseXferBytes = nullptr;
+        hostVerboseLbas = nullptr;
+        hostEndTime = nullptr;
+        hostStartTime = nullptr;
+        return EXIT_FAILURE;
+      }
+      memset(hostVerboseLbas, 0, lbBytes);
+      memset(hostVerboseXferBytes, 0, xfBytes);
+      memset(hostVerboseRwFlags, 0, flBytes);
     }
   } else if (lessTiming) {
     hipError_t hipErr = allocHostMemory(sizeof(XioTimingStats),
@@ -472,6 +537,20 @@ int main(int argc, char** argv) {
     if (hipErr != hipSuccess) {
       std::cerr << "Error: Failed to allocate " << "substep stats buffer"
                 << std::endl;
+      if (hostVerboseRwFlags != nullptr)
+        freeHostMemory(hostVerboseRwFlags, XIO_HOST_MEM_MAPPED);
+      if (hostVerboseXferBytes != nullptr)
+        freeHostMemory(hostVerboseXferBytes, XIO_HOST_MEM_MAPPED);
+      if (hostVerboseLbas != nullptr)
+        freeHostMemory(hostVerboseLbas, XIO_HOST_MEM_MAPPED);
+      if (!lessTiming && hostStartTime != nullptr)
+        freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
+      if (!lessTiming && hostEndTime != nullptr)
+        freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+      if (lessTiming && timingStats != nullptr)
+        freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
+      freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
+      freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
       return EXIT_FAILURE;
     }
     memset(substepStats, 0, sizeof(XioSubstepStats));
@@ -483,6 +562,12 @@ int main(int argc, char** argv) {
                                            "stop flag", XIO_HOST_MEM_MAPPED);
   if (stopFlagErr != hipSuccess) {
     std::cerr << "Error: Failed to allocate stop flag" << std::endl;
+    if (hostVerboseRwFlags != nullptr)
+      freeHostMemory(hostVerboseRwFlags, XIO_HOST_MEM_MAPPED);
+    if (hostVerboseXferBytes != nullptr)
+      freeHostMemory(hostVerboseXferBytes, XIO_HOST_MEM_MAPPED);
+    if (hostVerboseLbas != nullptr)
+      freeHostMemory(hostVerboseLbas, XIO_HOST_MEM_MAPPED);
     if (!lessTiming && hostStartTime != nullptr)
       freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
     if (!lessTiming && hostEndTime != nullptr)
@@ -500,6 +585,9 @@ int main(int argc, char** argv) {
   // Assign buffers to our config structure
   baseConfig.startTimes = hostStartTime;
   baseConfig.endTimes = hostEndTime;
+  baseConfig.verboseLbas = hostVerboseLbas;
+  baseConfig.verboseXferBytes = hostVerboseXferBytes;
+  baseConfig.verboseRwFlags = hostVerboseRwFlags;
   baseConfig.timingStats = timingStats;
   baseConfig.substepStats = substepStats;
   baseConfig.submissionQueue = hostSqeAddr;
@@ -522,24 +610,15 @@ int main(int argc, char** argv) {
 
   // Run endpoint test
   hipError_t err = endpoint->run(&baseConfig);
-  if (err != hipSuccess) {
+  const bool run_ok = (err == hipSuccess);
+  if (!run_ok) {
     std::cerr << "Endpoint run failed: " << hipGetErrorString(err)
-              << " (error code: " << err << ")" << std::endl;
-    freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
-    freeQueue(hostCqeAddr, cqIsDevice, "completion queue");
-    if (!lessTiming && hostStartTime != nullptr)
-      freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
-    if (!lessTiming && hostEndTime != nullptr)
-      freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
-    if (lessTiming && timingStats != nullptr)
-      freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
-    if (substepStats != nullptr)
-      freeHostMemory(substepStats, XIO_HOST_MEM_MAPPED);
-    if (stopRequestedFlag != nullptr)
-      freeHostMemory(const_cast<bool*>(stopRequestedFlag), XIO_HOST_MEM_MAPPED);
-    g_configForSignalHandler = nullptr;
-    g_endpointNameForSignalHandler = nullptr;
-    return EXIT_FAILURE;
+              << " (error code: " << static_cast<int>(err) << ")"
+              << std::endl;
+    if (selectedEndpoint == "nvme-ep" && err == hipErrorIllegalState) {
+      std::cerr << "  NVMe: hipErrorIllegalState is used for LFSR --verify "
+                   "data mismatches and for --inject-verify-fail.\n";
+    }
   }
 
   // Check if test was interrupted by SIGINT
@@ -550,46 +629,141 @@ int main(int argc, char** argv) {
   }
 
   // Print raw timing data if verbose and full timing is enabled
-  if (baseConfig.verbose && !lessTiming) {
+  if (baseConfig.verbose && !lessTiming && hostStartTime != nullptr &&
+      hostEndTime != nullptr) {
+    const bool nvmeOpTrace =
+      (hostVerboseLbas != nullptr && hostVerboseXferBytes != nullptr &&
+       hostVerboseRwFlags != nullptr);
+    // Column widths for NVMe raw table (headers match data cells).
+    constexpr int kNvIx = 5;
+    constexpr int kNvOp = 5;
+    constexpr int kNvLba = 18;
+    constexpr int kNvBytes = 10;
+    constexpr int kNvClk = 18;
+    constexpr int durationWidth = 24;
+    const char oldFill = std::cout.fill();
+    auto printDurationColumn = [&](double durationNs, bool ignored) {
+      std::ostringstream durationText;
+      durationText << std::fixed << std::setprecision(3) << durationNs
+                   << " ns";
+      if (ignored) {
+        durationText << " (ignored)";
+      }
+      std::cout << std::setfill(' ') << std::left
+                << std::setw(durationWidth) << durationText.str()
+                << std::right << std::setfill(oldFill) << " |" << std::endl;
+    };
+    auto printInvalidDuration = [&]() {
+      std::cout << std::setfill(' ') << std::left
+                << std::setw(durationWidth) << "INVALID" << std::right
+                << std::setfill(oldFill) << " |" << std::endl;
+    };
+
     if (baseConfig.numThreads == 1) {
       std::cout << "\nRaw timing data:" << std::endl;
-      std::cout << "Index | Start Time      | End Time        | Duration"
-                << std::endl;
-      std::cout << "------|-----------------|-----------------|----------"
-                << std::endl;
+      if (nvmeOpTrace) {
+        std::cout << std::left << std::setfill(' ') << std::setw(kNvIx) << "Index"
+                  << " | " << std::setw(kNvOp) << "Op" << " | " << std::setw(kNvLba)
+                  << "LBA" << " | " << std::setw(kNvBytes) << "Bytes (B)"
+                  << " | " << std::setw(kNvClk) << "Start (clk)" << " | "
+                  << std::setw(kNvClk) << "End (clk)" << " | "
+                  << std::setw(durationWidth) << "Duration" << std::right
+                  << std::setfill(oldFill) << " |" << std::endl;
+        std::cout << std::string(static_cast<size_t>(kNvIx), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvOp), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvLba), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvBytes), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvClk), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvClk), '-') << "-|-"
+                  << std::string(static_cast<size_t>(durationWidth + 2), '-')
+                  << "|" << std::endl;
+      } else {
+        std::cout << "Index | Start Time      | End Time        | "
+                  << std::setfill(' ') << std::left
+                  << std::setw(durationWidth) << "Duration" << std::right
+                  << std::setfill(oldFill) << " |" << std::endl;
+        std::cout << "------|-----------------|-----------------|"
+                  << std::string(durationWidth + 2, '-') << "|" << std::endl;
+      }
       for (unsigned i = 0; i < baseConfig.iterations; ++i) {
-        std::cout << std::setw(5) << i << " | " << std::setw(15)
-                  << hostStartTime[i] << " | " << std::setw(15)
-                  << hostEndTime[i] << " | ";
+        std::cout << std::setfill(' ') << std::setw(kNvIx) << i << " | ";
+        if (nvmeOpTrace) {
+          const char* opLabel =
+            hostVerboseRwFlags[i] != 0 ? "read" : "write";
+          std::cout << std::setfill(' ') << std::left << std::setw(kNvOp)
+                    << opLabel << std::right << " | "
+                    << std::setw(kNvLba) << hostVerboseLbas[i] << " | "
+                    << std::setw(kNvBytes) << hostVerboseXferBytes[i] << " | "
+                    << std::setw(kNvClk) << hostStartTime[i] << " | "
+                    << std::setw(kNvClk) << hostEndTime[i] << " | ";
+        } else {
+          std::cout << std::setw(15) << hostStartTime[i] << " | " << std::setw(15)
+                    << hostEndTime[i] << " | ";
+        }
         if (hostEndTime[i] > hostStartTime[i]) {
           double durationNs = (hostEndTime[i] - hostStartTime[i]) *
                               gpuClockPeriodNs;
-          std::cout << std::fixed << std::setprecision(3) << durationNs << " ns"
-                    << std::endl;
+          printDurationColumn(durationNs, baseConfig.skipFirstIoTiming &&
+                                            i == 0);
         } else {
-          std::cout << "INVALID" << std::endl;
+          printInvalidDuration();
         }
       }
       std::cout << std::endl;
     } else {
+      constexpr int kNvTh = 6;
       std::cout << "\nRaw timing data (multi-threaded):" << std::endl;
-      std::cout << "Thread | Index | Start Time      | End Time        | "
-                << "Duration" << std::endl;
-      std::cout << "-------|-------|-----------------|-----------------|"
-                << "----------" << std::endl;
+      if (nvmeOpTrace) {
+        std::cout << std::left << std::setfill(' ') << std::setw(kNvTh) << "Thread"
+                  << " | " << std::setw(kNvIx) << "Index" << " | "
+                  << std::setw(kNvOp) << "Op" << " | " << std::setw(kNvLba) << "LBA"
+                  << " | " << std::setw(kNvBytes) << "Bytes (B)" << " | "
+                  << std::setw(kNvClk) << "Start (clk)" << " | "
+                  << std::setw(kNvClk) << "End (clk)" << " | "
+                  << std::setw(durationWidth) << "Duration" << std::right
+                  << std::setfill(oldFill) << " |" << std::endl;
+        std::cout << std::string(static_cast<size_t>(kNvTh), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvIx), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvOp), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvLba), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvBytes), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvClk), '-') << "-|-"
+                  << std::string(static_cast<size_t>(kNvClk), '-') << "-|-"
+                  << std::string(static_cast<size_t>(durationWidth + 2), '-')
+                  << "|" << std::endl;
+      } else {
+        std::cout << "Thread | Index | Start Time      | End Time        | "
+                  << std::setfill(' ') << std::left
+                  << std::setw(durationWidth) << "Duration" << std::right
+                  << std::setfill(oldFill) << " |" << std::endl;
+        std::cout << "-------|-------|-----------------|-----------------|"
+                  << std::string(durationWidth + 2, '-') << "|" << std::endl;
+      }
       for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
         for (unsigned i = 0; i < baseConfig.iterations; ++i) {
           unsigned idx = t * baseConfig.iterations + i;
-          std::cout << std::setw(6) << t << " | " << std::setw(5) << i << " | "
-                    << std::setw(15) << hostStartTime[idx] << " | "
-                    << std::setw(15) << hostEndTime[idx] << " | ";
+          std::cout << std::setfill(' ') << std::setw(kNvTh) << t << " | "
+                    << std::setw(kNvIx) << i << " | ";
+          if (nvmeOpTrace) {
+            const char* opLabel =
+              hostVerboseRwFlags[idx] != 0 ? "read" : "write";
+            std::cout << std::setfill(' ') << std::left << std::setw(kNvOp)
+                      << opLabel << std::right << " | "
+                      << std::setw(kNvLba) << hostVerboseLbas[idx]
+                      << " | " << std::setw(kNvBytes) << hostVerboseXferBytes[idx]
+                      << " | " << std::setw(kNvClk) << hostStartTime[idx] << " | "
+                      << std::setw(kNvClk) << hostEndTime[idx] << " | ";
+          } else {
+            std::cout << std::setw(15) << hostStartTime[idx] << " | "
+                      << std::setw(15) << hostEndTime[idx] << " | ";
+          }
           if (hostEndTime[idx] > hostStartTime[idx]) {
             double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
                                 gpuClockPeriodNs;
-            std::cout << std::fixed << std::setprecision(3) << durationNs
-                      << " ns" << std::endl;
+            printDurationColumn(durationNs, baseConfig.skipFirstIoTiming &&
+                                              i == 0);
           } else {
-            std::cout << "INVALID" << std::endl;
+            printInvalidDuration();
           }
         }
       }
@@ -636,11 +810,12 @@ int main(int argc, char** argv) {
       unsigned actualIterations = static_cast<unsigned>(timingStats->count);
       if (showHistogram) {
         printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
-                       UINT_MAX, baseConfig.verifyPass, baseConfig.verifyFail);
+                       UINT_MAX, baseConfig.verifyPass, baseConfig.verifyFail,
+                       baseConfig.skipFirstIoTiming);
       } else {
         printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
                         0, UINT_MAX, baseConfig.verifyPass,
-                        baseConfig.verifyFail);
+                        baseConfig.verifyFail, baseConfig.skipFirstIoTiming);
       }
     } else {
       std::cout << "Warning: No timing data collected in less-timing mode"
@@ -653,49 +828,59 @@ int main(int argc, char** argv) {
       }
     }
   } else if (!lessTiming) {
-    // Full timing mode: calculate durations from individual timestamps
-    // (skip first iteration per thread, as it tends to be larger)
-    std::vector<double> durations;
-    unsigned actualIterations = 0;
-    for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
-      unsigned baseIdx = t * baseConfig.iterations;
-      for (unsigned i = 0; i < baseConfig.iterations; ++i) {
-        unsigned idx = baseIdx + i;
-        if (hostEndTime[idx] > hostStartTime[idx]) {
-          actualIterations++; // Count all completed iterations
-          if (i > 0) {
-            // Skip first iteration per thread for statistics
-            double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
-                                gpuClockPeriodNs;
-            durations.push_back(durationNs);
+    if (hostStartTime != nullptr && hostEndTime != nullptr) {
+      // Full timing mode: calculate durations from individual timestamps
+      // (skip first iteration per thread, as it tends to be larger)
+      std::vector<double> durations;
+      unsigned actualIterations = 0;
+      for (unsigned t = 0; t < baseConfig.numThreads; ++t) {
+        unsigned baseIdx = t * baseConfig.iterations;
+        for (unsigned i = 0; i < baseConfig.iterations; ++i) {
+          unsigned idx = baseIdx + i;
+          if (hostEndTime[idx] > hostStartTime[idx]) {
+            actualIterations++; // Count all completed iterations
+            if (!baseConfig.skipFirstIoTiming || i > 0) {
+              // Optionally skip first iteration per thread for statistics.
+              double durationNs = (hostEndTime[idx] - hostStartTime[idx]) *
+                                  gpuClockPeriodNs;
+              durations.push_back(durationNs);
+            }
           }
         }
       }
-    }
 
-    // Print statistics (showHistogram flag is already set from common options)
-    // Use actual count of completed iterations instead of configured iterations
-    // Note: readIterations/writeIterations not available without
-    // endpoint-specific headers, so pass 0 to show "Iterations" instead of
-    // "Reads/Writes" Note: verifiedReadsCount not tracked in normal mode, use
-    // UINT_MAX
-    if (durations.size() > 0) {
-      if (showHistogram) {
-        printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
-                       UINT_MAX, baseConfig.verifyPass, baseConfig.verifyFail);
+      // Print statistics (showHistogram flag is already set from common options)
+      // Use actual count of completed iterations instead of configured iterations
+      // Note: readIterations/writeIterations not available without
+      // endpoint-specific headers, so pass 0 to show "Iterations" instead of
+      // "Reads/Writes" Note: verifiedReadsCount not tracked in normal mode, use
+      // UINT_MAX
+      if (durations.size() > 0) {
+        if (showHistogram) {
+          printHistogram(durations, actualIterations, baseConfig.numThreads, 0, 0,
+                         UINT_MAX, baseConfig.verifyPass, baseConfig.verifyFail,
+                         baseConfig.skipFirstIoTiming);
+        } else {
+          printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
+                          0, UINT_MAX, baseConfig.verifyPass,
+                          baseConfig.verifyFail, baseConfig.skipFirstIoTiming);
+        }
       } else {
-        printStatistics(durations, actualIterations, baseConfig.numThreads, 0,
-                        0, UINT_MAX, baseConfig.verifyPass,
-                        baseConfig.verifyFail);
+        std::cout << "Warning: No valid timing data collected" << std::endl;
+        if (baseConfig.verifyPass > 0 || baseConfig.verifyFail > 0) {
+          std::cout << "  Verify Passed:    " << std::setw(10)
+                    << baseConfig.verifyPass << std::endl;
+          std::cout << "  Verify Failed:    " << std::setw(10)
+                    << baseConfig.verifyFail << std::endl;
+        }
       }
-    } else {
-      std::cout << "Warning: No valid timing data collected" << std::endl;
-      if (baseConfig.verifyPass > 0 || baseConfig.verifyFail > 0) {
-        std::cout << "  Verify Passed:    " << std::setw(10)
-                  << baseConfig.verifyPass << std::endl;
-        std::cout << "  Verify Failed:    " << std::setw(10)
-                  << baseConfig.verifyFail << std::endl;
-      }
+    } else if (baseConfig.verifyPass > 0 || baseConfig.verifyFail > 0) {
+      std::cout << "Warning: No per-op timing buffers; verify summary only"
+                << std::endl;
+      std::cout << "  Verify Passed:    " << std::setw(10)
+                << baseConfig.verifyPass << std::endl;
+      std::cout << "  Verify Failed:    " << std::setw(10)
+                << baseConfig.verifyFail << std::endl;
     }
   }
 
@@ -733,7 +918,11 @@ int main(int argc, char** argv) {
 
   // Print completion message
   if (!wasInterrupted) {
-    std::cout << "\nTest completed successfully!" << std::endl;
+    if (run_ok) {
+      std::cout << "\nTest completed successfully!" << std::endl;
+    } else {
+      std::cout << "\nTest completed with errors." << std::endl;
+    }
   }
 
   freeQueue(hostSqeAddr, sqIsDevice, "submission queue");
@@ -742,6 +931,12 @@ int main(int argc, char** argv) {
     freeHostMemory(hostStartTime, XIO_HOST_MEM_MAPPED);
   if (!lessTiming && hostEndTime != nullptr)
     freeHostMemory(hostEndTime, XIO_HOST_MEM_MAPPED);
+  if (hostVerboseRwFlags != nullptr)
+    freeHostMemory(hostVerboseRwFlags, XIO_HOST_MEM_MAPPED);
+  if (hostVerboseXferBytes != nullptr)
+    freeHostMemory(hostVerboseXferBytes, XIO_HOST_MEM_MAPPED);
+  if (hostVerboseLbas != nullptr)
+    freeHostMemory(hostVerboseLbas, XIO_HOST_MEM_MAPPED);
   if (lessTiming && timingStats != nullptr)
     freeHostMemory(timingStats, XIO_HOST_MEM_MAPPED);
   if (substepStats != nullptr)
@@ -753,5 +948,5 @@ int main(int argc, char** argv) {
   g_configForSignalHandler = nullptr;
   g_endpointNameForSignalHandler = nullptr;
 
-  return EXIT_SUCCESS;
+  return run_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

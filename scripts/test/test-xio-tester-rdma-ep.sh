@@ -31,7 +31,7 @@ if [ -z "${VENDOR:-}" ]; then
     case "$_dev" in
       *bnxt*)  VENDOR=bnxt  ;;
       *ionic*) VENDOR=ionic ;;
-      *mlx5*)  VENDOR=mlx5  ;;
+      *mlx5*|*roce*|*mlx*) VENDOR=mlx5  ;;
       *ernic*) VENDOR=ernic ;;
       *)
         echo "ERROR: cannot derive vendor" \

@@ -19,9 +19,12 @@
  *   1. Userspace allocates GPU VRAM buffers (queues, data buffers etc)
  *   2. Get physical addresses via GET_VRAM_PHYS_ADDR ioctl
  *   3. Register queue addresses via REGISTER_QUEUE_ADDR ioctl
- *   4. Register data buffers via REGISTER_BUFFER ioctl (optional, for I/O)
- *   5. Use normal NVMe driver interface - kprobe automatically injects
- *      physical addresses into PRP1/PRP2 fields
+ *   4. Register data buffers via REGISTER_BUFFER ioctl when SQE PRPs carry
+ *      the buffer virtual base (host or GPU); skip when PRPs are already
+ *      IOVAs. Host vs VRAM is selected by REGISTER_BUFFER dmabuf_fd (-1 vs
+ *      DMA-BUF fd).
+ *   5. Use normal NVMe driver interface - kprobe injects device-visible
+ *      addresses for PRPs that fall inside a registered virtual range.
  */
 
 #include "rocm-xio.h"
@@ -88,6 +91,7 @@ struct vram_buffer_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
+  __u64 dmabuf_linear_off;
   struct list_head list;
   // For passthrough NVMe - keep attachment alive for P2PDMA
   struct dma_buf* dmabuf;
@@ -709,6 +713,27 @@ static __u64 lookup_queue_prp2(__u64 virt_addr) {
  * Look up physical address for data buffer (I/O commands).
  * First checks registered VRAM buffers, then falls back to virt_to_phys.
  */
+static int sgtable_dma_at_byte(struct sg_table* sgt, size_t offset,
+                               dma_addr_t* out) {
+  struct scatterlist* sg;
+  unsigned int i;
+  size_t pos = 0;
+
+  if (!sgt || !sgt->sgl || !out)
+    return -EINVAL;
+
+  for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+    unsigned int len = sg_dma_len(sg);
+
+    if (offset < pos + (size_t)len) {
+      *out = sg_dma_address(sg) + (dma_addr_t)(offset - pos);
+      return 0;
+    }
+    pos += (size_t)len;
+  }
+  return -EINVAL;
+}
+
 static __u64 lookup_buffer_phys_addr(__u64 virt_addr) {
   struct vram_buffer_entry* entry;
   __u64 phys_addr = 0;
@@ -718,7 +743,17 @@ static __u64 lookup_buffer_phys_addr(__u64 virt_addr) {
   list_for_each_entry(entry, &vram_buffers, list) {
     if (virt_addr >= entry->virt_addr &&
         virt_addr < (entry->virt_addr + entry->size)) {
-      phys_addr = entry->phys_addr + (virt_addr - entry->virt_addr);
+      size_t delta = (size_t)(virt_addr - entry->virt_addr);
+      size_t off = (size_t)entry->dmabuf_linear_off + delta;
+
+      if (entry->is_passthrough && entry->sgt) {
+        dma_addr_t d;
+
+        if (sgtable_dma_at_byte(entry->sgt, off, &d) == 0)
+          phys_addr = (__u64)d;
+      } else {
+        phys_addr = entry->phys_addr + (__u64)off;
+      }
       break;
     }
   }
@@ -733,6 +768,179 @@ static __u64 lookup_buffer_phys_addr(__u64 virt_addr) {
   }
 
   return 0;
+}
+
+/*
+ * True if @addr lies in the virtual range of a REGISTER_BUFFER entry.
+ * Host vs device memory is already distinguished at registration time
+ * (struct rocm_xio_register_buffer_req: dmabuf_fd -1 vs VRAM DMA-BUF fd).
+ * The NVMe kprobe only rewrites PRPs when the SQE still carries such a
+ * registered user/GPU virtual address; values that are already IOVAs
+ * (including PRP list pointers) are left unchanged.
+ */
+static bool vram_user_virt_registered(__u64 addr) {
+  struct vram_buffer_entry* entry;
+  bool found = false;
+
+  spin_lock(&vram_buffers_lock);
+  list_for_each_entry(entry, &vram_buffers, list) {
+    if (addr >= entry->virt_addr &&
+        addr < (__u64)(entry->virt_addr + entry->size)) {
+      found = true;
+      break;
+    }
+  }
+  spin_unlock(&vram_buffers_lock);
+  return found;
+}
+
+#define ROCM_XIO_NVME_PAGE_BYTES 4096ULL
+#define ROCM_XIO_MAX_SG_SNAPSHOT 512U
+
+static int snap_dma_byte_offset(const dma_addr_t* sg_addr,
+                                const unsigned int* sg_len,
+                                unsigned int sg_count, size_t offset,
+                                dma_addr_t* out) {
+  size_t pos = 0;
+  unsigned int i;
+
+  for (i = 0; i < sg_count; i++) {
+    if (offset < pos + (size_t)sg_len[i]) {
+      *out = sg_addr[i] + (dma_addr_t)(offset - pos);
+      return 0;
+    }
+    pos += (size_t)sg_len[i];
+  }
+  return -EINVAL;
+}
+
+/*
+ * Copy one NVMe 4K-page DMA/IOVA per buffer page for a REGISTER_BUFFER entry.
+ * Passthrough buffers use the full scatter-gather map; emulated buffers use
+ * a linear GPA from the single registered base.
+ */
+static long rocm_xio_ioctl_get_buffer_dma_pages(void __user* uarg) {
+  struct rocm_xio_buffer_dma_pages_req req;
+  struct vram_buffer_entry* entry;
+  dma_addr_t* sg_addr = NULL;
+  unsigned int* sg_len = NULL;
+  unsigned int sg_count = 0;
+  bool use_sg = false;
+  __u64 linear_phys = 0;
+  size_t buf_size = 0;
+  bool found = false;
+  unsigned long irqflags;
+  __u32 needed;
+  __u64* kbuf = NULL;
+  __u32 p;
+  long ret = 0;
+  __u64 dmabuf_lo = 0;
+
+  if (copy_from_user(&req, uarg, sizeof(req)))
+    return -EFAULT;
+
+  if (!req.user_addrs_ptr || req.max_pages == 0)
+    return -EINVAL;
+  if (req.max_pages > (1U << 20))
+    return -EINVAL;
+
+  sg_addr = kmalloc_array(ROCM_XIO_MAX_SG_SNAPSHOT, sizeof(*sg_addr),
+                          GFP_KERNEL);
+  if (!sg_addr) {
+    ret = -ENOMEM;
+    goto out_free_snap;
+  }
+  sg_len = kmalloc_array(ROCM_XIO_MAX_SG_SNAPSHOT, sizeof(*sg_len),
+                         GFP_KERNEL);
+  if (!sg_len) {
+    ret = -ENOMEM;
+    goto out_free_snap;
+  }
+
+  spin_lock_irqsave(&vram_buffers_lock, irqflags);
+  list_for_each_entry(entry, &vram_buffers, list) {
+    if (entry->virt_addr == req.virt_addr) {
+      buf_size = (size_t)entry->size;
+      dmabuf_lo = entry->dmabuf_linear_off;
+      if (entry->is_passthrough && entry->sgt) {
+        struct scatterlist* sg;
+        unsigned int sg_i;
+
+        if ((unsigned int)entry->sgt->nents > ROCM_XIO_MAX_SG_SNAPSHOT) {
+          spin_unlock_irqrestore(&vram_buffers_lock, irqflags);
+          ret = -E2BIG;
+          goto out_free_snap;
+        }
+        for_each_sg(entry->sgt->sgl, sg, entry->sgt->nents, sg_i) {
+          sg_addr[sg_count] = sg_dma_address(sg);
+          sg_len[sg_count] = sg_dma_len(sg);
+          sg_count++;
+        }
+        use_sg = true;
+      } else {
+        linear_phys = entry->phys_addr;
+        use_sg = false;
+      }
+      found = true;
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&vram_buffers_lock, irqflags);
+
+  if (!found) {
+    ret = -ENOENT;
+    goto out_free_snap;
+  }
+  if (buf_size == 0) {
+    ret = -EINVAL;
+    goto out_free_snap;
+  }
+
+  needed = (__u32)DIV_ROUND_UP(buf_size, ROCM_XIO_NVME_PAGE_BYTES);
+  if (req.max_pages < needed) {
+    ret = -EINVAL;
+    goto out_free_snap;
+  }
+
+  kbuf = kmalloc_array(needed, sizeof(__u64), GFP_KERNEL);
+  if (!kbuf) {
+    ret = -ENOMEM;
+    goto out_free_snap;
+  }
+
+  for (p = 0; p < needed; p++) {
+    size_t off = (size_t)dmabuf_lo +
+                 (size_t)p * (size_t)ROCM_XIO_NVME_PAGE_BYTES;
+
+    if (use_sg) {
+      dma_addr_t d;
+
+      if (snap_dma_byte_offset(sg_addr, sg_len, sg_count, off, &d) != 0) {
+        ret = -EIO;
+        goto out_kfree_kbuf;
+      }
+      kbuf[p] = (__u64)d;
+    } else {
+      kbuf[p] = linear_phys + (__u64)off;
+    }
+  }
+
+  if (copy_to_user((void __user*)(uintptr_t)req.user_addrs_ptr, kbuf,
+                   (size_t)needed * sizeof(__u64))) {
+    ret = -EFAULT;
+    goto out_kfree_kbuf;
+  }
+
+  req.num_pages_out = needed;
+  if (copy_to_user(uarg, &req, sizeof(req)))
+    ret = -EFAULT;
+
+out_kfree_kbuf:
+  kfree(kbuf);
+out_free_snap:
+  kfree(sg_addr);
+  kfree(sg_len);
+  return ret;
 }
 
 /*
@@ -837,9 +1045,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     __u64 prp1_val = le64_to_cpu(cmd->common.dptr.prp1);
     __u64 prp2_val = le64_to_cpu(cmd->common.dptr.prp2);
 
-    /* If PRP1 looks like a virtual address (not a high physical address),
-     * try to convert it */
-    if (prp1_val && prp1_val < 0x100000000ULL) {
+    if (prp1_val && vram_user_virt_registered(prp1_val)) {
       phys_addr = lookup_buffer_phys_addr(prp1_val);
       if (phys_addr) {
         pr_debug("rocm-axiio: Injecting PRP1 for I/O: 0x%016llx\n",
@@ -848,8 +1054,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
       }
     }
 
-    /* Same for PRP2 if present */
-    if (prp2_val && prp2_val < 0x100000000ULL) {
+    if (prp2_val && vram_user_virt_registered(prp2_val)) {
       phys_addr = lookup_buffer_phys_addr(prp2_val);
       if (phys_addr) {
         pr_debug("rocm-axiio: Injecting PRP2 for I/O: 0x%016llx\n",
@@ -1037,6 +1242,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_register_buffer_req req;
       struct vram_buffer_entry* entry;
       __u64 phys_addr;
+      __u64 logical_size;
       bool is_emulated = false;
       struct dma_buf* dmabuf = NULL;
       struct dma_buf_attachment* attach = NULL;
@@ -1045,6 +1251,14 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
+
+      /*
+       * Userspace passes the logical I/O buffer size. get_dmabuf_* may
+       * overwrite req.size with the full DMA-BUF object size (page-rounded
+       * export), which can be larger. entry->size must stay logical so
+       * GET_BUFFER_DMA_PAGES and PRP range checks match hip allocation.
+       */
+      logical_size = req.size;
 
       /* Determine if this is emulated NVMe based on flags field */
       if (req.flags & ROCM_XIO_FLAG_EMULATED) {
@@ -1106,7 +1320,8 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       /* Store userspace virtual address */
       entry->virt_addr = (__u64)req.virt_addr;
       entry->phys_addr = phys_addr;
-      entry->size = req.size;
+      entry->size = logical_size;
+      entry->dmabuf_linear_off = req.dmabuf_linear_off;
       entry->is_passthrough = !is_emulated;
 
       /* Store attachment info for passthrough (keep alive) */
@@ -1139,17 +1354,20 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
           pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
-                  "phys=0x%016llx size=0x%llx (%s)%s\n",
+                  "phys=0x%016llx size=0x%llx (dmabuf=0x%llx) (%s)%s\n",
                   (unsigned long long)entry->virt_addr,
-                  (unsigned long long)phys_addr, (unsigned long long)req.size,
-                  pci_addr,
+                  (unsigned long long)phys_addr,
+                  (unsigned long long)logical_size,
+                  (unsigned long long)req.size, pci_addr,
                   entry->is_passthrough ? " (P2PDMA attachment kept alive)"
                                         : "");
         } else {
           pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
-                  "phys=0x%016llx size=0x%llx%s\n",
+                  "phys=0x%016llx size=0x%llx (dmabuf=0x%llx)%s\n",
                   (unsigned long long)entry->virt_addr,
-                  (unsigned long long)phys_addr, (unsigned long long)req.size,
+                  (unsigned long long)phys_addr,
+                  (unsigned long long)logical_size,
+                  (unsigned long long)req.size,
                   entry->is_passthrough ? " (P2PDMA attachment kept alive)"
                                         : "");
         }
@@ -1243,6 +1461,9 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       kfree(entry);
       return 0;
     }
+
+    case ROCM_XIO_GET_BUFFER_DMA_PAGES:
+      return rocm_xio_ioctl_get_buffer_dma_pages((void __user*)arg);
 
     case ROCM_XIO_GET_MMIO_BRIDGE_SHADOW_BUFFER: {
       struct rocm_xio_mmio_bridge_shadow_req req;

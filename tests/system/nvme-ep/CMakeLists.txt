@@ -271,7 +271,7 @@ xio_add_script_test(
   NAME nvme-verify-seq-device-mem-multi-lba
   SCRIPT ${_verify_wrapper}
   LABELS hardware nvme verify
-  TIMEOUT 120
+  TIMEOUT 30
   ARGS ${_seq_script}
   ENVIRONMENT
     "MEMORY_MODE=8"
@@ -403,6 +403,65 @@ xio_add_script_test(
   ENVIRONMENT "XIO_TESTER=${_xio_tester}"
 )
 
+# Inline --verify with >8 LBAs per I/O (host and VRAM data buffers).
+# Use 12 and 16 LBAs per command: both exceed 8*512 B and still fit the
+# <=2 NVMe 4K-page PRP1+PRP2 layout for page-aligned transfers. Larger
+# single-command sizes (e.g. 32 LBAs) need a PRP list; passthrough setups
+# may still fail --verify at the first list boundary, so those stay in
+# smoke-only tests without --verify.
+
+xio_add_script_test(
+  NAME nvme-verify-inline-lbas-12-host-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 45
+  ARGS --access-pattern random -m 0
+    --lbas-per-io 12 --lfsr-seed 0xB3
+    --write-io 8 --read-io 8
+    --queue-length 128 --batch-size 1
+    --data-buffer-size 1048576 --verify --less-timing
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-lbas-12-device-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 45
+  ARGS --access-pattern random -m 8
+    --lbas-per-io 12 --lfsr-seed 0xB4
+    --write-io 8 --read-io 8
+    --queue-length 128 --batch-size 1
+    --data-buffer-size 1048576 --verify --less-timing
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-lbas-16-host-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 45
+  ARGS --access-pattern random -m 0
+    --lbas-per-io 16 --lfsr-seed 0xB5
+    --write-io 8 --read-io 8
+    --queue-length 128 --batch-size 1
+    --data-buffer-size 1048576 --verify --less-timing
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-lbas-16-device-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 45
+  ARGS --access-pattern random -m 8
+    --lbas-per-io 16 --lfsr-seed 0xB6
+    --write-io 8 --read-io 8
+    --queue-length 128 --batch-size 1
+    --data-buffer-size 1048576 --verify --less-timing
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
 # --- Negative tests (expected failures) -----------------
 
 xio_add_script_test(
@@ -414,6 +473,23 @@ xio_add_script_test(
   ENVIRONMENT
     "XIO_TESTER=${_xio_tester}"
     "EXPECT_FAIL=1"
+)
+
+# Assert xio-tester exits non-zero when verification is forced to fail
+# (--inject-verify-fail). Requires GPU + NVMe like other nvme-ep tests.
+xio_add_script_test(
+  NAME nvme-negative-verify-exit-inject
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme negative
+  TIMEOUT 30
+  ARGS --access-pattern random -m 0
+    --lbas-per-io 8 --lfsr-seed 0xC0DE
+    --write-io 4 --read-io 4
+    --queue-length 128 --batch-size 1
+    --verify --inject-verify-fail --less-timing
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "EXPECT_NONZERO=1"
 )
 
 xio_add_script_test(

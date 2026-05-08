@@ -23,8 +23,10 @@ Prerequisites
 Tool                Install
 ==================  ===================================
 QEMU >= 10.1        ``apt install qemu-system-x86``
-                    or build from source under
-                    ``/opt/qemu-<version>``
+                    or a PCI/MMIO-capable build (for example
+                    ``/opt/qemu-mmio-bridge-submit/bin/`` or
+                    ``/opt/qemu-pci*/bin/``) preferred for
+                    passthrough and MMIO bridge tests
 ``driverctl``       ``apt install driverctl``
 ``cloud-localds``   ``apt install cloud-image-utils``
 ``qemu-minimal``    Clone
@@ -192,8 +194,14 @@ configure time.
 ======================  ================================
 Variable                Description
 ======================  ================================
-``QEMU_PATH``           QEMU binary prefix (empty =
-                        system ``qemu-system-x86_64``)
+``QEMU_PATH``           QEMU binary directory prefix
+                        (must include a trailing ``/`` when
+                        passed to ``run-vm``; CMake and
+                        ``launch-vm`` normalize this). Prefer a
+                        PCI/MMIO-capable build under
+                        ``/opt/qemu-mmio-bridge-submit/bin/`` or
+                        ``/opt/qemu-pci*/bin/`` (>= 10.1) over the
+                        distro ``qemu-system-x86_64`` alone.
 ``XIO_VM_GPU``          GPU BDF for passthrough
                         (for example, ``10:00.0``); auto-
                         detected if not set
@@ -201,7 +209,9 @@ Variable                Description
 ``XIO_VM_PASS``         VM password (default:
                         ``password``)
 ``RUN_VM``              Path to ``qemu-minimal``
-                        ``run-vm`` script
+                        ``run-vm`` script (CMake searches next
+                        to this checkout:
+                        ``<repo>/../qemu-minimal/qemu``)
 ``GEN_VM``              Path to ``qemu-minimal``
                         ``gen-vm`` script
 ======================  ================================
@@ -221,10 +231,80 @@ Variable                Default   Notes
 ``RDMA_NIC_BDF``        c3:00.1   BNXT NIC (rdma mode)
 ``NVME_DEV_BDF``        85:00.0   NVMe ctrl (nvme mode)
 ``VCPUS``               16        Guest vCPU count
-``VMEM``                32768     Guest RAM (MB)
+``VMEM``                16384     Guest RAM (MB); lower if VFIO
+                                  hits ENOMEM, higher only with
+                                  memlock limits raised
 ``VM_MODE``             rdma      ``rdma``, ``nvme``,
                                   ``ernic``, or ``full``
+``NVME``                1         Emulated qcow2 NVMe count
+                                  for ``run-vm`` (``2`` for
+                                  two devices)
+``NVME_TRACE``          none      ``doorbell``, ``all``, or a
+                                  QEMU event name; see
+                                  ``qemu-minimal`` ``run-vm``
+                                  header
+``NVME_TRACE_FILE``     (empty)   Host path for ``-trace
+                                  file=...`` when tracing
+``NVME_RECREATE``       false     When ``true``, delete and
+                                  recreate emulated NVMe
+                                  qcow2 images before boot
+``DRY_RUN``             none      Any value other than
+                                  ``none`` prints the QEMU
+                                  argv without running QEMU
+``QMP_SOCKET``          false     ``true``, ``false``, or a
+                                  custom Unix socket path; see
+                                  ``run-vm``
 ======================  ========  =====================
+
+The ``launch-test-vm`` target passes ``RUN_VM``, ``GPU_BDF``,
+and ``QEMU_PATH`` via ``cmake -E env``; other variables in the
+table are inherited from the environment of the tool that runs
+the build (for example ``ninja``), so export them in the same
+shell before ``cmake --build`` when you need tracing or a dry
+run.
+
+QEMU path, dual NVMe topology, and tracing
+==========================================
+
+``run-vm`` builds the QEMU command by concatenating
+``QEMU_PATH`` with ``qemu-system-x86_64`` (plus arguments).
+``QEMU_PATH`` must therefore be a directory prefix, normally
+ending in ``bin/``. ``launch-vm`` adds the trailing slash when
+it is missing and, when ``QEMU_PATH`` is unset or empty, picks
+``/opt/qemu-mmio-bridge-submit/bin/`` when that install exists,
+otherwise the newest matching ``/opt/qemu-pci*/bin/`` directory
+that contains a usable ``qemu-system-x86_64`` (or
+``qemu-system-amd64``), so routine VM launches align with the
+PCI/MMIO-capable QEMU builds used for ``gen-test-vm`` when you
+configure with ``-DQEMU_PATH=`` under that tree.
+
+In ``nvme`` and ``full`` modes the guest receives **both** the
+emulated qcow2-backed NVMe device(s) controlled by ``NVME`` and
+a **VFIO**-passthrough NVMe **controller** (``NVME_DEV_BDF``).
+``launch-vm`` also enables ``PCI_MMIO_BRIDGE`` for GPU-direct
+NVMe in those modes. QEMU wires the emulated NVMe first, then
+VFIO devices. Namespace names inside the guest are not the
+same as host ``/dev/disk/by-id/...`` paths; use ``lsblk`` and
+``nvme list`` in the guest to pick the correct device for
+``xio-tester nvme-ep`` (use ``--pci-mmio-bridge`` when the VM
+was started with the MMIO bridge). Passthrough detaches the
+whole PCI function from the host for the VM session; confirm
+the BDF is the intended scratch or test controller before
+binding it to ``vfio-pci``.
+
+QEMU **NVMe trace** events complement rocm-xio logging on the
+emulated path (for example ``ROCXIO_NVME_DUMP_PRP``). Set
+``NVME_TRACE`` to ``doorbell``, ``all``, or a specific event
+name, and optionally ``NVME_TRACE_FILE`` to capture trace lines
+to a host file. Example inspection without booting the guest
+(``DRY_RUN=1`` skips host VFIO checks in ``launch-vm`` and
+``pci_check`` in ``run-vm`` so you can print the argv without
+binding devices; a real boot still needs ``vfio-pci``):
+
+.. code-block:: bash
+
+   DRY_RUN=1 NVME_TRACE=all \
+     ./scripts/test/launch-vm nvme
 
 GPU detection
 =============
@@ -290,3 +370,22 @@ Troubleshooting
       cd ~/Projects/rocm-ernic
       cmake -B build -G Ninja
       cmake --build build
+
+**VFIO ``vfio_container_dma_map ... Cannot allocate memory``**
+   QEMU maps all guest RAM for the GPU VFIO container; with a
+   large ``VMEM`` and a low **locked memory** hard limit, the
+   kernel returns ENOMEM. ``ulimit -l unlimited`` only works
+   after an admin raises the **hard** cap, for example under
+   ``/etc/security/limits.d/`` (``memlock`` soft/hard
+   ``unlimited`` for your user), then a full logout and login.
+   Until then, run with less RAM, for example
+   ``VMEM=8192 ./scripts/test/launch-vm nvme``.
+
+**QEMU ``Can't add chassis slot, error -16`` on a second
+   ``pcie-root-port``**
+   Older ``qemu-minimal`` ``run-vm`` lines gave every
+   ``pcie-root-port`` the default ACPI ``chassis``/``slot``,
+   so the second VFIO passthrough root port collides (EBUSY).
+   Update ``qemu-minimal`` ``run-vm`` so each host root port
+   sets distinct ``chassis=``/``slot=`` (or pull the latest
+   ``run-vm`` from your ``qemu-minimal`` checkout).

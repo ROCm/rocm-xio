@@ -935,6 +935,7 @@ hipError_t run(XioEndpointConfig* config) {
         *d_vFail = 0;
     }
 
+    (void)xio::clearHipLaunchError("test-ep", "endpoint_kernel", 0);
     hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
                        sqePtr, cqePtr, config->startTimes, config->endTimes,
                        config->timingStats, config->iterations,
@@ -943,7 +944,8 @@ hipError_t run(XioEndpointConfig* config) {
                        testEpConfig->verify, testEpConfig->seed, d_vPass,
                        d_vFail);
 
-    err = hipGetLastError();
+    err = xio::checkHipLaunchError("test-ep", "endpoint_kernel", 0, 1,
+                                   config->numThreads, 0, nullptr);
     if (err != hipSuccess) {
       for (auto& thread : cpuThreadHandles)
         thread.join();
@@ -954,7 +956,7 @@ hipError_t run(XioEndpointConfig* config) {
       return err;
     }
 
-    err = hipDeviceSynchronize();
+    err = xio::syncHipKernel("test-ep", "endpoint_kernel", 0, nullptr);
     if (err != hipSuccess) {
       for (auto& thread : cpuThreadHandles)
         thread.join();

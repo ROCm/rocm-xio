@@ -40,7 +40,7 @@ if [ -z "${PROVIDER:-}" ] && [ -n "$RDMA_DEV" ]; then
     case "$RDMA_DEV" in
         *bnxt*)  PROVIDER=bnxt  ;;
         *ionic*) PROVIDER=ionic ;;
-        *mlx5*)  PROVIDER=mlx5  ;;
+        *mlx5*|*roce*|*mlx*) PROVIDER=mlx5  ;;
         *ernic*) PROVIDER=ernic ;;
         *)
             echo "ERROR: cannot derive provider" \

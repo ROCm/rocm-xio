@@ -21,9 +21,11 @@
 # 1. QEMU binary
 # ---------------------------------------------------
 # Cache variable: override with
-#   -DQEMU_PATH=/opt/qemu-10.1.2/bin/
+#   -DQEMU_PATH=/opt/qemu-pci-10.2.0/bin/
+#   or -DQEMU_PATH=/opt/qemu-mmio-bridge-submit/bin/
+#   or -DQEMU_PATH=/opt/qemu-10.1.2/bin/
 set(QEMU_PATH "" CACHE STRING
-  "Path prefix for qemu-system-x86_64 (empty = system)")
+  "Path prefix for qemu-system-x86_64 (empty: search PATH then /opt). Prefer /opt/qemu-mmio-bridge-submit/bin/ or /opt/qemu-pci*/bin/.")
 
 if(QEMU_PATH)
   set(_qemu_bin "${QEMU_PATH}/qemu-system-x86_64")
@@ -39,7 +41,23 @@ if(QEMU_PATH)
     endif()
   endif()
 else()
-  find_program(_qemu_bin qemu-system-x86_64)
+  set(_qemu_bin "")
+  if(EXISTS
+      "/opt/qemu-mmio-bridge-submit/bin/qemu-system-x86_64")
+    set(_qemu_bin
+      "/opt/qemu-mmio-bridge-submit/bin/qemu-system-x86_64")
+  endif()
+  if(NOT _qemu_bin)
+    file(GLOB _xio_qemu_pci_glob
+      "/opt/qemu-pci*/bin/qemu-system-x86_64")
+    if(_xio_qemu_pci_glob)
+      list(SORT _xio_qemu_pci_glob COMPARE NATURAL)
+      list(GET _xio_qemu_pci_glob -1 _qemu_bin)
+    endif()
+  endif()
+  if(NOT _qemu_bin)
+    find_program(_qemu_bin qemu-system-x86_64)
+  endif()
 endif()
 
 set(_qemu_ok FALSE)
@@ -98,7 +116,9 @@ endif()
 # 3. run-vm script
 # ---------------------------------------------------
 find_program(RUN_VM run-vm
-  HINTS "$ENV{HOME}/Projects/qemu-minimal/qemu")
+  HINTS
+    "${CMAKE_SOURCE_DIR}/../qemu-minimal/qemu"
+    "$ENV{HOME}/Projects/qemu-minimal/qemu")
 
 if(NOT RUN_VM)
   message(STATUS
@@ -279,12 +299,11 @@ else()
   if(NOT _qemu_ok)
     list(APPEND _err_cmds
       COMMAND ${CMAKE_COMMAND} -E echo
-        "Error: qemu-system-x86_64 not found or"
-        "version < 10.1.0."
+        "Error: qemu-system-x86_64 not found or QEMU version below 10.1.0."
       COMMAND ${CMAKE_COMMAND} -E echo
         "  sudo apt-get install qemu-system-x86"
       COMMAND ${CMAKE_COMMAND} -E echo
-        "  or: -DQEMU_PATH=/opt/qemu-10.1.2/bin/")
+        "  or: -DQEMU_PATH=/opt/qemu-mmio-bridge-submit/bin/")
   endif()
 
   if(NOT RUN_VM)
@@ -338,7 +357,9 @@ endif()
 # 7. gen-vm script and cloud-localds
 # ---------------------------------------------------
 find_program(GEN_VM gen-vm
-  HINTS "$ENV{HOME}/Projects/qemu-minimal/qemu")
+  HINTS
+    "${CMAKE_SOURCE_DIR}/../qemu-minimal/qemu"
+    "$ENV{HOME}/Projects/qemu-minimal/qemu")
 
 find_program(CLOUD_LOCALDS cloud-localds)
 
@@ -431,9 +452,9 @@ else()
   if(NOT _qemu_ok)
     list(APPEND _gen_err
       COMMAND ${CMAKE_COMMAND} -E echo
-        "Error: QEMU not found or < 10.1.0."
+        "Error: QEMU not found or QEMU version below 10.1.0."
       COMMAND ${CMAKE_COMMAND} -E echo
-        "  -DQEMU_PATH=/opt/qemu-10.1.2/bin/")
+        "  -DQEMU_PATH=/opt/qemu-mmio-bridge-submit/bin/")
   endif()
 
   if(NOT GEN_VM)

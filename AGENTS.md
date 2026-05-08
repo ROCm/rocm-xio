@@ -23,15 +23,22 @@ exempt.
 Never use volatile NVMe namespace paths such as `/dev/nvme0n1` in destructive
 or benchmark commands. The root filesystem may live on an NVMe namespace, so an
 incorrect volatile path can corrupt the OS disk. NVMe hardware tests must target
-only the spare MTR SLC SSD by stable identity:
+only a stable `/dev/disk/by-id/` namespace path that the user has explicitly
+confirmed is safe to overwrite or benchmark.
 
-```bash
-/dev/disk/by-id/nvme-MTR_SLC_16GB_0400000E3CBC
-```
+Before running any NVMe hardware test, resolve the proposed by-id namespace,
+verify it is not mounted as `/` or any other active filesystem, and ask the user
+to confirm that the resolved device is the intended scratch/test drive. Do not
+infer safety from controller numbering such as `/dev/nvmeX`; use controller
+nodes only when an API explicitly requires a controller path.
 
-For multi-queue NVMe runs, set an explicit queue id. On the current test node,
-the MTR SLC controller has `queue_count=33`, so `ROCXIO_NVME_QUEUE_ID=32` is the
-known-good value.
+For multi-queue NVMe runs, set an explicit queue id after checking the selected
+controller's `queue_count`. Use the last valid I/O queue id, which is normally
+`queue_count - 1`, unless the user asks for a different queue.
+
+Do not use `--pci-mmio-bridge` for bare-metal NVMe tests. PCI MMIO bridge mode
+is intended for VM environments; direct bare-metal NVMe endpoint runs should use
+the default doorbell path.
 
 ## Build Setup
 
@@ -126,13 +133,14 @@ truth for this path.
 Run the sweep in three parts so the results are deterministic and each vendor is
 tested against the intended device.
 
-First run non-RDMA tests, including NVMe on only the MTR SLC by-id namespace:
+First run non-RDMA tests, including NVMe only on a user-confirmed safe by-id
+namespace:
 
 ```bash
 sudo env \
-  ROCXIO_NVME_DEVICE=/dev/disk/by-id/nvme-MTR_SLC_16GB_0400000E3CBC \
-  NVME_DEVICE=/dev/disk/by-id/nvme-MTR_SLC_16GB_0400000E3CBC \
-  ROCXIO_NVME_QUEUE_ID=32 \
+  ROCXIO_NVME_DEVICE="${SAFE_NVME_BY_ID:?set a confirmed by-id namespace}" \
+  NVME_DEVICE="${SAFE_NVME_BY_ID:?set a confirmed by-id namespace}" \
+  ROCXIO_NVME_QUEUE_ID="${SAFE_NVME_QUEUE_ID:?set after checking queue_count}" \
   LD_LIBRARY_PATH="$LIB:/opt/rocs-ais/lib:/opt/rocm/lib:${LD_LIBRARY_PATH:-}" \
   HSA_FORCE_FINE_GRAIN_PCIE=1 \
   ctest --test-dir build -LE 'rdma|fixture' \

@@ -31,6 +31,24 @@ struct DataPatternParams {
 };
 
 /**
+ * Expected pattern byte at buffer index @p index for the same rules as
+ * dataPattern() with base @p baseOffset, @p blockSize, and @p seed.
+ */
+__host__ __device__ static inline uint8_t dataPatternExpectedByte(
+    uint64_t baseOffset, uint32_t blockSize, uint32_t seed, size_t index) {
+  const uint64_t block = baseOffset / blockSize;
+  const uint32_t base_seed = (uint32_t)(block * 0x12345678);
+  const uint32_t mixed = base_seed ^ seed;
+  uint32_t rng = (uint32_t)(block * 0x9e3779b9 + mixed + index);
+  rng ^= rng >> 16;
+  rng *= 0x85ebca6b;
+  rng ^= rng >> 13;
+  rng *= 0xc2b2ae35;
+  rng ^= rng >> 16;
+  return (uint8_t)(rng & 0xFF);
+}
+
+/**
  * Generate or verify LFSR-based test data pattern.
  *
  * Generates or verifies a deterministic pseudo-random data pattern using
@@ -45,18 +63,9 @@ struct DataPatternParams {
  */
 __host__ __device__ static inline bool dataPattern(bool isVerify,
                                                    DataPatternParams& params) {
-  uint64_t block = params.offset / params.blockSize;
-  uint32_t base_seed = (uint32_t)(block * 0x12345678);
-  uint32_t seed = base_seed ^ params.seed;
-
   for (size_t i = 0; i < params.size; i++) {
-    uint32_t rng = (uint32_t)(block * 0x9e3779b9 + seed + i);
-    rng ^= rng >> 16;
-    rng *= 0x85ebca6b;
-    rng ^= rng >> 13;
-    rng *= 0xc2b2ae35;
-    rng ^= rng >> 16;
-    uint8_t expected = (uint8_t)(rng & 0xFF);
+    const uint8_t expected = dataPatternExpectedByte(
+        params.offset, params.blockSize, params.seed, i);
 
     if (isVerify) {
       if (params.buffer[i] != expected) {

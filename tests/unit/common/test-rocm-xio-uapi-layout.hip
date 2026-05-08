@@ -24,8 +24,10 @@ int main() {
 
   static_assert(sizeof(struct rocm_xio_register_queue_addr_req) == 40,
                 "rocm_xio_register_queue_addr_req size drift");
-  static_assert(sizeof(struct rocm_xio_register_buffer_req) == 40,
+  static_assert(sizeof(struct rocm_xio_register_buffer_req) == 48,
                 "rocm_xio_register_buffer_req size drift");
+  static_assert(sizeof(struct rocm_xio_buffer_dma_pages_req) == 24,
+                "rocm_xio_buffer_dma_pages_req size drift");
   static_assert(sizeof(struct rocm_xio_mmio_bridge_shadow_req) == 24,
                 "rocm_xio_mmio_bridge_shadow_req size drift");
   static_assert(sizeof(struct rocm_xio_alloc_contig_req) == 32,

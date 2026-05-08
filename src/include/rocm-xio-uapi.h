@@ -60,6 +60,9 @@ extern "C" {
 /** @brief Free contiguous queue memory allocated by the kernel helper. */
 #define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
   _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_xio_free_contig_req)
+/** @brief Per-NVMe-page DMA addresses for a registered VRAM buffer (SG). */
+#define ROCM_XIO_GET_BUFFER_DMA_PAGES                                          \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 13, struct rocm_xio_buffer_dma_pages_req)
 
 /** @brief Return the emulated BAR guest-physical address. */
 #define ROCM_XIO_FLAG_EMULATED (1 << 0)
@@ -124,17 +127,31 @@ struct rocm_xio_unregister_queue_addr_req {
 
 /** @brief Register data buffer for PRP injection (REGISTER_BUFFER). */
 struct rocm_xio_register_buffer_req {
-  int dmabuf_fd;   /**< DMA-BUF fd for VRAM, or -1 for host memory. */
+  int dmabuf_fd; /**< DMA-BUF fd for VRAM, or -1 for host memory. */
   __u64 virt_addr; /**< Userspace virtual buffer base address. */
   __u64 phys_addr; /**< Physical address, IOVA, or emulated GPA. */
-  __u64 size;      /**< Buffer size in bytes. */
-  __u16 nvme_bdf;  /**< Target NVMe device in 0xBBDD form. */
-  __u32 flags;     /**< ROCM_XIO_FLAG_* address selection flags. */
+  __u64 size; /**< Buffer size in bytes. */
+  /**
+   * Byte offset from the start of the DMA-BUF object to virt_addr (export
+   * often rounds the GPU pointer down to a page boundary). Use 0 when the
+   * buffer base matches the DMA-BUF base.
+   */
+  __u64 dmabuf_linear_off;
+  __u16 nvme_bdf; /**< Target NVMe device in 0xBBDD form. */
+  __u32 flags; /**< ROCM_XIO_FLAG_* address selection flags. */
 };
 
 /** @brief Unregister a data buffer by userspace virtual address. */
 struct rocm_xio_unregister_buffer_req {
   __u64 virt_addr; /**< Userspace virtual buffer base address. */
+};
+
+/** @brief Per-page DMA/IOVA list for a REGISTER_BUFFER VRAM mapping (ioctl 13). */
+struct rocm_xio_buffer_dma_pages_req {
+  __u64 virt_addr; /**< GPU virtual base passed to REGISTER_BUFFER. */
+  __u64 user_addrs_ptr; /**< Userspace output array of \a max_pages \c __u64. */
+  __u32 max_pages; /**< Capacity of \a user_addrs_ptr (must cover buffer). */
+  __u32 num_pages_out; /**< Kernel: NVMe 4K pages copied (equals expected). */
 };
 
 /** @brief MMIO bridge shadow buffer mapping (GET_MMIO_BRIDGE_SHADOW_BUFFER). */

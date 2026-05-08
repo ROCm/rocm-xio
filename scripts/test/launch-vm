@@ -33,13 +33,34 @@
 #   ERNIC_INSTANCES Number of ERNIC instances
 #                   (default: 1)
 #   ERNIC_BACKEND   ERNIC backend (default: loopback)
-#   RUN_VM          Path to qemu-minimal run-vm script
-#   QEMU_PATH       Path prefix for QEMU binary
+#   RUN_VM          Path to qemu-minimal run-vm script (default:
+#                   ../qemu-minimal/qemu/run-vm next to this repo,
+#                   else ${HOME}/Projects/qemu-minimal/qemu/run-vm)
+#   QEMU_PATH       Directory prefix for QEMU, trailing slash
+#                   required (run-vm uses ${QEMU_PATH}qemu-system-*).
+#                   If unset, /opt/qemu-mmio-bridge-submit/bin/ is
+#                   used when present, else the newest
+#                   /opt/qemu-pci*/bin/ with qemu-system-x86_64.
+#   NVME            Emulated NVMe count for run-vm (default: 1; use 2
+#                   for two qcow2-backed devices)
+#   NVME_TRACE      QEMU NVMe trace: none | doorbell | all | event name
+#   NVME_TRACE_FILE Optional; redirect -trace file=... host path
+#   NVME_RECREATE   true deletes/recreates emulated NVMe qcow2 (default:
+#                   false)
+#   DRY_RUN         none (default) runs QEMU; any other value prints
+#                   the argv only (run-vm)
+#   QMP_SOCKET      false | true | unix path for QMP (run-vm)
 #   VCPUS           Number of vCPUs (default: 16)
-#   VMEM            VM memory in MB (default: 32768)
+#   VMEM            Guest RAM in MB (default: 16384). VFIO GPU
+#                   passthrough maps guest RAM for DMA; large
+#                   values need memlock unlimited (limits.d). Use
+#                   VMEM=8192 or VMEM=32768 as needed.
 
 set -e
 
+_LVM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_REPO_ROOT="$(cd "${_LVM_DIR}/../.." && pwd)"
+_RUN_VM_SIBLING="${_REPO_ROOT}/../qemu-minimal/qemu/run-vm"
 
 MODE="${1:-${VM_MODE:-rdma}}"
 SSH_PORT="${SSH_PORT:-2222}"
@@ -47,13 +68,19 @@ GPU_BDF="${GPU_BDF:-10:00.0}"
 RDMA_NIC_BDF="${RDMA_NIC_BDF:-c3:00.1}"
 NVME_DEV_BDF="${NVME_DEV_BDF:-85:00.0}"
 VCPUS="${VCPUS:-16}"
-VMEM="${VMEM:-32768}"
+VMEM="${VMEM:-16384}"
 
 ERNIC_BIN="${ERNIC_BIN:-}"
 ERNIC_INSTANCES="${ERNIC_INSTANCES:-1}"
 ERNIC_BACKEND="${ERNIC_BACKEND:-loopback}"
 
-RUN_VM="${RUN_VM:-${HOME}/Projects/qemu-minimal/qemu/run-vm}"
+if [ -z "${RUN_VM:-}" ]; then
+    if [ -x "${_RUN_VM_SIBLING}" ]; then
+        RUN_VM="${_RUN_VM_SIBLING}"
+    else
+        RUN_VM="${HOME}/Projects/qemu-minimal/qemu/run-vm"
+    fi
+fi
 
 RUN_VM_DIR="$(dirname "${RUN_VM}")"
 IMAGES="${RUN_VM_DIR}/../images"
@@ -74,6 +101,9 @@ cleanup() {
 }
 
 check_vfio_binding() {
+    if [ "${DRY_RUN:-none}" != "none" ]; then
+        return 0
+    fi
     local bdf="$1"
     local sysfs="/sys/bus/pci/devices/0000:${bdf}"
 
@@ -103,6 +133,9 @@ check_vfio_binding() {
 }
 
 check_ssh_port() {
+    if [ "${DRY_RUN:-none}" != "none" ]; then
+        return 0
+    fi
     if ss -tln 2>/dev/null \
          | grep -q ":${SSH_PORT} "; then
         echo "ERROR: Port ${SSH_PORT} already in use."
@@ -282,7 +315,15 @@ case "${MODE}" in
         echo "  Sockets:      ${VFIO_USERDEV}"
         ;;
 esac
-echo "  Emulated NVMe: 1x 1TB"
+_NVME_SHOW="${NVME:-1}"
+case "${_NVME_SHOW}" in
+    ''|*[!0-9]*)
+        echo "  Emulated NVMe: custom (NVME=${_NVME_SHOW})"
+        ;;
+    *)
+        echo "  Emulated NVMe: ${_NVME_SHOW}x 1TB"
+        ;;
+esac
 echo ""
 echo "Networking:"
 echo "  SSH: ssh -p ${SSH_PORT} user@localhost"
@@ -330,12 +371,55 @@ esac
 echo "${SEP}"
 echo ""
 
+# run-vm concatenates ${QEMU_PATH}qemu-system-${QARCH}; QEMU_PATH must end
+# with /. Prefer /opt/qemu-mmio-bridge-submit/bin/, then newest
+# /opt/qemu-pci*/bin/, when unset (PCI/MMIO-capable QEMU for nvme/full).
+if [ -n "${QEMU_PATH:-}" ]; then
+    case "${QEMU_PATH}" in
+        */) ;;
+        *)
+            QEMU_PATH="${QEMU_PATH}/"
+            ;;
+    esac
+else
+    _qpicked=""
+    _mmio_bin="/opt/qemu-mmio-bridge-submit/bin"
+    if [ -x "${_mmio_bin}/qemu-system-x86_64" ] \
+        || [ -x "${_mmio_bin}/qemu-system-amd64" ]; then
+        _qpicked="${_mmio_bin}"
+    else
+        shopt -s nullglob
+        _qpci_dirs=(/opt/qemu-pci*/bin)
+        shopt -u nullglob
+        _qpci_valid=""
+        for _d in "${_qpci_dirs[@]}"; do
+            if [ -x "${_d}/qemu-system-x86_64" ] \
+                || [ -x "${_d}/qemu-system-amd64" ]; then
+                _qpci_valid="${_qpci_valid}${_d}"$'\n'
+            fi
+        done
+        if [ -n "${_qpci_valid}" ]; then
+            _qpicked="$(printf '%s' "${_qpci_valid}" | sort -V | tail -n1)"
+        fi
+    fi
+    if [ -n "${_qpicked}" ]; then
+        QEMU_PATH="${_qpicked}/"
+    fi
+fi
+
+export NVME_TRACE="${NVME_TRACE:-none}"
+export NVME_TRACE_FILE="${NVME_TRACE_FILE:-}"
+export NVME_RECREATE="${NVME_RECREATE:-false}"
+export DRY_RUN="${DRY_RUN:-none}"
+export QMP_SOCKET="${QMP_SOCKET:-false}"
+export NVME="${NVME:-1}"
+
 export VM_NAME=rocm-xio-vm
 export VCPUS
 export VMEM
 export FILESYSTEM=/home/stebates/Projects
 export SSH_PORT
 export IMAGES
-export NVME=1
+[ -n "${QEMU_PATH:-}" ] && export QEMU_PATH
 
 exec "${RUN_VM}"

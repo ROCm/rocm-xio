@@ -242,6 +242,22 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
                           unsigned* lba_size);
 
 /**
+ * Query controller MDTS maximum single-command transfer size (bytes).
+ *
+ * Reads Identify Controller (CNS=1) and derives the NVMe maximum data
+ * transfer size from the MDTS field: (2^MDTS) * 4096 when MDTS is non-zero.
+ * Uses the conventional minimum memory page size (4 KiB). When MDTS is 0,
+ * the controller reports no limit and @p max_xfer_bytes is set to 0.
+ *
+ * @param nvme_device Controller or namespace path (resolved like queryLbaSize).
+ * @param nsid Namespace id for path resolution (controller identify is global).
+ * @param max_xfer_bytes Out: 0 if unlimited or on failure to query.
+ * @return 0 on success, negative errno-style code on failure.
+ */
+__host__ int queryMdtsMaxXferBytes(const char* nvme_device, uint32_t nsid,
+                                   uint64_t* max_xfer_bytes);
+
+/**
  * Query namespace capacity in LBAs from NVMe controller
  *
  * This function queries the NVMe controller to determine the namespace
@@ -817,6 +833,21 @@ struct nvmeEpConfig {
   } ioParams;                  /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
+  /**
+   * When true with --verify, force a verification failure after successful
+   * I/O so automated tests can assert a non-zero process exit. For testing
+   * only; requires --verify, --write-io, and --read-io.
+   */
+  bool injectVerifyFail = false;
+
+  /**
+   * Identify Controller MDTS-derived maximum NVM read/write data size
+   * (bytes) for one command. Filled by validateConfig when Identify succeeds;
+   * when mdtsIdentified is true and mdtsMaxXferBytes is 0, the controller
+   * reports no MDTS limit (MDTS field 0).
+   */
+  bool mdtsIdentified = false;
+  uint64_t mdtsMaxXferBytes = 0;
 
   /** @brief Host-side data buffer options mirrored into nvmeBufferParams. */
   struct {

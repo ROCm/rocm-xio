@@ -230,13 +230,25 @@ test_device() {
 
     local read_file="$TEMP_DIR/${device_name}_read.bin"
     local expected_file="$TEMP_DIR/${device_name}_expected.bin"
+    local nvme_read_log="$TEMP_DIR/${device_name}_nvme_read.log"
 
-    if ! $NVME_CMD read "$ns" \
+    set +e
+    $NVME_CMD read "$ns" \
         --start-block=$BASE_LBA \
         --block-count=$total_blocks \
         --data-size=$total_bytes \
-        --data="$read_file" > /dev/null 2>&1; then
-        echo "✗ Read failed"
+        --data="$read_file" >"$nvme_read_log" 2>&1
+    local nvme_read_rc=$?
+    set -e
+    if [ "$nvme_read_rc" -ne 0 ]; then
+        echo "✗ Read failed (nvme exit $nvme_read_rc)"
+        echo "  Command: $NVME_CMD read $ns" \
+            "--start-block=$BASE_LBA" \
+            "--block-count=$total_blocks" \
+            "--data-size=$total_bytes" \
+            "--data=$read_file"
+        echo "  nvme-cli output ($nvme_read_log):"
+        sed 's/^/    /' "$nvme_read_log" || true
         return 1
     fi
 

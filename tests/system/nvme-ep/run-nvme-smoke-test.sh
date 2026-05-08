@@ -12,6 +12,8 @@
 #
 # For negative tests (expected failures), set
 # EXPECT_FAIL=1; the wrapper inverts the exit code.
+# For tests that expect xio-tester to exit non-zero (e.g. verify
+# mismatch or --inject-verify-fail), set EXPECT_NONZERO=1.
 #
 # Usage:
 #   run-nvme-smoke-test.sh [xio-tester-args...]
@@ -70,15 +72,27 @@ if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
 fi
 
 if [ "${EXPECT_FAIL:-0}" = "1" ]; then
-    if "$XIO_TESTER" nvme-ep \
-         --controller "$CONTROLLER" "${EXTRA_ARGS[@]}" \
-         >/dev/null 2>&1; then
-        echo "FAIL: expected failure but command succeeded"
-        exit 1
-    else
-        echo "OK: command failed as expected"
-        exit 0
-    fi
+  if "$XIO_TESTER" nvme-ep \
+       --controller "$CONTROLLER" "${EXTRA_ARGS[@]}" \
+       >/dev/null 2>&1; then
+    echo "FAIL: expected failure but command succeeded"
+    exit 1
+  else
+    echo "OK: command failed as expected"
+    exit 0
+  fi
+fi
+
+if [ "${EXPECT_NONZERO:-0}" = "1" ]; then
+  if "$XIO_TESTER" nvme-ep \
+       --controller "$CONTROLLER" "${EXTRA_ARGS[@]}" \
+       >/dev/null 2>&1; then
+    echo "FAIL: expected non-zero exit from xio-tester"
+    exit 1
+  else
+    echo "OK: xio-tester exited with non-zero status as expected"
+    exit 0
+  fi
 fi
 
 exec "$XIO_TESTER" nvme-ep \

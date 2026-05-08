@@ -133,11 +133,54 @@ void printGpuDeviceDetails(int deviceId) {
   }
 }
 
+__host__ hipError_t clearHipLaunchError(const char* endpoint,
+                                        const char* kernel,
+                                        uint32_t queue_id) {
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_WARN("%s: cleared stale HIP error before %s "
+                    "launch for queue %u: %s (code: %d)\n",
+                    endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                    queue_id, hipGetErrorString(err), err);
+  }
+  return err;
+}
+
+__host__ hipError_t checkHipLaunchError(const char* endpoint,
+                                        const char* kernel,
+                                        uint32_t queue_id, unsigned blocks,
+                                        unsigned threads, size_t shmem_bytes,
+                                        hipStream_t stream) {
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_ERROR("%s: %s launch failed for queue %u "
+                     "(blocks=%u, threads=%u, shmem=%zu, stream=%p): "
+                     "%s (code: %d)\n",
+                     endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                     queue_id, blocks, threads, shmem_bytes, (void*)stream,
+                     hipGetErrorString(err), err);
+  }
+  return err;
+}
+
+__host__ hipError_t syncHipKernel(const char* endpoint, const char* kernel,
+                                  uint32_t queue_id, hipStream_t stream) {
+  hipError_t err = stream ? hipStreamSynchronize(stream)
+                          : hipDeviceSynchronize();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_ERROR("%s: %s sync failed for queue %u "
+                     "(stream=%p): %s (code: %d)\n",
+                     endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                     queue_id, (void*)stream, hipGetErrorString(err), err);
+  }
+  return err;
+}
+
 void printStatistics(const std::vector<double>& durations,
                      unsigned totalIterations, unsigned numThreads,
                      unsigned readIterations, unsigned writeIterations,
                      unsigned verifiedReadsCount, unsigned verifyPass,
-                     unsigned verifyFail) {
+                     unsigned verifyFail, bool firstIoIgnored) {
   if (durations.empty()) {
     return;
   }
@@ -185,7 +228,10 @@ void printStatistics(const std::vector<double>& durations,
     time_unit = " ns";
   }
 
-  std::cout << "\nStatistics:" << std::endl;
+  if (firstIoIgnored)
+    std::cout << "\nStatistics (first I/O ignored):" << std::endl;
+  else
+    std::cout << "\nStatistics:" << std::endl;
 
   // Print iterations - endpoint-specific (at the top)
   if (readIterations > 0 || writeIterations > 0) {
@@ -231,7 +277,8 @@ void printStatistics(const std::vector<double>& durations,
 void printHistogram(const std::vector<double>& durations, unsigned nIterations,
                     unsigned numThreads, unsigned readIterations,
                     unsigned writeIterations, unsigned verifiedReadsCount,
-                    unsigned verifyPass, unsigned verifyFail) {
+                    unsigned verifyPass, unsigned verifyFail,
+                    bool firstIoIgnored) {
   if (durations.empty() || nIterations == 0) {
     return;
   }
@@ -339,7 +386,8 @@ void printHistogram(const std::vector<double>& durations, unsigned nIterations,
 
   // Print statistics after histogram
   printStatistics(durations, nIterations, numThreads, readIterations,
-                  writeIterations, verifiedReadsCount, verifyPass, verifyFail);
+                  writeIterations, verifiedReadsCount, verifyPass, verifyFail,
+                  firstIoIgnored);
 }
 
 static hsa_status_t allocDeviceMemoryHsa(size_t size, void** ptr,
@@ -2401,7 +2449,8 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
   hsa_status_t status;
   hipDeviceptr_t aligned_ptr;
   const size_t host_page_size = sysconf(_SC_PAGESIZE);
-  uint64_t dmabuf_offset = 0;
+  uint64_t hsa_dmabuf_off = 0;
+  uint64_t virt_skew = 0;
   size_t aligned_size;
   int dmabuf_fd = -1;
   int kmod_fd = -1;
@@ -2413,17 +2462,18 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
 
   // Round down to host page size for dmabuf alignment
   aligned_ptr = (hipDeviceptr_t)((uintptr_t)vram_ptr & ~(host_page_size - 1));
-  dmabuf_offset = (uintptr_t)vram_ptr - (uintptr_t)aligned_ptr;
-  aligned_size = (size + dmabuf_offset + host_page_size - 1) &
+  virt_skew =
+    static_cast<uint64_t>((uintptr_t)vram_ptr - (uintptr_t)aligned_ptr);
+  aligned_size = (size + virt_skew + host_page_size - 1) &
                  ~(host_page_size - 1);
 
   ROCXIO_LOG_INFO("  Aligning VRAM buffer: ptr=%p -> aligned=%p, "
                   "size=%zu -> %zu, offset=%llu\n",
                   vram_ptr, (void*)aligned_ptr, size, aligned_size,
-                  (unsigned long long)dmabuf_offset);
+                  (unsigned long long)virt_skew);
 
   status = exportDmabuf((void*)aligned_ptr, aligned_size, &dmabuf_fd,
-                        &dmabuf_offset);
+                        &hsa_dmabuf_off);
   if (status != HSA_STATUS_SUCCESS) {
     ROCXIO_LOG_ERROR("exportDmabuf failed (status=%d)\n", status);
     ROCXIO_LOG_ERROR("  This requires:\n");
@@ -2433,8 +2483,11 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
     return -ENOTSUP;
   }
 
-  ROCXIO_LOG_INFO("  ✅ Exported dmabuf: fd=%d, offset=0x%llx\n", dmabuf_fd,
-                  (unsigned long long)dmabuf_offset);
+  ROCXIO_LOG_INFO("  ✅ Exported dmabuf: fd=%d, hsa_offset=0x%llx "
+                  "virt_skew=0x%llx linear_off=0x%llx\n",
+                  dmabuf_fd, (unsigned long long)hsa_dmabuf_off,
+                  (unsigned long long)virt_skew,
+                  (unsigned long long)(virt_skew + hsa_dmabuf_off));
 
   // Open kernel module device
   kmod_fd = open(kernel_module_device, O_RDWR);
@@ -2450,6 +2503,7 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
   req.dmabuf_fd = dmabuf_fd;
   req.virt_addr = reinterpret_cast<uint64_t>(vram_ptr);
   req.size = size;
+  req.dmabuf_linear_off = virt_skew + hsa_dmabuf_off;
   req.nvme_bdf = nvme_bdf;
   req.flags = is_emulated ? ROCM_XIO_FLAG_EMULATED : ROCM_XIO_FLAG_PASSTHROUGH;
 
@@ -2462,8 +2516,8 @@ __host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
     return -errno;
   }
 
-  // Physical address includes the offset within the dmabuf
-  *phys_addr_out = req.phys_addr + dmabuf_offset;
+  // Physical address includes skew from page alignment and HSA export offset.
+  *phys_addr_out = req.phys_addr + virt_skew + hsa_dmabuf_off;
 
   ROCXIO_LOG_INFO("  ✅ Registered buffer: virt=0x%016llx, phys=0x%016llx, "
                   "size=%zu\n",
@@ -2505,6 +2559,18 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
 #endif
+}
+
+__host__ static void unregisterRocmXioVramBuffer(void* gpu_virt) {
+  if (!gpu_virt)
+    return;
+  int fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+  if (fd < 0)
+    return;
+  struct rocm_xio_unregister_buffer_req ur = {};
+  ur.virt_addr = reinterpret_cast<uint64_t>(gpu_virt);
+  (void)ioctl(fd, ROCM_XIO_UNREGISTER_BUFFER, &ur);
+  close(fd);
 }
 
 // Allocate GPU-accessible buffer for DMA operations
@@ -2559,6 +2625,69 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
 
     ROCXIO_LOG_INFO("  Data buffer physical: 0x%016llx (VRAM)\n",
                     (unsigned long long)bufferInfo->dmaAddr);
+
+    {
+      constexpr size_t nvme_page = 4096;
+      uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
+      size_t pa_bytes = (size_t)nvme_np * sizeof(uint64_t);
+      uint64_t* pa = nullptr;
+      hipError_t pa_err =
+        hipHostMalloc((void**)&pa, pa_bytes, hipHostMallocMapped);
+      if (pa_err != hipSuccess || !pa) {
+        ROCXIO_LOG_ERROR(
+          "hipHostMalloc for VRAM per-page DMA table failed (%zu bytes): %s\n",
+          pa_bytes, hipGetErrorString(pa_err));
+        unregisterRocmXioVramBuffer(bufferInfo->hostPtr);
+        freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+        bufferInfo->hostPtr = nullptr;
+        return hipErrorMemoryAllocation;
+      }
+      memset(pa, 0, pa_bytes);
+
+      int fetch_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+      if (fetch_fd < 0) {
+        ROCXIO_LOG_ERROR("open %s for GET_BUFFER_DMA_PAGES: %s\n",
+                         ROCM_XIO_DEVICE_PATH, strerror(errno));
+        (void)hipHostFree(pa);
+        unregisterRocmXioVramBuffer(bufferInfo->hostPtr);
+        freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+        bufferInfo->hostPtr = nullptr;
+        return hipErrorInvalidValue;
+      }
+
+      struct rocm_xio_buffer_dma_pages_req dma_req = {};
+      dma_req.virt_addr = reinterpret_cast<uint64_t>(bufferInfo->hostPtr);
+      dma_req.user_addrs_ptr =
+        reinterpret_cast<uint64_t>(static_cast<void*>(pa));
+      dma_req.max_pages = nvme_np;
+      dma_req.num_pages_out = 0;
+
+      int ioctl_ret = ioctl(fetch_fd, ROCM_XIO_GET_BUFFER_DMA_PAGES, &dma_req);
+      int ioctl_errno = errno;
+      close(fetch_fd);
+
+      if (ioctl_ret != 0 || dma_req.num_pages_out != nvme_np) {
+        ROCXIO_LOG_ERROR(
+          "GET_BUFFER_DMA_PAGES failed (ioctl ret=%d errno=%d %s, "
+          "num_pages_out=%u expected %u). Rebuild and install kernel/"
+          "rocm-xio (sudo make -C kernel/rocm-xio install && "
+          "sudo modprobe -r rocm-xio && sudo modprobe rocm-xio).\n",
+          ioctl_ret, ioctl_errno, strerror(ioctl_errno),
+          dma_req.num_pages_out, nvme_np);
+        (void)hipHostFree(pa);
+        unregisterRocmXioVramBuffer(bufferInfo->hostPtr);
+        freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+        bufferInfo->hostPtr = nullptr;
+        return hipErrorInvalidValue;
+      }
+
+      bufferInfo->pagePhysAddrs = pa;
+      bufferInfo->numPages = nvme_np;
+      ROCXIO_LOG_INFO("  Resolved %u NVMe-page P2P DMA addrs for VRAM "
+                      "buffer\n",
+                      nvme_np);
+    }
+
     ROCXIO_LOG_INFO("  GPU writes directly to VRAM\n");
     ROCXIO_LOG_INFO("  NVMe DMAs from VRAM (P2P)\n");
 
@@ -2586,37 +2715,71 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
       size_t sys_page = (ps > 0) ? (size_t)ps : 4096;
       uint32_t sys_np = (uint32_t)((size + sys_page - 1) / sys_page);
       uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
-      size_t pa_bytes = nvme_np * sizeof(uint64_t);
-      uint64_t* pa = nullptr;
-      hipError_t pa_err = hipHostMalloc((void**)&pa, pa_bytes,
-                                        hipHostMallocMapped);
-      if (pa_err == hipSuccess && pa) {
-        memset(pa, 0, pa_bytes);
-        uint64_t sys_addrs[1024];
-        uint32_t max_sys = (sys_np <= 1024) ? sys_np : 1024;
-        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs,
-                                   max_sys);
-        if (ret < 0) {
-          ROCXIO_LOG_WARN("Failed to resolve per-page "
-                          "phys addrs: %s\n",
-                          strerror(-ret));
-          (void)hipHostFree(pa);
-        } else {
-          uint32_t ratio = (uint32_t)(sys_page / nvme_page);
-          for (uint32_t s = 0; s < sys_np; s++) {
-            for (uint32_t sub = 0; sub < ratio; sub++) {
-              uint32_t idx = s * ratio + sub;
-              if (idx >= nvme_np)
-                break;
-              pa[idx] = sys_addrs[s] + sub * nvme_page;
-            }
-          }
-          bufferInfo->pagePhysAddrs = pa;
-          bufferInfo->numPages = nvme_np;
-          ROCXIO_LOG_INFO("  Resolved %u NVMe-page phys "
-                          "addrs for host buffer\n",
-                          nvme_np);
+
+      if (nvme_np > 1) {
+        if (sys_np > 1024) {
+          ROCXIO_LOG_ERROR(
+            "Host buffer needs per-page phys for %u system pages; "
+            "only 1024 are supported. Reduce buffer size or increase "
+            "page size.\n",
+            sys_np);
+          (void)hipHostFree(bufferInfo->hostPtr);
+          bufferInfo->hostPtr = nullptr;
+          return hipErrorInvalidValue;
         }
+        if (sys_page < nvme_page || (sys_page % nvme_page) != 0) {
+          ROCXIO_LOG_ERROR(
+            "System page size %zu is incompatible with NVMe 4K PRP "
+            "page mapping.\n",
+            sys_page);
+          (void)hipHostFree(bufferInfo->hostPtr);
+          bufferInfo->hostPtr = nullptr;
+          return hipErrorInvalidValue;
+        }
+
+        size_t pa_bytes = (size_t)nvme_np * sizeof(uint64_t);
+        uint64_t* pa = nullptr;
+        hipError_t pa_err = hipHostMalloc((void**)&pa, pa_bytes,
+                                          hipHostMallocMapped);
+        if (pa_err != hipSuccess || !pa) {
+          ROCXIO_LOG_ERROR(
+            "hipHostMalloc for NVMe per-page phys table failed "
+            "(%zu bytes): %s\n",
+            pa_bytes, hipGetErrorString(pa_err));
+          (void)hipHostFree(bufferInfo->hostPtr);
+          bufferInfo->hostPtr = nullptr;
+          return hipErrorMemoryAllocation;
+        }
+        memset(pa, 0, pa_bytes);
+
+        uint64_t sys_addrs[1024];
+        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs,
+                                   sys_np);
+        if (ret < 0) {
+          ROCXIO_LOG_ERROR(
+            "Failed to resolve per-page phys addrs (required for "
+            "multi-page host buffers): %s\n",
+            strerror(-ret));
+          (void)hipHostFree(pa);
+          (void)hipHostFree(bufferInfo->hostPtr);
+          bufferInfo->hostPtr = nullptr;
+          return hipErrorInvalidValue;
+        }
+
+        uint32_t ratio = (uint32_t)(sys_page / nvme_page);
+        for (uint32_t s = 0; s < sys_np; s++) {
+          for (uint32_t sub = 0; sub < ratio; sub++) {
+            uint32_t idx = s * ratio + sub;
+            if (idx >= nvme_np)
+              break;
+            pa[idx] = sys_addrs[s] + sub * nvme_page;
+          }
+        }
+        bufferInfo->pagePhysAddrs = pa;
+        bufferInfo->numPages = nvme_np;
+        ROCXIO_LOG_INFO("  Resolved %u NVMe-page phys addrs for host "
+                        "buffer\n",
+                        nvme_np);
       }
     }
 
@@ -2664,21 +2827,22 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
     return;
   }
 
+  if (bufferInfo->pagePhysAddrs) {
+    (void)hipHostFree(bufferInfo->pagePhysAddrs);
+    bufferInfo->pagePhysAddrs = nullptr;
+  }
+
   if (bufferInfo->isDeviceMemory) {
+    unregisterRocmXioVramBuffer(bufferInfo->hostPtr);
     freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
   } else {
     freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
-  }
-
-  if (bufferInfo->pagePhysAddrs) {
-    (void)hipHostFree(bufferInfo->pagePhysAddrs);
   }
 
   bufferInfo->hostPtr = nullptr;
   bufferInfo->gpuPtr = nullptr;
   bufferInfo->dmaAddr = 0;
   bufferInfo->isDeviceMemory = false;
-  bufferInfo->pagePhysAddrs = nullptr;
   bufferInfo->numPages = 0;
 }
 

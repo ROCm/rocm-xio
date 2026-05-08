@@ -187,6 +187,12 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
               "read-back (requires --write-io and "
               "--read-io)")
     ->group(nvme_group);
+  app
+    .add_flag("--inject-verify-fail", cfg->injectVerifyFail,
+              "Testing only: after successful --verify, force failure "
+              "so xio-tester exits non-zero. Requires --verify, "
+              "--write-io, and --read-io.")
+    ->group(nvme_group);
 }
 
 void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg) {

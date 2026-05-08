@@ -209,6 +209,19 @@ static int run_test(const char* label, bool use_fenced) {
 }
 
 int main() {
+  hipError_t herr = hipInit(0);
+  if (herr != hipSuccess) {
+    printf("SKIP: HIP init failed (%s)\n", hipGetErrorString(herr));
+    return 77;
+  }
+  int device_count = 0;
+  herr = hipGetDeviceCount(&device_count);
+  if (herr != hipSuccess || device_count == 0) {
+    printf("SKIP: no HIP devices found.\n");
+    return 77;
+  }
+  (void)hipSetDevice(0);
+
   int failures = 0;
 
   printf("=== Doorbell coherence stress test ===\n");

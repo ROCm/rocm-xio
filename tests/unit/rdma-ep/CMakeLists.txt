@@ -53,8 +53,8 @@ xio_add_test(
 # hardware tests via FIXTURES_REQUIRED)
 if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
   add_test(NAME rdma-hw-setup
-    COMMAND sudo
-      ${CMAKE_SOURCE_DIR}/scripts/test/setup-rdma-loopback.sh)
+    COMMAND bash
+      "${CMAKE_SOURCE_DIR}/scripts/test/invoke-rdma-loopback-setup.sh")
   set_tests_properties(rdma-hw-setup PROPERTIES
     FIXTURES_SETUP RDMA_HW
     LABELS "hardware;fixture"

@@ -33,8 +33,18 @@ if [ "$EUID" -ne 0 ]; then
     exit 77
 fi
 
-# Auto-detect RDMA device if not specified
+# Auto-detect RDMA device if not specified. Prefer repo udev names
+# (rocm-rdma-*) so provider/vendor derivation matches setup-rdma-loopback.sh;
+# otherwise the first glob entry is often a kernel RoCE name (rocep*) that
+# shell scripts cannot map to bnxt|ionic|mlx5.
 RDMA_DEV="${ROCXIO_RDMA_DEVICE:-}"
+if [ -z "$RDMA_DEV" ]; then
+    for ib in /sys/class/infiniband/rocm-rdma-*; do
+        [ -d "$ib" ] || continue
+        RDMA_DEV="$(basename "$ib")"
+        break
+    done
+fi
 if [ -z "$RDMA_DEV" ]; then
     for ib in /sys/class/infiniband/*; do
         [ -d "$ib" ] || continue

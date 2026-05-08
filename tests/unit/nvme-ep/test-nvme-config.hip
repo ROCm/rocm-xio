@@ -132,6 +132,12 @@ int test_config_defaults() {
   return 0;
 }
 
+int test_common_config_defaults() {
+  xio::XioEndpointConfig cfg;
+  ASSERT_TRUE(cfg.skipFirstIoTiming);
+  return 0;
+}
+
 int test_doorbell_constants() {
   ASSERT_EQ(doorbellBase, 0x1000u);
   ASSERT_EQ(doorBellStride, 4u);
@@ -207,6 +213,7 @@ int main() {
   failures += test_cqe_field_access();
   failures += test_cqe_cdw0_union();
   failures += test_config_defaults();
+  failures += test_common_config_defaults();
   failures += test_doorbell_constants();
   failures += test_admin_response_size();
   failures += test_command_opcodes();
