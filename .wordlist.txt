@@ -3,6 +3,7 @@
 # Reduced from 918 to 311 terms (66% reduction) after doc cleanup
 
 # ===== Project Names =====
+SPDX
 xio
 XIO
 rocm
@@ -45,6 +46,7 @@ ssd
 SSDs
 
 # ===== RDMA and Networking =====
+ais
 DMA
 dma
 BUF
@@ -167,6 +169,7 @@ radeon
 RDNA
 ROCm
 rocm
+rocs
 rocminfo
 Ryzen
 Threadripper
@@ -188,6 +191,7 @@ netdev
 NetworkManager
 nmcli
 PCI
+PCIE
 pci
 pcie
 PCIe
@@ -417,6 +421,7 @@ pragmas
 prefetchable
 printf
 PTE
+PWD
 qd
 QID
 qid
@@ -444,6 +449,7 @@ sys
 systemctl
 tmp
 ubuntu
+udevadm
 UEFI
 umount
 uname
@@ -494,6 +500,7 @@ mknod
 # ===== Additional Terms =====
 codespellrc
 dkms
+eth
 instantiation
 iter
 iters
