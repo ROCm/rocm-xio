@@ -20,8 +20,8 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg);
 
 void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg);
 
-void registerSdmaEpCliOptions(CLI::App& app, sdma_ep::SdmaEpConfig* cfg);
+void registerSdmaEpCliOptions(CLI::App& app, xio::sdma_ep::SdmaEpConfig* cfg);
 
-void detectSdmaTestType(CLI::App& app, sdma_ep::SdmaEpConfig* cfg);
+void detectSdmaTestType(CLI::App& app, xio::sdma_ep::SdmaEpConfig* cfg);
 
 #endif // XIO_CLI_OPTIONS_H

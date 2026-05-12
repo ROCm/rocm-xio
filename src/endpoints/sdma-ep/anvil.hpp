@@ -31,13 +31,13 @@ public:
   ~SdmaQueue();
 
   SdmaQueueDeviceHandle* deviceHandle() const;
-  SdmaQueuePythonDeviceCtx pythonDeviceContext() const;
-  SdmaQueueHostHandle hostHandle();
+  xio::sdma_ep::SdmaQueuePythonDeviceCtx pythonDeviceContext() const;
+  xio::sdma_ep::SdmaQueueHostHandle hostHandle();
 
   void dump(std::ofstream&);
 
 private:
-  friend class SdmaQueueHostHandle;
+  friend class xio::sdma_ep::SdmaQueueHostHandle;
 
   int remoteDeviceId_;
   bool hostAllocated_;
@@ -73,8 +73,8 @@ public:
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
                              uint32_t engineId, int* channelIdx = nullptr, bool isHostQueue = false);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
-  SdmaQueuePythonDeviceCtx getPythonDeviceCtx(int srcDeviceId, int dstDeviceId);
-  SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
+  xio::sdma_ep::SdmaQueuePythonDeviceCtx getPythonDeviceCtx(int srcDeviceId, int dstDeviceId);
+  xio::sdma_ep::SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
 
 private:
   using ChannelKey = std::pair<int, int>;

@@ -26,11 +26,11 @@
 #include <hip/hip_runtime.h>
 
 // Forward declarations to avoid circular dependency
-namespace anvil {
-class SdmaQueueHostHandle;
-}
-
+namespace xio {
 namespace sdma_ep {
+
+// Forward declaration
+class SdmaQueueHostHandle;
 
 /* ================================================================
  * Host-Side Setup Types
@@ -235,8 +235,9 @@ __host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int ds
  * @note The corresponding queue must have been created with
  *       createHostQueue() first.
  */
-__host__ anvil::SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
+__host__ SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
 
 } // namespace sdma_ep
+} // namespace xio
 
 #endif // SDMA_EP_H

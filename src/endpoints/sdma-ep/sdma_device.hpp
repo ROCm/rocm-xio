@@ -580,3 +580,4 @@ __device__ __forceinline__ void quiet(SdmaQueueHandle& handle) {
 }
 
 } // namespace sdma_ep
+} // namespace xio

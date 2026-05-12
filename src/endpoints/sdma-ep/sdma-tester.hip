@@ -55,6 +55,7 @@ static void lfsr_fill_chunk(void* buf, size_t size, uint32_t state) {
   }
 }
 
+namespace xio {
 namespace sdma_ep {
 std::string validateConfig(SdmaEpConfig* config) {
   if (!config)
@@ -81,6 +82,7 @@ unsigned getIterations(void* endpointConfig) {
 }
 
 } // namespace sdma_ep
+} // namespace xio
 
 // Single-thread kernel: one thread does all transfers to avoid queue
 // contention (multi-thread submit can stall on anvil's committedWptr ordering).
@@ -389,8 +391,11 @@ __global__ void sdma_buffer_reuse_kernel(
   }
 }
 
+namespace xio {
+namespace sdma_ep {
+
 // SDMA-ep run function - sets up real hardware SDMA queues
-hipError_t sdma_ep_run(XioEndpointConfig* config) {
+hipError_t run(XioEndpointConfig* config) {
   hipError_t err;
 
   if (sdma_ep::initEndpoint() != 0) {
@@ -481,6 +486,9 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
       return hipErrorInvalidDevice;
     }
 
+    // Enable peer access from source to destination
+    enablePeerAccess(srcGpu, dstGpu);
+
     if (testType == "buffer-reuse" || testType == "ping-pong") {
       int canAccessReverse = 0;
       err = hipDeviceCanAccessPeer(&canAccessReverse, dstGpu, srcGpu);
@@ -494,6 +502,9 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
                   << " cannot access GPU " << srcGpu << std::endl;
         return hipErrorInvalidDevice;
       }
+
+      // Enable peer access from destination to source for bidirectional tests
+      enablePeerAccess(dstGpu, srcGpu);
     }
   }
 
@@ -1020,6 +1031,9 @@ hipError_t sdma_ep_run(XioEndpointConfig* config) {
 
   return hipSuccess;
 }
+
+} // namespace sdma_ep
+} // namespace xio
 
 // Legacy driveEndpoint function - not used with anvil integration
 __device__ void sdma_ep_driveEndpoint(const XioEndpointConfig& config,

@@ -16,15 +16,15 @@
 
 namespace anvil {
 
-constexpr uint64_t SDMA_QUEUE_SIZE = sdma_ep::SDMA_QUEUE_SIZE;
+constexpr uint64_t SDMA_QUEUE_SIZE = xio::sdma_ep::SDMA_QUEUE_SIZE;
 constexpr HSA_QUEUE_PRIORITY DEFAULT_PRIORITY = HSA_QUEUE_PRIORITY_NORMAL;
 constexpr unsigned int DEFAULT_QUEUE_PERCENTAGE = 100;
-constexpr int MAX_RETRIES = sdma_ep::MAX_RETRIES;
-constexpr bool BREAK_ON_RETRIES = sdma_ep::BREAK_ON_RETRIES;
+constexpr int MAX_RETRIES = xio::sdma_ep::MAX_RETRIES;
+constexpr bool BREAK_ON_RETRIES = xio::sdma_ep::BREAK_ON_RETRIES;
 
-using SdmaQueueDeviceHandle = sdma_ep::SdmaQueueHandle;
+using SdmaQueueDeviceHandle = xio::sdma_ep::SdmaQueueHandle;
 using SdmaQueueSingleProducerDeviceHandle =
-  sdma_ep::SdmaQueueSingleProducerHandle;
+  xio::sdma_ep::SdmaQueueSingleProducerHandle;
 
 __device__ __forceinline__ SDMA_PKT_COPY_LINEAR
 CreateCopyPacket(void* srcBuf, void* dstBuf, long long int packetSize) {
@@ -53,7 +53,7 @@ CreateAtomicIncPacket(HSAuint64* signal) {
 
 __device__ __forceinline__ SDMA_PKT_FENCE CreateFencePacket(HSAuint64* address,
                                                             uint32_t data = 1) {
-  return sdma_ep::CreateFencePacket(reinterpret_cast<uint64_t*>(address), data);
+  return xio::sdma_ep::CreateFencePacket(reinterpret_cast<uint64_t*>(address), data);
 }
 
 #if XIO_SDMA_OSS7

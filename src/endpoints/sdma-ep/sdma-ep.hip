@@ -17,7 +17,7 @@
 #include "sdma-ep.h"
 #include "xio.h"
 
-using namespace xio;
+// using namespace xio;
 
 // Discard HIP return values in cleanup paths to satisfy nodiscard
 static void ignoreHip(hipError_t e) {
@@ -59,7 +59,7 @@ int initEndpoint() {
   if (s_initialized)
     return 0;
   try {
-    anvil::AnvilLib::getInstance().init();
+    ::anvil::AnvilLib::getInstance().init();
     s_initialized = true;
     return 0;
   } catch (const std::exception& e) {
@@ -80,9 +80,9 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
   }
   try {
     uint32_t engineId =
-      anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+      ::anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
     int channelIdx = 0;
-    anvil::SdmaQueue* q = anvil::AnvilLib::getInstance().createSdmaQueue(
+    ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx);
     if (!q) {
       std::cerr << "sdma_ep::createQueue: " << "queue creation failed"
@@ -111,9 +111,9 @@ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
   }
   try {
     uint32_t engineId =
-      anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+      ::anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
     int channelIdx = 0;
-    anvil::SdmaQueue* q = anvil::AnvilLib::getInstance().createSdmaQueue(
+    ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx, true);
 
     if (!q) {
@@ -142,11 +142,11 @@ void destroyQueue(SdmaQueueInfo* info) {
 }
 
 SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int dstDeviceId) {
-  return anvil::AnvilLib::getInstance().getPythonDeviceCtx(srcDeviceId, dstDeviceId);
+  return ::anvil::AnvilLib::getInstance().getPythonDeviceCtx(srcDeviceId, dstDeviceId);
 }
 
-anvil::SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
-  return anvil::AnvilLib::getInstance().getHostHandle(srcDeviceId, dstDeviceId, channelIdx);
+SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
+  return ::anvil::AnvilLib::getInstance().getHostHandle(srcDeviceId, dstDeviceId, channelIdx);
 }
 
 int initQueue(int srcDeviceId, int dstDeviceId) {
@@ -155,7 +155,7 @@ int initQueue(int srcDeviceId, int dstDeviceId) {
     return -1;
   }
   try {
-    bool success = anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, false);
+    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, false);
     return success ? 0 : -1;
   } catch (const std::exception& e) {
     std::cerr << "sdma_ep::initQueue: " << e.what() << std::endl;
@@ -169,7 +169,7 @@ int initHostQueue(int srcDeviceId, int dstDeviceId) {
     return -1;
   }
   try {
-    bool success = anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, true);
+    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, true);
     return success ? 0 : -1;
   } catch (const std::exception& e) {
     std::cerr << "sdma_ep::initHostQueue: " << e.what() << std::endl;
@@ -179,25 +179,3 @@ int initHostQueue(int srcDeviceId, int dstDeviceId) {
 
 } // namespace sdma_ep
 } // namespace xio
-
-// Legacy driveEndpoint function - not used with anvil integration
-__device__ void sdma_ep_driveEndpoint(const XioEndpointConfig& config,
-                                      void* sqeAddr, void* cqeAddr) {
-  // This function is not used when running with anvil library
-  // The anvil-based implementation uses sdma_transfer_kernel instead
-}
-
-// Emulation mode not supported - hardware only
-__host__ __device__ void sdma_ep_emulateEndpoint(unsigned sqeIterations,
-                                                 void* sqeAddr, void* cqeAddr) {
-  // SDMA endpoint requires real hardware via anvil library
-  // Emulation mode has been removed to focus on hardware implementation
-#ifdef __HIP_DEVICE_COMPILE__
-  // Device code path (should not be called)
-  __builtin_trap();
-#else
-  // Host code path
-  throw std::runtime_error(
-    "sdma-ep emulation not supported - requires real SDMA hardware");
-#endif
-}

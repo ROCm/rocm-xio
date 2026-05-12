@@ -15,6 +15,9 @@
 
 #include <hip/hip_runtime.h>
 
+namespace xio {
+struct XioEndpointConfig;
+
 namespace sdma_ep {
 
 /**
@@ -55,5 +58,7 @@ struct SdmaEpConfig {
 
 __host__ std::string validateConfig(SdmaEpConfig* config);
 __host__ unsigned getIterations(void* endpointConfig);
+__host__ hipError_t run(XioEndpointConfig* config);
 
 } // namespace sdma_ep
+} // namespace xio

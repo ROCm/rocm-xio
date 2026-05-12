@@ -9,13 +9,14 @@
 #include <string>
 #include <type_traits>
 
-namespace anvil
+namespace xio {
+namespace sdma_ep
 {
 
 namespace
 {
-using sdma_ep::SDMA_QUEUE_SIZE;
 using ::SDMA_OP_NOP;
+namespace packets = ::anvil::packets;
 constexpr uint64_t kMaxSdmaDword = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxLinearSize = 0x1'0000'0000ULL; // 32-bit count field -> size-1 fits in uint32_t
 
@@ -480,4 +481,5 @@ void SdmaQueueHostHandle::submit(std::initializer_list<SdmaPacket> packets)
    submitPacket(offset, offset + total_size);
 }
 
-} // namespace anvil
+} // namespace sdma_ep
+} // namespace xio

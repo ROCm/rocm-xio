@@ -333,7 +333,7 @@ void registerRdmaEpCliOptions(CLI::App& app, rdma_ep::RdmaEpConfig* cfg) {
     ->group(group);
 }
 
-void registerSdmaEpCliOptions(CLI::App& app, sdma_ep::SdmaEpConfig* cfg) {
+void registerSdmaEpCliOptions(CLI::App& app, xio::sdma_ep::SdmaEpConfig* cfg) {
   app
     .add_option("-n,--iterations", cfg->iterations, "Number of SDMA transfers")
     ->default_val(128)
@@ -390,7 +390,7 @@ void registerSdmaEpCliOptions(CLI::App& app, sdma_ep::SdmaEpConfig* cfg) {
     ->group("Endpoint Options");
 }
 
-void detectSdmaTestType(CLI::App& app, sdma_ep::SdmaEpConfig* cfg) {
+void detectSdmaTestType(CLI::App& app, xio::sdma_ep::SdmaEpConfig* cfg) {
   for (auto* sub : app.get_subcommands({})) {
     std::string name = sub->get_name();
     if ((name == "p2p" || name == "ping-pong" || name == "buffer-reuse") &&

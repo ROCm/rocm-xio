@@ -7,42 +7,32 @@
 #include <cstdint>
 
 #include "sdma-ep.h"
+#include "sdma_packets.hpp"
 
-namespace anvil
+// Forward declaration for ::anvil::SdmaQueue
+namespace anvil {
+class SdmaQueue;
+}
+
+namespace xio {
+namespace sdma_ep
 {
-
-// Backward compatibility aliases
-using Tile = sdma_ep::Tile;
-using SdmaQueuePythonDeviceCtx = sdma_ep::SdmaQueuePythonDeviceCtx;
-
-// Forward declarations for packet types
-namespace packets
-{
-struct CopyLinearPacket;
-struct TimestampPacket;
-struct LargeSubWindowCopyPacket;
-template <typename T> struct AtomicAddPacket;
-template <typename T> struct PollRegmemPacket;
-} // namespace packets
 
 // Variant type for heterogeneous packet collections
 using SdmaPacket = std::variant<
-    packets::CopyLinearPacket,
-    packets::TimestampPacket,
-    packets::LargeSubWindowCopyPacket,
-    packets::AtomicAddPacket<uint32_t>,
-    packets::AtomicAddPacket<uint64_t>,
-    packets::PollRegmemPacket<uint32_t>
+    ::anvil::packets::CopyLinearPacket,
+    ::anvil::packets::TimestampPacket,
+    ::anvil::packets::LargeSubWindowCopyPacket,
+    ::anvil::packets::AtomicAddPacket<uint32_t>,
+    ::anvil::packets::AtomicAddPacket<uint64_t>,
+    ::anvil::packets::PollRegmemPacket<uint32_t>
 >;
-
-// Forward declaration
-class SdmaQueue;
 
 // Host-side handle for CPU-initiated SDMA operations
 class SdmaQueueHostHandle
 {
  public:
-   explicit SdmaQueueHostHandle(SdmaQueue* q) : queue(q)
+   explicit SdmaQueueHostHandle(::anvil::SdmaQueue* q) : queue(q)
    {
    }
 
@@ -105,7 +95,8 @@ class SdmaQueueHostHandle
    uint64_t wrapIntoRing(uint64_t index) const;
    void padRingToEnd(uint64_t cur_index);
 
-   SdmaQueue* queue;
+   ::anvil::SdmaQueue* queue;
 };
 
-} // namespace anvil
+} // namespace sdma_ep
+} // namespace xio

@@ -20,12 +20,15 @@
 #include "sdma_pkt_struct.h"
 #include "sdma_opcodes.h"
 
+namespace xio {
 namespace sdma_ep {
 /** SDMA queue size in bytes (8 MiB). */
 constexpr uint64_t SDMA_QUEUE_SIZE = 8 * 1024 * 1024;
-}
+} // namespace sdma_ep
+} // namespace xio
 
-namespace anvil::packets
+namespace anvil {
+namespace packets
 {
 
 struct CopyLinearPacket
@@ -191,7 +194,8 @@ template <typename T> struct PollRegmemPacket
    }
 };
 
-} // namespace anvil::packets
+} // namespace packets
+} // namespace anvil
 
 #undef SDMA_FORCEINLINE
 #undef SDMA_HOST_DEVICE
