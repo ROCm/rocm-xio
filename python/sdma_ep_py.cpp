@@ -8,6 +8,7 @@
 
 namespace nb = nanobind;
 using namespace nb::literals;
+using namespace xio;
 
 namespace
 {
