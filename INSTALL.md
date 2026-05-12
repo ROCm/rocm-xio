@@ -79,6 +79,7 @@ Supported platforms: Linux
 | BUILD\_CLIENTS | ON | Build xio-tester (requires libcli11-dev) |
 | XIO\_BUILD\_DOCS | OFF | Build documentation (Sphinx) |
 | XIO\_DOCS\_ONLY | OFF | Docs-only build (no HIP) |
+| XIO\_BUILD\_PYTHON | OFF | Build Python bindings (nanobind) |
 | INSTALL\_TESTER | OFF | Install xio-tester binary |
 
 Sanitizer options (clang only):
