@@ -79,10 +79,10 @@ struct Tile {
     return block_m;
   }
   size_t offset_m() const {
-    return pid_m * block_m;
+    return static_cast<size_t>(pid_m) * static_cast<size_t>(block_m);
   }
   size_t offset_n() const {
-    return pid_n * block_n;
+    return static_cast<size_t>(pid_n) * static_cast<size_t>(block_n);
   }
   size_t src_pitch() const {
     return src_stride > 0 ? src_stride : width_bytes();

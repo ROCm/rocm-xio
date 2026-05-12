@@ -17,8 +17,6 @@
 #include "sdma-ep.h"
 #include "xio.h"
 
-// using namespace xio;
-
 // Discard HIP return values in cleanup paths to satisfy nodiscard
 static void ignoreHip(hipError_t e) {
   (void)e;

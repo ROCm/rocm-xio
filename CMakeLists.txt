@@ -421,7 +421,6 @@ target_include_directories(rocm-xio
   PRIVATE
     ${INCLUDE_DIR}
     ${COMMON_DIR}
-    /opt/rocm/include
 )
 foreach(ep ${VALID_ENDPOINTS})
   target_include_directories(rocm-xio PRIVATE

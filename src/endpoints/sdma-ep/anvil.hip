@@ -480,13 +480,6 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
       return true; // idempotent
     }
 
-    std::cout << "Extending connection " << srcDeviceId << " -> " << dstDeviceId
-              << " from " << existingChannels << " to " << numChannels
-              << " channel(s) using engine " << engineId
-              << (allocateOnHost ? " (host allocation)"
-                                 : " (device allocation)")
-              << std::endl;
-
     queues.reserve(static_cast<std::size_t>(numChannels));
     for (int channel = existingChannels; channel < numChannels; ++channel) {
       queues.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
@@ -496,12 +489,6 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
     }
     return true;
   }
-
-  std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
-            << " with " << numChannels << " channel(s) using engine "
-            << engineId
-            << (allocateOnHost ? " (host allocation)" : " (device allocation)")
-            << std::endl;
 
   queues.reserve(static_cast<std::size_t>(numChannels));
   for (int channel = 0; channel < numChannels; ++channel) {
