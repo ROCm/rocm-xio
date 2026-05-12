@@ -86,8 +86,8 @@ unsigned getIterations(void* endpointConfig) {
 
 // Single-thread kernel: one thread does all transfers to avoid queue
 // contention (multi-thread submit can stall on anvil's committedWptr ordering).
-__global__ void sdma_p2p_kernel(sdma_ep::SdmaQueueHandle* handle,
-                                void* dstBuf, void* srcBuf, size_t transferSize,
+__global__ void sdma_p2p_kernel(sdma_ep::SdmaQueueHandle* handle, void* dstBuf,
+                                void* srcBuf, size_t transferSize,
                                 unsigned iterations, uint64_t* signal,
                                 unsigned long long* startTimes,
                                 unsigned long long* endTimes,
@@ -123,14 +123,11 @@ __global__ void sdma_p2p_kernel(sdma_ep::SdmaQueueHandle* handle,
 
 // Ping-pong kernel to test latency of put, signal, quiet
 // quiet can be substituted by local counter or flush
-__global__ void sdma_ping_pong_kernel(sdma_ep::SdmaQueueHandle* handle,
-                                      void* dstBuf, void* srcBuf, size_t nElem,
-                                      unsigned iterations, uint64_t** signals,
-                                      int rank, uint64_t* counter,
-                                      bool use_counter, bool use_flush,
-                                      unsigned long long* startTimes,
-                                      unsigned long long* endTimes,
-                                      volatile bool* stopRequested) {
+__global__ void sdma_ping_pong_kernel(
+  sdma_ep::SdmaQueueHandle* handle, void* dstBuf, void* srcBuf, size_t nElem,
+  unsigned iterations, uint64_t** signals, int rank, uint64_t* counter,
+  bool use_counter, bool use_flush, unsigned long long* startTimes,
+  unsigned long long* endTimes, volatile bool* stopRequested) {
   if (rank > 1)
     return;
 
@@ -178,7 +175,7 @@ __global__ void sdma_ping_pong_kernel(sdma_ep::SdmaQueueHandle* handle,
             /* counter*/ nullptr, &put_index);
         } else {
           sdma_ep::putSignal(sdma_handle, dst, src, nElem * sizeof(int),
-                            remote_signal);
+                             remote_signal);
         }
       }
 
@@ -246,7 +243,7 @@ __global__ void sdma_ping_pong_kernel(sdma_ep::SdmaQueueHandle* handle,
 
         } else {
           sdma_ep::putSignal(sdma_handle, dst, src, nElem * sizeof(int),
-                            remote_signal);
+                             remote_signal);
         }
       }
 
@@ -270,11 +267,10 @@ __global__ void sdma_ping_pong_kernel(sdma_ep::SdmaQueueHandle* handle,
 // This kernel tests the different variations to determine that the source
 // buffer can be reused
 __global__ void sdma_buffer_reuse_kernel(
-  sdma_ep::SdmaQueueHandle* handle, void* dstBuf, void* srcBuf,
-  size_t nElem, unsigned iterations, uint64_t** signals, int rank,
-  uint64_t* counter, bool use_counter, bool use_flush,
-  unsigned long long* startTimes, unsigned long long* endTimes,
-  volatile bool* stopRequested) {
+  sdma_ep::SdmaQueueHandle* handle, void* dstBuf, void* srcBuf, size_t nElem,
+  unsigned iterations, uint64_t** signals, int rank, uint64_t* counter,
+  bool use_counter, bool use_flush, unsigned long long* startTimes,
+  unsigned long long* endTimes, volatile bool* stopRequested) {
   if (rank > 1)
     return;
 
@@ -324,12 +320,12 @@ __global__ void sdma_buffer_reuse_kernel(
                 remote_signal, /*counter*/ nullptr, &put_index);
             } else {
               sdma_ep::putSignal(sdma_handle, dst + offset, src,
-                                nElem * sizeof(int), remote_signal);
+                                 nElem * sizeof(int), remote_signal);
             }
           } else {
             if (use_counter) {
               sdma_ep::putCounter(sdma_handle, dst + offset, src,
-                                 nElem * sizeof(int), counter);
+                                  nElem * sizeof(int), counter);
             } else if (use_flush) {
               sdma_ep::put_signal_counter_impl<true, false, false>(
                 sdma_handle, dst + offset, src, nElem * sizeof(int),
@@ -342,7 +338,8 @@ __global__ void sdma_buffer_reuse_kernel(
         // Wait for buffer reuse
         if (threadIdx.x == 0) {
           if (use_counter) {
-            sdma_ep::waitCounter(counter, (i * transfers_per_iteration) + t + 1);
+            sdma_ep::waitCounter(counter,
+                                 (i * transfers_per_iteration) + t + 1);
           } else if (use_flush) {
             sdma_ep::flush(sdma_handle, put_index);
           } else {
@@ -519,10 +516,8 @@ hipError_t run(XioEndpointConfig* config) {
   }
 
   std::map<int, sdma_ep::SdmaQueueHandle*> sdmaHandles;
-  sdmaHandles[0] = static_cast<sdma_ep::SdmaQueueHandle*>(
-    qInfo0.deviceHandle);
-  sdmaHandles[1] = static_cast<sdma_ep::SdmaQueueHandle*>(
-    qInfo1.deviceHandle);
+  sdmaHandles[0] = static_cast<sdma_ep::SdmaQueueHandle*>(qInfo0.deviceHandle);
+  sdmaHandles[1] = static_cast<sdma_ep::SdmaQueueHandle*>(qInfo1.deviceHandle);
 
   // Set device for memory allocations
   err = hipSetDevice(srcGpu);
