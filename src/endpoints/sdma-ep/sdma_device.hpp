@@ -16,9 +16,9 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+#include "sdma_packets.hpp"
 #include "sdma_pkt_struct.h"
 #include "sdma_pkt_struct_mi4.h"
-#include "sdma_packets.hpp"
 
 namespace xio {
 
@@ -75,11 +75,11 @@ __device__ __forceinline__ SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY
 CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
                                uint32_t tile_height, uint32_t src_buffer_pitch,
                                uint32_t dst_buffer_pitch, uint32_t src_x,
-                               uint32_t src_y, uint32_t dst_x,
-                               uint32_t dst_y) {
-  anvil::packets::LargeSubWindowCopyPacket pkt(
-      srcBuf, dstBuf, tile_width, tile_height, src_buffer_pitch,
-      dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
+                               uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
+  anvil::packets::LargeSubWindowCopyPacket pkt(srcBuf, dstBuf, tile_width,
+                                               tile_height, src_buffer_pitch,
+                                               dst_buffer_pitch, src_x, src_y,
+                                               dst_x, dst_y);
   return pkt.value;
 }
 

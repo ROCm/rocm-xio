@@ -74,19 +74,19 @@ void shutdownEndpoint() {
 
 int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
   if (!s_initialized) {
-    std::cerr << "sdma_ep::createQueue: " << "call initEndpoint() first"
-              << std::endl;
+    std::cerr << "sdma_ep::createQueue: "
+              << "call initEndpoint() first" << std::endl;
     return -1;
   }
   try {
-    uint32_t engineId =
-      ::anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+    uint32_t engineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
+      srcDeviceId, dstDeviceId);
     int channelIdx = 0;
     ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx);
     if (!q) {
-      std::cerr << "sdma_ep::createQueue: " << "queue creation failed"
-                << std::endl;
+      std::cerr << "sdma_ep::createQueue: "
+                << "queue creation failed" << std::endl;
       return -1;
     }
     if (info) {
@@ -105,24 +105,24 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
 
 int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
   if (!s_initialized) {
-    std::cerr << "sdma_ep::createHostQueue: " << "call initEndpoint() first"
-              << std::endl;
+    std::cerr << "sdma_ep::createHostQueue: "
+              << "call initEndpoint() first" << std::endl;
     return -1;
   }
   try {
-    uint32_t engineId =
-      ::anvil::AnvilLib::getInstance().getSdmaEngineId(srcDeviceId, dstDeviceId);
+    uint32_t engineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
+      srcDeviceId, dstDeviceId);
     int channelIdx = 0;
     ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx, true);
 
     if (!q) {
-      std::cerr << "sdma_ep::createHostQueue: " << "queue creation failed"
-                << std::endl;
+      std::cerr << "sdma_ep::createHostQueue: "
+                << "queue creation failed" << std::endl;
       return -1;
     }
     if (info) {
-      info->deviceHandle = nullptr;  // Host queues have no device handle
+      info->deviceHandle = nullptr; // Host queues have no device handle
       info->srcDeviceId = srcDeviceId;
       info->dstDeviceId = dstDeviceId;
       info->engineId = engineId;
@@ -141,12 +141,17 @@ void destroyQueue(SdmaQueueInfo* info) {
   }
 }
 
-SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int dstDeviceId) {
-  return ::anvil::AnvilLib::getInstance().getPythonDeviceCtx(srcDeviceId, dstDeviceId);
+SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
+                                                int dstDeviceId) {
+  return ::anvil::AnvilLib::getInstance().getPythonDeviceCtx(srcDeviceId,
+                                                             dstDeviceId);
 }
 
-SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
-  return ::anvil::AnvilLib::getInstance().getHostHandle(srcDeviceId, dstDeviceId, channelIdx);
+SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId,
+                                  int channelIdx) {
+  return ::anvil::AnvilLib::getInstance().getHostHandle(srcDeviceId,
+                                                        dstDeviceId,
+                                                        channelIdx);
 }
 
 int initQueue(int srcDeviceId, int dstDeviceId) {
@@ -155,7 +160,9 @@ int initQueue(int srcDeviceId, int dstDeviceId) {
     return -1;
   }
   try {
-    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, false);
+    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId,
+                                                            dstDeviceId, 1,
+                                                            false);
     return success ? 0 : -1;
   } catch (const std::exception& e) {
     std::cerr << "sdma_ep::initQueue: " << e.what() << std::endl;
@@ -165,11 +172,14 @@ int initQueue(int srcDeviceId, int dstDeviceId) {
 
 int initHostQueue(int srcDeviceId, int dstDeviceId) {
   if (!s_initialized) {
-    std::cerr << "sdma_ep::initHostQueue: call initEndpoint() first" << std::endl;
+    std::cerr << "sdma_ep::initHostQueue: call initEndpoint() first"
+              << std::endl;
     return -1;
   }
   try {
-    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId, dstDeviceId, 1, true);
+    bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId,
+                                                            dstDeviceId, 1,
+                                                            true);
     return success ? 0 : -1;
   } catch (const std::exception& e) {
     std::cerr << "sdma_ep::initHostQueue: " << e.what() << std::endl;

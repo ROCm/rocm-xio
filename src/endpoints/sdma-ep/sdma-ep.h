@@ -72,11 +72,21 @@ struct Tile {
   size_t elem_size;  /**< Element size in bytes (e.g., 4 for float) */
   size_t src_stride; /**< Source row stride in bytes (0 = contiguous) */
 
-  size_t width_bytes() const { return block_n * elem_size; }
-  size_t height() const { return block_m; }
-  size_t offset_m() const { return pid_m * block_m; }
-  size_t offset_n() const { return pid_n * block_n; }
-  size_t src_pitch() const { return src_stride > 0 ? src_stride : width_bytes(); }
+  size_t width_bytes() const {
+    return block_n * elem_size;
+  }
+  size_t height() const {
+    return block_m;
+  }
+  size_t offset_m() const {
+    return pid_m * block_m;
+  }
+  size_t offset_n() const {
+    return pid_n * block_n;
+  }
+  size_t src_pitch() const {
+    return src_stride > 0 ? src_stride : width_bytes();
+  }
 };
 
 /**
@@ -94,8 +104,9 @@ struct SdmaQueuePythonDeviceCtx {
   uintptr_t committedWptr;
 };
 
-static_assert(sizeof(SdmaQueuePythonDeviceCtx) == 48,
-              "SdmaQueuePythonDeviceCtx must be 48 bytes (6 * sizeof(uintptr_t))");
+static_assert(
+  sizeof(SdmaQueuePythonDeviceCtx) == 48,
+  "SdmaQueuePythonDeviceCtx must be 48 bytes (6 * sizeof(uintptr_t))");
 
 /* ================================================================
  * Device-Side Operations
@@ -177,7 +188,8 @@ __host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
  * @param info        Output queue information (deviceHandle will be nullptr).
  * @return 0 on success, negative error code on failure.
  */
-__host__ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
+__host__ int createHostQueue(int srcDeviceId, int dstDeviceId,
+                             SdmaQueueInfo* info);
 
 /**
  * @brief Initialize a device-initiated SDMA queue (idempotent).
@@ -218,7 +230,8 @@ __host__ int initHostQueue(int srcDeviceId, int dstDeviceId);
  */
 __host__ void destroyQueue(SdmaQueueInfo* info);
 
-__host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int dstDeviceId);
+__host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
+                                                         int dstDeviceId);
 
 /**
  * @brief Get a host handle for SDMA operations.
@@ -235,7 +248,8 @@ __host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId, int ds
  * @note The corresponding queue must have been created with
  *       createHostQueue() first.
  */
-__host__ SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
+__host__ SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId,
+                                           int channelIdx = 0);
 
 } // namespace sdma_ep
 } // namespace xio

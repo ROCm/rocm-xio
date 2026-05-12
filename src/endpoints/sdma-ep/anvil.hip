@@ -171,7 +171,7 @@ std::ostream& operator<<(std::ostream& os, const SDMA_PKT_FENCE_MI4& cmd) {
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                      hsa_agent_t& localAgent, uint32_t engineId,
                      bool allocateOnHost)
-    : remoteDeviceId_(remoteDeviceId), hostAllocated_(allocateOnHost) {
+  : remoteDeviceId_(remoteDeviceId), hostAllocated_(allocateOnHost) {
   int originalDeviceId;
   CHECK_HIP_ERROR(hipGetDevice(&originalDeviceId));
 
@@ -186,9 +186,9 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
   // Allocate SDMA queue buffer
   if (allocateOnHost) {
     // Use pinned host memory for CPU-only access
-    CHECK_HIP_ERROR(hipHostMalloc(&queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
-                                  hipHostMallocWriteCombined |
-                                      hipHostMallocPortable));
+    CHECK_HIP_ERROR(
+      hipHostMalloc(&queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
+                    hipHostMallocWriteCombined | hipHostMallocPortable));
   } else {
     // Use device memory (existing path)
     HsaMemFlags memFlags = {};
@@ -198,11 +198,12 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
     memFlags.ui32.NoNUMABind = 1;
     memFlags.ui32.ExecuteAccess = 1;
     memFlags.ui32.Uncached = 1;
-    CHECK_HSAKMT_SUCCESS(
-        hsaKmtAllocMemory(localNodeId, xio::sdma_ep::SDMA_QUEUE_SIZE, memFlags,
-                          &queueBuffer_),
-        "Failed");
-    CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
+    CHECK_HSAKMT_SUCCESS(hsaKmtAllocMemory(localNodeId,
+                                           xio::sdma_ep::SDMA_QUEUE_SIZE,
+                                           memFlags, &queueBuffer_),
+                         "Failed");
+    CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_,
+                                              xio::sdma_ep::SDMA_QUEUE_SIZE,
                                               NULL),
                          "Failed");
   }
@@ -211,10 +212,11 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
   std::memset(&queue_, 0, sizeof(HsaQueueResource));
 
   CHECK_HSAKMT_SUCCESS(
-      hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
-                           DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
-                           queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE, nullptr, &queue_),
-      "Failed");
+    hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
+                         DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
+                         queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE, nullptr,
+                         &queue_),
+    "Failed");
 
   // Initialize host-side state (always needed)
   uint64_t initial_wptr = *queue_.Queue_write_ptr_aql;
@@ -241,25 +243,26 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
       if (s != HSA_STATUS_SUCCESS)
         throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
       s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
-                                 "SDMA committed wptr", XIO_DEVICE_MEM_UNCACHED);
+                                 "SDMA committed wptr",
+                                 XIO_DEVICE_MEM_UNCACHED);
       if (s != HSA_STATUS_SUCCESS)
         throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
     }
 
-  uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
-    queue_.Queue_write_ptr_aql);
-  uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
-    queue_.Queue_write_ptr_aql);
+    uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
+      queue_.Queue_write_ptr_aql);
+    uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
+      queue_.Queue_write_ptr_aql);
     SdmaQueueDeviceHandle handle = {
-        .queueBuf = static_cast<uint32_t*>(queueBuffer_),
-        .rptr = queue_.Queue_read_ptr_aql,
-        .wptr = queue_.Queue_write_ptr_aql,
-        .doorbell = queue_.Queue_DoorBell_aql,
-        .cachedWptr = cachedWptr_,
-        .committedWptr = committedWptr_,
-        .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
-          queue_.Queue_read_ptr_aql),
-        .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
+      .queueBuf = static_cast<uint32_t*>(queueBuffer_),
+      .rptr = queue_.Queue_read_ptr_aql,
+      .wptr = queue_.Queue_write_ptr_aql,
+      .doorbell = queue_.Queue_DoorBell_aql,
+      .cachedWptr = cachedWptr_,
+      .committedWptr = committedWptr_,
+      .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
+        queue_.Queue_read_ptr_aql),
+      .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
     };
 
     CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
@@ -267,7 +270,7 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
                               hipMemcpyHostToDevice));
     CHECK_HIP_ERROR(hipMemcpy(cachedWptr_, &cachedWptr, sizeof(uint64_t),
                               hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
+    CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
                               hipMemcpyHostToDevice));
   }
 }
@@ -293,7 +296,8 @@ SdmaQueue::~SdmaQueue() {
     CHECK_HIP_ERROR(hipHostFree(queueBuffer_));
   } else {
     CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
-    CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE),
+    CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_,
+                                          xio::sdma_ep::SDMA_QUEUE_SIZE),
                          "Failed");
   }
 }
@@ -311,7 +315,8 @@ xio::sdma_ep::SdmaQueuePythonDeviceCtx SdmaQueue::pythonDeviceContext() const {
           .wptr = reinterpret_cast<uintptr_t>(deviceHandle_->wptr),
           .doorbell = reinterpret_cast<uintptr_t>(deviceHandle_->doorbell),
           .cachedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->cachedWptr),
-          .committedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->committedWptr)};
+          .committedWptr = reinterpret_cast<uintptr_t>(
+            deviceHandle_->committedWptr)};
 }
 
 xio::sdma_ep::SdmaQueueHostHandle SdmaQueue::hostHandle() {
@@ -441,15 +446,15 @@ void AnvilLib::init() {
 }
 
 SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
-                                     uint32_t engineId, int* channelIdx, bool isHostQueue) {
+                                     uint32_t engineId, int* channelIdx,
+                                     bool isHostQueue) {
   auto& channel_map = isHostQueue ? host_sdma_channels_ : sdma_channels_;
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
   auto& vec = channel_map[key];
 
   vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
                                                gpuAgents_[srcDeviceId],
-                                               engineId,
-                                               isHostQueue));
+                                               engineId, isHostQueue));
 
   if (channelIdx) {
     *channelIdx = static_cast<int>(vec.size() - 1);
@@ -475,17 +480,19 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
       return true; // idempotent
     }
 
-    std::cout << "Extending connection " << srcDeviceId << " -> "
-              << dstDeviceId << " from " << existingChannels << " to "
-              << numChannels << " channel(s) using engine " << engineId
-              << (allocateOnHost ? " (host allocation)" : " (device allocation)")
+    std::cout << "Extending connection " << srcDeviceId << " -> " << dstDeviceId
+              << " from " << existingChannels << " to " << numChannels
+              << " channel(s) using engine " << engineId
+              << (allocateOnHost ? " (host allocation)"
+                                 : " (device allocation)")
               << std::endl;
 
     queues.reserve(static_cast<std::size_t>(numChannels));
     for (int channel = existingChannels; channel < numChannels; ++channel) {
-      queues.emplace_back(std::make_unique<SdmaQueue>(
-          srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId], engineId,
-          allocateOnHost));
+      queues.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                                      gpuAgents_[srcDeviceId],
+                                                      engineId,
+                                                      allocateOnHost));
     }
     return true;
   }
@@ -498,9 +505,9 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
 
   queues.reserve(static_cast<std::size_t>(numChannels));
   for (int channel = 0; channel < numChannels; ++channel) {
-    queues.emplace_back(std::make_unique<SdmaQueue>(
-        srcDeviceId, dstDeviceId, gpuAgents_[srcDeviceId], engineId,
-        allocateOnHost));
+    queues.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                                    gpuAgents_[srcDeviceId],
+                                                    engineId, allocateOnHost));
   }
 
   return true;
@@ -554,7 +561,8 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
 
 // ==================== Host API Methods ====================
 
-xio::sdma_ep::SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(int srcDeviceId, int dstDeviceId) {
+xio::sdma_ep::SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(
+  int srcDeviceId, int dstDeviceId) {
   SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, 0);
   if (!queue) {
     throw std::runtime_error("getPythonDeviceCtx: queue not found");
@@ -562,7 +570,9 @@ xio::sdma_ep::SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(int srcDevic
   return queue->pythonDeviceContext();
 }
 
-xio::sdma_ep::SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId, int dstDeviceId, int channelIdx) {
+xio::sdma_ep::SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId,
+                                                          int dstDeviceId,
+                                                          int channelIdx) {
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
   auto host_it = host_sdma_channels_.find(key);
   if (host_it != host_sdma_channels_.end() &&

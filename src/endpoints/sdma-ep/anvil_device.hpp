@@ -38,22 +38,25 @@ CreateLargeSubWindowCopyPacket(void* srcBuf, void* dstBuf, uint32_t tile_width,
                                uint32_t tile_height, uint32_t src_buffer_pitch,
                                uint32_t dst_buffer_pitch, uint32_t src_x,
                                uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
-  anvil::packets::LargeSubWindowCopyPacket pkt(
-      srcBuf, dstBuf, tile_width, tile_height, src_buffer_pitch,
-      dst_buffer_pitch, src_x, src_y, dst_x, dst_y);
+  anvil::packets::LargeSubWindowCopyPacket pkt(srcBuf, dstBuf, tile_width,
+                                               tile_height, src_buffer_pitch,
+                                               dst_buffer_pitch, src_x, src_y,
+                                               dst_x, dst_y);
   return pkt.value;
 }
 
 __device__ __forceinline__ SDMA_PKT_ATOMIC
 CreateAtomicIncPacket(HSAuint64* signal) {
-  anvil::packets::AtomicAddPacket<uint64_t> pkt(
-      reinterpret_cast<uint64_t*>(signal), 1);
+  anvil::packets::AtomicAddPacket<uint64_t> pkt(reinterpret_cast<uint64_t*>(
+                                                  signal),
+                                                1);
   return pkt.value;
 }
 
 __device__ __forceinline__ SDMA_PKT_FENCE CreateFencePacket(HSAuint64* address,
                                                             uint32_t data = 1) {
-  return xio::sdma_ep::CreateFencePacket(reinterpret_cast<uint64_t*>(address), data);
+  return xio::sdma_ep::CreateFencePacket(reinterpret_cast<uint64_t*>(address),
+                                         data);
 }
 
 #if XIO_SDMA_OSS7
