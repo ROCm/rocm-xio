@@ -1,3 +1,5 @@
+#include "sdma-host-queue.h"
+
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -6,7 +8,6 @@
 #include <type_traits>
 
 #include "anvil.hpp"
-#include "sdma-host-queue.h"
 #include "sdma_packets.hpp"
 
 namespace xio {
