@@ -25,9 +25,9 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
-#include "xio.h"
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "endpoints/sdma-ep/sdma_device.hpp"
+#include "xio.h"
 
 using namespace xio;
 
@@ -86,8 +86,8 @@ int main() {
     return 1;
   }
   printf("Queue created: GPU %d -> GPU %d (engine %u, channel %d)\n\n",
-         queueInfo.srcDeviceId, queueInfo.dstDeviceId,
-         queueInfo.engineId, queueInfo.channelIdx);
+         queueInfo.srcDeviceId, queueInfo.dstDeviceId, queueInfo.engineId,
+         queueInfo.channelIdx);
 
   HIP_CHECK(hipSetDevice(SRC_GPU));
   uint8_t* srcBuf = nullptr;

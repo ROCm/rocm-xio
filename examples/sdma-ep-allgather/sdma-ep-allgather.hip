@@ -31,10 +31,10 @@
 
 #include <mpi.h>
 
-#include "xio.h"
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "endpoints/sdma-ep/sdma-host-queue.h"
 #include "endpoints/sdma-ep/sdma_device.hpp"
+#include "xio.h"
 
 using namespace xio;
 
@@ -79,7 +79,8 @@ __global__ void sdmaAllgatherKernel(AllgatherArgs args) {
   }
 }
 
-__global__ void waitForAllgatherCompletion(uint64_t* signals, int nranks, int myrank) {
+__global__ void waitForAllgatherCompletion(uint64_t* signals, int nranks,
+                                           int myrank) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == myrank)
       continue;
@@ -116,7 +117,8 @@ int main(int argc, char* argv[]) {
     } else {
       char* endptr = nullptr;
       long val = strtol(argv[i], &endptr, 10);
-      if (endptr == argv[i] || *endptr != '\0' || val <= 0 || val > INT_MAX / 2) {
+      if (endptr == argv[i] || *endptr != '\0' || val <= 0 ||
+          val > INT_MAX / 2) {
         if (myrank == 0)
           fprintf(stderr, "ERROR: invalid chunk size '%s'\n", argv[i]);
         MPI_Finalize();
@@ -130,8 +132,8 @@ int main(int argc, char* argv[]) {
   if (myrank == 0) {
     printf("sdma-ep allgather (%s): %d ranks, %d ints "
            "(%zu bytes) per rank\n",
-           hostInitiated ? "host-initiated" : "device-initiated",
-           nranks, chunkInts, chunkBytes);
+           hostInitiated ? "host-initiated" : "device-initiated", nranks,
+           chunkInts, chunkBytes);
   }
 
   int deviceCount = 0;
@@ -169,7 +171,8 @@ int main(int argc, char* argv[]) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == myrank) {
       if (hostInitiated) {
-        hostHandles.push_back(sdma_ep::SdmaQueueHostHandle(nullptr)); // Placeholder
+        hostHandles.push_back(
+          sdma_ep::SdmaQueueHostHandle(nullptr)); // Placeholder
       }
       continue;
     }
