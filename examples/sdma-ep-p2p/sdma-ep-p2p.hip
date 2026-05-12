@@ -27,6 +27,9 @@
 
 #include "xio.h"
 #include "endpoints/sdma-ep/sdma-ep.h"
+#include "endpoints/sdma-ep/sdma_device.hpp"
+
+using namespace xio;
 
 static constexpr int SRC_GPU = 0;
 static constexpr int DST_GPU = 1;

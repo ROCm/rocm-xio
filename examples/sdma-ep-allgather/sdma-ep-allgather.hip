@@ -7,7 +7,7 @@
  * Each MPI rank owns one GPU. By default, the GPU kernel uses the
  * rocm-xio sdma_ep device-side API to DMA its local input buffer
  * into the correct slot of every other rank's output buffer.
- * With --host-initiated, the CPU uses the anvil host API instead.
+ * With --host-initiated, the CPU uses the sdma_ep host API instead.
  *
  * Prerequisites:
  *   - N AMD GPUs with XGMI / Infinity Fabric P2P
@@ -35,6 +35,8 @@
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "endpoints/sdma-ep/sdma-host-queue.h"
 #include "endpoints/sdma-ep/sdma_device.hpp"
+
+using namespace xio;
 
 static int g_myrank = 0;
 
@@ -159,7 +161,7 @@ int main(int argc, char* argv[]) {
   args.chunkBytes = chunkBytes;
 
   sdma_ep::SdmaQueueInfo queueInfos[MAX_GPUS] = {};
-  std::vector<anvil::SdmaQueueHostHandle> hostHandles;
+  std::vector<sdma_ep::SdmaQueueHostHandle> hostHandles;
   if (hostInitiated) {
     hostHandles.reserve(nranks);
   }
@@ -167,7 +169,7 @@ int main(int argc, char* argv[]) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == myrank) {
       if (hostInitiated) {
-        hostHandles.push_back(anvil::SdmaQueueHostHandle(nullptr)); // Placeholder
+        hostHandles.push_back(sdma_ep::SdmaQueueHostHandle(nullptr)); // Placeholder
       }
       continue;
     }
