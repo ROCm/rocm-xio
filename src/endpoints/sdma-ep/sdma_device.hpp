@@ -217,6 +217,37 @@ __device__ __forceinline__ void poll_until_ge(uint64_t* addr,
  * Device Handle
  * ================================================================ */
 
+// Forward declaration
+struct SdmaQueueHandle;
+
+/**
+ * @brief Per-thread mutable state for SDMA queue operations.
+ *
+ * Optional caching layer for CanWriteUpto to avoid repeated
+ * hardware register reads. Pass to ReserveQueueSpace/CanWriteUpto
+ * to enable caching, or omit for stateless operation.
+ *
+ * Default initialization (cachedHwReadIndex = 0) is safe - first
+ * CanWriteUpto will be a cache miss, then subsequent calls benefit.
+ * For multiple operations, optionally initialize from hardware:
+ *   state.cachedHwReadIndex = __hip_atomic_load(handle.rptr, ...)
+ *
+ * maxWritePtr tracks the end of the last submitted packet and is
+ * required for quietAll() to work correctly.
+ */
+struct SdmaQueueState {
+  uint64_t cachedHwReadIndex = 0; /**< Cached hardware read pointer. */
+  uint64_t maxWritePtr = 0;       /**< End of last submitted packet. */
+
+  /**
+   * @brief Initialize cache from current hardware state.
+   *
+   * Useful when performing multiple operations - pays one atomic load
+   * upfront to avoid cache miss on first CanWriteUpto.
+   */
+  __device__ __forceinline__ void init(const SdmaQueueHandle& handle);
+};
+
 /**
  * @brief GPU-visible SDMA queue state.
  *
@@ -239,28 +270,39 @@ struct SdmaQueueHandle {
    * @param index Absolute byte index in the SDMA ring.
    * @return Ring-relative byte offset.
    */
-  __device__ __forceinline__ uint64_t WrapIntoRing(uint64_t index) {
+  __device__ __forceinline__ uint64_t WrapIntoRing(uint64_t index) const {
     return index % SDMA_QUEUE_SIZE;
   }
 
   /**
    * @brief Check if the queue has space up to uptoIndex.
    *
-   * Uses a cached HW read index for fast-path; falls
-   * back to reading the hardware register if the cached
-   * value indicates the queue is full.
+   * When state is provided, uses cached HW read index for
+   * fast-path; updates cache on miss. Without state, reads
+   * HW register every call.
    *
    * @param uptoIndex Absolute byte index the producer wants to reach.
+   * @param state Optional per-thread state for caching (nullptr = no cache).
    * @return true when the ring has enough free space.
    */
-  __device__ __forceinline__ bool CanWriteUpto(uint64_t uptoIndex) {
-    if ((uptoIndex - cachedHwReadIndex) < SDMA_QUEUE_SIZE) {
+  __device__ __forceinline__ bool CanWriteUpto(
+    uint64_t uptoIndex, SdmaQueueState* state = nullptr) const {
+    // Fast path: check cached value if state provided
+    if (state && (uptoIndex - state->cachedHwReadIndex) < SDMA_QUEUE_SIZE) {
       return true;
     }
-    cachedHwReadIndex = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
-                                          __HIP_MEMORY_SCOPE_AGENT);
+
+    // Slow path: read from hardware
+    uint64_t hwRead = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_AGENT);
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
-    return (uptoIndex - cachedHwReadIndex) < SDMA_QUEUE_SIZE;
+
+    // Update cache if state provided
+    if (state) {
+      state->cachedHwReadIndex = hwRead;
+    }
+
+    return (uptoIndex - hwRead) < SDMA_QUEUE_SIZE;
   }
 
   /**
@@ -273,11 +315,13 @@ struct SdmaQueueHandle {
    * @param size_in_bytes Bytes to reserve.
    * @param offset Output: NOP padding bytes inserted
    *        before the reserved region (for wraparound).
+   * @param state Optional per-thread state for caching (nullptr = no cache).
    * @return Base index (byte offset) of the reserved
    *         region.
    */
   __device__ __forceinline__ uint64_t
-  ReserveQueueSpace(const size_t size_in_bytes, uint64_t& offset) {
+  ReserveQueueSpace(const size_t size_in_bytes, uint64_t& offset,
+                    SdmaQueueState* state = nullptr) const {
     uint64_t cur_index;
     int retries = 0;
     while (true) {
@@ -288,7 +332,7 @@ struct SdmaQueueHandle {
         offset = SDMA_QUEUE_SIZE - WrapIntoRing(cur_index);
       }
       uint64_t new_index = cur_index + size_in_bytes + offset;
-      if (CanWriteUpto(new_index)) {
+      if (CanWriteUpto(new_index, state)) {
         if (__hip_atomic_compare_exchange_strong(cachedWptr, &cur_index,
                                                  new_index, __ATOMIC_RELAXED,
                                                  __ATOMIC_RELAXED,
@@ -320,12 +364,14 @@ struct SdmaQueueHandle {
   template <typename PacketType>
   __device__ __forceinline__ void placePacket(PacketType& packet,
                                               uint64_t& pendingWptr,
-                                              uint64_t offset) {
+                                              uint64_t offset) const {
     static_assert(sizeof(PacketType) / sizeof(uint32_t) <= 64);
     const uint32_t numOffsetDwords = offset / sizeof(uint32_t);
     const uint32_t numDwords = sizeof(PacketType) / sizeof(uint32_t);
     uint32_t* packetPtr = reinterpret_cast<uint32_t*>(&packet);
     uint64_t base_idx = WrapIntoRing(pendingWptr) / sizeof(uint32_t);
+
+    // Place NOP padding if needed
     for (uint32_t i = 0; i < numOffsetDwords; i++) {
       if (i == 0) {
         __hip_atomic_store(queueBuf + base_idx + i,
@@ -338,6 +384,8 @@ struct SdmaQueueHandle {
     }
     pendingWptr += offset;
     base_idx = WrapIntoRing(pendingWptr) / sizeof(uint32_t);
+
+    // Place packet data
     for (uint32_t i = 0; i < numDwords; i++) {
       __hip_atomic_store(queueBuf + base_idx + i, packetPtr[i],
                          __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
@@ -354,9 +402,11 @@ struct SdmaQueueHandle {
    *
    * @param base        Base index from ReserveQueueSpace.
    * @param pendingWptr End index after placePacket.
+   * @param state       Optional state to track maxWritePtr for quietAll.
    */
-  __device__ __forceinline__ void submitPacket(uint64_t base,
-                                               uint64_t pendingWptr) {
+  __device__ __forceinline__ void submitPacket(
+    uint64_t base, uint64_t pendingWptr,
+    SdmaQueueState* state = nullptr) const {
     int retries = 0;
     while (true) {
       uint64_t val = __hip_atomic_load(committedWptr, __ATOMIC_RELAXED,
@@ -386,23 +436,11 @@ struct SdmaQueueHandle {
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(committedWptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    maxWritePtr = pendingWptr;
-  }
 
-  /**
-   * @brief Wait until HW has consumed up to upToIndex.
-   *
-   * Spin-polls the hardware read pointer until it
-   * reaches or passes upToIndex.
-   *
-   * @param upToIndex Byte index to wait for.
-   */
-  __device__ __forceinline__ void flushTo(uint64_t upToIndex) {
-    uint64_t hw_read_index;
-    do {
-      hw_read_index = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
-                                        __HIP_MEMORY_SCOPE_AGENT);
-    } while (hw_read_index < upToIndex);
+    // Track maxWritePtr if state provided
+    if (state) {
+      state->maxWritePtr = pendingWptr;
+    }
   }
 
   /**
@@ -410,29 +448,44 @@ struct SdmaQueueHandle {
    *
    * Spin-polls the hardware read pointer until it
    * reaches maxWritePtr (the end of the last submitted
-   * packet).
+   * packet). If state is null, waits until rptr reaches
+   * current wptr (less precise, waits for all queued ops).
+   *
+   * @param state Optional state that tracks maxWritePtr via submitPacket.
    */
-  __device__ __forceinline__ void quietAll() {
+  __device__ __forceinline__ void quietAll(
+    SdmaQueueState* state = nullptr) const {
+    uint64_t target;
+    if (state) {
+      target = state->maxWritePtr;
+    } else {
+      // No state - read current wptr and wait for rptr to reach it
+      target = __hip_atomic_load(wptr, __ATOMIC_RELAXED,
+                                 __HIP_MEMORY_SCOPE_AGENT);
+    }
     uint64_t hw_read_index;
     do {
       hw_read_index = __hip_atomic_load(rptr, __ATOMIC_RELAXED,
                                         __HIP_MEMORY_SCOPE_AGENT);
-    } while (hw_read_index < maxWritePtr);
+    } while (hw_read_index < target);
   }
 
-  uint32_t* queueBuf;         /**< Ring buffer base. */
-  uint64_t* rptr;             /**< HW read pointer. */
-  uint64_t* wptr;             /**< HW write pointer. */
-  uint64_t* doorbell;         /**< Doorbell register. */
-  uint64_t* cachedWptr;       /**< Cached write pointer
-                                   (shared, device mem). */
-  uint64_t* committedWptr;    /**< Committed write pointer
-                                   (shared, device mem). */
-  uint64_t cachedHwReadIndex; /**< Cached HW read index
-                                   (local). */
-  uint64_t maxWritePtr;       /**< End of last submitted
-                                   packet (local). */
+  uint32_t* queueBuf;      /**< Ring buffer base. */
+  uint64_t* rptr;          /**< HW read pointer. */
+  uint64_t* wptr;          /**< HW write pointer. */
+  uint64_t* doorbell;      /**< Doorbell register. */
+  uint64_t* cachedWptr;    /**< Cached write pointer
+                                (shared, device mem). */
+  uint64_t* committedWptr; /**< Committed write pointer
+                                (shared, device mem). */
 };
+
+// Define SdmaQueueState::init() after SdmaQueueHandle is complete
+__device__ __forceinline__ void SdmaQueueState::init(
+  const SdmaQueueHandle& handle) {
+  cachedHwReadIndex = __hip_atomic_load(handle.rptr, __ATOMIC_RELAXED,
+                                        __HIP_MEMORY_SCOPE_AGENT);
+}
 
 /**
  * @brief Single-producer variant of SdmaQueueHandle.
@@ -494,7 +547,7 @@ struct SdmaQueueSingleProducerHandle : SdmaQueueHandle {
    * @param pendingWptr End index after packet placement.
    */
   __device__ __forceinline__ void submitPacket(uint64_t base,
-                                               uint64_t pendingWptr) {
+                                               uint64_t pendingWptr) const {
     *wptr = pendingWptr;
     __builtin_amdgcn_s_waitcnt(0);
     __builtin_amdgcn_wave_barrier();
@@ -524,8 +577,8 @@ static_assert(sizeof(SdmaQueueSingleProducerHandle) == sizeof(SdmaQueueHandle),
  */
 template <bool PUT_EN, bool SIGNAL_EN, bool COUNTER_EN>
 __device__ __forceinline__ void put_signal_counter_impl(
-  SdmaQueueHandle& handle, void* dst, void* src, size_t size, uint64_t* signal,
-  uint64_t* counter, uint64_t* put_index = nullptr) {
+  const SdmaQueueHandle handle, void* dst, void* src, size_t size,
+  uint64_t* signal, uint64_t* counter, SdmaQueueState* state = nullptr) {
 #if XIO_SDMA_OSS7
   /*
    * OSS7 fast path: when a copy is combined with a signal and/or a
@@ -549,9 +602,6 @@ __device__ __forceinline__ void put_signal_counter_impl(
     auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, fused_addr, 1,
                                                 false, nullptr, 0, 0);
     handle.placePacket(ws_pkt, pendingWptr, offset);
-    if (put_index != nullptr) {
-      *put_index = pendingWptr;
-    }
     offset = 0;
 
     if constexpr (both) {
@@ -559,7 +609,7 @@ __device__ __forceinline__ void put_signal_counter_impl(
       handle.placePacket(counter_packet, pendingWptr, offset);
       offset = 0;
     }
-    handle.submitPacket(base, pendingWptr);
+    handle.submitPacket(base, pendingWptr, state);
     return;
   }
 #endif // XIO_SDMA_OSS7
@@ -569,13 +619,11 @@ __device__ __forceinline__ void put_signal_counter_impl(
     ((SIGNAL_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0) +
     ((COUNTER_EN) ? sizeof(SDMA_PKT_ATOMIC) : 0);
   uint64_t offset = 0;
-  auto base = handle.ReserveQueueSpace(space_required, offset);
+  auto base = handle.ReserveQueueSpace(space_required, offset, state);
   uint64_t pendingWptr = base;
   if constexpr (PUT_EN) {
     auto pkt = CreateCopyPacket(src, dst, size);
     handle.placePacket(pkt, pendingWptr, offset);
-    if (put_index != nullptr)
-      *put_index = pendingWptr;
     offset = 0;
   }
   if constexpr (SIGNAL_EN) {
@@ -588,20 +636,21 @@ __device__ __forceinline__ void put_signal_counter_impl(
     handle.placePacket(pkt, pendingWptr, offset);
     offset = 0;
   }
-  handle.submitPacket(base, pendingWptr);
+  handle.submitPacket(base, pendingWptr, state);
 }
 
 /* ================================================================
  * Device-Side Operations -- Data Transfer
  * ================================================================ */
 
-__device__ __forceinline__ void put(SdmaQueueHandle& handle, void* dst,
-                                    void* src, size_t size) {
+__device__ __forceinline__ void put(const SdmaQueueHandle handle, void* dst,
+                                    void* src, size_t size,
+                                    SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<true, false, false>(handle, dst, src, size, nullptr,
-                                              nullptr);
+                                              nullptr, state);
 }
 
-__device__ __forceinline__ void putTile(SdmaQueueHandle& handle, void* dst,
+__device__ __forceinline__ void putTile(const SdmaQueueHandle handle, void* dst,
                                         void* src, uint32_t tileWidth,
                                         uint32_t tileHeight, uint32_t srcPitch,
                                         uint32_t dstPitch, uint32_t srcX,
@@ -616,46 +665,49 @@ __device__ __forceinline__ void putTile(SdmaQueueHandle& handle, void* dst,
                                             dstX, dstY);
   uint64_t pendingWptr = base;
   handle.placePacket(pkt, pendingWptr, offset);
-  handle.submitPacket(base, pendingWptr);
+  handle.submitPacket(base, pendingWptr, nullptr);
 }
 
 /* ================================================================
  * Device-Side Operations -- Signaling
  * ================================================================ */
 
-__device__ __forceinline__ void signal(SdmaQueueHandle& handle,
-                                       uint64_t* signal) {
+__device__ __forceinline__ void signal(const SdmaQueueHandle handle,
+                                       uint64_t* signal,
+                                       SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<false, true, false>(handle, nullptr, nullptr, 0,
-                                              signal, nullptr);
+                                              signal, nullptr, state);
 }
 
-__device__ __forceinline__ void putSignal(SdmaQueueHandle& handle, void* dst,
-                                          void* src, size_t size,
-                                          uint64_t* signal) {
+__device__ __forceinline__ void putSignal(const SdmaQueueHandle handle,
+                                          void* dst, void* src, size_t size,
+                                          uint64_t* signal,
+                                          SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<true, true, false>(handle, dst, src, size, signal,
-                                             nullptr);
+                                             nullptr, state);
 }
 
-__device__ __forceinline__ void putSignalCounter(SdmaQueueHandle& handle,
-                                                 void* dst, void* src,
-                                                 size_t size, uint64_t* signal,
-                                                 uint64_t* counter) {
+__device__ __forceinline__ void putSignalCounter(
+  const SdmaQueueHandle handle, void* dst, void* src, size_t size,
+  uint64_t* signal, uint64_t* counter, SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<true, true, true>(handle, dst, src, size, signal,
-                                            counter);
+                                            counter, state);
 }
 
-__device__ __forceinline__ void putCounter(SdmaQueueHandle& handle, void* dst,
-                                           void* src, size_t size,
-                                           uint64_t* counter) {
+__device__ __forceinline__ void putCounter(const SdmaQueueHandle handle,
+                                           void* dst, void* src, size_t size,
+                                           uint64_t* counter,
+                                           SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<true, false, true>(handle, dst, src, size, nullptr,
-                                             counter);
+                                             counter, state);
 }
 
-__device__ __forceinline__ void signalCounter(SdmaQueueHandle& handle,
+__device__ __forceinline__ void signalCounter(const SdmaQueueHandle handle,
                                               uint64_t* signal,
-                                              uint64_t* counter) {
+                                              uint64_t* counter,
+                                              SdmaQueueState* state = nullptr) {
   put_signal_counter_impl<false, true, true>(handle, nullptr, nullptr, 0,
-                                             signal, counter);
+                                             signal, counter, state);
 }
 
 /* ================================================================
@@ -678,13 +730,9 @@ __device__ __forceinline__ void waitCounter(uint64_t* addr, uint64_t expected) {
   }
 }
 
-__device__ __forceinline__ void flush(SdmaQueueHandle& handle,
-                                      uint64_t upToIndex) {
-  handle.flushTo(upToIndex);
-}
-
-__device__ __forceinline__ void quiet(SdmaQueueHandle& handle) {
-  handle.quietAll();
+__device__ __forceinline__ void quiet(const SdmaQueueHandle handle,
+                                      SdmaQueueState* state = nullptr) {
+  handle.quietAll(state);
 }
 
 } // namespace sdma_ep
