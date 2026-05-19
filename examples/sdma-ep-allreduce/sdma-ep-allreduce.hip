@@ -75,6 +75,26 @@ struct AllreduceArgs {
   int nranks;
 };
 
+// Device function: Cross-GPU barrier synchronization
+// Each block signals peers and waits for peers to enter the kernel
+__device__ void crossGpuBarrier(AllreduceArgs& args, int nPeer,
+                                uint64_t* myBarrierSignals,
+                                uint64_t expectedSignal) {
+  if (threadIdx.x < static_cast<uint32_t>(nPeer)) {
+    int slotIdx = blockIdx.x * nPeer + threadIdx.x;
+
+    // Signal to peer that we've entered the kernel
+    __atomic_store_n(args.remoteBarrierSignals[slotIdx], expectedSignal,
+                     __ATOMIC_RELAXED);
+
+    // Wait for peer to enter
+    while (__atomic_load_n(&myBarrierSignals[threadIdx.x], __ATOMIC_RELAXED) <
+           expectedSignal) {
+    }
+  }
+  __syncthreads();
+}
+
 // Kernel: Chunked local reduction + SDMA AllGather
 // Similar to allreduce9: process in chunks to overlap computation with
 // transfers Each block synchronizes with same blockIdx on peer GPUs using
@@ -114,21 +134,8 @@ __global__ void sdmaAllreduceKernel(AllreduceArgs args, int nBlocks,
   const size_t nChunks = (blockInt4s + nInt4PerChunk - 1) / nInt4PerChunk;
   size_t offsetInt4 = (rank * nInt4PerRank) + blockStartInt4;
 
-  // Initial cross-GPU synchronization via memory stores/loads
-  if (threadIdx.x < static_cast<uint32_t>(nPeer)) {
-    int slotIdx = blockIdx.x * nPeer + threadIdx.x;
-
-    // Signal to peer that we've entered the kernel
-    // __threadfence_system();
-    __atomic_store_n(args.remoteBarrierSignals[slotIdx], expectedSignal,
-                     __ATOMIC_RELAXED);
-
-    // Wait for peer to enter
-    while (__atomic_load_n(&myBarrierSignals[threadIdx.x], __ATOMIC_RELAXED) <
-           expectedSignal) {
-    }
-  }
-  __syncthreads();
+  // Initial cross-GPU synchronization
+  crossGpuBarrier(args, nPeer, myBarrierSignals, expectedSignal);
 
   int4* localInput4 = reinterpret_cast<int4*>(args.localInput);
   int4* localReduced4 = reinterpret_cast<int4*>(args.localReduced);
@@ -204,8 +211,7 @@ __global__ void sdmaAllreduceKernel(AllreduceArgs args, int nBlocks,
 // Used with device-triggered mode where host sets up wait_flag_then_put per
 // chunk
 __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
-                                       uint64_t expectedSignal,
-                                       uint32_t baseTrigger) {
+                                       uint64_t expectedSignal) {
   const int rank = args.myrank;
   const int nranks = args.nranks;
   const size_t nelemsPerRank = args.nelemsPerRank;
@@ -215,6 +221,7 @@ __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
 
   // Get base pointers for this block's signal section
   uint64_t* mySdmaSignals = args.localSdmaSignals + blockIdx.x * nPeer;
+  uint64_t* myBarrierSignals = args.localBarrierSignals + blockIdx.x * nPeer;
 
   // Work in int4 units for vectorization (same as device-initiated mode)
   constexpr size_t nInt4PerChunk = (CHUNK_SIZE_KB * 1024) / sizeof(int4);
@@ -233,6 +240,9 @@ __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
   const size_t nChunks = (blockInt4s + nInt4PerChunk - 1) / nInt4PerChunk;
   size_t offsetInt4 = (rank * nInt4PerRank) + blockStartInt4;
 
+  // Initial cross-GPU synchronization
+  crossGpuBarrier(args, nPeer, myBarrierSignals, expectedSignal);
+
   int4* localInput4 = reinterpret_cast<int4*>(args.localInput);
   int4* localReduced4 = reinterpret_cast<int4*>(args.localReduced);
 
@@ -246,9 +256,9 @@ __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
     for (size_t idx = threadIdx.x; idx < chunkInt4s; idx += blockDim.x) {
       int4 data = localInput4[offsetInt4 + idx];
 
-      for (int peer = 0; peer < nranks; ++peer) {
-        if (peer == rank)
-          continue;
+#pragma unroll
+      for (size_t peerIdx = 0; peerIdx < MAX_GPUS - 1; ++peerIdx) {
+        size_t peer = (peerIdx < rank) ? peerIdx : peerIdx + 1;
         int4 val = reinterpret_cast<int4*>(
           args.remoteBufs[peer])[offsetInt4 + idx];
         data.x += val.x;
@@ -265,11 +275,9 @@ __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
     __builtin_amdgcn_s_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
 
-    // Set trigger for this chunk (absolute value = baseTrigger + chunkIdx + 1)
+    // Set trigger for this chunk (all blocks increment the same chunk flag)
     if (threadIdx.x == 0) {
-      __atomic_store_n(&args.triggerFlags[blockIdx.x],
-                       baseTrigger + static_cast<uint32_t>(chunkIdx + 1),
-                       __ATOMIC_RELEASE);
+      __atomic_fetch_add(&args.triggerFlags[chunkIdx], 1, __ATOMIC_RELAXED);
     }
 
     offsetInt4 += chunkInt4s;
@@ -282,32 +290,53 @@ __global__ void reduceAndTriggerKernel(AllreduceArgs args, int nBlocks,
 }
 
 // Helper function to program SDMA wait_flag_then_put operations for all chunks
+// Chunk-major ordering: for each chunk, transfer from all blocks
 // Returns the number of chunks processed (for incrementing expectedTrigger)
 size_t programChunkedTransfers(
   AllreduceArgs& args, std::vector<sdma_ep::SdmaQueueHostHandle>& hostHandles,
-  int myrank, int nranks, int nBlocks, uint64_t expectedSignal,
-  uint32_t baseTrigger) {
+  int myrank, int nranks, int nBlocks, uint32_t baseTrigger) {
   size_t nInt4PerRank = args.nelemsPerRank / 4;
   constexpr size_t nInt4PerChunk = (CHUNK_SIZE_KB * 1024) / sizeof(int4);
   int nPeer = nranks - 1;
-  size_t maxChunks = 0;
 
-  // For each block, program wait_flag_then_put for each chunk, then signal
+  // Calculate chunks per block
+  size_t int4PerBlock = (nInt4PerRank + nBlocks - 1) / nBlocks;
+  size_t maxChunksPerBlock = 0;
+
+  // Find maximum chunks across all blocks
   for (int b = 0; b < nBlocks; ++b) {
-    size_t int4PerBlock = (nInt4PerRank + nBlocks - 1) / nBlocks;
     size_t blockStartInt4 = b * int4PerBlock;
     size_t blockInt4s = (b == nBlocks - 1) ? (nInt4PerRank - blockStartInt4)
                                            : int4PerBlock;
+    if (blockStartInt4 >= nInt4PerRank)
+      continue;
     size_t nChunks = (blockInt4s + nInt4PerChunk - 1) / nInt4PerChunk;
-    maxChunks = (nChunks > maxChunks) ? nChunks : maxChunks;
+    maxChunksPerBlock = (nChunks > maxChunksPerBlock) ? nChunks
+                                                      : maxChunksPerBlock;
+  }
 
-    // For each peer, program all chunks then add a signal
+  // Chunk-major ordering: for each chunk, transfer from all blocks
+  for (size_t chunkIdx = 0; chunkIdx < maxChunksPerBlock; ++chunkIdx) {
+    // For each peer, program transfers for this chunk from all blocks
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == myrank)
         continue;
 
-      // Program all chunk transfers for this peer
-      for (size_t chunkIdx = 0; chunkIdx < nChunks; ++chunkIdx) {
+      bool firstPut = true;
+
+      // Transfer this chunk from all blocks to this peer
+      for (int b = 0; b < nBlocks; ++b) {
+        size_t blockStartInt4 = b * int4PerBlock;
+        size_t blockInt4s = (b == nBlocks - 1) ? (nInt4PerRank - blockStartInt4)
+                                               : int4PerBlock;
+
+        if (blockStartInt4 >= nInt4PerRank)
+          continue;
+
+        size_t nChunks = (blockInt4s + nInt4PerChunk - 1) / nInt4PerChunk;
+        if (chunkIdx >= nChunks)
+          continue; // This block doesn't have this chunk
+
         size_t chunkStartInt4 = blockStartInt4 + chunkIdx * nInt4PerChunk;
         size_t chunkInt4s = (chunkIdx == nChunks - 1)
                               ? (blockInt4s - chunkIdx * nInt4PerChunk)
@@ -319,25 +348,41 @@ size_t programChunkedTransfers(
                     chunkStartInt4 * sizeof(int4);
         size_t bytes = chunkInt4s * sizeof(int4);
 
-        // Block b's flag, waiting for chunk completion (baseTrigger + chunkIdx + 1)
-        hostHandles[peer].wait_flag_then_put(
-          &args.triggerFlags[b],
-          baseTrigger + static_cast<uint32_t>(chunkIdx + 1), src, dst, bytes);
+        if (firstPut) {
+          // First put for this chunk: wait for all blocks to complete chunk
+          hostHandles[peer].wait_flag_then_put(
+            &args.triggerFlags[chunkIdx],
+            baseTrigger + nBlocks, // Wait for all nBlocks to increment
+            src, dst, bytes);
+          firstPut = false;
+        } else {
+          // Subsequent puts: just transfer
+          hostHandles[peer].put(src, dst, bytes);
+        }
       }
-
-      // After all chunks complete, signal peer that we're done
-      int peerIdxOnMe = (peer < myrank) ? peer : peer - 1;
-      int slotIdx = b * nPeer + peerIdxOnMe;
-      hostHandles[peer].signal(args.remoteSdmaSignals[slotIdx], expectedSignal);
     }
   }
 
-  return maxChunks;
+  // Signal completion after all chunks (one signal per block per peer)
+  for (int b = 0; b < nBlocks; ++b) {
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == myrank)
+        continue;
+
+      int peerIdxOnMe = (peer < myrank) ? peer : peer - 1;
+      int slotIdx = b * nPeer + peerIdxOnMe;
+      hostHandles[peer].signal(args.remoteSdmaSignals[slotIdx],
+                               static_cast<uint64_t>(1));
+    }
+  }
+
+  return maxChunksPerBlock;
 }
 
 void runBenchmark(AllreduceArgs& args, bool deviceTriggered,
                   std::vector<sdma_ep::SdmaQueueHostHandle>& hostHandles,
-                  int warmup, int iters, int myrank, int nranks, int nBlocks) {
+                  int warmup, int iters, int myrank, int nranks, int nBlocks,
+                  size_t maxChunks) {
   size_t totalElems = args.nelemsPerRank * nranks;
   size_t startIdx = myrank * args.nelemsPerRank;
 
@@ -353,7 +398,7 @@ void runBenchmark(AllreduceArgs& args, bool deviceTriggered,
     hipMemset(args.localBarrierSignals, 0, nBlocks * nPeer * sizeof(uint64_t)));
   HIP_CHECK(
     hipMemset(args.localSdmaSignals, 0, nBlocks * nPeer * sizeof(uint64_t)));
-  HIP_CHECK(hipMemset(args.triggerFlags, 0, nBlocks * sizeof(uint32_t)));
+  HIP_CHECK(hipMemset(args.triggerFlags, 0, maxChunks * sizeof(uint32_t)));
 
   uint64_t expectedSignal = 1;
   uint32_t expectedTrigger = 0;
@@ -364,12 +409,15 @@ void runBenchmark(AllreduceArgs& args, bool deviceTriggered,
   // Warmup
   for (int i = 0; i < warmup; ++i) {
     if (deviceTriggered) {
-      // Device-triggered: host programs wait_flag_then_put for each chunk, GPU triggers
-      size_t nChunks = programChunkedTransfers(args, hostHandles, myrank, nranks, nBlocks,
-                                               expectedSignal, expectedTrigger);
+      // Device-triggered: host programs wait_flag_then_put for each chunk, GPU
+      // triggers
+      size_t nChunks = programChunkedTransfers(args, hostHandles, myrank,
+                                               nranks, nBlocks,
+                                               expectedTrigger);
       reduceAndTriggerKernel<<<nBlocks, nThreadsPerBlock>>>(args, nBlocks,
-                                                            expectedSignal, expectedTrigger);
-      expectedTrigger += nChunks;
+                                                            expectedSignal);
+      expectedTrigger += nBlocks; // Each chunk incremented nBlocks times per
+                                  // iteration
     } else {
       // Device-initiated: GPU kernel does everything
       sdmaAllreduceKernel<<<nBlocks, nThreadsPerBlock>>>(args, nBlocks,
@@ -380,6 +428,15 @@ void runBenchmark(AllreduceArgs& args, bool deviceTriggered,
   }
   HIP_CHECK(hipDeviceSynchronize());
 
+  if (deviceTriggered) {
+    for (int i = 0; i < iters; ++i) {
+      size_t nChunks = programChunkedTransfers(args, hostHandles, myrank,
+                                               nranks, nBlocks,
+                                               expectedTrigger);
+      expectedTrigger += nBlocks;
+    }
+  }
+
   MPI_Barrier(MPI_COMM_WORLD);
 
   // Timed iterations
@@ -387,12 +444,8 @@ void runBenchmark(AllreduceArgs& args, bool deviceTriggered,
 
   for (int i = 0; i < iters; ++i) {
     if (deviceTriggered) {
-      // Device-triggered: host programs wait_flag_then_put for each chunk, GPU triggers
-      size_t nChunks = programChunkedTransfers(args, hostHandles, myrank, nranks, nBlocks,
-                                               expectedSignal, expectedTrigger);
       reduceAndTriggerKernel<<<nBlocks, nThreadsPerBlock>>>(args, nBlocks,
-                                                            expectedSignal, expectedTrigger);
-      expectedTrigger += nChunks;
+                                                          expectedSignal);
     } else {
       sdmaAllreduceKernel<<<nBlocks, nThreadsPerBlock>>>(args, nBlocks,
                                                          expectedSignal);
@@ -499,7 +552,7 @@ int main(int argc, char* argv[]) {
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
 
-  // Allocate maximum size buffers (16 MB per rank)
+  // Allocate maximum size buffers (256 MB per rank)
   size_t maxElemsPerRank = (256 * 1024 * 1024) / sizeof(int);
   size_t maxTotalElems = maxElemsPerRank * nranks;
 
@@ -511,6 +564,13 @@ int main(int argc, char* argv[]) {
 
   constexpr int nBlocks = 8;
   int nPeer = nranks - 1;
+
+  // Calculate max chunks for trigger flags allocation (one flag per chunk,
+  // shared across blocks)
+  constexpr size_t nInt4PerChunk = (CHUNK_SIZE_KB * 1024) / sizeof(int4);
+  size_t maxInt4PerRank = maxElemsPerRank / 4;
+  size_t maxInt4PerBlock = (maxInt4PerRank + nBlocks - 1) / nBlocks;
+  size_t maxChunks = (maxInt4PerBlock + nInt4PerChunk - 1) / nInt4PerChunk;
 
   HIP_CHECK(hipExtMallocWithFlags((void**)&inputBuf,
                                   maxTotalElems * sizeof(int),
@@ -525,7 +585,7 @@ int main(int argc, char* argv[]) {
                                   nBlocks * nPeer * sizeof(uint64_t),
                                   hipDeviceMallocUncached));
   HIP_CHECK(hipExtMallocWithFlags((void**)&triggerFlags,
-                                  nBlocks * sizeof(uint32_t),
+                                  maxChunks * sizeof(uint32_t),
                                   hipDeviceMallocUncached));
 
   // Initialize input
@@ -683,7 +743,7 @@ int main(int argc, char* argv[]) {
   delete[] hostSdmaPtrs;
 
   // Sweep power-of-2 sizes from 4 KB to 16 MB
-  for (size_t sizeBytes = 256 * 1024 * 1024; sizeBytes <= 256 * 1024 * 1024;
+  for (size_t sizeBytes = 4 * 1024; sizeBytes <= 256 * 1024 * 1024;
        sizeBytes *= 2) {
     size_t totalElems = sizeBytes / sizeof(int);
     size_t nelemsPerRank = totalElems / nranks;
@@ -691,7 +751,7 @@ int main(int argc, char* argv[]) {
     args.nelemsPerRank = nelemsPerRank;
 
     runBenchmark(args, deviceTriggered, hostHandles, warmup, iters, myrank,
-                 nranks, nBlocks);
+                 nranks, nBlocks, maxChunks);
 
     MPI_Barrier(MPI_COMM_WORLD);
   }
