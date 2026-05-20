@@ -1,7 +1,5 @@
 # Python bindings for SDMA endpoint
 
-cmake_minimum_required(VERSION 3.25)
-
 # Find Python
 find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module)
 
@@ -30,13 +28,18 @@ target_include_directories(sdma_ep_py PRIVATE
   ${hsa-runtime64_INCLUDE_DIRS}
 )
 
-# Link libraries
+# Link rocm-xio library file directly to avoid inheriting HIP device flags
+# (--offload-arch, --hip-link) from its INTERFACE dependencies, which break
+# pure C++ compilation. Runtime dependencies added explicitly.
 target_link_libraries(sdma_ep_py PRIVATE
-  rocm-xio
+  $<TARGET_FILE:rocm-xio>
   hip::host
   hsa-runtime64::hsa-runtime64
   hsakmt::hsakmt
 )
+
+# Ensure rocm-xio is built before the Python extension
+add_dependencies(sdma_ep_py rocm-xio)
 
 # Install to xio.sdma_ep package directory
 install(TARGETS sdma_ep_py
