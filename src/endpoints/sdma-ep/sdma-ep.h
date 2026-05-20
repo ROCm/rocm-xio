@@ -22,9 +22,6 @@
 #include <string>
 #include <vector>
 
-#include <hip/hip_ext.h>
-#include <hip/hip_runtime.h>
-
 // Forward declarations to avoid circular dependency
 namespace xio {
 namespace sdma_ep {
@@ -133,7 +130,7 @@ static_assert(
  *
  * @return 0 on success, negative error code on failure.
  */
-__host__ int initEndpoint();
+int initEndpoint();
 
 /**
  * @brief Mark the SDMA endpoint subsystem as inactive.
@@ -152,7 +149,7 @@ __host__ int initEndpoint();
  *       shutdownEndpoint() re-enables the flag but
  *       does not re-run HSA/KFD initialization.
  */
-__host__ void shutdownEndpoint();
+void shutdownEndpoint();
 
 /**
  * @brief Create an SDMA queue for a GPU pair.
@@ -171,7 +168,7 @@ __host__ void shutdownEndpoint();
  * @param info        Output queue information.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
+int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
 
 /**
  * @brief Create a host-initiated SDMA queue for a GPU pair.
@@ -188,8 +185,8 @@ __host__ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
  * @param info        Output queue information (deviceHandle will be nullptr).
  * @return 0 on success, negative error code on failure.
  */
-__host__ int createHostQueue(int srcDeviceId, int dstDeviceId,
-                             SdmaQueueInfo* info);
+int createHostQueue(int srcDeviceId, int dstDeviceId,
+                    SdmaQueueInfo* info);
 
 /**
  * @brief Initialize a device-initiated SDMA queue (idempotent).
@@ -202,7 +199,7 @@ __host__ int createHostQueue(int srcDeviceId, int dstDeviceId,
  * @param dstDeviceId Destination HIP device ID.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int initQueue(int srcDeviceId, int dstDeviceId);
+int initQueue(int srcDeviceId, int dstDeviceId);
 
 /**
  * @brief Initialize a host-initiated SDMA queue (idempotent).
@@ -215,7 +212,7 @@ __host__ int initQueue(int srcDeviceId, int dstDeviceId);
  * @param dstDeviceId Destination HIP device ID.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int initHostQueue(int srcDeviceId, int dstDeviceId);
+int initHostQueue(int srcDeviceId, int dstDeviceId);
 
 /**
  * @brief Destroy an SDMA queue.
@@ -228,10 +225,10 @@ __host__ int initHostQueue(int srcDeviceId, int dstDeviceId);
  *             The deviceHandle becomes invalid after
  *             this call.
  */
-__host__ void destroyQueue(SdmaQueueInfo* info);
+void destroyQueue(SdmaQueueInfo* info);
 
-__host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
-                                                         int dstDeviceId);
+SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
+                                                int dstDeviceId);
 
 /**
  * @brief Get a host handle for SDMA operations.
@@ -248,8 +245,8 @@ __host__ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
  * @note The corresponding queue must have been created with
  *       createHostQueue() first.
  */
-__host__ SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId,
-                                           int channelIdx = 0);
+SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId,
+                                  int channelIdx = 0);
 
 } // namespace sdma_ep
 } // namespace xio

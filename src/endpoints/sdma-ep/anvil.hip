@@ -310,13 +310,13 @@ xio::sdma_ep::SdmaQueuePythonDeviceCtx SdmaQueue::pythonDeviceContext() const {
   if (deviceHandle_ == nullptr) {
     throw std::runtime_error("pythonDeviceContext() called on host-only queue");
   }
-  return {.queueBuf = reinterpret_cast<uintptr_t>(deviceHandle_->queueBuf),
-          .rptr = reinterpret_cast<uintptr_t>(deviceHandle_->rptr),
-          .wptr = reinterpret_cast<uintptr_t>(deviceHandle_->wptr),
-          .doorbell = reinterpret_cast<uintptr_t>(deviceHandle_->doorbell),
-          .cachedWptr = reinterpret_cast<uintptr_t>(deviceHandle_->cachedWptr),
-          .committedWptr = reinterpret_cast<uintptr_t>(
-            deviceHandle_->committedWptr)};
+
+  return {.queueBuf = reinterpret_cast<uintptr_t>(queueBuffer_),
+          .rptr = reinterpret_cast<uintptr_t>(queue_.Queue_read_ptr_aql),
+          .wptr = reinterpret_cast<uintptr_t>(queue_.Queue_write_ptr_aql),
+          .doorbell = reinterpret_cast<uintptr_t>(queue_.Queue_DoorBell_aql),
+          .cachedWptr = reinterpret_cast<uintptr_t>(cachedWptr_),
+          .committedWptr = reinterpret_cast<uintptr_t>(committedWptr_)};
 }
 
 xio::sdma_ep::SdmaQueueHostHandle SdmaQueue::hostHandle() {

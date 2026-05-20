@@ -355,22 +355,22 @@ setup API:
 
 .. code-block:: cpp
 
-   #include "sdma_host.hpp"
-   #include "sdma_device.hpp"
+   #include "endpoints/sdma-ep/sdma-ep.h"
+   #include "endpoints/sdma-ep/sdma_device.hpp"
+   #include "xio.h"
 
    // 1. Initialize the SDMA subsystem (HSA + KFD)
    sdma_ep::initEndpoint();
 
-   // 2. Create a connection (peer access + engine)
-   sdma_ep::SdmaConnectionInfo conn;
-   sdma_ep::createConnection(0, 1, &conn);
+   // 2. Enable peer access between GPUs
+   xio::enablePeerAccess(0, 1);
 
    // 3. Create an SDMA queue
-   sdma_ep::SdmaQueueInfo qInfo;
+   sdma_ep::SdmaQueueInfo qInfo = {};
    sdma_ep::createQueue(0, 1, &qInfo);
 
    // Pass qInfo.deviceHandle to your GPU kernel
-   myKernel<<<1,1>>>(
+   hipLaunchKernelGGL(myKernel, dim3(1), dim3(1), 0, nullptr,
      static_cast<sdma_ep::SdmaQueueHandle*>(
        qInfo.deviceHandle),
      dst, src, size);

@@ -18,11 +18,6 @@ FetchContent_MakeAvailable(nanobind)
 # Create Python extension module
 nanobind_add_module(sdma_ep_py sdma_ep_py.cpp)
 
-# Set compiler to hipcc
-set_target_properties(sdma_ep_py PROPERTIES
-  CXX_COMPILER ${CMAKE_CXX_COMPILER}
-)
-
 # Find HIP, HSA, and hsakmt
 find_package(HIP REQUIRED)
 find_package(hsa-runtime64 REQUIRED HINTS /opt/rocm)

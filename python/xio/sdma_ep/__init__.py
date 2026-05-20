@@ -18,7 +18,6 @@ __all__ = [
     # Module-level functions
     'init',
     'shutdown',
-    'create_connection',
     'create_queue',
     'create_host_queue',
     'get_queue_device_ctx',
