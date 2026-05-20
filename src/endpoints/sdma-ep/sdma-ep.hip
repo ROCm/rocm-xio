@@ -17,37 +17,6 @@
 #include "sdma-ep.h"
 #include "xio.h"
 
-// Discard HIP return values in cleanup paths to satisfy nodiscard
-static void ignoreHip(hipError_t e) {
-  (void)e;
-}
-
-// LFSR for deterministic fill/verify: 32-bit maximal-length (polynomial
-// x^32+x^22+x^2+x+1). Seed advances per iteration so each transfer chunk is
-// verifiable.
-static constexpr uint32_t kLfsrSeed = 0x12345678u;
-
-static inline uint32_t lfsr_next(uint32_t s) {
-  const uint32_t tap = 0x80200003u;
-  return (s >> 1) ^ ((s & 1u) ? tap : 0u);
-}
-
-static inline uint32_t lfsr_advance(uint32_t s, unsigned n) {
-  for (unsigned i = 0; i < n; i++)
-    s = lfsr_next(s);
-  return s;
-}
-
-// Fill size bytes (must be multiple of 4) with LFSR output starting at state.
-static void lfsr_fill_chunk(void* buf, size_t size, uint32_t state) {
-  uint32_t* p = static_cast<uint32_t*>(buf);
-  size_t n = size / sizeof(uint32_t);
-  for (size_t i = 0; i < n; i++) {
-    p[i] = state;
-    state = lfsr_next(state);
-  }
-}
-
 namespace xio {
 namespace sdma_ep {
 

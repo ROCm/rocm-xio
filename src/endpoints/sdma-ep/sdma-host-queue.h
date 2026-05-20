@@ -32,14 +32,14 @@ public:
   }
 
   // Host-initiated SDMA operations
-  void put(void* src, void* dst, size_t size);
+  void put(void* dst, void* src, size_t size);
 
   template <typename T>
   void signal(T* ptr, T value);
 
   // Combined put + atomic_add in one SDMA submission (linear memory)
   template <typename T>
-  void put_signal(void* src, void* dst, size_t size, T* flag_ptr, T flag_value);
+  void put_signal(void* dst, void* src, size_t size, T* flag_ptr, T flag_value);
 
   void put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride);
 
@@ -61,7 +61,7 @@ public:
 
   // Wait on flag, then perform put (POLL + COPY in one submission)
   template <typename T>
-  void wait_flag_then_put(T* flag_ptr, T expected_value, void* src, void* dst,
+  void wait_flag_then_put(T* flag_ptr, T expected_value, void* dst, void* src,
                           size_t size);
 
   // Wait on flag, then perform put_tile (POLL + SUB_WINDOW_COPY in one

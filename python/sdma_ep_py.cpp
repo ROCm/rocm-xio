@@ -65,7 +65,7 @@ void register_sdma_ep(nb::module_& m) {
     [](int srcDevice, int dstDevice, int channelIdx, uintptr_t src,
        uintptr_t dst, size_t size) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
-      handle.put(reinterpret_cast<void*>(src), reinterpret_cast<void*>(dst),
+      handle.put(reinterpret_cast<void*>(dst), reinterpret_cast<void*>(src),
                  size);
     },
     "src_device"_a, "dst_device"_a, "channel_idx"_a, "src"_a, "dst"_a, "size"_a,
@@ -78,13 +78,13 @@ void register_sdma_ep(nb::module_& m) {
        int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
-        handle.put_signal(reinterpret_cast<void*>(src),
-                          reinterpret_cast<void*>(dst), size,
+        handle.put_signal(reinterpret_cast<void*>(dst),
+                          reinterpret_cast<void*>(src), size,
                           reinterpret_cast<uint32_t*>(flag_ptr),
                           static_cast<uint32_t>(flag_value));
       } else if (flag_bits == 64) {
-        handle.put_signal(reinterpret_cast<void*>(src),
-                          reinterpret_cast<void*>(dst), size,
+        handle.put_signal(reinterpret_cast<void*>(dst),
+                          reinterpret_cast<void*>(src), size,
                           reinterpret_cast<uint64_t*>(flag_ptr), flag_value);
       } else {
         throw std::invalid_argument("put_signal: flag_bits must be 32 or 64");

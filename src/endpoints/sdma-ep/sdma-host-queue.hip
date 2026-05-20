@@ -212,7 +212,7 @@ void SdmaQueueHostHandle::submitPacket(uint64_t base, uint64_t pending_wptr) {
   queue->hostCommittedWptr_.store(pending_wptr, std::memory_order_release);
 }
 
-void SdmaQueueHostHandle::put(void* src, void* dst, size_t size) {
+void SdmaQueueHostHandle::put(void* dst, void* src, size_t size) {
   validate_linear_args(src, dst, size, "put");
   submit({packets::CopyLinearPacket(src, dst, size)});
 }
@@ -233,7 +233,7 @@ void SdmaQueueHostHandle::timestamp(uint64_t* timestamp_ptr) {
 }
 
 template <typename T>
-void SdmaQueueHostHandle::put_signal(void* src, void* dst, size_t size,
+void SdmaQueueHostHandle::put_signal(void* dst, void* src, size_t size,
                                      T* flag_ptr, T flag_value) {
   validate_linear_args(src, dst, size, "put_signal");
 
@@ -309,11 +309,11 @@ template void SdmaQueueHostHandle::signal<uint32_t>(uint32_t* ptr,
 template void SdmaQueueHostHandle::signal<uint64_t>(uint64_t* ptr,
                                                     uint64_t value);
 
-template void SdmaQueueHostHandle::put_signal<uint32_t>(void* src, void* dst,
+template void SdmaQueueHostHandle::put_signal<uint32_t>(void* dst, void* src,
                                                         size_t size,
                                                         uint32_t* flag_ptr,
                                                         uint32_t flag_value);
-template void SdmaQueueHostHandle::put_signal<uint64_t>(void* src, void* dst,
+template void SdmaQueueHostHandle::put_signal<uint64_t>(void* dst, void* src,
                                                         size_t size,
                                                         uint64_t* flag_ptr,
                                                         uint64_t flag_value);
@@ -336,7 +336,7 @@ template void SdmaQueueHostHandle::put_tiles_signal<uint64_t>(
 
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value,
-                                             void* src, void* dst,
+                                             void* dst, void* src,
                                              size_t size) {
   validate_linear_args(src, dst, size, "wait_flag_then_put");
 
@@ -384,7 +384,7 @@ void SdmaQueueHostHandle::wait_flag_then_put_tiles(
 
 // Explicit template instantiations
 template void SdmaQueueHostHandle::wait_flag_then_put<uint32_t>(
-  uint32_t* flag_ptr, uint32_t expected_value, void* src, void* dst,
+  uint32_t* flag_ptr, uint32_t expected_value, void* dst, void* src,
   size_t size);
 
 template void SdmaQueueHostHandle::wait_flag_then_put_tile<uint32_t>(

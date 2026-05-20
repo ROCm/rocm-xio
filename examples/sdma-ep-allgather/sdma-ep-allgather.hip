@@ -273,7 +273,7 @@ int main(int argc, char* argv[]) {
       char* dst = static_cast<char*>(args.remoteDst[peer]) +
                   static_cast<size_t>(myrank) * chunkBytes;
 
-      hostHandles[peer].put_signal(args.localInput, dst, chunkBytes,
+      hostHandles[peer].put_signal(dst, args.localInput, chunkBytes,
                                    args.remoteSignals[peer] + myrank,
                                    static_cast<uint64_t>(1));
     }
