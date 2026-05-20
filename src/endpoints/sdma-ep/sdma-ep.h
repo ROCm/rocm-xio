@@ -185,8 +185,7 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
  * @param info        Output queue information (deviceHandle will be nullptr).
  * @return 0 on success, negative error code on failure.
  */
-int createHostQueue(int srcDeviceId, int dstDeviceId,
-                    SdmaQueueInfo* info);
+int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info);
 
 /**
  * @brief Initialize a device-initiated SDMA queue (idempotent).
