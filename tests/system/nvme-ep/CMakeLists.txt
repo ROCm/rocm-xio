@@ -80,7 +80,7 @@ xio_add_script_test(
   NAME nvme-verify-rand-host-mem
   SCRIPT ${_verify_wrapper}
   LABELS hardware nvme verify
-  TIMEOUT 30
+  TIMEOUT 120
   ARGS ${_rand_script}
   ENVIRONMENT
     "MEMORY_MODE=0"
@@ -93,7 +93,7 @@ xio_add_script_test(
   NAME nvme-verify-rand-device-mem
   SCRIPT ${_verify_wrapper}
   LABELS hardware nvme verify
-  TIMEOUT 30
+  TIMEOUT 120
   ARGS ${_rand_script}
   ENVIRONMENT
     "MEMORY_MODE=8"
@@ -283,6 +283,45 @@ xio_add_script_test(
     "XIO_TESTER=${_xio_tester}"
 )
 
+# --- Per-command I/O strictly greater than 8 KiB ----------
+# Most verify tests above use 1 or 8 LBAs per command (8 * 512 B = 4 KiB
+# on 512-byte namespaces), which does not span more than two 4 KiB PRP
+# pages.  BLOCKS_PER_CMD=20 yields 20 * 512 B = 10240 B (> 8192 B) on
+# typical 512e/512 namespaces; on 4 KiB LBAs the transfer is even larger.
+# Inline --verify tests use --lbas-per-io 20 for the same guarantee.
+
+xio_add_script_test(
+  NAME nvme-verify-seq-host-mem-gt8k
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 120
+  ARGS ${_seq_script}
+  ENVIRONMENT
+    "MEMORY_MODE=0"
+    "WRITE_IO=4"
+    "BLOCKS_PER_CMD=20"
+    "LFSR_SEED=0xD001"
+    "BASE_LBA=2048"
+    "USE_PCI_MMIO_BRIDGE=0"
+    "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-seq-device-mem-gt8k
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 120
+  ARGS ${_seq_script}
+  ENVIRONMENT
+    "MEMORY_MODE=8"
+    "WRITE_IO=4"
+    "BLOCKS_PER_CMD=20"
+    "LFSR_SEED=0xD002"
+    "BASE_LBA=2048"
+    "USE_PCI_MMIO_BRIDGE=0"
+    "XIO_TESTER=${_xio_tester}"
+)
+
 # --- Inline read-back verification (--verify) ----------
 # Write-then-read with LFSR verification in a single
 # xio-tester invocation.  Requires --batch-size 1
@@ -335,6 +374,32 @@ xio_add_script_test(
     --write-io 8 --read-io 8
     --queue-length 128
     --data-buffer-size 524288 --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-gt8k-host-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 60
+  ARGS --access-pattern sequential -m 0
+    --lbas-per-io 20 --lfsr-seed 0xB1
+    --write-io 8 --read-io 8
+    --queue-length 128
+    --data-buffer-size 2097152 --verify
+  ENVIRONMENT "XIO_TESTER=${_xio_tester}"
+)
+
+xio_add_script_test(
+  NAME nvme-verify-inline-gt8k-device-mem
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 60
+  ARGS --access-pattern sequential -m 8
+    --lbas-per-io 20 --lfsr-seed 0xB2
+    --write-io 8 --read-io 8
+    --queue-length 128 --less-timing
+    --data-buffer-size 2097152 --verify
   ENVIRONMENT "XIO_TESTER=${_xio_tester}"
 )
 

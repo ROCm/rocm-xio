@@ -839,10 +839,17 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
+    (void)xio::clearHipLaunchError("sdma-ep", "sdma_p2p_kernel", 0);
     hipLaunchKernelGGL(sdma_p2p_kernel, dim3(numBlocks), dim3(threadsPerBlock),
                        0, 0, sdmaHandles[0], dstBuf, srcBuf, transferSize,
                        config->iterations, signals[0][0], config->startTimes,
                        config->endTimes, config->stopRequested);
+    err = xio::checkHipLaunchError("sdma-ep", "sdma_p2p_kernel", 0, numBlocks,
+                                   threadsPerBlock, 0, nullptr);
+    if (err != hipSuccess) {
+      cleanupAll();
+      return err;
+    }
   } else if (testType == "buffer-reuse") {
     // For buffer-reuse kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -854,12 +861,19 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
+    (void)xio::clearHipLaunchError("sdma-ep", "sdma_buffer_reuse_kernel", 0);
     hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
                        srcBuf, nElem, config->iterations, signals[0],
                        /*rank*/ 0, counter0, useCounter, useFlush,
                        config->startTimes, config->endTimes,
                        config->stopRequested);
+    err = xio::checkHipLaunchError("sdma-ep", "sdma_buffer_reuse_kernel", 0,
+                                   numBlocks, threadsPerBlock, 0, nullptr);
+    if (err != hipSuccess) {
+      cleanupAll();
+      return err;
+    }
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -869,12 +883,19 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
+    (void)xio::clearHipLaunchError("sdma-ep", "sdma_buffer_reuse_kernel", 1);
     hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
                        dstBuf, nElem, config->iterations, signals[1],
                        /*rank*/ 1, counter1, useCounter, useFlush,
                        config->startTimes, config->endTimes,
                        config->stopRequested);
+    err = xio::checkHipLaunchError("sdma-ep", "sdma_buffer_reuse_kernel", 1,
+                                   numBlocks, threadsPerBlock, 0, nullptr);
+    if (err != hipSuccess) {
+      cleanupAll();
+      return err;
+    }
   } else if (testType == "ping-pong") {
     // For ping-pong kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -886,12 +907,19 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
+    (void)xio::clearHipLaunchError("sdma-ep", "sdma_ping_pong_kernel", 0);
     hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
                        srcBuf, nElem, config->iterations, signals[0],
                        /*rank*/ 0, counter0, useCounter, useFlush,
                        config->startTimes, config->endTimes,
                        config->stopRequested);
+    err = xio::checkHipLaunchError("sdma-ep", "sdma_ping_pong_kernel", 0,
+                                   numBlocks, threadsPerBlock, 0, nullptr);
+    if (err != hipSuccess) {
+      cleanupAll();
+      return err;
+    }
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -901,24 +929,23 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
+    (void)xio::clearHipLaunchError("sdma-ep", "sdma_ping_pong_kernel", 1);
     hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
                        dstBuf, nElem, config->iterations, signals[1],
                        /*rank*/ 1, counter1, useCounter, useFlush,
                        config->startTimes, config->endTimes,
                        config->stopRequested);
+    err = xio::checkHipLaunchError("sdma-ep", "sdma_ping_pong_kernel", 1,
+                                   numBlocks, threadsPerBlock, 0, nullptr);
+    if (err != hipSuccess) {
+      cleanupAll();
+      return err;
+    }
   } else {
     std::cerr << "Unknown test type: " << testType << std::endl;
     cleanupAll();
     return hipErrorInvalidValue;
-  }
-
-  err = hipGetLastError();
-  if (err != hipSuccess) {
-    std::cerr << "Kernel launch failed: " << hipGetErrorString(err)
-              << std::endl;
-    cleanupAll();
-    return err;
   }
 
   // Wait for kernel to complete
@@ -929,7 +956,7 @@ hipError_t run(XioEndpointConfig* config) {
     cleanupAll();
     return err;
   }
-  err = hipDeviceSynchronize();
+  err = xio::syncHipKernel("sdma-ep", testType.c_str(), 0, nullptr);
   if (err != hipSuccess) {
     std::cerr << "Device sync on srcGpu failed: " << hipGetErrorString(err)
               << std::endl;
@@ -946,7 +973,7 @@ hipError_t run(XioEndpointConfig* config) {
       cleanupAll();
       return err;
     }
-    err = hipDeviceSynchronize();
+    err = xio::syncHipKernel("sdma-ep", testType.c_str(), 1, nullptr);
     if (err != hipSuccess) {
       std::cerr << "Device sync on dstGpu failed: " << hipGetErrorString(err)
                 << std::endl;

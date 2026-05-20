@@ -1,0 +1,79 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Runs every CTest that does not require dedicated hardware or a HIP GPU.
+# Use a single --label-exclude regex: CMake treats multiple --label-exclude
+# flags as AND (a test is dropped only if it matches every pattern), so
+# separate -LE hardware -LE system would still run hardware-only and system-only
+# tests. See tests/CMakeLists.txt for the label convention.
+
+name: ctest-no-hardware
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - '**.hip'
+      - '**.cpp'
+      - '**.c'
+      - '**.h'
+      - '**.hpp'
+      - '**.cc'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - 'Makefile'
+      - 'tests/**'
+
+jobs:
+  ctest-no-hardware:
+    name: CTest (no hardware / no GPU)
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      HSA_FORCE_FINE_GRAIN_PCIE: '1'
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5.0.0
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            cmake \
+            curl \
+            libcli11-dev \
+            libdrm-dev \
+            libopenmpi-dev \
+            openmpi-bin
+
+      - name: Configure and build
+        run: |
+          mkdir -p build && cd build
+          cmake -DOFFLOAD_ARCH=gfx942:xnack+ \
+            -DROCM_PATH=/opt/rocm \
+            -DBUILD_TESTING=ON ..
+          cmake --build . --target all -j "$(nproc)"
+        env:
+          CLANGXX: /opt/rocm/llvm/bin/clang++
+
+      - name: Run CTests (--label-exclude hardware|system)
+        # Includes test-ep emulate binaries and test-ep-cli-* wrappers
+        # (labels test-ep / cli; no hardware or system label).
+        run: |
+          ctest --test-dir "${GITHUB_WORKSPACE}/build" -V \
+            --label-exclude 'hardware|system' \
+            --resource-spec-file "${GITHUB_WORKSPACE}/build/ctest-resources.json" \
+            --parallel "$(nproc)" \
+            --output-on-failure

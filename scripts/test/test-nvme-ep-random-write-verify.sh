@@ -175,6 +175,9 @@ $XIO_TESTER --dump-pattern "$EXPECTED_BUF" \
     --dump-pattern-block-size "$LBA_SIZE" \
     --dump-pattern-offset 0 2>/dev/null
 
+# Quiesce before namespace readback in Step 3.
+sleep 5
+
 echo "Step 3: Computing LBAs and verifying..."
 
 python3 << PYEOF

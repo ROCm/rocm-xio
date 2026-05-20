@@ -78,8 +78,14 @@ sdma
 SHMEM
 subnet
 TCP
+tcp
 XGMI
 xgmierr
+
+# ===== CLI and environment helpers (docs / tests) =====
+getEnvInt
+getEnvStr
+subcommand
 
 # ===== MPI and Collectives =====
 allgather
@@ -986,6 +992,15 @@ listAvailableEndpoints
 loadKernelModule
 mapPciBar
 nvmeBufferParams
+nvmePrpListDmaSlotIndex
+nvmePrpListWordOffset
+nvmePrpSlotsPerBatchVal
+batchIdx
+isWrite
+params
+prpListDmaForSlot
+prpListEntriesPerPage
+prpSlotsPerBatch
 nvmeDoorbellParams
 nvmeEpConfig
 nvmeIoParams
@@ -1016,6 +1031,31 @@ XioSubstepStats
 xioBufferInfo
 xioQueueSetup
 XioTimingStats
+
+# ===== test-ep docs and identifiers (HIP / API spellings) =====
+GoogleTest
+cpuTime
+cqeEqual
+dataPattern
+delayNs
+doVerify
+endTimes
+hipInit
+invariants
+launchCpuThreads
+memoryMode
+multithread
+numThreads
+poller
+pollers
+sigint
+sqeEqual
+startTimes
+substepStats
+timingStats
+verifyFail
+verifyPass
+XioComDequeue
 
 # ===== VM Testing Infrastructure Terms =====
 XIOVirtualMachine

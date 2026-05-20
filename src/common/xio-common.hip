@@ -133,6 +133,48 @@ void printGpuDeviceDetails(int deviceId) {
   }
 }
 
+__host__ hipError_t clearHipLaunchError(const char* endpoint,
+                                        const char* kernel, uint32_t queue_id) {
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_WARN("%s: cleared stale HIP error before %s "
+                    "launch for queue %u: %s (code: %d)\n",
+                    endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                    queue_id, hipGetErrorString(err), err);
+  }
+  return err;
+}
+
+__host__ hipError_t checkHipLaunchError(const char* endpoint,
+                                        const char* kernel, uint32_t queue_id,
+                                        unsigned blocks, unsigned threads,
+                                        size_t shmem_bytes,
+                                        hipStream_t stream) {
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_ERROR("%s: %s launch failed for queue %u "
+                     "(blocks=%u, threads=%u, shmem=%zu, stream=%p): "
+                     "%s (code: %d)\n",
+                     endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                     queue_id, blocks, threads, shmem_bytes, (void*)stream,
+                     hipGetErrorString(err), err);
+  }
+  return err;
+}
+
+__host__ hipError_t syncHipKernel(const char* endpoint, const char* kernel,
+                                  uint32_t queue_id, hipStream_t stream) {
+  hipError_t err = stream ? hipStreamSynchronize(stream)
+                          : hipDeviceSynchronize();
+  if (err != hipSuccess) {
+    ROCXIO_LOG_ERROR("%s: %s sync failed for queue %u "
+                     "(stream=%p): %s (code: %d)\n",
+                     endpoint ? endpoint : "xio", kernel ? kernel : "kernel",
+                     queue_id, (void*)stream, hipGetErrorString(err), err);
+  }
+  return err;
+}
+
 void printStatistics(const std::vector<double>& durations,
                      unsigned totalIterations, unsigned numThreads,
                      unsigned readIterations, unsigned writeIterations,

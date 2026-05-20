@@ -33,7 +33,11 @@ static std::string transferSizeTransform(std::string& s) {
     return "Invalid transfer size (missing number)";
   unsigned long long num = 0;
   try {
-    num = std::stoull(val, nullptr, 0);
+    size_t pos = 0;
+    num = std::stoull(val, &pos, 0);
+    if (pos != val.size()) {
+      return "Transfer size must be a number (e.g. 4096 or 1M)";
+    }
   } catch (...) {
     return "Transfer size must be a number (e.g. 4096 or 1M)";
   }

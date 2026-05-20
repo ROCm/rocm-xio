@@ -7,6 +7,7 @@
 #define XIO_H
 
 #include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -137,6 +138,56 @@ std::string getModelName(int deviceId);
  * @param deviceId HIP device identifier.
  */
 void printGpuDeviceDetails(int deviceId);
+
+/**
+ * @brief Clear and report any pending HIP launch error before a kernel launch.
+ *
+ * HIP records some launch/setup failures asynchronously in per-thread runtime
+ * state. Calling this immediately before a launch prevents stale failures from
+ * being attributed to the next kernel. A non-success return is diagnostic only;
+ * callers normally continue to launch after this helper returns.
+ *
+ * @param endpoint Endpoint name used in the diagnostic message.
+ * @param kernel Kernel name used in the diagnostic message.
+ * @param queue_id Logical queue identifier for the launch.
+ * @return The stale HIP status that was cleared, or hipSuccess.
+ */
+__host__ hipError_t clearHipLaunchError(const char* endpoint,
+                                        const char* kernel, uint32_t queue_id);
+
+/**
+ * @brief Check and report the HIP status for the most recent kernel launch.
+ *
+ * Call this immediately after hipLaunchKernelGGL() and before synchronization.
+ * The helper reports the endpoint, kernel, logical queue id, launch dimensions,
+ * dynamic shared memory, and stream so launch-configuration failures are
+ * reported near their source instead of surfacing later at synchronization.
+ *
+ * @param endpoint Endpoint name used in the diagnostic message.
+ * @param kernel Kernel name used in the diagnostic message.
+ * @param queue_id Logical queue identifier for the launch.
+ * @param blocks Number of blocks requested by the launch.
+ * @param threads Number of threads per block requested by the launch.
+ * @param shmem_bytes Dynamic shared memory bytes requested by the launch.
+ * @param stream HIP stream used for the launch, or nullptr for default stream.
+ * @return hipSuccess when the launch was accepted, otherwise the HIP error.
+ */
+__host__ hipError_t checkHipLaunchError(const char* endpoint,
+                                        const char* kernel, uint32_t queue_id,
+                                        unsigned blocks, unsigned threads,
+                                        size_t shmem_bytes, hipStream_t stream);
+
+/**
+ * @brief Synchronize after a kernel launch and log failures.
+ *
+ * @param endpoint Endpoint name used in the diagnostic message.
+ * @param kernel Kernel name used in the diagnostic message.
+ * @param queue_id Logical queue identifier for the launched kernel.
+ * @param stream HIP stream to synchronize, or nullptr for default stream.
+ * @return hipSuccess when synchronization succeeds, otherwise the HIP error.
+ */
+__host__ hipError_t syncHipKernel(const char* endpoint, const char* kernel,
+                                  uint32_t queue_id, hipStream_t stream);
 
 /**
  * @brief Print timing statistics from duration data.

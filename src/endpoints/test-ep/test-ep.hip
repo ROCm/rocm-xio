@@ -591,6 +591,28 @@ __global__ void endpoint_kernel(
   }
 }
 
+namespace {
+
+// Doorbell-mode CPU emulation shares these counters across threads.
+// They must be reset in run() before any emulation thread starts; otherwise
+// peers can increment iterStartCount before thread 0's late reset (deadlock
+// under scheduler preemption, seen as test-ep-emulate-doorbell timeouts).
+std::atomic<uint32_t> emulateDoorbellGlobalSeq{0};
+std::atomic<uint32_t> emulateDoorbellBarrierCounter{0};
+std::atomic<uint32_t> emulateDoorbellBarrierGeneration{0};
+std::atomic<uint32_t> emulateDoorbellIterStartCount{0};
+std::atomic<uint32_t> emulateDoorbellIterStartGen{0};
+
+void resetEmulateDoorbellSyncState() {
+  emulateDoorbellGlobalSeq.store(0, std::memory_order_relaxed);
+  emulateDoorbellBarrierCounter.store(0, std::memory_order_relaxed);
+  emulateDoorbellBarrierGeneration.store(0, std::memory_order_relaxed);
+  emulateDoorbellIterStartCount.store(0, std::memory_order_relaxed);
+  emulateDoorbellIterStartGen.store(0, std::memory_order_relaxed);
+}
+
+} // namespace
+
 // CPU emulation of endpoint kernel - runs kernel logic on CPU threads
 static void endpoint_kernel_cpu_emulate(
   sqeType* sqePtr, cqeType* cqePtr, unsigned long long int* startTimes,
@@ -622,21 +644,29 @@ static void endpoint_kernel_cpu_emulate(
   uint64_t lastCpuTime = 0;
 
   if (doorbellMode) {
-    // Doorbell mode: write SQEs to circular queue and ring doorbell
-    // Use atomic counter for sequence numbers across all threads
-    // Note: This is per-thread-call, so we need to synchronize initialization
-    static std::atomic<uint32_t> globalSeq{0};
-    // Use a barrier to synchronize threads before doorbell updates
-    static std::atomic<uint32_t> barrierCounter{0};
-    static std::atomic<uint32_t> barrierGeneration{0};
-    // Reset sequence counter at start of first iteration for first thread
-    if (threadId == 0 && iterations > 0) {
-      globalSeq.store(0, std::memory_order_relaxed);
-      barrierCounter.store(0, std::memory_order_relaxed);
-      barrierGeneration.store(0, std::memory_order_relaxed);
-    }
+    // Doorbell mode: write SQEs to circular queue and ring doorbell.
+    // Shared atomics are reset in run() before threads start (see
+    // resetEmulateDoorbellSyncState); static locals here raced with peer
+    // threads entering the loop before thread 0 reset (CI timeouts).
 
     for (unsigned i = 0; i < iterations; ++i) {
+      {
+        uint32_t gs = emulateDoorbellIterStartGen.load(
+          std::memory_order_acquire);
+        uint32_t c = emulateDoorbellIterStartCount.fetch_add(
+                       1, std::memory_order_acq_rel) +
+                     1;
+        if (c == numThreads) {
+          emulateDoorbellIterStartCount.store(0, std::memory_order_release);
+          emulateDoorbellIterStartGen.store(gs + 1, std::memory_order_release);
+        } else {
+          while (emulateDoorbellIterStartGen.load(std::memory_order_acquire) ==
+                 gs) {
+            std::this_thread::yield();
+          }
+        }
+      }
+
       // Record start time for this iteration (when SQE is posted)
       // Use CPU time instead of GPU wall clock in emulation mode
       uint64_t pollStartTime = getCpuTime();
@@ -672,7 +702,7 @@ static void endpoint_kernel_cpu_emulate(
       }
 
       // Get next sequence number atomically
-      uint32_t seq = globalSeq.fetch_add(1);
+      uint32_t seq = emulateDoorbellGlobalSeq.fetch_add(1);
       unsigned sqeIndex = seq % queueSize;
 
       // Write SQE
@@ -681,24 +711,29 @@ static void endpoint_kernel_cpu_emulate(
 
       // Barrier: wait for all threads to write their SQEs before ringing
       // doorbell Use a simple counter-based barrier optimized for low latency
-      uint32_t gen = barrierGeneration.load(std::memory_order_acquire);
-      uint32_t count = barrierCounter.fetch_add(1, std::memory_order_acq_rel) +
-                       1;
+      uint32_t gen = emulateDoorbellBarrierGeneration.load(
+        std::memory_order_acquire);
+      uint32_t count =
+        emulateDoorbellBarrierCounter.fetch_add(1, std::memory_order_acq_rel) +
+        1;
       if (count == numThreads) {
         // Last thread to arrive - reset counter and advance generation
-        barrierCounter.store(0, std::memory_order_release);
-        barrierGeneration.store(gen + 1, std::memory_order_release);
+        emulateDoorbellBarrierCounter.store(0, std::memory_order_release);
+        emulateDoorbellBarrierGeneration.store(gen + 1,
+                                               std::memory_order_release);
       } else {
         // Wait for all threads to arrive - spin briefly then yield
         // Most threads should arrive quickly, so we spin first for low latency
         for (uint32_t spin = 0; spin < 50; ++spin) {
-          if (barrierGeneration.load(std::memory_order_acquire) != gen) {
+          if (emulateDoorbellBarrierGeneration.load(
+                std::memory_order_acquire) != gen) {
             goto barrier_done;
           }
           std::atomic_signal_fence(std::memory_order_acq_rel);
         }
         // If still waiting after spinning, yield to avoid wasting CPU
-        while (barrierGeneration.load(std::memory_order_acquire) == gen) {
+        while (emulateDoorbellBarrierGeneration.load(
+                 std::memory_order_acquire) == gen) {
           std::this_thread::yield();
         }
       barrier_done:;
@@ -905,6 +940,9 @@ hipError_t run(XioEndpointConfig* config) {
   hipError_t err = hipSuccess;
 
   if (emulate) {
+    if (doorbell > 0) {
+      resetEmulateDoorbellSyncState();
+    }
     // Emulation mode: run kernel logic on CPU threads instead of GPU
     std::vector<std::thread> gpuEmulationThreads;
 
@@ -935,6 +973,7 @@ hipError_t run(XioEndpointConfig* config) {
         *d_vFail = 0;
     }
 
+    (void)xio::clearHipLaunchError("test-ep", "endpoint_kernel", 0);
     hipLaunchKernelGGL(endpoint_kernel, dim3(1), dim3(config->numThreads), 0, 0,
                        sqePtr, cqePtr, config->startTimes, config->endTimes,
                        config->timingStats, config->iterations,
@@ -943,7 +982,8 @@ hipError_t run(XioEndpointConfig* config) {
                        testEpConfig->verify, testEpConfig->seed, d_vPass,
                        d_vFail);
 
-    err = hipGetLastError();
+    err = xio::checkHipLaunchError("test-ep", "endpoint_kernel", 0, 1,
+                                   config->numThreads, 0, nullptr);
     if (err != hipSuccess) {
       for (auto& thread : cpuThreadHandles)
         thread.join();
@@ -954,7 +994,7 @@ hipError_t run(XioEndpointConfig* config) {
       return err;
     }
 
-    err = hipDeviceSynchronize();
+    err = xio::syncHipKernel("test-ep", "endpoint_kernel", 0, nullptr);
     if (err != hipSuccess) {
       for (auto& thread : cpuThreadHandles)
         thread.join();

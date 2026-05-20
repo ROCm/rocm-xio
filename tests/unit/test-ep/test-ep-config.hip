@@ -6,6 +6,7 @@
  */
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -60,6 +61,33 @@ int test_config_defaults() {
   ASSERT_EQ(cfg.doorbell, 0u);
   ASSERT_TRUE(!cfg.emulate);
   ASSERT_EQ(cfg.iterations, 128u);
+  ASSERT_TRUE(!cfg.verify);
+  ASSERT_EQ(cfg.seed, 1u);
+  return 0;
+}
+
+int test_sqe_field_offsets() {
+  ASSERT_EQ(offsetof(xio::test_ep::test_sqe, magic), 0u);
+  ASSERT_EQ(offsetof(xio::test_ep::test_sqe, iteration), 8u);
+  ASSERT_EQ(offsetof(xio::test_ep::test_sqe, gpuTime), 16u);
+  ASSERT_EQ(offsetof(xio::test_ep::test_sqe, data), 24u);
+  ASSERT_EQ(sizeof(((xio::test_ep::test_sqe*)nullptr)->data), 40u);
+  return 0;
+}
+
+int test_cqe_field_offsets() {
+  ASSERT_EQ(offsetof(xio::test_ep::test_cqe, magic), 0u);
+  ASSERT_EQ(offsetof(xio::test_ep::test_cqe, cpuTime), 8u);
+  return 0;
+}
+
+int test_sqe_payload_roundtrip() {
+  xio::test_ep::test_sqe sqe = {};
+  for (size_t i = 0; i < 5; i++)
+    sqe.data[i] = 0x1000 + i;
+
+  for (size_t i = 0; i < 5; i++)
+    ASSERT_EQ(sqe.data[i], 0x1000u + i);
   return 0;
 }
 
@@ -76,6 +104,9 @@ int main() {
   failures += test_sqe_struct_layout();
   failures += test_cqe_struct_layout();
   failures += test_config_defaults();
+  failures += test_sqe_field_offsets();
+  failures += test_cqe_field_offsets();
+  failures += test_sqe_payload_roundtrip();
   failures += test_type_aliases();
 
   if (failures == 0) {

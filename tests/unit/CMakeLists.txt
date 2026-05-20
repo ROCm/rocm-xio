@@ -9,3 +9,10 @@ add_subdirectory(common)
 add_subdirectory(test-ep)
 add_subdirectory(rdma-ep)
 add_subdirectory(nvme-ep)
+add_subdirectory(sdma-ep)
+
+if(BUILD_CLIENTS)
+  add_subdirectory(tester)
+endif()
+
+add_subdirectory(scripts)

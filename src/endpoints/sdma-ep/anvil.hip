@@ -1,8 +1,11 @@
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "anvil.hpp"
 #include "xio.h"
@@ -43,6 +46,14 @@ inline void checkHipError(hipError_t err, const char* msg, const char* file,
 }
 
 #define CHECK_HIP_ERROR(cmd) checkHipError((cmd), #cmd, __FILE__, __LINE__)
+
+static bool SdmaDebugEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("ROCM_XIO_SDMA_DEBUG");
+    return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
 
 // Allow access to peerDeviceId from deviceId
 // HSA agents
@@ -211,12 +222,21 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
   // Create SDMA Queue
   std::memset(&queue_, 0, sizeof(HsaQueueResource));
 
-  CHECK_HSAKMT_SUCCESS(
-    hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
-                         DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
-                         queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE, nullptr,
-                         &queue_),
-    "Failed");
+  if (SdmaDebugEnabled()) {
+    std::cout << "SDMA_DEBUG create_queue"
+              << " localDevice=" << localDeviceId
+              << " remoteDevice=" << remoteDeviceId
+              << " localNodeId=" << localNodeId << " engineId=" << engineId
+              << std::endl;
+  }
+  HSAKMT_STATUS createStatus = hsaKmtCreateQueueExt(
+    localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID, DEFAULT_QUEUE_PERCENTAGE,
+    DEFAULT_PRIORITY, engineId, queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
+    nullptr, &queue_);
+  if (SdmaDebugEnabled()) {
+    std::cout << "SDMA_DEBUG create_queue_status=" << createStatus << std::endl;
+  }
+  CHECK_HSAKMT_SUCCESS(createStatus, "Failed");
 
   // Initialize host-side state (always needed)
   uint64_t initial_wptr = *queue_.Queue_write_ptr_aql;
@@ -538,12 +558,126 @@ int AnvilLib::getOamId(int deviceId) {
   return xgmi_physical_id;
 }
 
-int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+uint32_t AnvilLib::getKfdNodeId(int deviceId) {
+  if (deviceId < 0 || static_cast<size_t>(deviceId) >= gpuAgents_.size()) {
+    throw std::runtime_error("GPU device index has no matching HSA agent");
+  }
+
+  uint32_t nodeId = 0;
+  hsa_status_t status = hsa_agent_get_info(
+    gpuAgents_[static_cast<size_t>(deviceId)], HSA_AGENT_INFO_NODE, &nodeId);
+  if (status != HSA_STATUS_SUCCESS) {
+    throw std::runtime_error("Failed to read HSA agent KFD node id");
+  }
+  return nodeId;
+}
+
+int AnvilLib::getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId) {
   int srcOamId = getOamId(srcDeviceId);
   int dstOamId = getOamId(dstDeviceId);
 
-  // Use even engines only
   return mi300xOamMap[srcOamId][dstOamId] * 2;
+}
+
+int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
+                                         int fallbackEngineId) {
+  if (srcDeviceId == dstDeviceId) {
+    return fallbackEngineId;
+  }
+
+  uint32_t srcNodeId = getKfdNodeId(srcDeviceId);
+  uint32_t dstNodeId = getKfdNodeId(dstDeviceId);
+
+  HsaNodeProperties nodeProps = {};
+  HSAKMT_STATUS status = hsaKmtGetNodeProperties(srcNodeId, &nodeProps);
+  if (status != HSAKMT_STATUS_SUCCESS || nodeProps.NumIOLinks == 0) {
+    if (SdmaDebugEnabled()) {
+      std::cout << "SDMA_DEBUG recommended_engine_unavailable"
+                << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
+                << " status=" << status
+                << " numIOLinks=" << nodeProps.NumIOLinks
+                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+    }
+    return fallbackEngineId;
+  }
+
+  std::vector<HsaIoLinkProperties> links(nodeProps.NumIOLinks);
+  status = hsaKmtGetNodeIoLinkProperties(srcNodeId, nodeProps.NumIOLinks,
+                                         links.data());
+  if (status != HSAKMT_STATUS_SUCCESS) {
+    if (SdmaDebugEnabled()) {
+      std::cout << "SDMA_DEBUG recommended_engine_iolink_query_failed"
+                << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
+                << " status=" << status
+                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+    }
+    return fallbackEngineId;
+  }
+
+  for (const HsaIoLinkProperties& link : links) {
+    if (link.NodeTo != dstNodeId) {
+      continue;
+    }
+
+    uint32_t mask = link.RecSdmaEngIdMask;
+    if (SdmaDebugEnabled()) {
+      std::cout << "SDMA_DEBUG recommended_engine_link"
+                << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
+                << " ioLinkType=" << link.IoLinkType
+                << " weight=" << link.Weight << " recSdmaEngIdMask=0x"
+                << std::hex << mask << std::dec
+                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+    }
+
+    if (mask == 0) {
+      return fallbackEngineId;
+    }
+    if (fallbackEngineId >= 0 && fallbackEngineId < 32 &&
+        (mask & (1u << fallbackEngineId)) != 0) {
+      return fallbackEngineId;
+    }
+    for (int engineId = 0; engineId < 32; ++engineId) {
+      if ((mask & (1u << engineId)) != 0) {
+        return engineId;
+      }
+    }
+  }
+
+  if (SdmaDebugEnabled()) {
+    std::cout << "SDMA_DEBUG recommended_engine_no_matching_link"
+              << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
+              << " fallbackEngineId=" << fallbackEngineId << std::endl;
+  }
+  return fallbackEngineId;
+}
+
+int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+  int fallbackEngineId = 0;
+  try {
+    fallbackEngineId = getMappedSdmaEngineId(srcDeviceId, dstDeviceId);
+  } catch (const std::runtime_error&) {
+    // MI300X sysfs xgmi_physical_id may be absent on other ASICs; still allow
+    // KFD RecSdmaEngIdMask to choose the engine. Same-GPU uses diagonal 0
+    // from the legacy table, matching getMappedSdmaEngineId when sysfs works.
+    fallbackEngineId = (srcDeviceId == dstDeviceId) ? 0 : -1;
+  }
+  int engineId = getRecommendedSdmaEngineId(srcDeviceId, dstDeviceId,
+                                            fallbackEngineId);
+  if (SdmaDebugEnabled()) {
+    int srcOamId = -1;
+    int dstOamId = -1;
+    try {
+      srcOamId = getOamId(srcDeviceId);
+      dstOamId = getOamId(dstDeviceId);
+    } catch (const std::runtime_error&) {
+    }
+    std::cout << "SDMA_DEBUG map"
+              << " srcDevice=" << srcDeviceId << " dstDevice=" << dstDeviceId
+              << " srcOam=" << srcOamId << " dstOam=" << dstOamId
+              << " fallbackEngineId=" << fallbackEngineId
+              << " engineId=" << engineId << std::endl;
+  }
+  return engineId;
 }
 
 // ==================== Host API Methods ====================
@@ -569,5 +703,7 @@ xio::sdma_ep::SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId,
 
   throw std::runtime_error("getHostHandle: queue not found");
 }
+
+AnvilLib& anvil = anvil.getInstance();
 
 } // namespace anvil

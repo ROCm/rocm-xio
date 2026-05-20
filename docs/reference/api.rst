@@ -114,6 +114,25 @@ NVMe Endpoint
    :members:
    :undoc-members:
 
+PRP list helpers
+^^^^^^^^^^^^^^^^
+
+When a batch issues both reads and writes and each direction needs a PRP
+list, ``nvmeBufferParams::prpSlotsPerBatch`` may be ``2`` so list memory uses
+separate pages (or slots) per direction. The helpers below map batch indices
+and DMA addresses the same way as the device kernels and optional host PRP
+dumps.
+
+.. doxygenfunction:: xio::nvme_ep::prpListEntriesPerPage
+
+.. doxygenfunction:: xio::nvme_ep::prpListDmaForSlot(const nvmeBufferParams &params, uint32_t slot)
+
+.. doxygenfunction:: xio::nvme_ep::nvmePrpSlotsPerBatchVal(const nvmeBufferParams &p)
+
+.. doxygenfunction:: xio::nvme_ep::nvmePrpListWordOffset(const nvmeBufferParams &p, uint32_t batchIdx, bool isWrite)
+
+.. doxygenfunction:: xio::nvme_ep::nvmePrpListDmaSlotIndex(const nvmeBufferParams &p, uint32_t batchIdx, bool isWrite)
+
 .. doxygenstruct:: xio::DataPatternParams
    :members:
    :undoc-members:

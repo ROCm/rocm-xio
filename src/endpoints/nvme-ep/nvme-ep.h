@@ -107,9 +107,94 @@ struct nvmeBufferParams {
   uint32_t readNumPages;        /**< Entries in readPagePhysAddrs. */
   uint32_t writeNumPages;       /**< Entries in writePagePhysAddrs. */
   uint64_t* prpListPool;        /**< PRP list backing storage for commands. */
+  uint64_t* prpListPageDmas;    /**< DMA address per PRP list command slot. */
   uint64_t prpListPoolDma;      /**< DMA address of prpListPool. */
   uint32_t prpEntriesPerCmd;    /**< PRP entries reserved per command. */
+  /**
+   * 1 for a single PRP list per batch, or 2 when read and write both use PRP
+   * lists so each batch reserves separate list pages for each direction.
+   */
+  uint32_t prpSlotsPerBatch;
 };
+
+/**
+ * @brief Number of @c uint64_t PRP list entries that fit in one NVMe page.
+ * @return @c NVME_PAGE_SIZE / sizeof(uint64_t).
+ */
+__host__ __device__ static inline uint32_t prpListEntriesPerPage() {
+  return NVME_PAGE_SIZE / sizeof(uint64_t);
+}
+
+/**
+ * @brief DMA base address of the PRP list for command slot @p slot.
+ *
+ * Uses @p prpListPageDmas[slot] when populated (one DMA per slot). Otherwise
+ * derives the address from @p prpListPoolDma using @p prpEntriesPerCmd stride,
+ * padded to at least one full list page when the stride is smaller.
+ *
+ * @param params Buffer and PRP pool parameters.
+ * @param slot   Linear slot index (pair read/write slots when
+ *               @c prpSlotsPerBatch is 2; see nvmePrpListDmaSlotIndex()).
+ * @return List DMA base for @p slot, or 0 when lists are not configured.
+ */
+__host__ __device__ static inline uint64_t prpListDmaForSlot(
+  const nvmeBufferParams& params, uint32_t slot) {
+  if (params.prpListPageDmas)
+    return params.prpListPageDmas[slot];
+  if (params.prpListPoolDma && params.prpEntriesPerCmd) {
+    uint32_t stride = params.prpEntriesPerCmd;
+    if (stride < prpListEntriesPerPage())
+      stride = prpListEntriesPerPage();
+    return params.prpListPoolDma + (uint64_t)slot * stride * sizeof(uint64_t);
+  }
+  return 0;
+}
+
+/**
+ * @brief Effective PRP list slots reserved per batch (1 or 2).
+ * @param p Buffer parameters; @c prpSlotsPerBatch == 2 selects dual lists.
+ * @return 2 when @p p.prpSlotsPerBatch is 2, otherwise 1.
+ */
+__host__ __device__ static inline uint32_t nvmePrpSlotsPerBatchVal(
+  const nvmeBufferParams& p) {
+  return p.prpSlotsPerBatch == 2u ? 2u : 1u;
+}
+
+/**
+ * @brief Word offset into @c prpListPool for batch @p batchIdx.
+ *
+ * When @c nvmePrpSlotsPerBatchVal(p) is 2, write lists follow read lists for
+ * the same batch inside the pool.
+ *
+ * @param p         Buffer parameters (stride @c prpEntriesPerCmd).
+ * @param batchIdx  Batch index within the doorbell group.
+ * @param isWrite   @c true for the write SQE list, @c false for read.
+ * @return Index in @c uint64_t words from the start of @c prpListPool.
+ */
+__host__ __device__ static inline uint32_t nvmePrpListWordOffset(
+  const nvmeBufferParams& p, uint32_t batchIdx, bool isWrite) {
+  const uint32_t mul = nvmePrpSlotsPerBatchVal(p);
+  uint32_t off = batchIdx * mul * p.prpEntriesPerCmd;
+  if (mul > 1u && isWrite)
+    off += p.prpEntriesPerCmd;
+  return off;
+}
+
+/**
+ * @brief Linear PRP list slot index for DMA lookup with prpListDmaForSlot().
+ *
+ * @param p         Buffer parameters.
+ * @param batchIdx  Batch index within the doorbell group.
+ * @param isWrite   @c true for the write path when dual lists are enabled.
+ * @return Slot index into @c prpListPageDmas or the derived pool layout.
+ */
+__host__ __device__ static inline uint32_t nvmePrpListDmaSlotIndex(
+  const nvmeBufferParams& p, uint32_t batchIdx, bool isWrite) {
+  const uint32_t mul = nvmePrpSlotsPerBatchVal(p);
+  if (mul > 1u)
+    return batchIdx * mul + (isWrite ? 1u : 0u);
+  return batchIdx;
+}
 
 /**
  * Drive NVMe endpoint I/O operations from GPU device code

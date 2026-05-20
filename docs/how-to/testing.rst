@@ -70,6 +70,7 @@ Label         Definition
 ``stress``    Long-running (timeout: 600 seconds)
 ``rdma``      RDMA-related test
 ``common``    Common library utilities
+``scripts``   Shell-script syntax checks
 ``fixture``   CTest fixture (setup/teardown)
 ============  =========================================
 
@@ -90,13 +91,17 @@ Unit tests (CPU-only)
 These run in CI without hardware:
 
 - ``test-data-pattern`` -- LFSR data pattern generation and verification
-- ``test-rdma-config`` -- ``RdmaEpConfig`` validation, ``Provider``
-  enum, ``provider_name()``, ``provider_from_string()`` (all vendors
-  including ROCM_ERNIC)
+- ``test-xio-env`` -- environment parsing and cached log-level helpers
+- ``test-xio-cli-options`` -- ``xio-tester`` CLI option registration,
+  validation, and SDMA subcommand detection
+- ``test-rdma-config`` -- ``RdmaEpConfig`` validation, ``Provider`` enum,
+  ``provider_name()``, ``provider_from_string()``, iteration handling, and
+  2-node validation
 - ``test-rdma-vendors`` -- Vendor ID constants, ``RmaDescriptor``,
   ``AmoDescriptor`` struct layout
-- ``test-rdma-endian`` -- Endian byte-swap helpers (host and
-  optional device)
+- ``test-rdma-endian`` -- Endian byte-swap helpers (host and optional device)
+- ``test-rdma-common`` -- Provider key normalization, RD atomic depth,
+  queue-pair init attributes, and backend config mapping
 - ``test-bnxt-sizing`` -- BNXT DV queue sizing math:
   ``roundup_pow2``, ``align_up``, ``calc_wqe_sz``, ``compute_sq``,
   ``compute_rq``, ``cqe_size``
@@ -104,13 +109,40 @@ These run in CI without hardware:
   ``ExtractBusNumber``, ``GetBusIdDistance``, ``GetLcaDepth``
 - ``test-extract-endpoint`` -- CLI argument parser:
   ``extractEndpointName()``
-- ``test-ep-config`` -- test-ep configuration defaults
+- ``test-xio-timing`` -- host-side ``XioTimingStats`` aggregation
+- ``test-tcp-exchange-layout`` -- two-node RDMA TCP exchange wire
+  layout and socket byte helpers
+- ``test-nvme-config`` -- NVMe command/status constants and config defaults
+- ``test-nvme-helpers`` -- NVMe SQE/CQE helpers, PRP edge cases, and data
+  pattern verification
+- ``test-ep-config`` -- test-ep configuration defaults and SQE/CQE layout
+- ``test-ep-launch-cpu-threads`` -- CPU-only round trip that drives
+  ``xio::test_ep::launchCpuThreads()`` directly in polling, multi-
+  thread, doorbell, and fixed-delay modes
+- ``test-sdma-config`` -- SDMA endpoint config validation, host-visible type
+  defaults, and validation rules
+- ``test-sdma-packet-layout`` -- SDMA packet sizes, offsets, and
+  opcode constants
+- ``test-script-*`` -- ``bash -n`` syntax checks for build, test,
+  udev, and DKMS helper scripts
 
 System tests
 ------------
 
-- ``test-ep-emulate`` -- Full SQE/CQE round-trip in emulation mode
-  (GPU required)
+- ``test-ep-emulate`` -- Single-thread SQE/CQE round trip in
+  emulation mode
+- ``test-ep-emulate-multithread`` -- 4-thread, 16-iteration round
+  trip; exercises per-thread queue indexing in the emulation kernel
+- ``test-ep-emulate-doorbell`` -- 4-thread doorbell-mode round trip
+  with queue depth ``iterations * threads``; exercises the shared atomic
+  sequence counter and barrier
+- ``test-ep-emulate-timing`` -- Asserts that ``startTimes`` /
+  ``endTimes`` and the aggregate ``XioTimingStats`` are populated
+- ``test-ep-emulate-delay`` -- Asserts that a fixed CPU response
+  delay is honoured
+- ``test-ep-cli-emulate*`` -- ``xio-tester test-ep --emulate``
+  smoke tests (labels ``test-ep`` and ``cli``); skip when ``xio-tester``
+  is absent
 
 Hardware tests
 --------------

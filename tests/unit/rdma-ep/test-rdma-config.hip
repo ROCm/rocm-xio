@@ -72,8 +72,21 @@ int test_config_defaults() {
   ASSERT_EQ(cfg.cqDepth, 256u);
   ASSERT_EQ(cfg.transferSize, 4096u);
   ASSERT_EQ(cfg.inlineThreshold, 28u);
+  ASSERT_TRUE(!cfg.pcieRelaxedOrdering);
+  ASSERT_EQ(cfg.trafficClass, 0);
   ASSERT_TRUE(cfg.loopback);
   ASSERT_EQ(cfg.gpuDeviceId, 0);
+  ASSERT_TRUE(!cfg.verify);
+  ASSERT_EQ(cfg.seed, 1u);
+  ASSERT_EQ(cfg.queueMem, xio::rdma_ep::QueueMemMode::HOST_COHERENT);
+  ASSERT_EQ(cfg.batchSize, 1u);
+  ASSERT_EQ(cfg.numQueues, 1u);
+  ASSERT_TRUE(!cfg.infiniteMode);
+  ASSERT_TRUE(!cfg.isServer);
+  ASSERT_TRUE(!cfg.isClient);
+  ASSERT_TRUE(cfg.serverHost.empty());
+  ASSERT_EQ(cfg.ppSize, 64u);
+  ASSERT_EQ(cfg.ppIters, 100u);
   return 0;
 }
 
@@ -103,6 +116,74 @@ int test_config_validate_zero_iterations() {
   return 0;
 }
 
+int test_config_validate_infinite_mode() {
+  xio::rdma_ep::RdmaEpConfig cfg;
+  cfg.providerStr = "bnxt";
+  cfg.iterations = 99;
+  cfg.infiniteMode = true;
+  std::string err = xio::rdma_ep::validateConfig(&cfg);
+  ASSERT_TRUE(err.empty());
+  ASSERT_EQ(cfg.iterations, 0u);
+  ASSERT_EQ(xio::rdma_ep::getIterations(&cfg), 0u);
+  return 0;
+}
+
+int test_config_validate_bad_queue_settings() {
+  xio::rdma_ep::RdmaEpConfig cfg;
+  cfg.providerStr = "bnxt";
+
+  cfg.sqDepth = 0;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "SQ depth must be > 0");
+
+  cfg.sqDepth = 256;
+  cfg.transferSize = 0;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "Transfer size must be > 0");
+
+  cfg.transferSize = 4096;
+  cfg.batchSize = 256;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "--batch-size must be < --sq-depth");
+  return 0;
+}
+
+int test_config_validate_2node_modes() {
+  xio::rdma_ep::RdmaEpConfig cfg;
+  cfg.providerStr = "bnxt";
+  cfg.loopback = false;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "--no-loopback requires --server or --client");
+
+  cfg.isClient = true;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "--client requires --server-host");
+
+  cfg.serverHost = "127.0.0.1";
+  cfg.ppSize = 15;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "Ping-pong size must be >= 16 bytes"
+               " (8-byte seq header + payload)");
+
+  cfg.ppSize = 18;
+  ASSERT_STREQ(xio::rdma_ep::validateConfig(&cfg).c_str(),
+               "Ping-pong size must be a multiple of 8"
+               " (PingPongBuf alignment)");
+
+  cfg.ppSize = 64;
+  ASSERT_TRUE(xio::rdma_ep::validateConfig(&cfg).empty());
+  return 0;
+}
+
+int test_get_iterations_default_and_config() {
+  ASSERT_EQ(xio::rdma_ep::getIterations(nullptr), 128u);
+
+  xio::rdma_ep::RdmaEpConfig cfg;
+  cfg.iterations = 17;
+  ASSERT_EQ(xio::rdma_ep::getIterations(&cfg), 17u);
+  return 0;
+}
+
 int test_config_validate_null() {
   std::string err = xio::rdma_ep::validateConfig(nullptr);
   ASSERT_TRUE(!err.empty());
@@ -118,6 +199,10 @@ int main() {
   failures += test_config_validate_good();
   failures += test_config_validate_bad_provider();
   failures += test_config_validate_zero_iterations();
+  failures += test_config_validate_infinite_mode();
+  failures += test_config_validate_bad_queue_settings();
+  failures += test_config_validate_2node_modes();
+  failures += test_get_iterations_default_and_config();
   failures += test_config_validate_null();
 
   if (failures == 0) {

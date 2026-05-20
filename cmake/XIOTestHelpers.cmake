@@ -91,6 +91,11 @@ function(xio_add_test)
     endif()
   endforeach()
 
+  if(XIO_SDMA_OSS7)
+    target_compile_definitions(${XIO_TEST_NAME}
+      PRIVATE XIO_SDMA_OSS7=1)
+  endif()
+
   # Register test with CTest
   if(XIO_TEST_EXTRA_ARGS)
     add_test(

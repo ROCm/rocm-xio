@@ -542,12 +542,17 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
     if (!kStats && !forceLessTiming)
       kStats = config->timingStats;
 
+    const char* kernelName = useBatch ? "rdma_ep_batch_kernel"
+                                      : "rdma_ep_kernel";
+    const unsigned launchThreads = useBatch ? batchSize + 1 : 1;
+    const size_t launchShmem = useBatch
+                                 ? batchSize * sizeof(unsigned long long int)
+                                 : 0;
+    (void)xio::clearHipLaunchError("rdma-ep", kernelName, q);
     if (useBatch) {
-      size_t shmem = batchSize * sizeof(unsigned long long int);
-      unsigned threads = batchSize + 1;
-      hipLaunchKernelGGL(rdma_ep::rdma_ep_batch_kernel, dim3(1), dim3(threads),
-                         shmem, queues[q].stream, queues[q].gpu_qp,
-                         static_cast<uint8_t*>(queues[q].buf),
+      hipLaunchKernelGGL(rdma_ep::rdma_ep_batch_kernel, dim3(1),
+                         dim3(launchThreads), launchShmem, queues[q].stream,
+                         queues[q].gpu_qp, static_cast<uint8_t*>(queues[q].buf),
                          cfg->transferSize, batchSize, config->iterations,
                          kStats, config->stopRequested, cfg->verify, cfg->seed,
                          queues[q].verifyPass, queues[q].verifyFail);
@@ -562,21 +567,21 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
                          config->substepStats);
     }
 
-    hipError_t le = hipGetLastError();
+    hipError_t le = xio::checkHipLaunchError("rdma-ep", kernelName, q, 1,
+                                             launchThreads, launchShmem,
+                                             queues[q].stream);
     if (le != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel launch failed"
-                       " (queue %u): %s\n",
-                       q, hipGetErrorString(le));
       result = le;
       goto cleanup;
     }
   }
 
-  {
-    hipError_t syncErr = hipDeviceSynchronize();
+  for (uint16_t q = 0; q < numQueues; q++) {
+    const char* kernelName = useBatch ? "rdma_ep_batch_kernel"
+                                      : "rdma_ep_kernel";
+    hipError_t syncErr = xio::syncHipKernel("rdma-ep", kernelName, q,
+                                            queues[q].stream);
     if (syncErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("rdma-ep: Kernel sync failed: %s\n",
-                       hipGetErrorString(syncErr));
       result = syncErr;
       goto cleanup;
     }
@@ -835,9 +840,13 @@ hipError_t run(XioEndpointConfig* config) {
       ROCXIO_LOG_INFO("rdma-ep: WRITE %u bytes"
                       " to server...\n",
                       write_size);
+      (void)xio::clearHipLaunchError("rdma-ep", "rdma_write_kernel", 0);
       hipLaunchKernelGGL(rdma_write_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                          remote_data, data_region, write_size);
-      herr = hipDeviceSynchronize();
+      herr = xio::checkHipLaunchError("rdma-ep", "rdma_write_kernel", 0, 1, 1,
+                                      0, nullptr);
+      if (herr == hipSuccess)
+        herr = xio::syncHipKernel("rdma-ep", "rdma_write_kernel", 0, nullptr);
       if (herr != hipSuccess) {
         ROCXIO_LOG_ERROR("rdma-ep: WRITE kernel failed:"
                          " %s\n",
@@ -950,11 +959,17 @@ hipError_t run(XioEndpointConfig* config) {
     }
 
     if (cfg->isClient) {
+      (void)xio::clearHipLaunchError("rdma-ep", "pingpong_client_kernel", 0);
       hipLaunchKernelGGL(pingpong_client_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                          reinterpret_cast<PingPongBuf*>(pp_send_buf),
                          reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors, d_elapsed);
-      herr = hipDeviceSynchronize();
+      herr = xio::checkHipLaunchError("rdma-ep", "pingpong_client_kernel", 0, 1,
+                                      1, 0, nullptr);
+      if (herr == hipSuccess) {
+        herr = xio::syncHipKernel("rdma-ep", "pingpong_client_kernel", 0,
+                                  nullptr);
+      }
       if (herr != hipSuccess) {
         ROCXIO_LOG_ERROR("rdma-ep: Pingpong client kernel"
                          " failed: %s\n",
@@ -999,11 +1014,17 @@ hipError_t run(XioEndpointConfig* config) {
                       " all %u iterations correct.\n",
                       pp_iters);
     } else {
+      (void)xio::clearHipLaunchError("rdma-ep", "pingpong_server_kernel", 0);
       hipLaunchKernelGGL(pingpong_server_kernel, dim3(1), dim3(1), 0, 0, gpu_qp,
                          reinterpret_cast<PingPongBuf*>(pp_send_buf),
                          reinterpret_cast<volatile PingPongBuf*>(pp_recv_buf),
                          remote_recv, pp_size, pp_iters, d_errors);
-      herr = hipDeviceSynchronize();
+      herr = xio::checkHipLaunchError("rdma-ep", "pingpong_server_kernel", 0, 1,
+                                      1, 0, nullptr);
+      if (herr == hipSuccess) {
+        herr = xio::syncHipKernel("rdma-ep", "pingpong_server_kernel", 0,
+                                  nullptr);
+      }
       if (herr != hipSuccess) {
         ROCXIO_LOG_ERROR("rdma-ep: Pingpong server kernel"
                          " failed: %s\n",

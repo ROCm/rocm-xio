@@ -4,7 +4,9 @@
  *
  * Unit tests for nvme-ep helper functions: sqeSetup, calculatePrps, cqeOk,
  * cqeStatusCode, cqeStatusType, sqeRead/sqeWrite, cqeRead/cqeWrite,
- * NVME_CQE_STATUS_* macros, NVME_STATUS_MAKE round-trip, and dataPattern.
+ * NVME_CQE_STATUS_* macros, NVME_STATUS_MAKE round-trip, dataPattern, and
+ * dual-slot PRP list index helpers (nvmePrpListWordOffset /
+ * nvmePrpListDmaSlotIndex).
  */
 
 #include <cassert>
@@ -85,6 +87,15 @@ int test_sqeSetup_nlb_one() {
   return 0;
 }
 
+int test_sqeSetup_large_nlb() {
+  struct nvme_sqe sqe = {};
+  sqeSetup(&sqe, 0x1234, 65536);
+  ASSERT_EQ(sqe.cdw10, 0x1234u);
+  ASSERT_EQ(sqe.cdw11, 0u);
+  ASSERT_EQ(sqe.cdw12, 65535u);
+  return 0;
+}
+
 /* ---- calculatePrps tests ---- */
 
 int test_prp_single_page_aligned() {
@@ -140,6 +151,35 @@ int test_prp_two_full_pages() {
   calculatePrps(addr, size, &sqe);
   ASSERT_EQ(sqe.dptr.prp.prp1, addr);
   ASSERT_EQ(sqe.dptr.prp.prp2, 0x21000u);
+  return 0;
+}
+
+int test_prp_unaligned_exact_first_page() {
+  struct nvme_sqe sqe = {};
+  uint64_t addr = 0x10F00;
+  uint32_t size = 0x100;
+  calculatePrps(addr, size, &sqe);
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, 0u);
+  return 0;
+}
+
+int test_prp_unaligned_crosses_by_one_byte() {
+  struct nvme_sqe sqe = {};
+  uint64_t addr = 0x10F00;
+  uint32_t size = 0x101;
+  calculatePrps(addr, size, &sqe);
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, 0x11000u);
+  return 0;
+}
+
+int test_prp_zero_size_keeps_single_prp() {
+  struct nvme_sqe sqe = {};
+  uint64_t addr = 0x12345000;
+  calculatePrps(addr, 0, &sqe);
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, 0u);
   return 0;
 }
 
@@ -735,6 +775,136 @@ int test_prp_list_noncontiguous_page_offset() {
   return 0;
 }
 
+int test_prp_list_dma_for_page_slots() {
+  nvmeBufferParams params = {};
+  uint64_t pageDmas[3] = {0x100000, 0x310000, 0x520000};
+
+  params.prpListPageDmas = pageDmas;
+  params.prpListPoolDma = pageDmas[0];
+  params.prpEntriesPerCmd = prpListEntriesPerPage();
+
+  ASSERT_EQ(prpListDmaForSlot(params, 0), (uint64_t)0x100000);
+  ASSERT_EQ(prpListDmaForSlot(params, 1), (uint64_t)0x310000);
+  ASSERT_EQ(prpListDmaForSlot(params, 2), (uint64_t)0x520000);
+  return 0;
+}
+
+int test_prp_list_dma_legacy_fallback() {
+  nvmeBufferParams params = {};
+
+  params.prpListPoolDma = 0x100000;
+  params.prpEntriesPerCmd = 4;
+
+  ASSERT_EQ(prpListDmaForSlot(params, 0), (uint64_t)0x100000);
+  ASSERT_EQ(prpListDmaForSlot(params, 1), (uint64_t)0x101000);
+  ASSERT_EQ(prpListDmaForSlot(params, 2), (uint64_t)0x102000);
+  return 0;
+}
+
+/* Dual read/write PRP list slots (prpSlotsPerBatch == 2). */
+
+int test_prp_slots_per_batch_val() {
+  nvmeBufferParams p = {};
+  p.prpSlotsPerBatch = 0;
+  ASSERT_EQ(nvmePrpSlotsPerBatchVal(p), 1u);
+  p.prpSlotsPerBatch = 1;
+  ASSERT_EQ(nvmePrpSlotsPerBatchVal(p), 1u);
+  p.prpSlotsPerBatch = 2;
+  ASSERT_EQ(nvmePrpSlotsPerBatchVal(p), 2u);
+  p.prpSlotsPerBatch = 3;
+  ASSERT_EQ(nvmePrpSlotsPerBatchVal(p), 1u);
+  return 0;
+}
+
+int test_prp_dual_slot_dma_index() {
+  nvmeBufferParams p = {};
+  p.prpSlotsPerBatch = 2;
+  p.prpEntriesPerCmd = 8;
+
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 0, false), 0u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 0, true), 1u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 1, false), 2u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 1, true), 3u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 5, false), 10u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 5, true), 11u);
+  return 0;
+}
+
+int test_prp_dual_slot_word_offset() {
+  nvmeBufferParams p = {};
+  p.prpSlotsPerBatch = 2;
+  p.prpEntriesPerCmd = 8;
+
+  ASSERT_EQ(nvmePrpListWordOffset(p, 0, false), 0u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 0, true), 8u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 1, false), 16u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 1, true), 24u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 3, false), 48u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 3, true), 56u);
+  return 0;
+}
+
+int test_prp_single_slot_word_offset_and_dma_index() {
+  nvmeBufferParams p = {};
+  p.prpSlotsPerBatch = 1;
+  p.prpEntriesPerCmd = 16;
+
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 4, false), 4u);
+  ASSERT_EQ(nvmePrpListDmaSlotIndex(p, 4, true), 4u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 4, false), 64u);
+  ASSERT_EQ(nvmePrpListWordOffset(p, 4, true), 64u);
+  return 0;
+}
+
+int test_prp_dual_slot_list_dma_with_slot_index() {
+  nvmeBufferParams p = {};
+  uint64_t dmas[6] = {0xA000, 0xA100, 0xA200, 0xA300, 0xA400, 0xA500};
+  p.prpListPageDmas = dmas;
+  p.prpListPoolDma = dmas[0];
+  p.prpEntriesPerCmd = prpListEntriesPerPage();
+  p.prpSlotsPerBatch = 2;
+
+  ASSERT_EQ(prpListDmaForSlot(p, nvmePrpListDmaSlotIndex(p, 0, false)),
+            (uint64_t)0xA000);
+  ASSERT_EQ(prpListDmaForSlot(p, nvmePrpListDmaSlotIndex(p, 0, true)),
+            (uint64_t)0xA100);
+  ASSERT_EQ(prpListDmaForSlot(p, nvmePrpListDmaSlotIndex(p, 2, false)),
+            (uint64_t)0xA400);
+  ASSERT_EQ(prpListDmaForSlot(p, nvmePrpListDmaSlotIndex(p, 2, true)),
+            (uint64_t)0xA500);
+  return 0;
+}
+
+int test_prp_list_two_pages_ignores_prp_list_dma() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[2] = {0xABCD, 0xDCBA};
+  uint64_t pageAddrs[2] = {0x100000, 0x140000};
+
+  calculatePrps(pageAddrs[0], 2 * NVME_PAGE_SIZE, &sqe, prpList, 0x777000,
+                pageAddrs, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, (uint64_t)0x100000);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0x140000);
+  ASSERT_EQ(prpList[0], (uint64_t)0xABCD);
+  ASSERT_EQ(prpList[1], (uint64_t)0xDCBA);
+  return 0;
+}
+
+int test_prp_list_unaligned_two_remaining_pages() {
+  struct nvme_sqe sqe = {};
+  uint64_t prpList[4] = {};
+  uint64_t addr = 0x200800;
+  uint32_t size = (NVME_PAGE_SIZE - 0x800) + 2 * NVME_PAGE_SIZE;
+
+  calculatePrps(addr, size, &sqe, prpList, 0x600000, nullptr, 0);
+
+  ASSERT_EQ(sqe.dptr.prp.prp1, addr);
+  ASSERT_EQ(sqe.dptr.prp.prp2, (uint64_t)0x600000);
+  ASSERT_EQ(prpList[0], (uint64_t)0x201000);
+  ASSERT_EQ(prpList[1], (uint64_t)0x202000);
+  return 0;
+}
+
 int main() {
   int failures = 0;
 
@@ -742,6 +912,7 @@ int main() {
   failures += test_sqeSetup_large_lba();
   failures += test_sqeSetup_zero_preserves();
   failures += test_sqeSetup_nlb_one();
+  failures += test_sqeSetup_large_nlb();
 
   failures += test_prp_single_page_aligned();
   failures += test_prp_single_page_fits();
@@ -749,6 +920,9 @@ int main() {
   failures += test_prp_unaligned_within_page();
   failures += test_prp_at_page_boundary();
   failures += test_prp_two_full_pages();
+  failures += test_prp_unaligned_exact_first_page();
+  failures += test_prp_unaligned_crosses_by_one_byte();
+  failures += test_prp_zero_size_keeps_single_prp();
 
   failures += test_prp_list_three_pages_contiguous();
   failures += test_prp_list_eight_pages_contiguous();
@@ -759,6 +933,15 @@ int main() {
   failures += test_prp_list_contiguous_with_offset();
   failures += test_prp_list_max_transfer_32_pages();
   failures += test_prp_list_noncontiguous_page_offset();
+  failures += test_prp_list_dma_for_page_slots();
+  failures += test_prp_list_dma_legacy_fallback();
+  failures += test_prp_slots_per_batch_val();
+  failures += test_prp_dual_slot_dma_index();
+  failures += test_prp_dual_slot_word_offset();
+  failures += test_prp_dual_slot_list_dma_with_slot_index();
+  failures += test_prp_single_slot_word_offset_and_dma_index();
+  failures += test_prp_list_two_pages_ignores_prp_list_dma();
+  failures += test_prp_list_unaligned_two_remaining_pages();
 
   failures += test_cqeOk_success();
   failures += test_cqeOk_success_with_phase();

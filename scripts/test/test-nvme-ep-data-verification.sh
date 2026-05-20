@@ -225,6 +225,10 @@ test_device() {
 
     echo "✓ Write completed"
 
+    # Allow controller and host driver to quiesce after GPU queue teardown
+    # before nvme-cli readback (avoids races with high QIDs / reset paths).
+    sleep 5
+
     echo ""
     echo "Step 2: Reading data back..."
 

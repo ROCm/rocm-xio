@@ -290,19 +290,17 @@ __device__ static void driveEndpointSingle(
     sqeType tmpSqe = {};
     for (uint32_t b = 0; b < precompute_count; b++) {
       uint64_t buf_off = (uint64_t)b * transfer_size;
-      uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
-      uint64_t* prpSlot = bufferParams.prpListPool
-                            ? bufferParams.prpListPool + prpOff
-                            : nullptr;
-      uint64_t prpSlotDma = bufferParams.prpListPoolDma
-                              ? bufferParams.prpListPoolDma +
-                                  prpOff * sizeof(uint64_t)
-                              : 0;
       uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
       uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
 
       if (has_read_buffer &&
           buf_off + transfer_size <= bufferParams.bufferSize) {
+        uint32_t prpOff = nvmePrpListWordOffset(bufferParams, b, false);
+        uint64_t* prpSlot = bufferParams.prpListPool
+                              ? bufferParams.prpListPool + prpOff
+                              : nullptr;
+        uint64_t prpSlotDma = prpListDmaForSlot(
+          bufferParams, nvmePrpListDmaSlotIndex(bufferParams, b, false));
         uint64_t addr = bufferParams.readPagePhysAddrs
                           ? bufferParams.readPagePhysAddrs[pageOff] +
                               intraPageOff
@@ -317,6 +315,12 @@ __device__ static void driveEndpointSingle(
 
       if (has_write_buffer &&
           buf_off + transfer_size <= bufferParams.bufferSize) {
+        uint32_t prpOff = nvmePrpListWordOffset(bufferParams, b, true);
+        uint64_t* prpSlot = bufferParams.prpListPool
+                              ? bufferParams.prpListPool + prpOff
+                              : nullptr;
+        uint64_t prpSlotDma = prpListDmaForSlot(
+          bufferParams, nvmePrpListDmaSlotIndex(bufferParams, b, true));
         uint64_t addr = bufferParams.writePagePhysAddrs
                           ? bufferParams.writePagePhysAddrs[pageOff] +
                               intraPageOff
@@ -379,14 +383,13 @@ __device__ static void driveEndpointSingle(
         }
       } else {
         uint64_t buf_off = (uint64_t)b * transfer_size;
-        uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
+        const bool is_write_sq = !is_read_op;
+        uint32_t prpOff = nvmePrpListWordOffset(bufferParams, b, is_write_sq);
         uint64_t* prpSlot = bufferParams.prpListPool
                               ? bufferParams.prpListPool + prpOff
                               : nullptr;
-        uint64_t prpSlotDma = bufferParams.prpListPoolDma
-                                ? bufferParams.prpListPoolDma +
-                                    prpOff * sizeof(uint64_t)
-                                : 0;
+        uint64_t prpSlotDma = prpListDmaForSlot(
+          bufferParams, nvmePrpListDmaSlotIndex(bufferParams, b, is_write_sq));
         uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
         uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
 
@@ -657,14 +660,13 @@ __device__ static void driveEndpointWavefront(
         uint64_t buf_off = (uint64_t)b * transfer_size;
         bool prp_valid = false;
 
-        uint32_t prpOff = b * bufferParams.prpEntriesPerCmd;
+        const bool is_write_sq = !is_read_op;
+        uint32_t prpOff = nvmePrpListWordOffset(bufferParams, b, is_write_sq);
         uint64_t* prpSlot = bufferParams.prpListPool
                               ? bufferParams.prpListPool + prpOff
                               : nullptr;
-        uint64_t prpSlotDma = bufferParams.prpListPoolDma
-                                ? bufferParams.prpListPoolDma +
-                                    prpOff * sizeof(uint64_t)
-                                : 0;
+        uint64_t prpSlotDma = prpListDmaForSlot(
+          bufferParams, nvmePrpListDmaSlotIndex(bufferParams, b, is_write_sq));
         uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
         uint64_t intraPageOff = buf_off % NVME_PAGE_SIZE;
 
@@ -1063,6 +1065,137 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
 }
 
 /**
+ * @brief Optional host-side PRP dump for debugging (env ROCXIO_NVME_DUMP_PRP).
+ *
+ * When @c ROCXIO_NVME_DUMP_PRP is set (any non-empty value), logs PRP1/PRP2
+ * and PRP list slot contents for the first @c N batch indices (@c N from
+ * @c ROCXIO_NVME_DUMP_PRP_BATCH, default 4). Uses the same @c calculatePrps()
+ * path as the device kernel with host-writable scratch for list entries.
+ * PRP2 addresses use @c prpListDmaForSlot and @c nvmePrpListDmaSlotIndex so
+ * read vs write list pages match the device when @p bp.prpSlotsPerBatch is 2.
+ *
+ * @param queue_id        I/O queue id (for log lines).
+ * @param bp              Per-queue buffer and PRP parameters. When
+ *                        @c prpListPageDmas is set, it must point to
+ *                        host-readable memory (values are read on the
+ *                        CPU); do not pass the device alias from
+ *                        @c hipHostGetDevicePointer.
+ * @param lbas_per_io     LBAs per NVMe command.
+ * @param lba_size        Namespace logical block size in bytes.
+ * @param eff_batch       Effective batch size for this launch.
+ * @param prp_stride_per_cmd  PRP list stride in @c uint64_t entries per slot.
+ * @param dump_reads      Log read-buffer PRPs when true.
+ * @param dump_writes     Log write-buffer PRPs when true.
+ */
+static __host__ void dumpNvmeDataPrpIfRequested(
+  uint16_t queue_id, const nvme_ep::nvmeBufferParams& bp, uint32_t lbas_per_io,
+  uint32_t lba_size, uint32_t eff_batch, uint32_t prp_stride_per_cmd,
+  bool dump_reads, bool dump_writes) {
+  const char* flag = getenv("ROCXIO_NVME_DUMP_PRP");
+  if (!flag || !flag[0])
+    return;
+
+  int max_b = xio::getEnvInt("ROCXIO_NVME_DUMP_PRP_BATCH", 4);
+  if (max_b < 1)
+    max_b = 1;
+  if (max_b > 256)
+    max_b = 256;
+
+  const uint64_t xfer64 = (uint64_t)lbas_per_io * (uint64_t)lba_size;
+  if (xfer64 > 0xffffffffULL) {
+    ROCXIO_LOG_WARN("ROCXIO_NVME_DUMP_PRP: transfer size > 4GiB, "
+                    "skipping PRP dump for queue %u\n",
+                    (unsigned)queue_id);
+    return;
+  }
+  const uint32_t xfer_u32 = (uint32_t)xfer64;
+
+  constexpr uint32_t kMaxList = NVME_PAGE_SIZE / sizeof(uint64_t);
+  uint64_t scratch[kMaxList];
+
+  ROCXIO_LOG_INFO("ROCXIO_NVME_DUMP_PRP queue=%u xfer=%u bytes "
+                  "prp_stride=%u prp_pool_dma=0x%016llx eff_batch=%u "
+                  "prp_slots_per_batch=%u\n",
+                  (unsigned)queue_id, xfer_u32, prp_stride_per_cmd,
+                  (unsigned long long)bp.prpListPoolDma, eff_batch,
+                  (unsigned)nvmePrpSlotsPerBatchVal(bp));
+
+  auto list_entry_count = [](uint64_t buffer_addr,
+                             uint32_t buffer_size) -> uint32_t {
+    constexpr uint32_t kMax = NVME_PAGE_SIZE / sizeof(uint64_t);
+    uint64_t offset_in_page = buffer_addr & (NVME_PAGE_SIZE - 1);
+    uint64_t first_page_size = NVME_PAGE_SIZE - offset_in_page;
+    if (buffer_size <= first_page_size)
+      return 0;
+    uint32_t remaining = (uint32_t)(buffer_size - first_page_size);
+    uint32_t num_remaining = (remaining + NVME_PAGE_SIZE - 1) / NVME_PAGE_SIZE;
+    if (num_remaining > kMax)
+      num_remaining = kMax;
+    if (num_remaining <= 1)
+      return 0;
+    return num_remaining;
+  };
+
+  auto dump_direction = [&](const char* label, bool active, uint64_t buf_dma,
+                            const uint64_t* page_addrs, bool is_write) {
+    if (!active)
+      return;
+    uint32_t limit_b = eff_batch;
+    if (limit_b > (uint32_t)max_b)
+      limit_b = (uint32_t)max_b;
+    for (uint32_t b = 0; b < limit_b; b++) {
+      uint64_t buf_off = (uint64_t)b * xfer64;
+      if (buf_off + xfer64 > bp.bufferSize)
+        break;
+      const uint64_t prp_slot_dma =
+        prp_stride_per_cmd != 0
+          ? prpListDmaForSlot(bp, nvmePrpListDmaSlotIndex(bp, b, is_write))
+          : 0ULL;
+      const uint32_t page_off = (uint32_t)(buf_off / (uint64_t)NVME_PAGE_SIZE);
+      const uint64_t intra_page_off = buf_off % (uint64_t)NVME_PAGE_SIZE;
+
+      uint64_t addr = 0;
+      if (page_addrs) {
+        addr = page_addrs[page_off] + intra_page_off;
+      } else if (buf_dma) {
+        addr = buf_dma + buf_off;
+      } else {
+        ROCXIO_LOG_WARN("ROCXIO_NVME_DUMP_PRP %s b=%u: no DMA base for "
+                        "PRP dump\n",
+                        label, b);
+        continue;
+      }
+
+      nvme_ep::sqeType tmp = {};
+      memset(scratch, 0, sizeof(scratch));
+      nvme_ep::calculatePrps(addr, xfer_u32, &tmp,
+                             (prp_stride_per_cmd != 0) ? scratch : nullptr,
+                             prp_slot_dma, page_addrs, page_off);
+
+      const uint32_t list_entries = list_entry_count(addr, xfer_u32);
+      ROCXIO_LOG_INFO("  %s b=%u buf_off=0x%llx data_addr=0x%016llx "
+                      "prp1=0x%016llx prp2=0x%016llx list_entries=%u\n",
+                      label, b, (unsigned long long)buf_off,
+                      (unsigned long long)addr,
+                      (unsigned long long)tmp.dptr.prp.prp1,
+                      (unsigned long long)tmp.dptr.prp.prp2, list_entries);
+
+      if (list_entries > 0 && prp_stride_per_cmd != 0) {
+        for (uint32_t i = 0; i < list_entries; i++) {
+          ROCXIO_LOG_INFO("    prp_list[%u]=0x%016llx\n", i,
+                          (unsigned long long)scratch[i]);
+        }
+      }
+    }
+  };
+
+  dump_direction("read", dump_reads, bp.readBufferDma, bp.readPagePhysAddrs,
+                 false);
+  dump_direction("write", dump_writes, bp.writeBufferDma, bp.writePagePhysAddrs,
+                 true);
+}
+
+/**
  * Run NVMe endpoint operations
  *
  * Sets up queues, allocates buffers, and launches GPU
@@ -1307,16 +1440,17 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     return hipErrorInvalidValue;
   }
   uint32_t prpEntriesPerCmd = (xfer_size > NVME_PAGE_SIZE)
-                                ? (uint32_t)((xfer_size / NVME_PAGE_SIZE) + 1)
+                                ? prpListEntriesPerPage()
                                 : 0;
   uint32_t prpStridePerCmd = prpEntriesPerCmd;
-  if (prpStridePerCmd > 0) {
-    uint32_t s = 1;
-    while (s < prpStridePerCmd)
-      s <<= 1;
-    prpStridePerCmd = s;
-  }
-  uint32_t prpPoolEntriesPerQueue = prpStridePerCmd * effBatch;
+  uint32_t prpSlotsPerBatch = (nvmeConfig->ioParams.readIo != 0 &&
+                               nvmeConfig->ioParams.writeIo != 0)
+                                ? 2u
+                                : 1u;
+  if (prpStridePerCmd == 0)
+    prpSlotsPerBatch = 1u;
+  uint32_t prpPoolEntriesPerQueue = prpStridePerCmd * effBatch *
+                                    prpSlotsPerBatch;
   size_t prpPoolBytes = (size_t)prpPoolEntriesPerQueue * sizeof(uint64_t);
   long sys_page_sz = sysconf(_SC_PAGESIZE);
   size_t host_page = (sys_page_sz > 0) ? (size_t)sys_page_sz : 4096;
@@ -1327,6 +1461,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   struct PrpPool {
     void* ptr = nullptr;
     void* gpuPtr = nullptr;
+    uint64_t* pageDmas = nullptr;
+    uint64_t* pageDmasGpu = nullptr;
     uint64_t dma = 0;
     size_t size = 0;
     bool hipAllocated = false;
@@ -1487,6 +1623,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
+      if ((reinterpret_cast<uintptr_t>(pool) & (NVME_PAGE_SIZE - 1)) != 0) {
+        ROCXIO_LOG_ERROR("PRP list pool for queue %u is not "
+                         "page-aligned\n",
+                         qid);
+        (void)hipHostFree(pool);
+        result = hipErrorInvalidValue;
+        goto cleanup;
+      }
       memset(pool, 0, prpPoolBytes);
 
       uint64_t pool_dma = getPhysAddr(pool);
@@ -1505,8 +1649,44 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         gpu_pool = pool;
       }
 
+      uint64_t* page_dmas = nullptr;
+      const uint32_t prp_dma_slots = effBatch * prpSlotsPerBatch;
+      hipError_t dmas_err = hipHostMalloc((void**)&page_dmas,
+                                          sizeof(*page_dmas) * prp_dma_slots,
+                                          hipHostMallocMapped);
+      if (dmas_err != hipSuccess || !page_dmas) {
+        ROCXIO_LOG_ERROR("Failed to allocate PRP list DMA "
+                         "table for queue %u: %s\n",
+                         qid, hipGetErrorString(dmas_err));
+        (void)hipHostFree(pool);
+        result = hipErrorMemoryAllocation;
+        goto cleanup;
+      }
+      memset(page_dmas, 0, sizeof(*page_dmas) * prp_dma_slots);
+      for (uint32_t s = 0; s < prp_dma_slots; s++) {
+        uint8_t* slot = static_cast<uint8_t*>(pool) +
+                        (size_t)s * prpStridePerCmd * sizeof(uint64_t);
+        page_dmas[s] = getPhysAddr(slot);
+        if (!page_dmas[s] || (page_dmas[s] & (NVME_PAGE_SIZE - 1)) != 0) {
+          ROCXIO_LOG_ERROR("Failed to get PRP list page "
+                           "phys addr for queue %u slot %u\n",
+                           qid, s);
+          (void)hipHostFree(page_dmas);
+          (void)hipHostFree(pool);
+          result = hipErrorInvalidValue;
+          goto cleanup;
+        }
+      }
+      void* gpu_page_dmas = nullptr;
+      (void)hipHostGetDevicePointer(&gpu_page_dmas, page_dmas, 0);
+      if (!gpu_page_dmas)
+        gpu_page_dmas = page_dmas;
+      pool_dma = page_dmas[0];
+
       prpPools[q].ptr = pool;
       prpPools[q].gpuPtr = gpu_pool;
+      prpPools[q].pageDmas = page_dmas;
+      prpPools[q].pageDmasGpu = static_cast<uint64_t*>(gpu_page_dmas);
       prpPools[q].dma = pool_dma;
       prpPools[q].size = prpPoolBytes;
       prpPools[q].hipAllocated = true;
@@ -1558,8 +1738,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     qBufParams.prpListPool = prpPools[q].gpuPtr
                                ? static_cast<uint64_t*>(prpPools[q].gpuPtr)
                                : static_cast<uint64_t*>(prpPools[q].ptr);
+    qBufParams.prpListPageDmas = prpPools[q].pageDmasGpu;
     qBufParams.prpListPoolDma = prpPools[q].dma;
     qBufParams.prpEntriesPerCmd = prpStridePerCmd;
+    qBufParams.prpSlotsPerBatch = prpSlotsPerBatch;
 
     XioEndpointConfig kernelConfig = *config;
     kernelConfig.endpointConfig = nullptr;
@@ -1573,6 +1755,71 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (useLessTiming) {
       kernelConfig.timingStats = perQueueStats[q];
     }
+
+    auto failMissingKernelArg = [&](const char* arg_name) -> bool {
+      ROCXIO_LOG_ERROR("Missing required NVMe kernel argument "
+                       "'%s' for queue %u\n",
+                       arg_name, qid);
+      result = hipErrorInvalidValue;
+      return true;
+    };
+
+    auto failZeroKernelArg = [&](const char* arg_name) -> bool {
+      ROCXIO_LOG_ERROR("Required NVMe kernel argument '%s' "
+                       "is zero for queue %u\n",
+                       arg_name, qid);
+      result = hipErrorInvalidValue;
+      return true;
+    };
+
+    if (!kernelConfig.submissionQueue &&
+        failMissingKernelArg("submissionQueue"))
+      goto cleanup;
+    if (!kernelConfig.completionQueue &&
+        failMissingKernelArg("completionQueue"))
+      goto cleanup;
+    if (useLessTiming && !kernelConfig.timingStats &&
+        failMissingKernelArg("timingStats"))
+      goto cleanup;
+    if (nvmeConfig->ioParams.readIo != 0) {
+      if (!qBufParams.readBuffer && failMissingKernelArg("readBuffer"))
+        goto cleanup;
+      if (qBufParams.readBufferDma == 0 && failZeroKernelArg("readBufferDma"))
+        goto cleanup;
+    }
+    if (nvmeConfig->ioParams.writeIo != 0) {
+      if (!qBufParams.writeBuffer && failMissingKernelArg("writeBuffer"))
+        goto cleanup;
+      if (qBufParams.writeBufferDma == 0 && failZeroKernelArg("writeBufferDma"))
+        goto cleanup;
+    }
+    if (prpStridePerCmd > 0) {
+      if (!qBufParams.prpListPool && failMissingKernelArg("prpListPool"))
+        goto cleanup;
+      if (qBufParams.prpListPoolDma == 0 && failZeroKernelArg("prpListPoolDma"))
+        goto cleanup;
+    }
+    if (qDoorbellParams.usePciMmioBridge) {
+      if (!qDoorbellParams.shadowBufferVirt &&
+          failMissingKernelArg("shadowBufferVirt"))
+        goto cleanup;
+    } else if (!qDoorbellParams.nvmeBar0Gpu &&
+               failMissingKernelArg("nvmeBar0Gpu")) {
+      goto cleanup;
+    }
+
+    // PRP dump runs on the host: prpListDmaForSlot() indexes
+    // prpListPageDmas[], so use the hipHostMalloc mapping, not the
+    // hipHostGetDevicePointer() alias passed to the kernel.
+    nvme_ep::nvmeBufferParams qBufParamsForDump = qBufParams;
+    if (prpPools[q].pageDmas != nullptr)
+      qBufParamsForDump.prpListPageDmas = prpPools[q].pageDmas;
+    dumpNvmeDataPrpIfRequested(qid, qBufParamsForDump,
+                               nvmeConfig->ioParams.lbasPerIo,
+                               nvmeConfig->ioParams.lbaSize, effBatch,
+                               prpStridePerCmd,
+                               nvmeConfig->ioParams.readIo != 0,
+                               nvmeConfig->ioParams.writeIo != 0);
 
     // Keep backward compat: update nvmeConfig
     // with the first queue's info for single-queue
@@ -1590,20 +1837,35 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                     "(stream %p)\n",
                     qid, (void*)streams[q]);
 
+    (void)xio::clearHipLaunchError("nvme-ep", "gpuKernel", qid);
+
     hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads),
                        dynShmemBytes, streams[q], kernelConfig, ioParams,
                        qDoorbellParams, qBufParams);
+
+    hipError_t launchErr = xio::checkHipLaunchError("nvme-ep", "gpuKernel", qid,
+                                                    1, kernelThreads,
+                                                    dynShmemBytes, streams[q]);
+    if (launchErr != hipSuccess) {
+      result = launchErr;
+      goto cleanup;
+    }
   }
 
   ROCXIO_LOG_INFO("%u kernel%s launched.\n", numQueues,
                   numQueues > 1 ? "s" : "");
 
-  // Wait for all GPU kernels to complete
-  result = hipDeviceSynchronize();
-  if (result != hipSuccess) {
-    ROCXIO_LOG_INFO("Device synchronization error: "
-                    "%s (code: %d).\n",
-                    hipGetErrorString(result), result);
+  // Wait for all GPU kernels to complete.  Stream-specific sync gives a
+  // precise queue id in multi-queue mode while preserving default-stream
+  // behavior for the single-queue path.
+  for (uint16_t q = 0; q < numQueues; q++) {
+    uint16_t qid = q < nvmeConfig->queueIds.size()
+                     ? nvmeConfig->queueIds[q]
+                     : (uint16_t)(baseQueueId + q);
+    result = xio::syncHipKernel("nvme-ep", "gpuKernel", qid, streams[q]);
+    if (result != hipSuccess) {
+      goto cleanup;
+    }
   }
 
   // ---- Verify read buffers ----
@@ -1704,6 +1966,9 @@ cleanup:
 
   // Free per-queue PRP list pools
   for (uint16_t q = 0; q < numQueues; q++) {
+    if (prpPools[q].pageDmas) {
+      (void)hipHostFree(prpPools[q].pageDmas);
+    }
     if (prpPools[q].ptr && prpPools[q].hipAllocated) {
       (void)hipHostFree(prpPools[q].ptr);
     }
