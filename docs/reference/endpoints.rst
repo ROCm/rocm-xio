@@ -93,8 +93,10 @@ Multi-queue parallelism (``--num-queues``)
 ``--num-queues N`` (default 1) creates ``N`` independent NVMe I/O
 queue pairs. Each queue gets its own GPU kernel on a separate HIP
 stream, its own data buffers, and its own doorbell offset. Queue
-IDs are allocated as a contiguous range ending at the auto-detected
-(or explicit ``--queue-id``) value.
+IDs are allocated as a contiguous range ending at the auto-selected
+(or explicit ``--queue-id``) value. Auto-selection prefers queue IDs
+whose Linux ``mq`` CPU mappings are outside the current process CPU
+affinity mask, reducing collisions with host NVMe submissions.
 
 .. code-block:: bash
 
