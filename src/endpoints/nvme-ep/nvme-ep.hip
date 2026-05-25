@@ -19,6 +19,7 @@
 
 #include <fcntl.h>
 #include <linux/nvme_ioctl.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -865,6 +866,163 @@ static int ioctlEintrSafe(int fd, unsigned long request, void* arg) {
   return ret;
 }
 
+static bool cpuRangeIntersectsAffinity(unsigned start_cpu, unsigned end_cpu,
+                                       const cpu_set_t* affinity) {
+  if (!affinity)
+    return false;
+
+  if (start_cpu > end_cpu) {
+    unsigned tmp = start_cpu;
+    start_cpu = end_cpu;
+    end_cpu = tmp;
+  }
+
+  if (start_cpu >= CPU_SETSIZE)
+    return false;
+  if (end_cpu >= CPU_SETSIZE)
+    end_cpu = CPU_SETSIZE - 1;
+
+  for (unsigned cpu = start_cpu; cpu <= end_cpu; cpu++) {
+    if (CPU_ISSET(cpu, affinity))
+      return true;
+  }
+  return false;
+}
+
+static bool cpuListIntersectsAffinity(const char* cpu_list,
+                                      const cpu_set_t* affinity) {
+  if (!cpu_list || !*cpu_list || !affinity)
+    return false;
+
+  char list_copy[256];
+  strncpy(list_copy, cpu_list, sizeof(list_copy) - 1);
+  list_copy[sizeof(list_copy) - 1] = '\0';
+
+  char* saveptr = nullptr;
+  for (char* token = strtok_r(list_copy, ",", &saveptr); token;
+       token = strtok_r(nullptr, ",", &saveptr)) {
+    while (*token == ' ' || *token == '\t')
+      token++;
+    size_t token_len = strlen(token);
+    while (token_len > 0 &&
+           (token[token_len - 1] == '\n' || token[token_len - 1] == '\r' ||
+            token[token_len - 1] == ' ' || token[token_len - 1] == '\t')) {
+      token[--token_len] = '\0';
+    }
+    if (*token == '\0')
+      continue;
+
+    char* dash = strchr(token, '-');
+    if (dash) {
+      *dash = '\0';
+      char* endptr = nullptr;
+      unsigned long start_cpu = strtoul(token, &endptr, 10);
+      if (endptr == token || *endptr != '\0')
+        continue;
+      unsigned long end_cpu = strtoul(dash + 1, &endptr, 10);
+      if (endptr == dash + 1 || *endptr != '\0')
+        continue;
+      if (cpuRangeIntersectsAffinity(static_cast<unsigned>(start_cpu),
+                                     static_cast<unsigned>(end_cpu), affinity)) {
+        return true;
+      }
+      continue;
+    }
+
+    char* endptr = nullptr;
+    unsigned long cpu = strtoul(token, &endptr, 10);
+    if (endptr == token || *endptr != '\0')
+      continue;
+    if (cpuRangeIntersectsAffinity(static_cast<unsigned>(cpu),
+                                   static_cast<unsigned>(cpu), affinity)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static int selectQueueIdOutsideCurrentAffinity(const NvmeDevicePath& nvme_path,
+                                               uint16_t max_queue_id,
+                                               uint16_t num_queues,
+                                               uint16_t* selected_queue_id) {
+  if (!selected_queue_id)
+    return -EINVAL;
+  if (max_queue_id == 0 || num_queues == 0)
+    return -EINVAL;
+
+  cpu_set_t affinity;
+  CPU_ZERO(&affinity);
+  if (sched_getaffinity(0, sizeof(affinity), &affinity) != 0) {
+    ROCXIO_LOG_WARN("sched_getaffinity failed while auto-selecting queue ID: "
+                    "%s. Falling back to queue %u.\n",
+                    strerror(errno), max_queue_id);
+    *selected_queue_id = max_queue_id;
+    return 0;
+  }
+
+  char ns_real[PATH_MAX] = {};
+  const char* ns_compare = nvme_path.namespacePath.c_str();
+  if (realpath(ns_compare, ns_real) != nullptr)
+    ns_compare = ns_real;
+
+  const char* ns_name = strrchr(ns_compare, '/');
+  if (!ns_name || *(ns_name + 1) == '\0') {
+    *selected_queue_id = max_queue_id;
+    return 0;
+  }
+  ns_name++;
+
+  bool saw_cpu_mapping = false;
+  for (int end_qid = max_queue_id; end_qid >= static_cast<int>(num_queues);
+       end_qid--) {
+    bool range_conflicts = false;
+    bool range_has_mapping = true;
+
+    for (uint16_t qid = static_cast<uint16_t>(end_qid - num_queues + 1);
+         qid <= static_cast<uint16_t>(end_qid); qid++) {
+      char cpu_list_path[PATH_MAX];
+      snprintf(cpu_list_path, sizeof(cpu_list_path), "/sys/block/%s/mq/%u/cpu_list",
+               ns_name, static_cast<unsigned>(qid - 1));
+
+      FILE* f = fopen(cpu_list_path, "r");
+      if (!f) {
+        range_has_mapping = false;
+        break;
+      }
+
+      saw_cpu_mapping = true;
+      char cpu_list[256] = {};
+      if (!fgets(cpu_list, sizeof(cpu_list), f)) {
+        fclose(f);
+        range_has_mapping = false;
+        break;
+      }
+      fclose(f);
+
+      if (cpuListIntersectsAffinity(cpu_list, &affinity)) {
+        range_conflicts = true;
+        break;
+      }
+    }
+
+    if (range_has_mapping && !range_conflicts) {
+      *selected_queue_id = static_cast<uint16_t>(end_qid);
+      return 0;
+    }
+  }
+
+  *selected_queue_id = max_queue_id;
+  if (saw_cpu_mapping) {
+    ROCXIO_LOG_WARN(
+      "No NVMe queue range was found outside current CPU affinity. "
+      "Using queue ID %u; consider setting --queue-id (or ROCXIO_NVME_QUEUE_ID) "
+      "to a queue not mapped to active CPUs.\n",
+      max_queue_id);
+  }
+  return 0;
+}
+
 //
 // NVMe Endpoint CLI Options
 //
@@ -908,10 +1066,21 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       return "Failed to detect maximum queue ID. "
              "Please specify --queue-id manually.";
     }
-    config->queueId = max_queue_id;
-    ROCXIO_LOG_INFO("Auto-detected last available queue "
-                    "ID: %u\n",
-                    config->queueId);
+    uint16_t selected_queue_id = max_queue_id;
+    uint16_t requested_queues = config->numQueues == 0 ? 1 : config->numQueues;
+    ret = selectQueueIdOutsideCurrentAffinity(
+      nvme_path, max_queue_id, requested_queues, &selected_queue_id);
+    if (ret == 0) {
+      config->queueId = selected_queue_id;
+      ROCXIO_LOG_INFO(
+        "Auto-selected queue ID: %u (max available queue ID: %u)\n",
+        config->queueId, max_queue_id);
+    } else {
+      config->queueId = max_queue_id;
+      ROCXIO_LOG_WARN("Failed to auto-select queue ID outside current CPU "
+                      "affinity: %s. Falling back to queue ID %u.\n",
+                      strerror(-ret), config->queueId);
+    }
   }
 
   // Multi-queue validation: ensure enough I/O queues
