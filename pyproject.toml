@@ -1,0 +1,29 @@
+[build-system]
+requires = ["scikit-build-core", "nanobind"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "rocm-xio"
+dynamic = ["version"]
+description = "Python bindings for ROCm XIO endpoints"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["AMD", "ROCm", "XIO", "SDMA", "GPU", "DMA"]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["python/xio"]
+metadata.version.provider = "scikit_build_core.metadata.regex"
+metadata.version.input = "CMakeLists.txt"
+metadata.version.regex = "set\\(ROCM_XIO_LIBRARY_VERSION\\s+\"(?P<value>[^\"]+)\""
+
+[tool.scikit-build.cmake.define]
+CMAKE_CXX_COMPILER = "/opt/rocm/bin/hipcc"
+XIO_BUILD_PYTHON = "ON"
+BUILD_CLIENTS = "OFF"
+BUILD_TESTING = "OFF"
+GDA_MLX5 = "OFF"
+GDA_BNXT = "OFF"
+GDA_IONIC = "OFF"
+GDA_ERNIC = "OFF"
