@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -56,23 +57,6 @@ static bool SdmaDebugEnabled() {
 }
 
 // Allow access to peerDeviceId from deviceId
-void EnablePeerAccess(int const deviceId, int const peerDeviceId) {
-  int canAccess;
-  CHECK_HIP_ERROR(hipDeviceCanAccessPeer(&canAccess, deviceId, peerDeviceId));
-  if (!canAccess) {
-    std::cerr << "Unable to enable peer access from GPU devices " << deviceId
-              << " to " << peerDeviceId << "\n";
-  }
-
-  CHECK_HIP_ERROR(hipSetDevice(deviceId));
-  hipError_t error = hipDeviceEnablePeerAccess(peerDeviceId, 0);
-  if (error != hipSuccess && error != hipErrorPeerAccessAlreadyEnabled) {
-    std::cerr << "Unable to enable peer to peer access from " << deviceId
-              << "  to " << peerDeviceId << " (" << hipGetErrorString(error)
-              << ")\n";
-  }
-}
-
 // HSA agents
 std::vector<hsa_agent_t> cpuAgents_;
 std::vector<hsa_agent_t> gpuAgents_;
@@ -197,11 +181,11 @@ std::ostream& operator<<(std::ostream& os, const SDMA_PKT_FENCE_MI4& cmd) {
 #endif /* XIO_SDMA_OSS7 */
 
 SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
-                     hsa_agent_t& localAgent, uint32_t engineId) {
-  (void)remoteDeviceId;
+                     hsa_agent_t& localAgent, uint32_t engineId,
+                     bool allocateOnHost)
+  : remoteDeviceId_(remoteDeviceId), hostAllocated_(allocateOnHost) {
   int originalDeviceId;
   CHECK_HIP_ERROR(hipGetDevice(&originalDeviceId));
-  (void)originalDeviceId;
 
   uint32_t localNodeId;
   hsa_status_t status = hsa_agent_get_info(localAgent, HSA_AGENT_INFO_NODE,
@@ -211,32 +195,32 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
     // return status;
   }
 
-  // std::cout << "Allocating queue for engine " << engineId << " on device " <<
-  // localDeviceId << " to device "
-  //           << remoteDeviceId << std::endl;
-  // std::cout << "original device id: " << originalDeviceId << " local " <<
-  // localDeviceId << " remote " << remoteDeviceId
-  //           << " local node " << localNodeId << std::endl;
-
-  // Allocate SDMA queue buffer on device side, requires ExecuteAccess
-  HsaMemFlags memFlags = {};
-  memFlags.ui32.NonPaged = 1;
-  memFlags.ui32.HostAccess = 1;
-  memFlags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
-  memFlags.ui32.NoNUMABind = 1;
-  memFlags.ui32.ExecuteAccess = 1;
-  memFlags.ui32.Uncached = 1;
-  // std::cout << "Allocating SDMA Queue Buffer for device: " << localNodeId <<
-  // std::endl << std::flush;
-  CHECK_HSAKMT_SUCCESS(hsaKmtAllocMemory(localNodeId, SDMA_QUEUE_SIZE, memFlags,
-                                         &queueBuffer_),
-                       "Failed");
-  CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_, SDMA_QUEUE_SIZE,
-                                            NULL),
-                       "Failed");
+  // Allocate SDMA queue buffer
+  if (allocateOnHost) {
+    // Use pinned host memory for CPU-only access
+    CHECK_HIP_ERROR(
+      hipHostMalloc(&queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
+                    hipHostMallocWriteCombined | hipHostMallocPortable));
+  } else {
+    // Use device memory (existing path)
+    HsaMemFlags memFlags = {};
+    memFlags.ui32.NonPaged = 1;
+    memFlags.ui32.HostAccess = 1;
+    memFlags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    memFlags.ui32.NoNUMABind = 1;
+    memFlags.ui32.ExecuteAccess = 1;
+    memFlags.ui32.Uncached = 1;
+    CHECK_HSAKMT_SUCCESS(hsaKmtAllocMemory(localNodeId,
+                                           xio::sdma_ep::SDMA_QUEUE_SIZE,
+                                           memFlags, &queueBuffer_),
+                         "Failed");
+    CHECK_HSAKMT_SUCCESS(hsaKmtMapMemoryToGPU(queueBuffer_,
+                                              xio::sdma_ep::SDMA_QUEUE_SIZE,
+                                              NULL),
+                         "Failed");
+  }
 
   // Create SDMA Queue
-  // TODO needed here?
   std::memset(&queue_, 0, sizeof(HsaQueueResource));
 
   if (SdmaDebugEnabled()) {
@@ -245,73 +229,118 @@ SdmaQueue::SdmaQueue(int localDeviceId, int remoteDeviceId,
               << " localNodeId=" << localNodeId << " engineId=" << engineId
               << std::endl;
   }
-  HSAKMT_STATUS createStatus =
-    hsaKmtCreateQueueExt(localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID,
-                         DEFAULT_QUEUE_PERCENTAGE, DEFAULT_PRIORITY, engineId,
-                         queueBuffer_, SDMA_QUEUE_SIZE, nullptr, &queue_);
+  HSAKMT_STATUS createStatus = hsaKmtCreateQueueExt(
+    localNodeId, HSA_QUEUE_SDMA_BY_ENG_ID, DEFAULT_QUEUE_PERCENTAGE,
+    DEFAULT_PRIORITY, engineId, queueBuffer_, xio::sdma_ep::SDMA_QUEUE_SIZE,
+    nullptr, &queue_);
   if (SdmaDebugEnabled()) {
     std::cout << "SDMA_DEBUG create_queue_status=" << createStatus << std::endl;
   }
   CHECK_HSAKMT_SUCCESS(createStatus, "Failed");
 
-  // Populate Device Handle
-  // TODO uncached
-  {
-    hsa_status_t s;
-    s = xio::allocDeviceMemory(sizeof(SdmaQueueDeviceHandle),
-                               (void**)&deviceHandle_, "SDMA queue handle",
-                               XIO_DEVICE_MEM_HIP);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(deviceHandle_) failed");
-    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&cachedWptr_,
-                               "SDMA cached wptr", XIO_DEVICE_MEM_UNCACHED);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
-    s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
-                               "SDMA committed wptr", XIO_DEVICE_MEM_UNCACHED);
-    if (s != HSA_STATUS_SUCCESS)
-      throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
+  // Initialize host-side state (always needed)
+  uint64_t initial_wptr = *queue_.Queue_write_ptr_aql;
+  hostCachedWptr_.store(initial_wptr, std::memory_order_relaxed);
+  hostCommittedWptr_.store(initial_wptr, std::memory_order_relaxed);
+  hostCachedHwReadIndex_ = *queue_.Queue_read_ptr_aql;
+
+  if (allocateOnHost) {
+    // Host-only queue: Skip device-side structures
+    cachedWptr_ = nullptr;
+    committedWptr_ = nullptr;
+    deviceHandle_ = nullptr;
+  } else {
+    // Device queue: Allocate device-side structures for GPU kernel access
+    {
+      hsa_status_t s;
+      s = xio::allocDeviceMemory(sizeof(SdmaQueueDeviceHandle),
+                                 (void**)&deviceHandle_, "SDMA queue handle",
+                                 XIO_DEVICE_MEM_HIP);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(deviceHandle_) failed");
+      s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&cachedWptr_,
+                                 "SDMA cached wptr", XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(cachedWptr_) failed");
+      s = xio::allocDeviceMemory(sizeof(uint64_t), (void**)&committedWptr_,
+                                 "SDMA committed wptr",
+                                 XIO_DEVICE_MEM_UNCACHED);
+      if (s != HSA_STATUS_SUCCESS)
+        throw std::runtime_error("allocDeviceMemory(committedWptr_) failed");
+    }
+
+    uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
+      queue_.Queue_write_ptr_aql);
+    uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
+      queue_.Queue_write_ptr_aql);
+    SdmaQueueDeviceHandle handle = {
+      .queueBuf = static_cast<uint32_t*>(queueBuffer_),
+      .rptr = queue_.Queue_read_ptr_aql,
+      .wptr = queue_.Queue_write_ptr_aql,
+      .doorbell = queue_.Queue_DoorBell_aql,
+      .cachedWptr = cachedWptr_,
+      .committedWptr = committedWptr_,
+      .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
+        queue_.Queue_read_ptr_aql),
+      .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
+    };
+
+    CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
+                              sizeof(SdmaQueueDeviceHandle),
+                              hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(cachedWptr_, &cachedWptr, sizeof(uint64_t),
+                              hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
+                              hipMemcpyHostToDevice));
   }
-
-  uint64_t cachedWptr = *reinterpret_cast<uint64_t*>(
-    queue_.Queue_write_ptr_aql);
-  uint64_t committedWptr = *reinterpret_cast<uint64_t*>(
-    queue_.Queue_write_ptr_aql);
-  SdmaQueueDeviceHandle handle = {
-    .queueBuf = static_cast<uint32_t*>(queueBuffer_),
-    .rptr = queue_.Queue_read_ptr_aql,
-    .wptr = queue_.Queue_write_ptr_aql,
-    .doorbell = queue_.Queue_DoorBell_aql,
-    .cachedWptr = cachedWptr_,
-    .committedWptr = committedWptr_,
-    .cachedHwReadIndex = *reinterpret_cast<uint64_t*>(
-      queue_.Queue_read_ptr_aql),
-    .maxWritePtr = *reinterpret_cast<uint64_t*>(queue_.Queue_read_ptr_aql),
-  };
-
-  CHECK_HIP_ERROR(hipMemcpy(deviceHandle_, &handle,
-                            sizeof(SdmaQueueDeviceHandle),
-                            hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(cachedWptr_, &cachedWptr, sizeof(uint64_t),
-                            hipMemcpyHostToDevice));
-  CHECK_HIP_ERROR(hipMemcpy(committedWptr_, &committedWptr, sizeof(uint64_t),
-                            hipMemcpyHostToDevice));
 }
 
 SdmaQueue::~SdmaQueue() {
   // TODO catch exception?
   CHECK_HSAKMT_SUCCESS(hsaKmtDestroyQueue(queue_.QueueId),
                        "Failed to destroy queue.");
-  xio::freeDeviceMemory(deviceHandle_, XIO_DEVICE_MEM_HIP);
-  xio::freeDeviceMemory(cachedWptr_, XIO_DEVICE_MEM_UNCACHED);
-  xio::freeDeviceMemory(committedWptr_, XIO_DEVICE_MEM_UNCACHED);
-  CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
-  CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_, SDMA_QUEUE_SIZE),
-                       "Failed");
+
+  // Only free device-side pointers if they were allocated
+  if (deviceHandle_ != nullptr) {
+    xio::freeDeviceMemory(deviceHandle_, XIO_DEVICE_MEM_HIP);
+  }
+  if (cachedWptr_ != nullptr) {
+    xio::freeDeviceMemory(cachedWptr_, XIO_DEVICE_MEM_UNCACHED);
+  }
+  if (committedWptr_ != nullptr) {
+    xio::freeDeviceMemory(committedWptr_, XIO_DEVICE_MEM_UNCACHED);
+  }
+
+  // Free queue buffer based on allocation type
+  if (hostAllocated_) {
+    CHECK_HIP_ERROR(hipHostFree(queueBuffer_));
+  } else {
+    CHECK_HSAKMT_SUCCESS(hsaKmtUnmapMemoryToGPU(queueBuffer_), "Failed");
+    CHECK_HSAKMT_SUCCESS(hsaKmtFreeMemory(queueBuffer_,
+                                          xio::sdma_ep::SDMA_QUEUE_SIZE),
+                         "Failed");
+  }
 }
 
 SdmaQueueDeviceHandle* SdmaQueue::deviceHandle() const {
   return deviceHandle_;
+}
+
+xio::sdma_ep::SdmaQueuePythonDeviceCtx SdmaQueue::pythonDeviceContext() const {
+  if (deviceHandle_ == nullptr) {
+    throw std::runtime_error("pythonDeviceContext() called on host-only queue");
+  }
+
+  return {.queueBuf = reinterpret_cast<uintptr_t>(queueBuffer_),
+          .rptr = reinterpret_cast<uintptr_t>(queue_.Queue_read_ptr_aql),
+          .wptr = reinterpret_cast<uintptr_t>(queue_.Queue_write_ptr_aql),
+          .doorbell = reinterpret_cast<uintptr_t>(queue_.Queue_DoorBell_aql),
+          .cachedWptr = reinterpret_cast<uintptr_t>(cachedWptr_),
+          .committedWptr = reinterpret_cast<uintptr_t>(committedWptr_)};
+}
+
+xio::sdma_ep::SdmaQueueHostHandle SdmaQueue::hostHandle() {
+  return xio::sdma_ep::SdmaQueueHostHandle(this);
 }
 
 void SdmaQueue::dump(std::ofstream& logFile) {
@@ -325,12 +354,12 @@ void SdmaQueue::dump(std::ofstream& logFile) {
           << "pendingWptr: " << *deviceHandle_->cachedWptr << ", " << std::endl;
 
   size_t dw_enqueued = std::min(*deviceHandle_->wptr,
-                                (uint64_t)SDMA_QUEUE_SIZE) /
+                                (uint64_t)xio::sdma_ep::SDMA_QUEUE_SIZE) /
                        sizeof(uint32_t);
   size_t it = 0;
   uint32_t* dwPtr = deviceHandle_->queueBuf;
-  uint64_t wrapped_rptr = *deviceHandle_->rptr % SDMA_QUEUE_SIZE;
-  uint64_t wrapped_wptr = *deviceHandle_->wptr % SDMA_QUEUE_SIZE;
+  uint64_t wrapped_rptr = *deviceHandle_->rptr % xio::sdma_ep::SDMA_QUEUE_SIZE;
+  uint64_t wrapped_wptr = *deviceHandle_->wptr % xio::sdma_ep::SDMA_QUEUE_SIZE;
 
   logFile << "valid dw: " << dw_enqueued << "\nwrapped rptr : " << wrapped_rptr
           << " dw rptr: " << wrapped_rptr / sizeof(uint32_t)
@@ -401,6 +430,9 @@ AnvilLib::~AnvilLib() {
   for (auto& p : sdma_channels_) {
     p.second.clear();
   }
+  for (auto& p : host_sdma_channels_) {
+    p.second.clear();
+  }
   if (s_kfd_opened) {
     CloseKFD();
     hsa_shut_down();
@@ -434,39 +466,75 @@ void AnvilLib::init() {
 }
 
 SdmaQueue* AnvilLib::createSdmaQueue(int srcDeviceId, int dstDeviceId,
-                                     uint32_t engineId, int* channelIdx) {
-  auto& vec = sdma_channels_[dstDeviceId];
+                                     uint32_t engineId, int* channelIdx,
+                                     bool isHostQueue) {
+  auto& channel_map = isHostQueue ? host_sdma_channels_ : sdma_channels_;
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto& vec = channel_map[key];
+
   vec.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
                                                gpuAgents_[srcDeviceId],
-                                               engineId));
-  if (channelIdx)
+                                               engineId, isHostQueue));
+
+  if (channelIdx) {
     *channelIdx = static_cast<int>(vec.size() - 1);
+  }
   return vec.back().get();
 }
 
-bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels) {
-  uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
-  std::cout << "Connect from " << srcDeviceId << " to " << dstDeviceId
-            << " with " << numChannels << " channels using engine " << engineId
-            << std::endl;
-  for (int c = 0; c < numChannels; ++c) {
-    createSdmaQueue(srcDeviceId, dstDeviceId, engineId);
+bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
+                       bool allocateOnHost) {
+  if (numChannels <= 0) {
+    throw std::invalid_argument("connect(): numChannels must be positive");
   }
+
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto& channel_map = allocateOnHost ? host_sdma_channels_ : sdma_channels_;
+
+  const uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
+  auto& queues = channel_map[key];
+  const int existingChannels = static_cast<int>(queues.size());
+
+  if (existingChannels > 0) {
+    if (numChannels == existingChannels) {
+      return true; // idempotent
+    }
+
+    queues.reserve(static_cast<std::size_t>(numChannels));
+    for (int channel = existingChannels; channel < numChannels; ++channel) {
+      queues.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                                      gpuAgents_[srcDeviceId],
+                                                      engineId,
+                                                      allocateOnHost));
+    }
+    return true;
+  }
+
+  queues.reserve(static_cast<std::size_t>(numChannels));
+  for (int channel = 0; channel < numChannels; ++channel) {
+    queues.emplace_back(std::make_unique<SdmaQueue>(srcDeviceId, dstDeviceId,
+                                                    gpuAgents_[srcDeviceId],
+                                                    engineId, allocateOnHost));
+  }
+
   return true;
 }
 
 SdmaQueue* AnvilLib::getSdmaQueue(int srcDeviceId, int dstDeviceId,
                                   int channel_idx) {
-  if (sdma_channels_.find(dstDeviceId) == sdma_channels_.end()) {
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto it = sdma_channels_.find(key);
+  if (it == sdma_channels_.end()) {
     return nullptr;
   }
 
-  const auto& channels = sdma_channels_[dstDeviceId];
-  if (channel_idx < 0 || static_cast<size_t>(channel_idx) >= channels.size()) {
+  const auto& channels = it->second;
+  if (channel_idx < 0 ||
+      static_cast<std::size_t>(channel_idx) >= channels.size()) {
     return nullptr;
   }
 
-  return channels[static_cast<size_t>(channel_idx)].get();
+  return channels[static_cast<std::size_t>(channel_idx)].get();
 }
 
 AnvilLib& AnvilLib::getInstance() {
@@ -612,6 +680,28 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
   return engineId;
 }
 
-AnvilLib& anvil = anvil.getInstance();
+// ==================== Host API Methods ====================
+
+xio::sdma_ep::SdmaQueuePythonDeviceCtx AnvilLib::getPythonDeviceCtx(
+  int srcDeviceId, int dstDeviceId) {
+  SdmaQueue* queue = getSdmaQueue(srcDeviceId, dstDeviceId, 0);
+  if (!queue) {
+    throw std::runtime_error("getPythonDeviceCtx: queue not found");
+  }
+  return queue->pythonDeviceContext();
+}
+
+xio::sdma_ep::SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId,
+                                                          int dstDeviceId,
+                                                          int channelIdx) {
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto host_it = host_sdma_channels_.find(key);
+  if (host_it != host_sdma_channels_.end() &&
+      static_cast<std::size_t>(channelIdx) < host_it->second.size()) {
+    return host_it->second[static_cast<std::size_t>(channelIdx)]->hostHandle();
+  }
+
+  throw std::runtime_error("getHostHandle: queue not found");
+}
 
 } // namespace anvil
