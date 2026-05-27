@@ -923,7 +923,8 @@ static bool cpuListIntersectsAffinity(const char* cpu_list,
       if (endptr == dash + 1 || *endptr != '\0')
         continue;
       if (cpuRangeIntersectsAffinity(static_cast<unsigned>(start_cpu),
-                                     static_cast<unsigned>(end_cpu), affinity)) {
+                                     static_cast<unsigned>(end_cpu),
+                                     affinity)) {
         return true;
       }
       continue;
@@ -982,8 +983,9 @@ static int selectQueueIdOutsideCurrentAffinity(const NvmeDevicePath& nvme_path,
     for (uint16_t qid = static_cast<uint16_t>(end_qid - num_queues + 1);
          qid <= static_cast<uint16_t>(end_qid); qid++) {
       char cpu_list_path[PATH_MAX];
-      snprintf(cpu_list_path, sizeof(cpu_list_path), "/sys/block/%s/mq/%u/cpu_list",
-               ns_name, static_cast<unsigned>(qid - 1));
+      snprintf(cpu_list_path, sizeof(cpu_list_path),
+               "/sys/block/%s/mq/%u/cpu_list", ns_name,
+               static_cast<unsigned>(qid - 1));
 
       FILE* f = fopen(cpu_list_path, "r");
       if (!f) {
@@ -1016,7 +1018,8 @@ static int selectQueueIdOutsideCurrentAffinity(const NvmeDevicePath& nvme_path,
   if (saw_cpu_mapping) {
     ROCXIO_LOG_WARN(
       "No NVMe queue range was found outside current CPU affinity. "
-      "Using queue ID %u; consider setting --queue-id (or ROCXIO_NVME_QUEUE_ID) "
+      "Using queue ID %u; consider setting --queue-id (or "
+      "ROCXIO_NVME_QUEUE_ID) "
       "to a queue not mapped to active CPUs.\n",
       max_queue_id);
   }
@@ -1068,8 +1071,9 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     }
     uint16_t selected_queue_id = max_queue_id;
     uint16_t requested_queues = config->numQueues == 0 ? 1 : config->numQueues;
-    ret = selectQueueIdOutsideCurrentAffinity(
-      nvme_path, max_queue_id, requested_queues, &selected_queue_id);
+    ret = selectQueueIdOutsideCurrentAffinity(nvme_path, max_queue_id,
+                                              requested_queues,
+                                              &selected_queue_id);
     if (ret == 0) {
       config->queueId = selected_queue_id;
       ROCXIO_LOG_INFO(
@@ -1590,6 +1594,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   nvmeConfig->queueInfos.reserve(numQueues);
 
   hipError_t result = hipSuccess;
+  uint16_t launchedQueues = 0;
   std::vector<struct xioBufferInfo> readBufs(numQueues);
   std::vector<struct xioBufferInfo> writeBufs(numQueues);
   std::vector<hipStream_t> streams(numQueues, nullptr);
@@ -2086,6 +2091,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       result = launchErr;
       goto cleanup;
     }
+    launchedQueues = static_cast<uint16_t>(q + 1);
   }
 
   ROCXIO_LOG_INFO("%u kernel%s launched.\n", numQueues,
@@ -2180,6 +2186,27 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
 cleanup:
+  if (result != hipSuccess && launchedQueues > 0) {
+    ROCXIO_LOG_WARN("nvme-ep: error after launching %u queue kernel%s; "
+                    "requesting stop before cleanup\n",
+                    launchedQueues, launchedQueues > 1 ? "s" : "");
+    if (config->stopRequested != nullptr) {
+      *config->stopRequested = true;
+    }
+    for (uint16_t q = 0; q < launchedQueues; q++) {
+      uint16_t qid = q < nvmeConfig->queueIds.size()
+                       ? nvmeConfig->queueIds[q]
+                       : (uint16_t)(baseQueueId + q);
+      hipError_t sync_err = xio::syncHipKernel("nvme-ep", "gpuKernel", qid,
+                                               streams[q]);
+      if (sync_err != hipSuccess) {
+        ROCXIO_LOG_WARN("nvme-ep: kernel sync during error cleanup "
+                        "failed for queue %u: %s (code: %d)\n",
+                        qid, hipGetErrorString(sync_err), sync_err);
+      }
+    }
+  }
+
   // ---- Cleanup: delete successfully created NVMe queues ----
   if (nvmeConfig->queuesCreated) {
     uint16_t nCreated = (uint16_t)nvmeConfig->queueIds.size();
