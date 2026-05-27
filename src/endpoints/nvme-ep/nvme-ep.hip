@@ -1421,6 +1421,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   nvmeConfig->queueInfos.reserve(numQueues);
 
   hipError_t result = hipSuccess;
+  uint16_t launchedQueues = 0;
   std::vector<struct xioBufferInfo> readBufs(numQueues);
   std::vector<struct xioBufferInfo> writeBufs(numQueues);
   std::vector<hipStream_t> streams(numQueues, nullptr);
@@ -1850,6 +1851,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       result = launchErr;
       goto cleanup;
     }
+    launchedQueues = static_cast<uint16_t>(q + 1);
   }
 
   ROCXIO_LOG_INFO("%u kernel%s launched.\n", numQueues,
@@ -1944,6 +1946,27 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
 cleanup:
+  if (result != hipSuccess && launchedQueues > 0) {
+    ROCXIO_LOG_WARN("nvme-ep: error after launching %u queue kernel%s; "
+                    "requesting stop before cleanup\n",
+                    launchedQueues, launchedQueues > 1 ? "s" : "");
+    if (config->stopRequested != nullptr) {
+      *config->stopRequested = true;
+    }
+    for (uint16_t q = 0; q < launchedQueues; q++) {
+      uint16_t qid = q < nvmeConfig->queueIds.size()
+                       ? nvmeConfig->queueIds[q]
+                       : (uint16_t)(baseQueueId + q);
+      hipError_t sync_err = xio::syncHipKernel("nvme-ep", "gpuKernel", qid,
+                                               streams[q]);
+      if (sync_err != hipSuccess) {
+        ROCXIO_LOG_WARN("nvme-ep: kernel sync during error cleanup "
+                        "failed for queue %u: %s (code: %d)\n",
+                        qid, hipGetErrorString(sync_err), sync_err);
+      }
+    }
+  }
+
   // ---- Cleanup: delete successfully created NVMe queues ----
   if (nvmeConfig->queuesCreated) {
     uint16_t nCreated = (uint16_t)nvmeConfig->queueIds.size();
