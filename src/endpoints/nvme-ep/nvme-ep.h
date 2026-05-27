@@ -776,6 +776,45 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
                           nvmeBufferParams bufferParams);
 
 /**
+ * Host-side occupancy summary for the NVMe GPU kernel.
+ *
+ * The endpoint launches one kernel block per NVMe I/O queue.  Finite kernels
+ * can safely queue behind resident blocks, but infinite kernels must fit all
+ * requested queues on the GPU at once or some queues will never run.
+ */
+struct nvmeQueueResidency {
+  uint32_t activeBlocksPerMultiprocessor; /**< Resident blocks per CU/SM. */
+  uint32_t multiprocessorCount;           /**< GPU compute-unit count. */
+  uint32_t residentQueueCapacity;         /**< Maximum resident queue kernels. */
+};
+
+/**
+ * Compute the number of queue kernels that can be resident at once.
+ *
+ * @param activeBlocksPerMultiprocessor Blocks per compute unit from HIP
+ *                                      occupancy.
+ * @param multiprocessorCount Compute-unit count from HIP device properties.
+ * @return Total resident kernel-block capacity, or 0 if unknown.
+ */
+__host__ static inline uint32_t nvmeResidentQueueCapacity(
+  int activeBlocksPerMultiprocessor, int multiprocessorCount) {
+  if (activeBlocksPerMultiprocessor <= 0 || multiprocessorCount <= 0)
+    return 0;
+
+  uint64_t capacity = (uint64_t)activeBlocksPerMultiprocessor *
+                      (uint64_t)multiprocessorCount;
+  return capacity > UINT32_MAX ? UINT32_MAX : (uint32_t)capacity;
+}
+
+/**
+ * @return true when the requested queues exceed known resident capacity.
+ */
+__host__ static inline bool nvmeQueueResidencyExceeded(
+  uint16_t requestedQueues, uint32_t residentQueueCapacity) {
+  return residentQueueCapacity != 0 && requestedQueues > residentQueueCapacity;
+}
+
+/**
  * NVMe Endpoint Configuration Structure
  *
  * Contains all NVMe-specific configuration options that were previously

@@ -96,6 +96,12 @@ stream, its own data buffers, and its own doorbell offset. Queue
 IDs are allocated as a contiguous range ending at the auto-detected
 (or explicit ``--queue-id``) value.
 
+The number of resident queue kernels is also bounded by GPU occupancy for the
+selected ``--batch-size`` and dynamic shared-memory footprint. If
+``--num-queues`` exceeds that resident capacity, finite runs continue with a
+warning and HIP serializes the extra stream kernels. Infinite runs fail before
+queue creation because non-resident queue kernels would otherwise never run.
+
 .. code-block:: bash
 
    # 2 independent queues, each doing 32 reads

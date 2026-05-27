@@ -182,6 +182,18 @@ int test_queue_length_validation() {
   return 0;
 }
 
+int test_queue_residency_capacity() {
+  ASSERT_EQ(nvmeResidentQueueCapacity(0, 120), 0u);
+  ASSERT_EQ(nvmeResidentQueueCapacity(8, 0), 0u);
+  ASSERT_EQ(nvmeResidentQueueCapacity(8, 120), 960u);
+
+  ASSERT_TRUE(!nvmeQueueResidencyExceeded(32, 960));
+  ASSERT_TRUE(!nvmeQueueResidencyExceeded(960, 960));
+  ASSERT_TRUE(nvmeQueueResidencyExceeded(961, 960));
+  ASSERT_TRUE(!nvmeQueueResidencyExceeded(961, 0));
+  return 0;
+}
+
 int test_nvme_page_size() {
   ASSERT_EQ(NVME_PAGE_SIZE, 4096);
   return 0;
@@ -211,6 +223,7 @@ int main() {
   failures += test_admin_response_size();
   failures += test_command_opcodes();
   failures += test_queue_length_validation();
+  failures += test_queue_residency_capacity();
   failures += test_nvme_page_size();
   failures += test_status_code_constants();
 

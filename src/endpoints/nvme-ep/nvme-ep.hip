@@ -1195,6 +1195,37 @@ static __host__ void dumpNvmeDataPrpIfRequested(
                  true);
 }
 
+static __host__ hipError_t queryNvmeKernelResidency(
+  unsigned kernelThreads, size_t dynShmemBytes,
+  nvme_ep::nvmeQueueResidency* residency) {
+  if (!residency)
+    return hipErrorInvalidValue;
+
+  *residency = {};
+
+  int deviceId = 0;
+  hipError_t err = hipGetDevice(&deviceId);
+  if (err != hipSuccess)
+    return err;
+
+  hipDeviceProp_t deviceProp = {};
+  err = hipGetDeviceProperties(&deviceProp, deviceId);
+  if (err != hipSuccess)
+    return err;
+
+  int activeBlocks = 0;
+  err = hipOccupancyMaxActiveBlocksPerMultiprocessor(
+    &activeBlocks, nvme_ep::gpuKernel, (int)kernelThreads, dynShmemBytes);
+  if (err != hipSuccess)
+    return err;
+
+  residency->activeBlocksPerMultiprocessor = (uint32_t)activeBlocks;
+  residency->multiprocessorCount = (uint32_t)deviceProp.multiProcessorCount;
+  residency->residentQueueCapacity = nvme_ep::nvmeResidentQueueCapacity(
+    activeBlocks, deviceProp.multiProcessorCount);
+  return hipSuccess;
+}
+
 /**
  * Run NVMe endpoint operations
  *
@@ -1276,6 +1307,53 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                     kernelThreads, effBatch);
   }
   ROCXIO_LOG_INFO("Using queue length: %u entries\n", queue_size);
+
+  // Dynamic shared memory for batch timing
+  size_t dynShmemBytes = 0;
+  if (effBatch > 1) {
+    dynShmemBytes = effBatch * sizeof(unsigned long long int);
+  }
+
+  // Each NVMe queue launches one single-block kernel.  HIP will queue excess
+  // stream work, but infinite queue kernels never return, so any non-resident
+  // queues would never become active.
+  nvme_ep::nvmeQueueResidency residency = {};
+  hipError_t occupancyErr =
+    queryNvmeKernelResidency(kernelThreads, dynShmemBytes, &residency);
+  if (occupancyErr == hipSuccess && residency.residentQueueCapacity != 0) {
+    ROCXIO_LOG_INFO("NVMe queue GPU residency: %u active block%s/CU, "
+                    "%u CU%s, capacity %u queue kernel%s\n",
+                    residency.activeBlocksPerMultiprocessor,
+                    residency.activeBlocksPerMultiprocessor == 1 ? "" : "s",
+                    residency.multiprocessorCount,
+                    residency.multiprocessorCount == 1 ? "" : "s",
+                    residency.residentQueueCapacity,
+                    residency.residentQueueCapacity == 1 ? "" : "s");
+
+    if (nvme_ep::nvmeQueueResidencyExceeded(numQueues,
+                                            residency.residentQueueCapacity)) {
+      if (nvmeConfig->ioParams.infiniteMode) {
+        ROCXIO_LOG_ERROR("--num-queues %u exceeds GPU resident queue "
+                         "capacity %u for this kernel configuration. "
+                         "Infinite-mode kernels do not complete, so queued "
+                         "kernels would never run. Reduce --num-queues or "
+                         "--batch-size.\n",
+                         numQueues, residency.residentQueueCapacity);
+        return hipErrorNotSupported;
+      }
+
+      ROCXIO_LOG_WARN("--num-queues %u exceeds GPU resident queue "
+                      "capacity %u for this kernel configuration. HIP will "
+                      "serialize the extra finite queue kernels, so effective "
+                      "concurrency is capped at %u.\n",
+                      numQueues, residency.residentQueueCapacity,
+                      residency.residentQueueCapacity);
+    }
+  } else if (occupancyErr != hipSuccess) {
+    ROCXIO_LOG_WARN("Unable to query NVMe kernel occupancy: %s. "
+                    "Continuing without queue residency preflight.\n",
+                    hipGetErrorString(occupancyErr));
+  }
 
   // ---- Doorbell access setup (shared) ----
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
@@ -1398,12 +1476,6 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                        nvmeConfig->bufferParams.bufferSize);
       return hipErrorInvalidValue;
     }
-  }
-
-  // Dynamic shared memory for batch timing
-  size_t dynShmemBytes = 0;
-  if (effBatch > 1) {
-    dynShmemBytes = effBatch * sizeof(unsigned long long int);
   }
 
   // ---- Per-queue state vectors ----
