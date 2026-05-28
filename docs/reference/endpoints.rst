@@ -359,6 +359,11 @@ setup API:
    #include "endpoints/sdma-ep/sdma_device.hpp"
    #include "xio.h"
 
+   // All SDMA endpoint APIs live in xio::sdma_ep. The alias below
+   // keeps the call sites short without polluting the global
+   // namespace.
+   namespace sdma_ep = xio::sdma_ep;
+
    // 1. Initialize the SDMA subsystem (HSA + KFD)
    sdma_ep::initEndpoint();
 
@@ -394,6 +399,10 @@ functions are ``__device__ __forceinline__`` and operate on a
 .. code-block:: cpp
 
    #include "sdma_device.hpp"
+
+   // All device-side helpers live in xio::sdma_ep. Add an alias
+   // local to the translation unit if you want the short prefix.
+   namespace sdma_ep = xio::sdma_ep;
 
    __global__ void myKernel(
        sdma_ep::SdmaQueueHandle* handle,

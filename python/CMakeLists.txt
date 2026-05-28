@@ -41,7 +41,10 @@ target_link_libraries(sdma_ep_py PRIVATE
 # Ensure rocm-xio is built before the Python extension
 add_dependencies(sdma_ep_py rocm-xio)
 
-# Install to xio.sdma_ep package directory
+# Install the extension into the xio.sdma_ep package. scikit-build-core
+# sets CMAKE_INSTALL_PREFIX to the wheel staging directory, so a
+# relative destination keeps the source tree clean and lets the wheel
+# pick up the .so via wheel.packages = ["python/xio"] in pyproject.toml.
 install(TARGETS sdma_ep_py
   LIBRARY DESTINATION xio/sdma_ep
 )

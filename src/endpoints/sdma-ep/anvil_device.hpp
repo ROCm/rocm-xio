@@ -1,11 +1,31 @@
 #pragma once
 
-/* Backward-compatibility shim.
+/* Internal anvil:: shim for SDMA endpoint code.
  *
- * All public types and device-side operations now live
- * in sdma_device.hpp under namespace sdma_ep. This header
- * provides anvil:: aliases so existing internal code
- * (sdma-ep.hip, anvil.hip) compiles without changes.
+ * All public types and device-side operations live in
+ * sdma_device.hpp under xio::sdma_ep. This header is now
+ * limited to the small surface that anvil.hip /
+ * anvil.hpp / sdma-ep.hip / sdma-tester.hip still consume:
+ *
+ *   - Constants:           SDMA_QUEUE_SIZE, MAX_RETRIES,
+ *                          BREAK_ON_RETRIES, DEFAULT_PRIORITY,
+ *                          DEFAULT_QUEUE_PERCENTAGE.
+ *   - Type aliases:        SdmaQueueDeviceHandle,
+ *                          SdmaQueueSingleProducerDeviceHandle.
+ *   - Packet builders:     CreateCopyPacket, CreateAtomicIncPacket,
+ *                          CreateFencePacket,
+ *                          CreateLargeSubWindowCopyPacket and the
+ *                          MI4 variants gated on XIO_SDMA_OSS7.
+ *   - Composite op:        put_signal_counter_impl with the OSS7
+ *                          fast path retained for any callers that
+ *                          still resolve the anvil:: overload.
+ *
+ * The earlier anvil:: device-side helpers (anvil::put,
+ * anvil::put_signal, anvil::waitSignal, anvil::flush,
+ * anvil::quiet, anvil::poll_until_*) have moved to
+ * xio::sdma_ep:: and are no longer aliased here. Downstream
+ * kernels should include sdma_device.hpp and use the
+ * xio::sdma_ep namespace directly.
  */
 
 #include "hsakmt/hsakmt.h"

@@ -410,22 +410,48 @@ void SdmaQueueHostHandle::quiet() {
   std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
-void SdmaQueueHostHandle::submit(const std::vector<SdmaPacket>& packets) {
-  if (packets.empty()) {
-    return;
-  }
+namespace {
+// Reject batches that cannot ever fit in the ring. reserveQueueSpace
+// spins until the requested span has free space; the hardware read
+// pointer can never advance far enough to leave a contiguous window
+// >= SDMA_QUEUE_SIZE bytes, so an oversized batch would spin forever.
+// The ring is also padded with NOPs on wraparound, so the largest
+// admissible single submission is SDMA_QUEUE_SIZE - sizeof(NOP) bytes.
+constexpr size_t kMaxSubmitBytes = sdma_ep::SDMA_QUEUE_SIZE - sizeof(uint32_t);
 
-  // Calculate total size
-  size_t total_size = 0;
+template <typename Iterable>
+size_t total_packet_bytes(const Iterable& packets) {
+  size_t total = 0;
   for (const auto& pkt : packets) {
-    total_size += std::visit(
+    total += std::visit(
       [](const auto& p) {
         return p.size_bytes();
       },
       pkt);
   }
+  return total;
+}
 
-  // Reserve, place, submit
+void check_submit_size(size_t total_size) {
+  if (total_size > kMaxSubmitBytes) {
+    throw std::invalid_argument(
+      "SdmaQueueHostHandle::submit: batch size " + std::to_string(total_size) +
+      " bytes exceeds the maximum single submission of " +
+      std::to_string(kMaxSubmitBytes) + " bytes (SDMA ring is " +
+      std::to_string(sdma_ep::SDMA_QUEUE_SIZE) +
+      " bytes). Split the batch into smaller submissions.");
+  }
+}
+} // namespace
+
+void SdmaQueueHostHandle::submit(const std::vector<SdmaPacket>& packets) {
+  if (packets.empty()) {
+    return;
+  }
+
+  size_t total_size = total_packet_bytes(packets);
+  check_submit_size(total_size);
+
   uint64_t offset = reserveQueueSpace(total_size);
   uint64_t current = offset;
 
@@ -446,17 +472,9 @@ void SdmaQueueHostHandle::submit(std::initializer_list<SdmaPacket> packets) {
     return;
   }
 
-  // Calculate total size
-  size_t total_size = 0;
-  for (const auto& pkt : packets) {
-    total_size += std::visit(
-      [](const auto& p) {
-        return p.size_bytes();
-      },
-      pkt);
-  }
+  size_t total_size = total_packet_bytes(packets);
+  check_submit_size(total_size);
 
-  // Reserve, place, submit
   uint64_t offset = reserveQueueSpace(total_size);
   uint64_t current = offset;
 

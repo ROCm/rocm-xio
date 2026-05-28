@@ -5,6 +5,10 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "rocm-xio"
 dynamic = []
+# Keep this in sync with ROCM_XIO_LIBRARY_{MAJOR,MINOR,PATCH} in
+# CMakeLists.txt. The scikit_build_core regex provider cannot resolve
+# the CMake variable expansion used for ROCM_XIO_LIBRARY_VERSION, so
+# the wheel version is pinned here until that helper is in place.
 version = "0.1.0"
 description = "Python bindings for ROCm XIO endpoints"
 readme = "README.md"
