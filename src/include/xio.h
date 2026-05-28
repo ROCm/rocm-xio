@@ -616,6 +616,40 @@ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr, size_t size,
                  const char* queue_name);
 
 /**
+ * @brief Quiesce a namespace's block-layer request_queue.
+ *
+ * Calls @c ROCM_XIO_QUIESCE_NS on the kernel module, which uses
+ * @c blk_mq_quiesce_queue() to stop the in-kernel NVMe driver
+ * from dispatching new I/O on any of its hardware queues while
+ * rocm-xio takes over one of them for GPU-initiated I/O.
+ *
+ * Older kernel modules without QUIESCE_NS support return
+ * @c -ENOTTY. Callers should treat that as a soft warning and
+ * continue, since older deployments simply lose the extra
+ * defence-in-depth rather than become broken.
+ *
+ * @param kmod_fd Open file descriptor for /dev/rocm-xio.
+ * @param ns_path Block-device path for the namespace
+ *        (for example "/dev/nvme2n1").
+ * @return 0 on success, negative errno on failure.
+ */
+__host__ int xioQuiesceNvmeNamespace(int kmod_fd, const char* ns_path);
+
+/**
+ * @brief Resume I/O on a previously quiesced namespace.
+ *
+ * Pairs with @ref xioQuiesceNvmeNamespace. The rocm-xio character
+ * device also auto-unquiesces any namespaces this fd left
+ * quiesced when it is closed, so it is safe (but not encouraged)
+ * to skip the explicit unquiesce on the abort path.
+ *
+ * @param kmod_fd Open file descriptor for /dev/rocm-xio.
+ * @param ns_path Block-device path for the namespace.
+ * @return 0 on success, negative errno on failure.
+ */
+__host__ int xioUnquiesceNvmeNamespace(int kmod_fd, const char* ns_path);
+
+/**
  * @brief Queue setup structure for unified initialization.
  */
 struct xioQueueSetup {

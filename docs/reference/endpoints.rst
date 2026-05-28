@@ -164,6 +164,44 @@ or an emulated device inside a virtual machine.
   throughput with no benefit -- real hardware already exposes its
   BAR0 directly to the GPU.
 
+Block-layer quiesce around GPU-owned queues
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When ``nvme-ep`` reclaims an NVMe hardware queue for
+GPU-initiated I/O it must coordinate with the in-kernel NVMe
+driver, which still believes it owns every hardware queue on
+the controller. The block layer maps namespace I/O to a
+hardware queue based on the CPU that issued the request, so a
+foreground workload pinned to the same CPU as the reclaimed
+queue ID can race the GPU's tail pointer updates. In practice
+this manifests as NVMe ``I/O Cmd ... timeout`` warnings followed
+by ``blk_mq_complete_request_remote()`` NULL pointer
+dereferences and, on Linux 6.8, a full kernel panic.
+
+To defend against the race the host calls
+``blk_mq_quiesce_queue()`` on the namespace's
+``request_queue`` for the duration of the GPU run. The call is
+delivered through two ioctls on ``/dev/rocm-xio``:
+
+- ``ROCM_XIO_QUIESCE_NS`` -- stop new block-layer dispatch on
+  the namespace whose block-device fd is passed in
+  ``bdev_fd``. The kernel module pins the file so the
+  underlying ``struct block_device`` cannot disappear while
+  rocm-xio holds the quiesce.
+- ``ROCM_XIO_UNQUIESCE_NS`` -- resume normal dispatch. The
+  character device also auto-unquiesces every namespace this
+  fd left quiesced when it is closed, so a crashed userspace
+  process cannot leave the block layer permanently stopped.
+
+The userspace ``nvme-ep`` ``run()`` brackets the per-queue
+create/delete loop with ``xioQuiesceNvmeNamespace()`` and
+``xioUnquiesceNvmeNamespace()`` declared in ``xio.h``. Older
+kernel modules without the new ioctls return ``ENOTTY`` and
+the test continues without the extra protection. Verify the
+quiesce path is active by checking ``dmesg`` for a line like
+``rocm-axiio: QUIESCE_NS: quiesced request_queue for nvme2n1``
+shortly before the GPU kernel launches.
+
 ``rdma-ep`` -- RDMA endpoint
 ----------------------------
 
