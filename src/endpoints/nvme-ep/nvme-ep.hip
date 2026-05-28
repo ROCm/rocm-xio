@@ -1430,7 +1430,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // QUIESCE_NS call below for the rationale.
   std::string quiesce_ns_path;
   int quiesce_kmod_fd = -1;
-  bool quiesced_ns = false;
+  std::vector<uint32_t> quiesced_qids;
 
   uint64_t xfer_size = (uint64_t)nvmeConfig->ioParams.lbasPerIo *
                        nvmeConfig->ioParams.lbaSize;
@@ -1544,20 +1544,20 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
   }
 
-  // ---- Quiesce the namespace's block-layer request_queue
-  // ---- before any rocm-xio queue work.
+  // ---- Isolate the rocm-xio-owned NVMe queue IDs from the
+  // ---- in-kernel block dispatcher.
   //
   // The in-kernel NVMe driver maps namespace request_queue work
-  // to one of its hardware queues based on CPU affinity. If a
-  // CPU happens to be affined to the same hardware queue ID that
-  // rocm-xio is about to reclaim for GPU-initiated I/O, the
-  // driver's tail pointer drifts away from the controller's,
-  // which manifests as NVMe I/O timeouts and even a
-  // blk_mq_complete_request_remote() NULL deref kernel panic.
-  // blk_mq_quiesce_queue() in the kernel module stops new
-  // dispatch on this request_queue for the duration of the GPU
-  // run, and the corresponding unquiesce restores normal kernel
-  // I/O afterwards.
+  // to a hardware queue based on the CPU that issued the I/O. If
+  // a foreground task is pinned to a CPU mapped to the same
+  // hardware queue ID that rocm-xio reclaims for GPU-initiated
+  // I/O, the driver's tail pointer drifts away from the
+  // controller's, which manifests as NVMe I/O timeouts and even
+  // a blk_mq_complete_request_remote() NULL deref kernel panic.
+  // The kernel module's ROCM_XIO_QUIESCE_NS ioctl stops only the
+  // matching blk_mq_hw_ctx via blk_mq_stop_hw_queue(), so the
+  // namespace's other hardware queues keep dispatching kernel
+  // I/O normally.
   {
     NvmeDevicePath nvme_path;
     int path_ret = xio::resolveNvmeDevicePath(nvmeConfig->controller.c_str(),
@@ -1579,14 +1579,28 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                       "continuing without block-layer quiesce.\n",
                       ROCM_XIO_DEVICE_PATH, strerror(errno));
     } else {
-      int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd,
-                                         quiesce_ns_path.c_str());
-      if (qret == 0) {
-        quiesced_ns = true;
-      } else if (qret != -ENOTTY) {
-        ROCXIO_LOG_WARN("Failed to quiesce namespace %s (%s); "
-                        "continuing anyway.\n",
-                        quiesce_ns_path.c_str(), strerror(-qret));
+      bool kmod_too_old = false;
+      bool any_isolated = false;
+      for (uint16_t q = 0; q < numQueues; q++) {
+        uint32_t qid = static_cast<uint32_t>(baseQueueId + q);
+        int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd,
+                                           quiesce_ns_path.c_str(), qid);
+        if (qret == 0) {
+          quiesced_qids.push_back(qid);
+          any_isolated = true;
+        } else if (qret == -ENOTTY) {
+          kmod_too_old = true;
+          break;
+        } else {
+          ROCXIO_LOG_WARN("Failed to isolate namespace %s qid %u (%s); "
+                          "continuing anyway.\n",
+                          quiesce_ns_path.c_str(), qid, strerror(-qret));
+        }
+      }
+      if (kmod_too_old && !any_isolated) {
+        ROCXIO_LOG_INFO(
+          "kernel module lacks per-hctx QUIESCE_NS; running without "
+          "block-layer isolation.\n");
       }
     }
   }
@@ -2017,21 +2031,22 @@ cleanup:
     }
   }
 
-  // ---- Release the block-layer quiesce now that the NVMe
-  // ---- queues have been deleted (or the run aborted before
-  // ---- the queues were created).
+  // ---- Restart each isolated hctx now that the NVMe queues
+  // ---- have been deleted (or the run aborted before the
+  // ---- queues were created). The kernel module's fd-close
+  // ---- auto-restart is a belt-and-braces fallback.
   if (quiesce_kmod_fd >= 0) {
-    if (quiesced_ns) {
+    for (uint32_t qid : quiesced_qids) {
       int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd,
-                                           quiesce_ns_path.c_str());
+                                           quiesce_ns_path.c_str(), qid);
       if (uret != 0 && uret != -ENOTTY) {
-        ROCXIO_LOG_WARN("Failed to unquiesce namespace %s (%s); "
-                        "the kernel module will auto-unquiesce on fd "
+        ROCXIO_LOG_WARN("Failed to restart namespace %s qid %u (%s); "
+                        "the kernel module will auto-restart on fd "
                         "close.\n",
-                        quiesce_ns_path.c_str(), strerror(-uret));
+                        quiesce_ns_path.c_str(), qid, strerror(-uret));
       }
-      quiesced_ns = false;
     }
+    quiesced_qids.clear();
     close(quiesce_kmod_fd);
     quiesce_kmod_fd = -1;
   }

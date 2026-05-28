@@ -164,8 +164,8 @@ or an emulated device inside a virtual machine.
   throughput with no benefit -- real hardware already exposes its
   BAR0 directly to the GPU.
 
-Block-layer quiesce around GPU-owned queues
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Block-layer isolation of GPU-owned queues
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When ``nvme-ep`` reclaims an NVMe hardware queue for
 GPU-initiated I/O it must coordinate with the in-kernel NVMe
@@ -178,29 +178,38 @@ this manifests as NVMe ``I/O Cmd ... timeout`` warnings followed
 by ``blk_mq_complete_request_remote()`` NULL pointer
 dereferences and, on Linux 6.8, a full kernel panic.
 
-To defend against the race the host calls
-``blk_mq_quiesce_queue()`` on the namespace's
-``request_queue`` for the duration of the GPU run. The call is
-delivered through two ioctls on ``/dev/rocm-xio``:
+To defend against the race the host stops only the specific
+``blk_mq_hw_ctx`` that backs the NVMe queue ID rocm-xio took
+over, leaving the namespace's other hardware queues free to
+keep dispatching host I/O. The call is delivered through two
+ioctls on ``/dev/rocm-xio``:
 
-- ``ROCM_XIO_QUIESCE_NS`` -- stop new block-layer dispatch on
-  the namespace whose block-device fd is passed in
-  ``bdev_fd``. The kernel module pins the file so the
-  underlying ``struct block_device`` cannot disappear while
-  rocm-xio holds the quiesce.
-- ``ROCM_XIO_UNQUIESCE_NS`` -- resume normal dispatch. The
-  character device also auto-unquiesces every namespace this
-  fd left quiesced when it is closed, so a crashed userspace
-  process cannot leave the block layer permanently stopped.
+- ``ROCM_XIO_QUIESCE_NS`` -- holds a brief
+  ``blk_mq_quiesce_queue()`` over the namespace, calls
+  ``blk_mq_stop_hw_queue()`` on the hctx matching ``qid``, then
+  unquiesces. The brief quiesce ensures any in-flight dispatch
+  on the target hctx drains before rocm-xio reclaims the SQ/CQ
+  memory. The mapping ``hctx_idx = qid - 1`` matches the
+  upstream NVMe PCI driver's default I/O queue allocation.
+  Passing ``qid = 0`` falls back to the conservative
+  whole-namespace ``blk_mq_quiesce_queue()`` behaviour.
+- ``ROCM_XIO_UNQUIESCE_NS`` -- restarts the hctx for ``qid``
+  (or unquiesces the whole namespace when ``qid = 0``). The
+  character device also auto-restarts every hctx this fd left
+  stopped when it is closed, so a crashed userspace process
+  cannot leave the block layer permanently stopped on that
+  queue ID.
 
-The userspace ``nvme-ep`` ``run()`` brackets the per-queue
-create/delete loop with ``xioQuiesceNvmeNamespace()`` and
-``xioUnquiesceNvmeNamespace()`` declared in ``xio.h``. Older
+The userspace ``nvme-ep`` ``run()`` issues one
+``xioQuiesceNvmeNamespace()`` call per rocm-xio-owned queue ID
+and pairs each with ``xioUnquiesceNvmeNamespace()`` in the
+cleanup path. Both helpers are declared in ``xio.h``. Older
 kernel modules without the new ioctls return ``ENOTTY`` and
 the test continues without the extra protection. Verify the
-quiesce path is active by checking ``dmesg`` for a line like
-``rocm-axiio: QUIESCE_NS: quiesced request_queue for nvme2n1``
-shortly before the GPU kernel launches.
+isolation is active by checking ``dmesg`` for a line like
+``rocm-axiio: QUIESCE_NS: stopped hctx 3 (qid 4) on nvme2n1;
+other queues continue to dispatch`` shortly before the GPU
+kernel launches.
 
 ``rdma-ep`` -- RDMA endpoint
 ----------------------------
