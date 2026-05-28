@@ -1523,6 +1523,88 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   return 0;
 }
 
+__host__ int xioQuiesceNvmeNamespace(int kmod_fd, const char* ns_path) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: failed to open %s: %s\n", ns_path,
+                    strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_QUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      ROCXIO_LOG_INFO(
+        "xioQuiesceNvmeNamespace: kernel module lacks QUIESCE_NS "
+        "(ENOTTY) for %s; continuing without block-layer quiesce\n",
+        ns_path);
+      return -ENOTTY;
+    }
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: ioctl(%s) failed: %s\n", ns_path,
+                    strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  ROCXIO_LOG_INFO("xioQuiesceNvmeNamespace: quiesced block-layer "
+                  "request_queue for %s\n",
+                  ns_path);
+  return 0;
+}
+
+__host__ int xioUnquiesceNvmeNamespace(int kmod_fd, const char* ns_path) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: failed to open %s: %s\n",
+                    ns_path, strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_UNQUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      return -ENOTTY;
+    }
+    if (saved_errno == ENOENT) {
+      ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: %s was not quiesced by "
+                      "this fd\n",
+                      ns_path);
+      return -ENOENT;
+    }
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: ioctl(%s) failed: %s\n",
+                    ns_path, strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: resumed block-layer "
+                  "request_queue for %s\n",
+                  ns_path);
+  return 0;
+}
+
 __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
                                   void** gpu_ptr_out) {
   if (!host_ptr || size == 0 || !name || !gpu_ptr_out) {

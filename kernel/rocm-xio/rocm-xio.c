@@ -29,10 +29,13 @@
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
+#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/io_uring.h>
 #include <linux/kernel.h>
@@ -118,6 +121,38 @@ struct contig_alloc_entry {
 static LIST_HEAD(contig_allocs);
 static DEFINE_SPINLOCK(contig_allocs_lock);
 static __u32 contig_alloc_next_id = 1;
+
+/*
+ * Tracking for quiesced NVMe namespace request_queues.
+ *
+ * Each entry pins the userspace-provided block-device file so the
+ * underlying struct block_device (and its request_queue) stays
+ * valid for the duration of the quiesce window. Entries are owned
+ * by the rocm-xio file that issued ROCM_XIO_QUIESCE_NS and are
+ * released either by an explicit ROCM_XIO_UNQUIESCE_NS ioctl or
+ * automatically when that fd is closed.
+ */
+struct quiesced_ns_entry {
+  struct file* bdev_file;  /* pinned namespace bdev file */
+  struct block_device* bd; /* convenience pointer (no extra ref) */
+  struct file* owner;      /* rocm-xio fd that quiesced this ns */
+  struct list_head list;
+};
+
+static LIST_HEAD(quiesced_ns);
+static DEFINE_MUTEX(quiesced_ns_lock);
+
+static struct block_device* rocm_xio_file_to_bdev(struct file* bdev_file) {
+  struct inode* inode;
+
+  if (!bdev_file)
+    return NULL;
+
+  inode = file_inode(bdev_file);
+  if (!inode || !S_ISBLK(inode->i_mode))
+    return NULL;
+  return I_BDEV(inode);
+}
 
 static void contig_alloc_release(struct kref* ref) {
   struct contig_alloc_entry* ca = container_of(ref, struct contig_alloc_entry,
@@ -1354,6 +1389,133 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_QUIESCE_NS: {
+      struct rocm_xio_quiesce_ns_req req;
+      struct file* bdev_file;
+      struct block_device* bd;
+      struct request_queue* q;
+      struct quiesced_ns_entry* entry;
+      struct quiesced_ns_entry* existing;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      if (req.bdev_fd < 0)
+        return -EINVAL;
+
+      bdev_file = fget(req.bdev_fd);
+      if (!bdev_file) {
+        pr_err("rocm-axiio: QUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
+        return -EBADF;
+      }
+
+      bd = rocm_xio_file_to_bdev(bdev_file);
+      if (!bd) {
+        pr_err("rocm-axiio: QUIESCE_NS: fd %d is not a block device\n",
+               req.bdev_fd);
+        fput(bdev_file);
+        return -ENOTBLK;
+      }
+
+      q = bdev_get_queue(bd);
+      if (!q) {
+        pr_err("rocm-axiio: QUIESCE_NS: no request_queue for bdev\n");
+        fput(bdev_file);
+        return -ENODEV;
+      }
+
+      mutex_lock(&quiesced_ns_lock);
+      list_for_each_entry(existing, &quiesced_ns, list) {
+        if (existing->owner == file && existing->bd == bd) {
+          mutex_unlock(&quiesced_ns_lock);
+          pr_info("rocm-axiio: QUIESCE_NS: %pg already quiesced by this fd\n",
+                  bd);
+          fput(bdev_file);
+          return 0;
+        }
+      }
+      mutex_unlock(&quiesced_ns_lock);
+
+      entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+      if (!entry) {
+        fput(bdev_file);
+        return -ENOMEM;
+      }
+
+      entry->bdev_file = bdev_file;
+      entry->bd = bd;
+      entry->owner = file;
+
+      blk_mq_quiesce_queue(q);
+      pr_info("rocm-axiio: QUIESCE_NS: quiesced request_queue for %pg\n", bd);
+
+      mutex_lock(&quiesced_ns_lock);
+      list_add(&entry->list, &quiesced_ns);
+      mutex_unlock(&quiesced_ns_lock);
+
+      return 0;
+    }
+
+    case ROCM_XIO_UNQUIESCE_NS: {
+      struct rocm_xio_quiesce_ns_req req;
+      struct file* bdev_file;
+      struct block_device* bd;
+      struct request_queue* q;
+      struct quiesced_ns_entry *entry, *tmp;
+      struct quiesced_ns_entry* found = NULL;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      if (req.bdev_fd < 0)
+        return -EINVAL;
+
+      bdev_file = fget(req.bdev_fd);
+      if (!bdev_file) {
+        pr_err("rocm-axiio: UNQUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
+        return -EBADF;
+      }
+
+      bd = rocm_xio_file_to_bdev(bdev_file);
+      if (!bd) {
+        pr_err("rocm-axiio: UNQUIESCE_NS: fd %d is not a block device\n",
+               req.bdev_fd);
+        fput(bdev_file);
+        return -ENOTBLK;
+      }
+
+      mutex_lock(&quiesced_ns_lock);
+      list_for_each_entry_safe(entry, tmp, &quiesced_ns, list) {
+        if (entry->owner == file && entry->bd == bd) {
+          list_del(&entry->list);
+          found = entry;
+          break;
+        }
+      }
+      mutex_unlock(&quiesced_ns_lock);
+
+      if (!found) {
+        pr_warn("rocm-axiio: UNQUIESCE_NS: no quiesce entry for %pg\n", bd);
+        fput(bdev_file);
+        return -ENOENT;
+      }
+
+      q = bdev_get_queue(found->bd);
+      if (q) {
+        blk_mq_unquiesce_queue(q);
+        pr_info("rocm-axiio: UNQUIESCE_NS: resumed request_queue for %pg\n",
+                found->bd);
+      } else {
+        pr_warn("rocm-axiio: UNQUIESCE_NS: lost request_queue for %pg\n",
+                found->bd);
+      }
+
+      fput(found->bdev_file);
+      kfree(found);
+      fput(bdev_file);
+      return 0;
+    }
+
     case ROCM_XIO_FREE_CONTIG_QUEUE: {
       struct rocm_xio_free_contig_req req;
       struct contig_alloc_entry *ca, *tmp;
@@ -1511,7 +1673,9 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 
 static int rocm_xio_release(struct inode* inode, struct file* file) {
   struct contig_alloc_entry *ca, *tmp;
+  struct quiesced_ns_entry *qn, *qn_tmp;
   LIST_HEAD(to_release);
+  LIST_HEAD(quiesce_release);
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
@@ -1529,6 +1693,32 @@ static int rocm_xio_release(struct inode* inode, struct file* file) {
             "size=%zu\n",
             ca->id, (unsigned long long)ca->dma_addr, ca->size);
     kref_put(&ca->ref, contig_alloc_release);
+  }
+
+  /*
+   * Auto-unquiesce any namespaces this fd left quiesced. The
+   * block layer would otherwise stay quiesced forever if a
+   * caller crashed between QUIESCE_NS and UNQUIESCE_NS.
+   */
+  mutex_lock(&quiesced_ns_lock);
+  list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
+    if (qn->owner == file) {
+      list_del(&qn->list);
+      list_add(&qn->list, &quiesce_release);
+    }
+  }
+  mutex_unlock(&quiesced_ns_lock);
+
+  list_for_each_entry_safe(qn, qn_tmp, &quiesce_release, list) {
+    struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
+    list_del(&qn->list);
+    if (q) {
+      blk_mq_unquiesce_queue(q);
+      pr_info("rocm-axiio: release: auto-unquiesced request_queue for %pg\n",
+              qn->bd);
+    }
+    fput(qn->bdev_file);
+    kfree(qn);
   }
 
   return 0;
@@ -1643,6 +1833,30 @@ static void __exit rocm_xio_exit(void) {
               "id=%u dma=0x%llx size=%zu\n",
               ca->id, (unsigned long long)ca->dma_addr, ca->size);
       kref_put(&ca->ref, contig_alloc_release);
+    }
+  }
+
+  /* Unquiesce any namespaces still held by the module */
+  {
+    struct quiesced_ns_entry *qn, *qn_tmp;
+    LIST_HEAD(qn_free);
+
+    mutex_lock(&quiesced_ns_lock);
+    list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
+      list_del(&qn->list);
+      list_add(&qn->list, &qn_free);
+    }
+    mutex_unlock(&quiesced_ns_lock);
+
+    list_for_each_entry_safe(qn, qn_tmp, &qn_free, list) {
+      struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
+      list_del(&qn->list);
+      if (q) {
+        blk_mq_unquiesce_queue(q);
+        pr_info("rocm-axiio: exit: unquiesced request_queue for %pg\n", qn->bd);
+      }
+      fput(qn->bdev_file);
+      kfree(qn);
     }
   }
 

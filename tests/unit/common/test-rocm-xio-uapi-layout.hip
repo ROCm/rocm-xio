@@ -33,6 +33,22 @@ int main() {
   static_assert(sizeof(struct rocm_xio_free_contig_req) == 4,
                 "rocm_xio_free_contig_req size drift");
 
+  static_assert(sizeof(struct rocm_xio_quiesce_ns_req) == 8,
+                "rocm_xio_quiesce_ns_req size drift");
+  static_assert(offsetof(struct rocm_xio_quiesce_ns_req, bdev_fd) == 0,
+                "quiesce_ns_req bdev_fd offset drift");
+  static_assert(offsetof(struct rocm_xio_quiesce_ns_req, reserved) == 4,
+                "quiesce_ns_req reserved offset drift");
+
+  /*
+   * Confirm the new ioctl command numbers slot in directly after
+   * the existing ones; this catches accidental renumbering when
+   * the UAPI header is reorganised.
+   */
+  static_assert(_IOC_NR(ROCM_XIO_FREE_CONTIG_QUEUE) == 12, "");
+  static_assert(_IOC_NR(ROCM_XIO_QUIESCE_NS) == 13, "");
+  static_assert(_IOC_NR(ROCM_XIO_UNQUIESCE_NS) == 14, "");
+
   std::cout << "rocm-xio UAPI layout checks passed\n";
   return 0;
 }

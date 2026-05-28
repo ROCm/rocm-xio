@@ -1426,6 +1426,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   std::vector<hipStream_t> streams(numQueues, nullptr);
   std::vector<XioTimingStats*> perQueueStats(numQueues, nullptr);
 
+  // Block-layer quiesce state: see the comment near the
+  // QUIESCE_NS call below for the rationale.
+  std::string quiesce_ns_path;
+  int quiesce_kmod_fd = -1;
+  bool quiesced_ns = false;
+
   uint64_t xfer_size = (uint64_t)nvmeConfig->ioParams.lbasPerIo *
                        nvmeConfig->ioParams.lbaSize;
   constexpr uint32_t kMaxPrpListEntries = NVME_PAGE_SIZE / sizeof(uint64_t);
@@ -1534,6 +1540,53 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                         "  Then: sudo update-initramfs -u "
                         "&& sudo reboot\n");
         return hipErrorNotSupported;
+      }
+    }
+  }
+
+  // ---- Quiesce the namespace's block-layer request_queue
+  // ---- before any rocm-xio queue work.
+  //
+  // The in-kernel NVMe driver maps namespace request_queue work
+  // to one of its hardware queues based on CPU affinity. If a
+  // CPU happens to be affined to the same hardware queue ID that
+  // rocm-xio is about to reclaim for GPU-initiated I/O, the
+  // driver's tail pointer drifts away from the controller's,
+  // which manifests as NVMe I/O timeouts and even a
+  // blk_mq_complete_request_remote() NULL deref kernel panic.
+  // blk_mq_quiesce_queue() in the kernel module stops new
+  // dispatch on this request_queue for the duration of the GPU
+  // run, and the corresponding unquiesce restores normal kernel
+  // I/O afterwards.
+  {
+    NvmeDevicePath nvme_path;
+    int path_ret = xio::resolveNvmeDevicePath(nvmeConfig->controller.c_str(),
+                                              nvmeConfig->ioParams.nsid,
+                                              &nvme_path);
+    if (path_ret == 0 && !nvme_path.namespacePath.empty()) {
+      quiesce_ns_path = nvme_path.namespacePath;
+    } else {
+      ROCXIO_LOG_WARN("Could not resolve namespace path for %s "
+                      "(ret=%d); skipping block-layer quiesce.\n",
+                      nvmeConfig->controller.c_str(), path_ret);
+    }
+  }
+
+  if (!quiesce_ns_path.empty()) {
+    quiesce_kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+    if (quiesce_kmod_fd < 0) {
+      ROCXIO_LOG_WARN("Could not open %s for namespace quiesce: %s; "
+                      "continuing without block-layer quiesce.\n",
+                      ROCM_XIO_DEVICE_PATH, strerror(errno));
+    } else {
+      int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd,
+                                         quiesce_ns_path.c_str());
+      if (qret == 0) {
+        quiesced_ns = true;
+      } else if (qret != -ENOTTY) {
+        ROCXIO_LOG_WARN("Failed to quiesce namespace %s (%s); "
+                        "continuing anyway.\n",
+                        quiesce_ns_path.c_str(), strerror(-qret));
       }
     }
   }
@@ -1962,6 +2015,25 @@ cleanup:
                       "device for queue cleanup: %s\n",
                       strerror(errno));
     }
+  }
+
+  // ---- Release the block-layer quiesce now that the NVMe
+  // ---- queues have been deleted (or the run aborted before
+  // ---- the queues were created).
+  if (quiesce_kmod_fd >= 0) {
+    if (quiesced_ns) {
+      int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd,
+                                           quiesce_ns_path.c_str());
+      if (uret != 0 && uret != -ENOTTY) {
+        ROCXIO_LOG_WARN("Failed to unquiesce namespace %s (%s); "
+                        "the kernel module will auto-unquiesce on fd "
+                        "close.\n",
+                        quiesce_ns_path.c_str(), strerror(-uret));
+      }
+      quiesced_ns = false;
+    }
+    close(quiesce_kmod_fd);
+    quiesce_kmod_fd = -1;
   }
 
   // Free per-queue PRP list pools

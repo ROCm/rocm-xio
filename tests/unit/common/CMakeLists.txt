@@ -40,6 +40,13 @@ xio_add_test(
 )
 
 xio_add_test(
+  NAME test-xio-quiesce-ns
+  SOURCE test-xio-quiesce-ns.hip
+  LABELS unit common nvme
+  TIMEOUT 30
+)
+
+xio_add_test(
   NAME test-endpoint-registry
   SOURCE test-endpoint-registry.hip
   LABELS unit common
