@@ -197,3 +197,112 @@ sudo env \
 Use `rdma statistic show` to observe `rocm-rdma-ionic0` traffic. For long
 runs, watch GPU power management and temperatures as described in
 `docs/how-to/testing.rst`.
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent VM has no AMD GPU, NVMe SSD, or RDMA NIC hardware.
+All work is limited to compilation, unit/integration tests, linting,
+and documentation builds.
+
+The Cursor Cloud VM startup script (managed by the Cursor platform,
+not stored in this repo) installs the latest release of ROCm from
+`repo.radeon.com` along with the build and lint dependencies listed
+below. Check the CI workflows (`.github/workflows/`) for the
+container image tag currently in use and keep the installed ROCm
+release in sync when that tag changes.
+
+### Available scope
+
+**Configure and build:**
+
+```bash
+cmake -DROCM_PATH=/opt/rocm -DBUILD_TESTING=ON -S . -B build
+cmake --build build -j
+```
+
+**Unit tests:**
+
+```bash
+ctest -L unit --test-dir build
+```
+
+**All no-hardware tests** (mirrors `ctest-no-hardware.yml`):
+
+```bash
+HSA_FORCE_FINE_GRAIN_PCIE=1 \
+  ctest --test-dir build \
+    --label-exclude 'hardware|system' \
+    --resource-spec-file "$PWD/build/ctest-resources.json" \
+    --parallel "$(nproc)" \
+    --output-on-failure
+```
+
+**Clang-format lint** (mirrors `build-check.yml`):
+
+```bash
+git ls-files '*.cpp' '*.h' '*.hpp' '*.c' '*.cc' '*.hip' \
+  | grep -v 'src/include/external/' \
+  | xargs clang-format-18 --style=file --dry-run --Werror
+```
+
+**ShellCheck** (mirrors `scripts-check.yml`):
+
+```bash
+find scripts -name '*.sh' \
+  -exec shellcheck --severity=warning --exclude=SC2086 {} +
+```
+
+**Spell check and RST lint** (mirrors `spell-check.yml` and
+`docs-check.yml`):
+
+```bash
+source .venv/bin/activate
+pyspelling -c .spellcheck.yml
+codespell
+doc8 docs/ --max-line-length 80 \
+  --ignore-path docs/sphinx/requirements.txt
+```
+
+**Sphinx docs build** (mirrors `docs-check.yml`):
+
+```bash
+source .venv/bin/activate
+cmake -S . -B build-docs \
+  -DXIO_DOCS_ONLY=ON -DXIO_BUILD_DOCS=ON
+cmake --build build-docs --target sphinx-html
+```
+
+**Kernel module build:**
+
+```bash
+make -C kernel/rocm-xio
+```
+
+**xio-tester emulation demo:**
+
+```bash
+./build/xio-tester test-ep --emulate -n 32 --threads 2 -v
+```
+
+### Gotchas
+
+- The system CXX compiler is clang-18 (not the ROCm `amdclang++`).
+  The `libstdc++-14-dev` and clang-18 runtime dev packages must be
+  installed for test and tester linking to succeed. The VM startup
+  script handles this.
+- `nvme-ep-generated.h` in `src/include/` is auto-generated and
+  excluded from version control. Lint checks must exclude it or use
+  `git ls-files` to enumerate sources.
+- The Python venv at `.venv/` is used only for Sphinx docs and lint
+  tools (codespell, pyspelling, doc8). Activate it before running
+  those tools: `source .venv/bin/activate`.
+- Without a GPU, `rocminfo` returns no devices; CMake defaults
+  `XIODetectGPUs` to 1 GPU for CTest resource specs.
+- Tests labeled `hardware` or `system` require real AMD GPU or NIC
+  hardware and will fail in the Cloud Agent VM. Always pass
+  `--label-exclude 'hardware|system'` to `ctest`.
+- The VM kernel differs from the installed headers package. The VM
+  startup script creates a link from
+  `/lib/modules/$(uname -r)/build` to the installed headers so
+  `make` in `kernel/rocm-xio` works. Debug type generation is
+  skipped at build time; this is harmless for compilation checks.
