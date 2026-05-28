@@ -185,8 +185,8 @@ void register_sdma_ep(nb::module_& m) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
         handle.wait_flag_then_put(reinterpret_cast<uint32_t*>(flag_ptr),
-                                  expected_value, reinterpret_cast<void*>(src),
-                                  reinterpret_cast<void*>(dst), size);
+                                  expected_value, reinterpret_cast<void*>(dst),
+                                  reinterpret_cast<void*>(src), size);
       } else {
         throw std::invalid_argument("wait_flag_then_put: flag_bits must be 32");
       }

@@ -43,5 +43,5 @@ add_dependencies(sdma_ep_py rocm-xio)
 
 # Install to xio.sdma_ep package directory
 install(TARGETS sdma_ep_py
-  LIBRARY DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/xio/sdma_ep
+  LIBRARY DESTINATION xio/sdma_ep
 )
