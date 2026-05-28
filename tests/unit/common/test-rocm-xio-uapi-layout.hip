@@ -37,8 +37,8 @@ int main() {
                 "rocm_xio_quiesce_ns_req size drift");
   static_assert(offsetof(struct rocm_xio_quiesce_ns_req, bdev_fd) == 0,
                 "quiesce_ns_req bdev_fd offset drift");
-  static_assert(offsetof(struct rocm_xio_quiesce_ns_req, reserved) == 4,
-                "quiesce_ns_req reserved offset drift");
+  static_assert(offsetof(struct rocm_xio_quiesce_ns_req, qid) == 4,
+                "quiesce_ns_req qid offset drift");
 
   /*
    * Confirm the new ioctl command numbers slot in directly after

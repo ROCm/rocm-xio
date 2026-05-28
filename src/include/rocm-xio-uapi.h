@@ -181,14 +181,29 @@ struct rocm_xio_free_contig_req {
  *
  * Userspace opens the namespace block device (for example
  * ``/dev/nvme2n1``) and passes its file descriptor in @c bdev_fd.
- * The kernel module resolves the request_queue and either
- * quiesces or unquiesces it depending on the ioctl. The fd may be
- * closed after the ioctl returns; the kernel module pins the
- * block device for the duration of the quiesced window.
+ * The kernel module resolves the namespace ``request_queue`` and
+ * isolates a single NVMe I/O queue ID from the in-kernel block
+ * dispatcher.
+ *
+ * When @c qid is non-zero the kernel module calls
+ * ``blk_mq_stop_hw_queue()`` on the matching ``blk_mq_hw_ctx`` so
+ * the kernel keeps using the namespace's *other* hardware queues
+ * normally. The mapping ``hctx_idx = qid - 1`` matches the
+ * NVMe PCI driver's default I/O queue allocation. A brief
+ * ``blk_mq_quiesce_queue()`` is held while the stop bit is set so
+ * any in-flight dispatch on the target queue drains before
+ * rocm-xio reclaims the SQ/CQ memory.
+ *
+ * When @c qid is zero the entire namespace ``request_queue`` is
+ * quiesced (``blk_mq_quiesce_queue()``), which is the more
+ * conservative behaviour and matches the very first revision of
+ * this ioctl. The fd may be closed after the ioctl returns; the
+ * kernel module pins the block device for the duration of the
+ * quiesced window.
  */
 struct rocm_xio_quiesce_ns_req {
-  __s32 bdev_fd;  /**< File descriptor opened on a namespace bdev. */
-  __u32 reserved; /**< Reserved for ABI alignment; must be zero. */
+  __s32 bdev_fd; /**< File descriptor opened on a namespace bdev. */
+  __u32 qid;     /**< NVMe I/O queue ID to isolate; 0 = entire ns. */
 };
 
 #ifdef __cplusplus

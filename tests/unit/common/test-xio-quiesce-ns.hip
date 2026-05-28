@@ -23,20 +23,22 @@
 #include "xio.h"
 
 int test_bad_kmod_fd_is_rejected() {
-  ASSERT_EQ(xioQuiesceNvmeNamespace(-1, "/dev/nvme0n1"), -EINVAL);
-  ASSERT_EQ(xioUnquiesceNvmeNamespace(-1, "/dev/nvme0n1"), -EINVAL);
+  ASSERT_EQ(xioQuiesceNvmeNamespace(-1, "/dev/nvme0n1", 4u), -EINVAL);
+  ASSERT_EQ(xioUnquiesceNvmeNamespace(-1, "/dev/nvme0n1", 4u), -EINVAL);
+  ASSERT_EQ(xioQuiesceNvmeNamespace(-1, "/dev/nvme0n1", 0u), -EINVAL);
+  ASSERT_EQ(xioUnquiesceNvmeNamespace(-1, "/dev/nvme0n1", 0u), -EINVAL);
   return 0;
 }
 
 int test_null_path_is_rejected() {
-  ASSERT_EQ(xioQuiesceNvmeNamespace(0, nullptr), -EINVAL);
-  ASSERT_EQ(xioUnquiesceNvmeNamespace(0, nullptr), -EINVAL);
+  ASSERT_EQ(xioQuiesceNvmeNamespace(0, nullptr, 1u), -EINVAL);
+  ASSERT_EQ(xioUnquiesceNvmeNamespace(0, nullptr, 1u), -EINVAL);
   return 0;
 }
 
 int test_empty_path_is_rejected() {
-  ASSERT_EQ(xioQuiesceNvmeNamespace(0, ""), -EINVAL);
-  ASSERT_EQ(xioUnquiesceNvmeNamespace(0, ""), -EINVAL);
+  ASSERT_EQ(xioQuiesceNvmeNamespace(0, "", 1u), -EINVAL);
+  ASSERT_EQ(xioUnquiesceNvmeNamespace(0, "", 1u), -EINVAL);
   return 0;
 }
 
