@@ -788,6 +788,13 @@ blk
 bool
 crashed
 defence
+ENOTTY
+hctx
+idx
+ioctls
+namespace's
+xioQuiesceNvmeNamespace
+xioUnquiesceNvmeNamespace
 deref
 dereferences
 errno
