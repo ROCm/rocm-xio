@@ -13,9 +13,13 @@ on:
       - '**.h'
       - '**.hpp'
       - '**.cc'
+      - '**.py'
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'examples/**'
+      - 'python/**'
+      - 'pyproject.toml'
+      - 'INSTALL.md'
       - 'scripts/**'
       - 'Makefile'
 
@@ -37,10 +41,12 @@ jobs:
         apt-get install -y \
           cmake \
           curl \
+          git \
           libcli11-dev \
           libdrm-dev \
           libopenmpi-dev \
-          openmpi-bin
+          openmpi-bin \
+          python3-dev
     - name: List supported GPUs.
       run: |
         mkdir -p build && cd build
@@ -82,3 +88,19 @@ jobs:
             -DOFFLOAD_ARCH=gfx942:xnack+
           cmake --build /tmp/ex-${ex}
         done
+    - name: Build Python bindings
+      run: |
+        cmake -S . -B build-py \
+          -DXIO_BUILD_PYTHON=ON \
+          -DBUILD_TESTING=OFF \
+          -DBUILD_CLIENTS=OFF \
+          -DOFFLOAD_ARCH=gfx942:xnack+ \
+          -DROCM_PATH=/opt/rocm
+        cmake --build build-py --target sdma_ep_py -j "$(nproc)"
+        cp build-py/python/sdma_ep_py*.so python/xio/sdma_ep/
+      env:
+        CLANGXX: /opt/rocm/llvm/bin/clang++
+    - name: Smoke import Python bindings
+      run: |
+        export PYTHONPATH="${GITHUB_WORKSPACE}/python"
+        python3 -c "from xio import sdma_ep; print('ok', sdma_ep.__name__)"

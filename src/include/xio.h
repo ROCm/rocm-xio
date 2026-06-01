@@ -112,6 +112,16 @@
 namespace xio {
 
 /**
+ * @brief Enable peer access between two GPU devices.
+ * @param deviceId Source GPU device identifier.
+ * @param peerDeviceId Peer GPU device identifier.
+ *
+ * Enables direct memory access from deviceId to peerDeviceId.
+ * Safe to call multiple times for the same device pair.
+ */
+void enablePeerAccess(int deviceId, int peerDeviceId);
+
+/**
  * @brief Print information about all available GPU devices.
  */
 void printDeviceInfo();
