@@ -171,7 +171,21 @@ static struct block_device* rocm_xio_file_to_bdev(struct file* bdev_file) {
   if (!bdev_file)
     return NULL;
 
-  inode = file_inode(bdev_file);
+  /*
+   * On Linux 6.5+, opening /dev/<blkdev> from userspace stores
+   * the devtmpfs inode in file->f_inode, while the real bdev
+   * inode (which I_BDEV()'s container_of() arithmetic
+   * expects) lives at file->f_mapping->host. Calling
+   * file_inode() here yields a wild block_device pointer whose
+   * deref produces faults like 'page fault for address
+   * 0x100000010' inside the QUIESCE_NS ioctl. Use
+   * f_mapping->host so I_BDEV() lands on the correct
+   * bdev_inode container.
+   */
+  if (bdev_file->f_mapping)
+    inode = bdev_file->f_mapping->host;
+  else
+    inode = file_inode(bdev_file);
   if (!inode || !S_ISBLK(inode->i_mode))
     return NULL;
   return I_BDEV(inode);
