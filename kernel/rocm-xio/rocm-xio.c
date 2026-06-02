@@ -85,7 +85,6 @@ struct queue_addr_entry {
   __u8 queue_type; /* 0=SQ, 1=CQ */
   __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
   __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
-  struct file* owner; /* fd that registered this address (NULL if pre-fix path) */
   struct list_head list;
 };
 
@@ -342,10 +341,20 @@ static LIST_HEAD(nvme_queue_snapshots);
 static DEFINE_SPINLOCK(nvme_queue_snapshots_lock);
 
 /*
- * Per-fd record of (bdf, qid) pairs whose device-side state we
- * believe was clobbered by the kprobe's PRP1 rewrite. On
- * rocm_xio_release we walk this list and resurrect the kernel's
- * view of each queue.
+ * Per-(bdf, qid) record of queues that have been wedged by
+ * xio-tester. Entries are added when the kprobe sees a hijacked
+ * CREATE_SQ/CREATE_CQ. Entries are marked "needs_resurrect" when
+ * the kprobe sees a DELETE_SQ/DELETE_CQ for the same (bdf, qid)
+ * pair. A workqueue then runs in process context to issue
+ * CREATE_CQ + CREATE_SQ via the snapshotted admin_q.
+ *
+ * Keyed globally by (bdf, qid), NOT by file owner. xio-tester
+ * splits queue registration, contig allocation, and the actual
+ * NVMe ops across multiple file descriptors, so a per-fd model
+ * fires release-time resurrect against the wrong fd's lifetime.
+ * Watching DELETE in the kprobe and scheduling work matches the
+ * real "wedge event" (device-side queue destroyed by user
+ * command).
  *
  * We deliberately store BDF rather than pci_dev* here because the
  * kprobe records entries from atomic context where
@@ -354,8 +363,9 @@ static DEFINE_SPINLOCK(nvme_queue_snapshots_lock);
  */
 struct poisoned_qid_entry {
   u16 bdf;
-  struct file* owner;
   u16 qid;
+  bool created;        /* kprobe saw injected CREATE_* */
+  bool needs_resurrect;/* kprobe saw DELETE_*, work not yet done */
   struct list_head list;
 };
 
@@ -475,28 +485,45 @@ static void nvme_queue_snapshots_free_all(void) {
   }
 }
 
-/*
- * Record that @owner caused a CREATE_SQ/CREATE_CQ for (bdf, qid) to
- * be hijacked. Idempotent per (owner, bdf, qid).
+/* Forward decl: workqueue handler does the actual resurrect.
  *
- * Called from kprobe pre-handler context: must not sleep, must use
- * GFP_ATOMIC and irq-safe locks.
+ * Use delayed_work with a short delay so we run AFTER the user-issued
+ * DELETE_SQ/DELETE_CQ pair has completed on the device. The kprobe
+ * fires in pre-handler context (before the kernel submits the
+ * DELETE command to the controller), so an immediate schedule_work
+ * can race the controller-side teardown and we'd CREATE_CQ against
+ * a still-live CQ (returns 0x4101 Invalid Queue Identifier).
+ *
+ * 250ms is well over a single admin-command latency in the worst
+ * case while still being unnoticeable to the next kernel I/O on
+ * that hctx.
  */
-static void poisoned_qid_record(struct file* owner, u16 bdf, u16 qid) {
+#define ROCM_XIO_RESURRECT_DELAY_MS 250
+static void rocm_xio_resurrect_work_fn(struct work_struct* w);
+static DECLARE_DELAYED_WORK(rocm_xio_resurrect_work,
+                            rocm_xio_resurrect_work_fn);
+
+/*
+ * Mark (bdf, qid) as hijacked by a kprobe-injected CREATE_*.
+ * Idempotent. Called from kprobe pre-handler (atomic).
+ */
+static void poisoned_qid_mark_created(u16 bdf, u16 qid) {
   struct poisoned_qid_entry *e, *existing = NULL;
   unsigned long flags_irq;
 
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   list_for_each_entry(e, &poisoned_qids, list) {
-    if (e->owner == owner && e->bdf == bdf && e->qid == qid) {
+    if (e->bdf == bdf && e->qid == qid) {
       existing = e;
       break;
     }
   }
-  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-
-  if (existing)
+  if (existing) {
+    existing->created = true;
+    spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
     return;
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
 
   e = kmalloc(sizeof(*e), GFP_ATOMIC);
   if (!e) {
@@ -505,15 +532,16 @@ static void poisoned_qid_record(struct file* owner, u16 bdf, u16 qid) {
     return;
   }
   e->bdf = bdf;
-  e->owner = owner;
   e->qid = qid;
+  e->created = true;
+  e->needs_resurrect = false;
   INIT_LIST_HEAD(&e->list);
 
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   /* Re-check under lock */
   list_for_each_entry(existing, &poisoned_qids, list) {
-    if (existing->owner == owner && existing->bdf == bdf &&
-        existing->qid == qid) {
+    if (existing->bdf == bdf && existing->qid == qid) {
+      existing->created = true;
       spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
       kfree(e);
       return;
@@ -522,8 +550,50 @@ static void poisoned_qid_record(struct file* owner, u16 bdf, u16 qid) {
   list_add(&e->list, &poisoned_qids);
   spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
 
-  pr_info("rocm-axiio: marked QID %u (bdf 0x%04x) as poisoned by fd %p\n",
-          qid, bdf, owner);
+  pr_info("rocm-axiio: tracked hijacked CREATE_* on bdf 0x%04x qid %u\n", bdf,
+          qid);
+}
+
+/*
+ * Mark (bdf, qid) as deleted on the device by a user-issued
+ * DELETE_*. If we previously saw a hijacked CREATE_* for the same
+ * pair, schedule resurrection. Called from kprobe pre-handler
+ * (atomic).
+ *
+ * Note: this must be called on DELETE_CQ (opcode 0x04), not
+ * DELETE_SQ. DELETE_SQ is sent first, DELETE_CQ second, and the
+ * device must have processed BOTH before we can issue CREATE_CQ
+ * for the same QID -- otherwise the controller still sees a live
+ * CQ and rejects our CREATE_CQ with Invalid Queue Identifier
+ * (0x4101). Scheduling on DELETE_CQ guarantees the pair has at
+ * least reached the controller.
+ */
+static void poisoned_qid_mark_deleted(u16 bdf, u16 qid) {
+  struct poisoned_qid_entry* e;
+  unsigned long flags_irq;
+  bool schedule = false;
+
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  list_for_each_entry(e, &poisoned_qids, list) {
+    if (e->bdf == bdf && e->qid == qid) {
+      if (e->created) {
+        e->needs_resurrect = true;
+        schedule = true;
+      }
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  if (schedule) {
+    pr_info("rocm-axiio: user DELETE on bdf 0x%04x qid %u; scheduling "
+            "queue resurrection in %u ms\n",
+            bdf, qid, ROCM_XIO_RESURRECT_DELAY_MS);
+    /* mod_delayed_work coalesces multiple DELETE events into a
+     * single resurrect pass at the latest scheduled time. */
+    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
+                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
+  }
 }
 
 /* kretprobe entry for nvme_alloc_queue(dev, qid, depth):
@@ -1308,29 +1378,6 @@ static __u16 lookup_queue_bdf(__u64 virt_addr) {
 }
 
 /*
- * Look up BDF and owning file for queue address. Returns true if
- * found. @bdf_out / @owner_out are set on success.
- */
-static bool lookup_queue_bdf_owner(__u64 virt_addr, __u16* bdf_out,
-                                   struct file** owner_out) {
-  struct queue_addr_entry* entry;
-  bool found = false;
-
-  spin_lock(&queue_addrs_lock);
-  list_for_each_entry(entry, &queue_addrs, list) {
-    if (virt_addr >= entry->virt_addr &&
-        virt_addr < (entry->virt_addr + entry->size)) {
-      *bdf_out = entry->nvme_bdf;
-      *owner_out = entry->owner;
-      found = true;
-      break;
-    }
-  }
-  spin_unlock(&queue_addrs_lock);
-  return found;
-}
-
-/*
  * Look up PRP2 value for queue (CREATE_SQ/CREATE_CQ with PC=0).
  * Returns PRP2 if found, 0 otherwise.
  */
@@ -1437,6 +1484,39 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
               opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
     }
     pr_info("  Queue ID: %u\n", queue_id);
+
+    /*
+     * If we've previously seen the kernel's CREATE_* for this
+     * (bdf, qid) get hijacked, the device is about to lose the
+     * queue. Trigger resurrection on DELETE_CQ (opcode 0x04), which
+     * is the second of the DELETE_SQ/DELETE_CQ pair. By the time
+     * the device acks DELETE_CQ, the CQ no longer exists and our
+     * CREATE_CQ won't collide.
+     *
+     * For DELETE we don't have a registered queue_addr lookup that
+     * reliably gives BDF (the ubuffer at DELETE time might not be
+     * the queue's PRP). So if lookup_queue_bdf returned 0 we fall
+     * back to "any bdf with a matching qid in the poisoned list".
+     */
+    if (opcode == 0x04) {
+      if (bdf) {
+        poisoned_qid_mark_deleted(bdf, queue_id);
+      } else {
+        struct poisoned_qid_entry* pe;
+        unsigned long flags_irq;
+        u16 found_bdf = 0;
+        spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+        list_for_each_entry(pe, &poisoned_qids, list) {
+          if (pe->qid == queue_id && pe->created) {
+            found_bdf = pe->bdf;
+            break;
+          }
+        }
+        spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+        if (found_bdf)
+          poisoned_qid_mark_deleted(found_bdf, queue_id);
+      }
+    }
   }
 
   /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
@@ -1462,8 +1542,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     phys_addr = lookup_queue_phys_addr(ubuffer);
     if (phys_addr) {
       __u64 prp2_val;
-      __u16 owner_bdf = 0;
-      struct file* owner_file = NULL;
+      u16 hijack_bdf;
 
       cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
       pr_info("  Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
@@ -1475,16 +1554,13 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
       }
 
       /*
-       * Mark this (bdf, qid) as poisoned by the registering fd, so
-       * rocm_xio_release() knows to resurrect the kernel's queue
-       * once the fd closes. We mark on BOTH CREATE_CQ and CREATE_SQ
-       * to be robust against ordering surprises; poisoned_qid_record
-       * is idempotent.
+       * Track that (bdf, qid) had its kernel CREATE_* hijacked.
+       * The actual resurrect is triggered later when xio-tester
+       * issues DELETE_SQ for the same (bdf, qid).
        */
-      if (lookup_queue_bdf_owner(ubuffer, &owner_bdf, &owner_file) &&
-          owner_file) {
-        poisoned_qid_record(owner_file, owner_bdf, queue_id);
-      }
+      hijack_bdf = lookup_queue_bdf(ubuffer);
+      if (hijack_bdf)
+        poisoned_qid_mark_created(hijack_bdf, queue_id);
     } else {
       pr_info("rocm-axiio: Queue not registered, "
               "using ubuffer directly\n");
@@ -1627,7 +1703,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->queue_type = req.queue_type;
       entry->nvme_bdf = req.nvme_bdf;
       entry->prp2 = req.prp2;
-      entry->owner = file;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
@@ -2399,9 +2474,9 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 }
 
 /*
- * Resurrect the kernel's view of every NVMe queue this fd hijacked.
+ * Resurrect every NVMe queue currently flagged as needing it.
  *
- * For each (bdf, qid) in poisoned_qids owned by @file we:
+ * For each entry in poisoned_qids with needs_resurrect=true:
  *   1. Resolve the pci_dev and look up our cached snapshot.
  *   2. Submit CREATE_CQ then CREATE_SQ to the controller's admin
  *      queue with the kernel's original DMA addresses. This makes
@@ -2409,24 +2484,44 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
  *      still-intact struct nvme_queue, so the next kernel I/O on
  *      that hctx no longer times out.
  *
- * Called from rocm_xio_release(), which is process context for the
- * fd-closing process (typically xio-tester on exit), so we can sleep
- * and use blocking NVMe admin commands here.
+ * Runs as workqueue work_struct -- process context, may sleep.
  *
  * Logging is verbose by design -- a malformed CREATE_SQ from kernel
  * context can panic the controller, so we want a clear breadcrumb
  * trail in dmesg if something misbehaves.
  */
-static void rocm_xio_resurrect_poisoned_qids(struct file* file) {
+static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
   struct poisoned_qid_entry *pe, *pe_tmp;
   unsigned long flags_irq;
   LIST_HEAD(to_resurrect);
 
+  (void)w;
+
+  /*
+   * Snapshot the set of entries that need resurrection AND
+   * atomically clear the flag, so we don't double-fire if another
+   * DELETE schedules us again while we're running.
+   */
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
-    if (pe->owner == file) {
-      list_del(&pe->list);
-      list_add(&pe->list, &to_resurrect);
+    if (pe->needs_resurrect) {
+      pe->needs_resurrect = false;
+      pe->created = false; /* fresh slate: we're handing the QID back */
+      /* Detach a clone-ish view: build a parallel list of small
+       * structs for the worker to iterate without holding the
+       * spinlock. */
+      {
+        struct poisoned_qid_entry* clone =
+          kmalloc(sizeof(*clone), GFP_ATOMIC);
+        if (clone) {
+          clone->bdf = pe->bdf;
+          clone->qid = pe->qid;
+          clone->created = false;
+          clone->needs_resurrect = false;
+          INIT_LIST_HEAD(&clone->list);
+          list_add_tail(&clone->list, &to_resurrect);
+        }
+      }
     }
   }
   spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
@@ -2550,15 +2645,15 @@ static int rocm_xio_release(struct inode* inode, struct file* file) {
   LIST_HEAD(quiesce_release);
 
   /*
-   * Step 0: resurrect any NVMe queues this fd hijacked. We must do
-   * this BEFORE freeing the contig pages, because the contig pages
-   * are only meaningful for the device's view of the queue -- which
-   * we are about to overwrite via CREATE_CQ + CREATE_SQ pointing
-   * back at the kernel's own DMA pages. The order is therefore:
-   *   1. Resurrect (device now points at kernel pages again).
-   *   2. Free contig pages (safe; nothing references them anymore).
+   * Note: queue resurrection no longer runs here. It is triggered
+   * from the kprobe pre-handler when it sees a user-issued
+   * DELETE_SQ for a (bdf, qid) we previously saw a hijacked
+   * CREATE_* for, via schedule_work(&rocm_xio_resurrect_work). That
+   * timing is the actual "device-side queue is gone" event, which
+   * may pre-date file-close by many milliseconds, and may involve
+   * different fds for queue-addr registration vs. contig
+   * allocation. Per-fd release was unreliable here.
    */
-  rocm_xio_resurrect_poisoned_qids(file);
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
@@ -2731,6 +2826,10 @@ static void __exit rocm_xio_exit(void) {
             "(missed=%d)\n",
             nvme_create_queue_krp.nmissed);
   }
+
+  /* Wait for any pending resurrect work to finish before tearing
+   * down the snapshot/poisoned lists. */
+  cancel_delayed_work_sync(&rocm_xio_resurrect_work);
 
   /* Free any remaining queue snapshots and poisoned-qid entries */
   nvme_queue_snapshots_free_all();
