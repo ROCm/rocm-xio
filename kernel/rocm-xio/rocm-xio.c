@@ -342,13 +342,18 @@ static LIST_HEAD(nvme_queue_snapshots);
 static DEFINE_SPINLOCK(nvme_queue_snapshots_lock);
 
 /*
- * Per-fd record of (pdev, qid) pairs whose device-side state we
+ * Per-fd record of (bdf, qid) pairs whose device-side state we
  * believe was clobbered by the kprobe's PRP1 rewrite. On
  * rocm_xio_release we walk this list and resurrect the kernel's
  * view of each queue.
+ *
+ * We deliberately store BDF rather than pci_dev* here because the
+ * kprobe records entries from atomic context where
+ * pci_get_domain_bus_and_slot() (which may sleep on the PCI bus
+ * mutex) is not safe to call.
  */
 struct poisoned_qid_entry {
-  struct pci_dev* pdev; /* with ref */
+  u16 bdf;
   struct file* owner;
   u16 qid;
   struct list_head list;
@@ -431,8 +436,8 @@ static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
 }
 
 /* Return a copy of the snapshot for (pdev, qid), or false if none. */
-static __maybe_unused bool nvme_queue_snapshot_lookup(
-  struct pci_dev* pdev, u16 qid, struct nvme_queue_snapshot* out) {
+static bool nvme_queue_snapshot_lookup(struct pci_dev* pdev, u16 qid,
+                                       struct nvme_queue_snapshot* out) {
   struct nvme_queue_snapshot* s;
   unsigned long flags_irq;
   bool found = false;
@@ -471,17 +476,19 @@ static void nvme_queue_snapshots_free_all(void) {
 }
 
 /*
- * Record that @owner caused a CREATE_SQ/CREATE_CQ for (pdev, qid) to
- * be hijacked. Idempotent per (owner, pdev, qid).
+ * Record that @owner caused a CREATE_SQ/CREATE_CQ for (bdf, qid) to
+ * be hijacked. Idempotent per (owner, bdf, qid).
+ *
+ * Called from kprobe pre-handler context: must not sleep, must use
+ * GFP_ATOMIC and irq-safe locks.
  */
-static __maybe_unused void poisoned_qid_record(struct file* owner,
-                                               struct pci_dev* pdev, u16 qid) {
+static void poisoned_qid_record(struct file* owner, u16 bdf, u16 qid) {
   struct poisoned_qid_entry *e, *existing = NULL;
   unsigned long flags_irq;
 
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   list_for_each_entry(e, &poisoned_qids, list) {
-    if (e->owner == owner && e->pdev == pdev && e->qid == qid) {
+    if (e->owner == owner && e->bdf == bdf && e->qid == qid) {
       existing = e;
       break;
     }
@@ -493,11 +500,11 @@ static __maybe_unused void poisoned_qid_record(struct file* owner,
 
   e = kmalloc(sizeof(*e), GFP_ATOMIC);
   if (!e) {
-    pr_warn("rocm-axiio: poisoned_qid kmalloc failed for %s qid=%u\n",
-            pci_name(pdev), qid);
+    pr_warn("rocm-axiio: poisoned_qid kmalloc failed for bdf=0x%04x qid=%u\n",
+            bdf, qid);
     return;
   }
-  e->pdev = pci_dev_get(pdev);
+  e->bdf = bdf;
   e->owner = owner;
   e->qid = qid;
   INIT_LIST_HEAD(&e->list);
@@ -505,10 +512,9 @@ static __maybe_unused void poisoned_qid_record(struct file* owner,
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   /* Re-check under lock */
   list_for_each_entry(existing, &poisoned_qids, list) {
-    if (existing->owner == owner && existing->pdev == pdev &&
+    if (existing->owner == owner && existing->bdf == bdf &&
         existing->qid == qid) {
       spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-      pci_dev_put(e->pdev);
       kfree(e);
       return;
     }
@@ -516,8 +522,8 @@ static __maybe_unused void poisoned_qid_record(struct file* owner,
   list_add(&e->list, &poisoned_qids);
   spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
 
-  pr_info("rocm-axiio: marked QID %u on %s as poisoned by file %p\n", qid,
-          pci_name(pdev), owner);
+  pr_info("rocm-axiio: marked QID %u (bdf 0x%04x) as poisoned by fd %p\n",
+          qid, bdf, owner);
 }
 
 /* kretprobe entry for nvme_alloc_queue(dev, qid, depth):
@@ -1302,6 +1308,29 @@ static __u16 lookup_queue_bdf(__u64 virt_addr) {
 }
 
 /*
+ * Look up BDF and owning file for queue address. Returns true if
+ * found. @bdf_out / @owner_out are set on success.
+ */
+static bool lookup_queue_bdf_owner(__u64 virt_addr, __u16* bdf_out,
+                                   struct file** owner_out) {
+  struct queue_addr_entry* entry;
+  bool found = false;
+
+  spin_lock(&queue_addrs_lock);
+  list_for_each_entry(entry, &queue_addrs, list) {
+    if (virt_addr >= entry->virt_addr &&
+        virt_addr < (entry->virt_addr + entry->size)) {
+      *bdf_out = entry->nvme_bdf;
+      *owner_out = entry->owner;
+      found = true;
+      break;
+    }
+  }
+  spin_unlock(&queue_addrs_lock);
+  return found;
+}
+
+/*
  * Look up PRP2 value for queue (CREATE_SQ/CREATE_CQ with PC=0).
  * Returns PRP2 if found, 0 otherwise.
  */
@@ -1433,6 +1462,8 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     phys_addr = lookup_queue_phys_addr(ubuffer);
     if (phys_addr) {
       __u64 prp2_val;
+      __u16 owner_bdf = 0;
+      struct file* owner_file = NULL;
 
       cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
       pr_info("  Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
@@ -1441,6 +1472,18 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
       if (prp2_val) {
         cmd->common.dptr.prp2 = cpu_to_le64(prp2_val);
         pr_info("  Injected PRP2: 0x%016llx\n", (unsigned long long)prp2_val);
+      }
+
+      /*
+       * Mark this (bdf, qid) as poisoned by the registering fd, so
+       * rocm_xio_release() knows to resurrect the kernel's queue
+       * once the fd closes. We mark on BOTH CREATE_CQ and CREATE_SQ
+       * to be robust against ordering surprises; poisoned_qid_record
+       * is idempotent.
+       */
+      if (lookup_queue_bdf_owner(ubuffer, &owner_bdf, &owner_file) &&
+          owner_file) {
+        poisoned_qid_record(owner_file, owner_bdf, queue_id);
       }
     } else {
       pr_info("rocm-axiio: Queue not registered, "
@@ -2355,11 +2398,167 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
   return -ENOSYS;
 }
 
+/*
+ * Resurrect the kernel's view of every NVMe queue this fd hijacked.
+ *
+ * For each (bdf, qid) in poisoned_qids owned by @file we:
+ *   1. Resolve the pci_dev and look up our cached snapshot.
+ *   2. Submit CREATE_CQ then CREATE_SQ to the controller's admin
+ *      queue with the kernel's original DMA addresses. This makes
+ *      the device side of the QID line back up with the kernel's
+ *      still-intact struct nvme_queue, so the next kernel I/O on
+ *      that hctx no longer times out.
+ *
+ * Called from rocm_xio_release(), which is process context for the
+ * fd-closing process (typically xio-tester on exit), so we can sleep
+ * and use blocking NVMe admin commands here.
+ *
+ * Logging is verbose by design -- a malformed CREATE_SQ from kernel
+ * context can panic the controller, so we want a clear breadcrumb
+ * trail in dmesg if something misbehaves.
+ */
+static void rocm_xio_resurrect_poisoned_qids(struct file* file) {
+  struct poisoned_qid_entry *pe, *pe_tmp;
+  unsigned long flags_irq;
+  LIST_HEAD(to_resurrect);
+
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
+    if (pe->owner == file) {
+      list_del(&pe->list);
+      list_add(&pe->list, &to_resurrect);
+    }
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  list_for_each_entry_safe(pe, pe_tmp, &to_resurrect, list) {
+    struct pci_dev* pdev;
+    struct nvme_queue_snapshot snap;
+    struct nvme_command c;
+    int rc;
+    unsigned int bus, devfn;
+    int cq_flags;
+
+    list_del(&pe->list);
+
+    bus = (pe->bdf >> 8) & 0xFF;
+    devfn = pe->bdf & 0xFF;
+    pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
+    if (!pdev) {
+      pr_warn("rocm-axiio: resurrect: pci_dev for bdf 0x%04x not found, "
+              "skipping qid=%u\n",
+              pe->bdf, pe->qid);
+      kfree(pe);
+      continue;
+    }
+
+    if (!nvme_queue_snapshot_lookup(pdev, pe->qid, &snap)) {
+      pr_warn("rocm-axiio: resurrect: NO snapshot for %s qid=%u; "
+              "kernel will hit a one-time timeout on this QID. "
+              "(Snapshot will be captured on the controller reset that "
+              "follows.)\n",
+              pci_name(pdev), pe->qid);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    if (!snap.admin_q) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u has snapshot but no admin_q, "
+              "skipping\n",
+              pci_name(pdev), pe->qid);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    if (snap.q_depth == 0 || snap.sq_dma_addr == 0 || snap.cq_dma_addr == 0) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot looks bogus "
+              "(depth=%u sq=0x%llx cq=0x%llx), skipping\n",
+              pci_name(pdev), pe->qid, snap.q_depth,
+              (unsigned long long)snap.sq_dma_addr,
+              (unsigned long long)snap.cq_dma_addr);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    /* ---- CREATE_CQ ---- (must come first; SQ references the CQ) */
+    memset(&c, 0, sizeof(c));
+    cq_flags = NVME_QUEUE_PHYS_CONTIG;
+    if (!snap.polled)
+      cq_flags |= NVME_CQ_IRQ_ENABLED;
+
+    c.create_cq.opcode = nvme_admin_create_cq;
+    c.create_cq.prp1 = cpu_to_le64(snap.cq_dma_addr);
+    c.create_cq.cqid = cpu_to_le16(pe->qid);
+    c.create_cq.qsize = cpu_to_le16(snap.q_depth - 1);
+    c.create_cq.cq_flags = cpu_to_le16(cq_flags);
+    c.create_cq.irq_vector = cpu_to_le16(snap.cq_vector);
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_CQ "
+            "prp1=0x%llx qsize=%u cq_flags=0x%x vec=%u\n",
+            pci_name(pdev), pe->qid, (unsigned long long)snap.cq_dma_addr,
+            snap.q_depth - 1, cq_flags, snap.cq_vector);
+
+    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
+    if (rc) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_CQ failed: %d\n",
+              pci_name(pdev), pe->qid, rc);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    /* ---- CREATE_SQ ---- */
+    memset(&c, 0, sizeof(c));
+    c.create_sq.opcode = nvme_admin_create_sq;
+    c.create_sq.prp1 = cpu_to_le64(snap.sq_dma_addr);
+    c.create_sq.sqid = cpu_to_le16(pe->qid);
+    c.create_sq.qsize = cpu_to_le16(snap.q_depth - 1);
+    c.create_sq.sq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG);
+    c.create_sq.cqid = cpu_to_le16(pe->qid);
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_SQ "
+            "prp1=0x%llx qsize=%u\n",
+            pci_name(pdev), pe->qid, (unsigned long long)snap.sq_dma_addr,
+            snap.q_depth - 1);
+
+    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
+    if (rc) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_SQ failed: %d "
+              "(controller now has CQ but no SQ for this qid; a kernel "
+              "I/O on this hctx will still time out and trigger a reset)\n",
+              pci_name(pdev), pe->qid, rc);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u DONE\n", pci_name(pdev),
+            pe->qid);
+
+    pci_dev_put(pdev);
+    kfree(pe);
+  }
+}
+
 static int rocm_xio_release(struct inode* inode, struct file* file) {
   struct contig_alloc_entry *ca, *tmp;
   struct quiesced_ns_entry *qn, *qn_tmp;
   LIST_HEAD(to_release);
   LIST_HEAD(quiesce_release);
+
+  /*
+   * Step 0: resurrect any NVMe queues this fd hijacked. We must do
+   * this BEFORE freeing the contig pages, because the contig pages
+   * are only meaningful for the device's view of the queue -- which
+   * we are about to overwrite via CREATE_CQ + CREATE_SQ pointing
+   * back at the kernel's own DMA pages. The order is therefore:
+   *   1. Resurrect (device now points at kernel pages again).
+   *   2. Free contig pages (safe; nothing references them anymore).
+   */
+  rocm_xio_resurrect_poisoned_qids(file);
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
@@ -2547,7 +2746,6 @@ static void __exit rocm_xio_exit(void) {
     spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
     list_for_each_entry_safe(pe, pe_tmp, &to_free, list) {
       list_del(&pe->list);
-      pci_dev_put(pe->pdev);
       kfree(pe);
     }
   }
