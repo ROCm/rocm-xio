@@ -334,6 +334,15 @@ struct nvme_queue_snapshot {
   u16 cq_vector;
   bool polled;
   struct request_queue* admin_q;
+  /*
+   * The struct nvme_dev* that owns this queue. Captured so the
+   * resurrect path can reach the live struct nvme_queue via
+   * dev->queues[qid] and reset its host-side ring pointers after
+   * CREATE_CQ/CREATE_SQ (see rocm_xio_resurrect_work_fn). Stored as
+   * void* because we never pull private nvme_dev fields through it
+   * except @queues, which we reach via rocm_xio_nvme_dev_layout.
+   */
+  void* dev; /* struct nvme_dev * */
   struct list_head list;
 };
 
@@ -390,7 +399,8 @@ struct rocm_xio_alloc_queue_ctx {
 static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
                                       dma_addr_t sq_dma, dma_addr_t cq_dma,
                                       u32 depth, u16 cq_vector, bool polled,
-                                      struct request_queue* admin_q) {
+                                      struct request_queue* admin_q,
+                                      void* nvme_dev) {
   struct nvme_queue_snapshot *snap, *existing;
   unsigned long flags_irq;
   bool replaced = false;
@@ -409,6 +419,7 @@ static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
   snap->cq_vector = cq_vector;
   snap->polled = polled;
   snap->admin_q = admin_q;
+  snap->dev = nvme_dev;
   INIT_LIST_HEAD(&snap->list);
 
   spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
@@ -420,6 +431,7 @@ static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
       existing->cq_vector = cq_vector;
       existing->polled = polled;
       existing->admin_q = admin_q;
+      existing->dev = nvme_dev;
       replaced = true;
       break;
     }
@@ -733,7 +745,7 @@ static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
                               nvmeq->cq_dma_addr, nvmeq->q_depth,
                               nvmeq->cq_vector,
                               test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags),
-                              admin_q);
+                              admin_q, ctx->nvme_dev);
   }
   /* Drop the ref left by the 'break' out of for_each_pci_dev. */
   pci_dev_put(pdev);
@@ -804,7 +816,7 @@ static int nvme_create_queue_ret_handler(struct kretprobe_instance* ri,
                               nvmeq->cq_dma_addr, nvmeq->q_depth,
                               nvmeq->cq_vector,
                               test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags),
-                              admin_q);
+                              admin_q, nvme_dev_ptr);
   }
   pci_dev_put(pdev);
   return 0;
@@ -2629,6 +2641,150 @@ static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
       kfree(pe);
       continue;
     }
+
+    /*
+     * ---- Host-side ring-pointer write-back ----
+     *
+     * The controller, having just processed CREATE_CQ + CREATE_SQ,
+     * has reset QID @pe->qid's internal SQ-head / CQ-tail to the top
+     * (entry 0, phase 1) -- mandatory NVMe behaviour for a freshly
+     * created queue. But the kernel's HOST-side copy of those
+     * pointers in struct nvme_queue was NOT touched: the normal
+     * reset lives in nvme_init_queue() (drivers/nvme/host/pci.c),
+     * which is on the kernel queue-creation path and is never called
+     * during our passthrough-based resurrect. Without this fix the
+     * host keeps its stale sq_tail/cq_head/cq_phase: the next kernel
+     * SQE is written to the wrong SQ slot and/or the completion path
+     * checks the wrong phase bit, so the first post-resurrect I/O on
+     * this queue hangs and times out.
+     *
+     * We mirror exactly the four ring pointers nvme_init_queue sets:
+     *   sq_tail = 0; last_sq_tail = 0; cq_head = 0; cq_phase = 1;
+     *
+     * Side effects of nvme_init_queue() we deliberately do NOT
+     * replicate, and why each is not load-bearing here:
+     *   - nvmeq->q_db = &dev->dbs[...]: the doorbell BAR pointer is
+     *     unchanged across resurrect (the queue struct, its index,
+     *     and the BAR mapping are all the same object the kernel set
+     *     up at probe time). Re-deriving it is a no-op.
+     *   - memset(cqes, 0, CQ_SIZE): zeroing the CQE ring is only a
+     *     belt-and-suspenders for the phase-tag scan. We restore
+     *     cq_phase=1 and cq_head=0 so the host expects phase-1 CQEs,
+     *     which is exactly what the controller will write into a
+     *     freshly created CQ. The stale CQEs left from before the
+     *     hijack already carry phase 1 (the queue had wrapped an even
+     *     number of times or not at all is NOT guaranteed) -- so to
+     *     be safe we DO clear the CQ ring below, matching
+     *     nvme_init_queue, because a stale phase-1 CQE at cq_head
+     *     could otherwise be mistaken for a fresh completion.
+     *   - nvme_dbbuf_init(): shadow doorbell. QEMU's emulated NVMe
+     *     does not advertise the dbbuf (CMB shadow doorbell) feature,
+     *     so dbbuf_sq_db/dbbuf_cq_db are NULL on this controller and
+     *     nvme_dbbuf_init is a no-op for it. We skip it; if a future
+     *     controller advertised dbbuf this would need revisiting (we
+     *     would have to re-init the shadow doorbell so the device and
+     *     host agree on the doorbell values after the queue's
+     *     internal pointers were reset). Noted, not implemented,
+     *     because it is provably inert here.
+     *   - dev->online_queues++: NOT a per-queue ring pointer and is
+     *     explicitly out of scope for this change (a separate
+     *     investigation owns online_queues). The queue was already
+     *     counted online at probe time and was never torn down on the
+     *     host side, so we must NOT bump it here -- doing so would
+     *     double-count.
+     *
+     * SAFETY / LOCKING:
+     *   sq_tail and last_sq_tail are written by the submit path
+     *   (nvme_queue_rq -> nvme_sq_copy_cmd / nvme_write_sq_db) under
+     *   nvmeq->sq_lock. We take that same lock so our reset is
+     *   atomic w.r.t. any concurrent dispatch on another CPU. We
+     *   reach the lock through the offset-verified mirror (sq_lock at
+     *   offset 8, confirmed via pahole against this kernel's BTF), so
+     *   it is the *same* spinlock object nvme_queue_rq uses -- not a
+     *   copy. The lock is never taken from hard-IRQ context in the
+     *   nvme driver, so plain spin_lock (matching upstream) is
+     *   correct; we do not need irqsave.
+     *
+     *   cq_head and cq_phase are written by the completion path
+     *   (nvme_process_cq -> nvme_update_cq_head) which, for an
+     *   IRQ-driven (non-poll) queue, runs only on the single CPU the
+     *   managed MSI-X vector is pinned to (CPU 7 for QID 8 here) and
+     *   takes NO lock. We CANNOT serialise against it with a lock.
+     *   We rely instead on the fact that at resurrect time the queue
+     *   is wedged: xio-tester just issued DELETE_SQ/DELETE_CQ, the
+     *   device has no QID @pe->qid, and PR-174's QUIESCE_NS stopped
+     *   this hctx for the whole xio-tester run, so NO kernel command
+     *   was outstanding on this queue and NO completion can be in
+     *   flight -- the completion handler cannot be running. We
+     *   publish the reset with wmb() (as nvme_init_queue does) before
+     *   returning, so the first post-UNQUIESCE I/O and its completion
+     *   observe the fresh pointers. If the completion path could race
+     *   us we would be unable to make this safe with a lock; we have
+     *   established it cannot, hence this is safe.
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) && \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+    if (snap.dev) {
+      struct rocm_xio_nvme_dev_layout* dev_layout =
+        (struct rocm_xio_nvme_dev_layout*)snap.dev;
+      if (dev_layout->queues) {
+        /*
+         * dev->queues is an array of struct nvme_queue (NOT an array
+         * of pointers); element stride is the real kernel
+         * sizeof(struct nvme_queue) == 192 on 6.8.0-117-generic,
+         * pahole-verified. Index by qid and cast to the mirror.
+         */
+        const size_t kernel_nvmeq_stride = 192;
+        struct rocm_xio_nvmeq_layout* live_nvmeq =
+          (struct rocm_xio_nvmeq_layout*)((u8*)dev_layout->queues +
+                                          (size_t)pe->qid *
+                                            kernel_nvmeq_stride);
+
+        /*
+         * Clear the CQE ring (matches nvme_init_queue's memset) so a
+         * stale phase-1 CQE left at the old cq_head cannot be
+         * mistaken for a fresh completion once we reset cq_head=0,
+         * cq_phase=1. live_nvmeq->cqes is the same DMA-coherent CQ
+         * buffer the controller now writes into; q_depth * sizeof(
+         * struct nvme_completion) is its size.
+         */
+        if (live_nvmeq->cqes && snap.q_depth)
+          memset(live_nvmeq->cqes, 0,
+                 (size_t)snap.q_depth * sizeof(struct nvme_completion));
+
+        /* sq_tail / last_sq_tail under sq_lock (submit-path lock). */
+        spin_lock(&live_nvmeq->sq_lock);
+        live_nvmeq->sq_tail = 0;
+        live_nvmeq->last_sq_tail = 0;
+        spin_unlock(&live_nvmeq->sq_lock);
+
+        /* cq_head / cq_phase: no concurrent writer at resurrect time
+         * (see SAFETY note above). */
+        live_nvmeq->cq_head = 0;
+        live_nvmeq->cq_phase = 1;
+
+        wmb(); /* publish before the first post-resurrect I/O */
+
+        pr_info("rocm-axiio: resurrect: %s qid=%u host ring pointers "
+                "reset (sq_tail=last_sq_tail=cq_head=0, cq_phase=1)\n",
+                pci_name(pdev), pe->qid);
+      } else {
+        pr_warn("rocm-axiio: resurrect: %s qid=%u dev->queues NULL, "
+                "skipping host ring-pointer reset (queue may still "
+                "desync)\n",
+                pci_name(pdev), pe->qid);
+      }
+    } else {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot has no nvme_dev, "
+              "skipping host ring-pointer reset\n",
+              pci_name(pdev), pe->qid);
+    }
+#else
+    pr_warn("rocm-axiio: resurrect: host ring-pointer reset compiled out "
+            "(kernel not in [6.8, 6.10)); mirror layout unverified for "
+            "this kernel -- qid=%u may desync\n",
+            pe->qid);
+#endif
 
     pr_info("rocm-axiio: resurrect: %s qid=%u DONE\n", pci_name(pdev),
             pe->qid);
