@@ -80,6 +80,22 @@ extern "C" {
 #define ROCM_XIO_UNQUIESCE_NS                                                  \
   _IOW(ROCM_XIO_IOC_MAGIC, 14, struct rocm_xio_quiesce_ns_req)
 
+/**
+ * @brief TEST-ONLY: force the kernel-queue resurrect path for (bdf, qid).
+ *
+ * Marks (bdf, qid) created+needs_resurrect and schedules the same
+ * delayed work the DELETE_CQ kprobe schedules, so the resurrect path
+ * (CREATE_CQ + CREATE_SQ from the captured snapshot, plus the
+ * host-side ring-pointer reset) can be exercised WITHOUT the GPU /
+ * xio-tester hijack. Used by scripts/test/test-qid8-ring-wrap-stress.sh
+ * to test the resurrect code path on hosts where the Navi 21 GPU is
+ * wedged by the AMD reset bug and xio-tester cannot run. Has no effect
+ * unless a snapshot for (bdf, qid) already exists. Not used by
+ * xio-tester or any production path.
+ */
+#define ROCM_XIO_DEBUG_RESURRECT_QID                                           \
+  _IOW(ROCM_XIO_IOC_MAGIC, 15, struct rocm_xio_debug_resurrect_req)
+
 /** @brief Return the emulated BAR guest-physical address. */
 #define ROCM_XIO_FLAG_EMULATED (1 << 0)
 /** @brief Return a P2PDMA IOVA for passthrough hardware. */
@@ -204,6 +220,18 @@ struct rocm_xio_free_contig_req {
 struct rocm_xio_quiesce_ns_req {
   __s32 bdev_fd; /**< File descriptor opened on a namespace bdev. */
   __u32 qid;     /**< NVMe I/O queue ID to isolate; 0 = entire ns. */
+};
+
+/**
+ * @brief TEST-ONLY request for ROCM_XIO_DEBUG_RESURRECT_QID.
+ *
+ * Identifies the (bdf, qid) whose kernel queue should be resurrected
+ * via the production rocm_xio_resurrect_work_fn path. See the ioctl
+ * definition above for the rationale.
+ */
+struct rocm_xio_debug_resurrect_req {
+  __u16 bdf; /**< Target NVMe device in 0xBBDD form (bus<<8 | devfn). */
+  __u16 qid; /**< NVMe I/O queue ID to resurrect. */
 };
 
 #ifdef __cplusplus

@@ -2330,6 +2330,41 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_DEBUG_RESURRECT_QID: {
+      /*
+       * TEST-ONLY: drive the production resurrect path for (bdf, qid)
+       * without the GPU/xio-tester hijack. This exists so the
+       * ring-wrap stress test can exercise rocm_xio_resurrect_work_fn
+       * (including the Task-A host ring-pointer reset) on hosts where
+       * the Navi 21 GPU is wedged by the AMD reset bug and xio-tester
+       * cannot run. It reuses the exact same code path as a real
+       * DELETE_CQ-triggered resurrect: mark created + needs_resurrect,
+       * then schedule rocm_xio_resurrect_work. No production caller
+       * uses this; it is a faithful trigger, not a reimplementation.
+       *
+       * Requires a previously captured snapshot for (bdf, qid) (the
+       * resurrect work fn bails with "NO snapshot" otherwise), and the
+       * caller is responsible for having already issued DELETE_SQ +
+       * DELETE_CQ for the qid so the controller side is actually gone.
+       */
+      struct rocm_xio_debug_resurrect_req req;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      pr_info("rocm-axiio: DEBUG_RESURRECT_QID: forcing resurrect of "
+              "bdf=0x%04x qid=%u (test-only path)\n",
+              req.bdf, req.qid);
+
+      /* poisoned_qid_mark_created is idempotent; it creates the entry
+       * if absent and sets created=true. Then mark_deleted flips
+       * needs_resurrect and schedules the delayed work -- identical to
+       * the kprobe-driven sequence. */
+      poisoned_qid_mark_created(req.bdf, req.qid);
+      poisoned_qid_mark_deleted(req.bdf, req.qid);
+      return 0;
+    }
+
     case ROCM_XIO_FREE_CONTIG_QUEUE: {
       struct rocm_xio_free_contig_req req;
       struct contig_alloc_entry *ca, *tmp;

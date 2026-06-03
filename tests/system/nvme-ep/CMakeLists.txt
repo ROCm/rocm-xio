@@ -481,3 +481,40 @@ xio_add_script_test(
     "READ_IO=128"
     "BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
+
+# --- QID-8 ring-wrap resurrect stress test --------------
+# Proves the kernel-module resurrect path resets the host-side NVMe
+# ring pointers (sq_tail/last_sq_tail/cq_head/cq_phase) after a deleted
+# queue is recreated. Drives an odd number of half-ring-wraps so
+# cq_phase flips to 0, deletes + resurrects QID 8, then verifies a
+# CPU-7-pinned write/read round-trips. Without the fix the first
+# post-resurrect I/O hangs and the controller resets.
+#
+# Default driver is GPU-free (nvme admin-passthru DELETE + the
+# test-only ROCM_XIO_DEBUG_RESURRECT_QID ioctl), so it runs even where
+# the Navi 21 GPU is wedged by the AMD reset bug. The helper binary
+# issues that ioctl.
+# Compile the tiny C helper as CXX: the top-level project only enables
+# CXX and HIP (not C), and the helper is plain C that is valid C++.
+set_source_files_properties(
+  ${CMAKE_SOURCE_DIR}/scripts/test/resurrect-qid.c
+  PROPERTIES LANGUAGE CXX)
+add_executable(resurrect-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/resurrect-qid.c)
+set_target_properties(resurrect-qid PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+set(_qid8_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid8-ring-wrap-stress.sh)
+
+xio_add_script_test(
+  NAME nvme-qid8-ring-wrap-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 300
+  ARGS ${_qid8_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=5"
+    "STRESS_HALF_WRAPS=3"
+    "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
+)
