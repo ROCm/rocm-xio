@@ -36,10 +36,17 @@ dmesg_mark() {
 
 # dmesg_bad_since <marker-file> <qid>  -> prints bad lines since marker, empty if clean
 dmesg_bad_since() {
-    local marker qid
+    local marker qid src
     marker="$(cat "$1" 2>/dev/null)"
     qid="$2"
-    dmesg | awk -v m="$marker" 'f{print} $0==m{f=1}' \
+    if [ -n "$marker" ]; then
+        src="$(dmesg | awk -v m="$marker" 'f{print} $0==m{f=1}')"
+    else
+        # No baseline captured -> scan everything (err toward catching
+        # problems rather than silently passing).
+        src="$(dmesg)"
+    fi
+    printf '%s\n' "$src" \
         | grep -iE "QID $qid timeout|reset controller|Oops|kernel BUG|Invalid SQE|invalid queue|general protection" \
         || true
 }
