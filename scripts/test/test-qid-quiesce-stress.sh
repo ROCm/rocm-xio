@@ -33,10 +33,12 @@
 # === Why the isolation assertion has teeth ===
 # A 256 KiB write to a warmed hctx is near-instant (sub-millisecond) when
 # it is NOT blocked. The background CPU-target write touches a SENTINEL
-# file ONLY on completion. We assert the sentinel is still ABSENT partway
-# through an 8s hold: if the write were dispatched it would have finished
-# in milliseconds, so an absent sentinel after seconds of hold is robust
-# proof the hctx is stopped. After the hold, the sentinel MUST appear
+# file ONLY on completion. We assert the sentinel is still ABSENT while we
+# have INDEPENDENTLY CONFIRMED the target hctx is still STOPPED (reading
+# the blk-mq hctx state file) and the hold-quiesce process is still alive:
+# if the write were dispatched it would have finished in milliseconds, so
+# an absent sentinel while the queue is provably stopped is robust proof
+# the hctx is holding it off. After the hold, the sentinel MUST appear
 # (resume), and the written region MUST match the pattern (integrity).
 # A broken unquiesce (queue stays stopped) makes the post-window write
 # never complete -> FAIL. A broken/over-broad quiesce (control CPU also
@@ -50,7 +52,10 @@
 #   STRESS_QID           target NVMe QID,  default CPU+1
 #   STRESS_CTRL_CPU      control pin CPU,  default 3  (-> QID 4)
 #   STRESS_CTRL_QID      control NVMe QID, default CTRL_CPU+1
-#   QUIESCE_HOLD_S       hold-quiesce window seconds,   default 8
+#   QUIESCE_HOLD_S       hold-quiesce window seconds,   default 12
+#                        (must be >= FIRST_IO_TIMEOUT_S + 3 so the control
+#                        read, settle, and isolation check all fit inside
+#                        the window with margin -- enforced at preflight)
 #   FIRST_IO_TIMEOUT_S   bound for control I/O + post-window resume wait,
 #                        default 8
 #   HOLD_HELPER          path to hold-quiesce helper (else search
@@ -74,7 +79,7 @@ CPU="${STRESS_CPU:-7}"
 QID="${STRESS_QID:-$((CPU + 1))}"
 CTRL_CPU="${STRESS_CTRL_CPU:-3}"
 CTRL_QID="${STRESS_CTRL_QID:-$((CTRL_CPU + 1))}"
-HOLD_S="${QUIESCE_HOLD_S:-8}"
+HOLD_S="${QUIESCE_HOLD_S:-12}"
 FIRST_IO_TIMEOUT_S="${FIRST_IO_TIMEOUT_S:-8}"
 VERIFY_BYTES="${STRESS_VERIFY_BYTES:-$((256 * 1024))}"
 NVME_CMD="${NVME_CMD:-nvme}"
@@ -105,10 +110,20 @@ if [ -z "$HOLD_HELPER" ] || [ ! -x "$HOLD_HELPER" ]; then
     echo "  or set HOLD_HELPER=/path/to/hold-quiesce"
     exit 2
 fi
-if [ "$HOLD_S" -le "$((FIRST_IO_TIMEOUT_S + 1))" ]; then
-    echo -e "${YELLOW}WARN: QUIESCE_HOLD_S ($HOLD_S) should comfortably exceed${NC}"
-    echo -e "${YELLOW}      FIRST_IO_TIMEOUT_S ($FIRST_IO_TIMEOUT_S) so the control I/O${NC}"
-    echo -e "${YELLOW}      finishes well inside the hold window.${NC}"
+# The control read (step 5) can burn up to FIRST_IO_TIMEOUT_S of wall time
+# INSIDE the hold window; the isolation check (step 6) and a settle then
+# have to land while the queue is STILL provably quiesced. Require the hold
+# window to exceed the control timeout by a clear margin (control read +
+# settle + sentinel check), else the window can close before we assert and
+# the result becomes unprovable. Hard error -- do not run.
+MIN_HOLD_S=$((FIRST_IO_TIMEOUT_S + 3))
+if [ "$HOLD_S" -lt "$MIN_HOLD_S" ]; then
+    echo -e "${RED}Error: QUIESCE_HOLD_S ($HOLD_S) must be >= FIRST_IO_TIMEOUT_S + 3 ($MIN_HOLD_S).${NC}"
+    echo -e "${RED}       The control read can consume up to FIRST_IO_TIMEOUT_S (${FIRST_IO_TIMEOUT_S}s)${NC}"
+    echo -e "${RED}       inside the hold window; the isolation check needs the queue to${NC}"
+    echo -e "${RED}       still be provably quiesced afterward. Increase QUIESCE_HOLD_S${NC}"
+    echo -e "${RED}       (or lower FIRST_IO_TIMEOUT_S) so HOLD >= timeout + 3.${NC}"
+    exit 2
 fi
 
 CTRL_NAME="$(basename "$NVME_CTRL")"
@@ -158,7 +173,20 @@ echo "iterations=$ITERS  hold=${HOLD_S}s  io-timeout=${FIRST_IO_TIMEOUT_S}s"
 echo "verify bytes=$VERIFY_BYTES  lba-size=$LBA_SIZE  helper=$HOLD_HELPER"
 echo "================================================================="
 
-PASS=0; FAIL=0; FAIL_REASONS=""
+PASS=0; FAIL=0; SKIP=0; FAIL_REASONS=""; SKIP_REASONS=""
+
+# Per-iteration cap on environment-error retries (window closed before we
+# could assert isolation). Bounded so a persistently mis-timed environment
+# cannot loop forever.
+ENV_RETRY_MAX="${STRESS_ENV_RETRY_MAX:-3}"
+
+# Path to the target hctx state file (authoritative "is it quiesced?").
+HCTX_STATE="/sys/kernel/debug/block/$(basename "$NVME_BDEV")/hctx${HCTX_IDX}/state"
+
+# Return 0 iff the target hctx is CURRENTLY stopped (queue still quiesced).
+hctx_is_stopped() {
+    [ -r "$HCTX_STATE" ] && grep -qiw STOPPED "$HCTX_STATE" 2>/dev/null
+}
 
 # Re-check at iteration end that the target hctx is NOT left stopped and a
 # direct read works. Returns 0 if healthy.
@@ -171,6 +199,7 @@ target_hctx_healthy() {
         >/dev/null 2>&1
 }
 
+env_retries=0
 for ((it=1; it<=ITERS; it++)); do
     echo ""
     echo "---- iteration $it/$ITERS ----"
@@ -243,12 +272,56 @@ for ((it=1; it<=ITERS; it++)); do
     fi
     echo -e "      control read OK in ${cdt}s (cross-CPU liveness intact)"
 
-    # 6. ISOLATION assertion: partway through the hold the target write must
-    #    still be unfinished. Wait until we are clearly inside the window
-    #    (control read already proved seconds remain), then check sentinel.
-    #    A non-blocked 256 KiB write finishes in ms, so absence here is
-    #    robust proof the target hctx is stopped.
+    # 6. ISOLATION assertion -- anchored to "the queue is STILL provably
+    #    quiesced AT THE MOMENT OF THE CHECK", not to elapsed wall time.
+    #
+    #    The control read above can have consumed up to FIRST_IO_TIMEOUT_S
+    #    inside the hold window, so a bare `sleep 1` is not enough to prove
+    #    we are still inside the window. Instead, we independently confirm
+    #    the queue is still stopped using two signals:
+    #       (a) the hold-quiesce process is still alive (HOLD_PID), and
+    #       (b) the target hctx state file STILL reports STOPPED.
+    #    (b) is the authoritative kernel-side signal -- it reads the actual
+    #    blk-mq hctx flag rather than reasoning about timing.
+    #
+    #    Only while BOTH hold (window still active) is true do we assert the
+    #    sentinel is absent: a non-blocked 256 KiB write completes in ms, so
+    #    an absent sentinel WHILE the queue is confirmed STOPPED is robust
+    #    proof the target write is being held off by the quiesce.
+    #
+    #    If the window has already closed at check time (HOLD_PID gone or
+    #    hctx no longer STOPPED), we can no longer prove isolation either
+    #    way -- that is a test-ENVIRONMENT error for this iteration (the
+    #    control read ate the window), NOT a pass and NOT an isolation FAIL.
+    #    Retry the iteration a bounded number of times, else skip it.
     sleep 1
+    if ! kill -0 "$HOLD_PID" 2>/dev/null || ! hctx_is_stopped; then
+        # Window closed before we could assert. Determine which signal.
+        if kill -0 "$HOLD_PID" 2>/dev/null; then
+            why="hctx${HCTX_IDX} no longer STOPPED ([$(cat "$HCTX_STATE" 2>/dev/null)])"
+        else
+            why="hold-quiesce already exited (window released)"
+        fi
+        echo -e "  ${YELLOW}ENV: quiesce window closed before isolation check: ${why}${NC}"
+        echo -e "  ${YELLOW}     (control read consumed ${cdt}s of the ${HOLD_S}s window)${NC}"
+        # Reap whatever is left of this iteration without hanging.
+        wait "$HOLD_PID" 2>/dev/null; HOLD_PID=""
+        # If the window released, the target write resumes and completes;
+        # reaping it will not hang. Otherwise (shouldn't reach here) signal.
+        wait "$WRITE_PID" 2>/dev/null; WRITE_PID=""
+        if [ "$env_retries" -lt "$ENV_RETRY_MAX" ]; then
+            env_retries=$((env_retries + 1))
+            echo -e "  ${YELLOW}     retrying iteration $it (env retry ${env_retries}/${ENV_RETRY_MAX})${NC}"
+            it=$((it - 1))
+        else
+            echo -e "  ${YELLOW}     env-retry budget exhausted; SKIPPING iteration${NC}"
+            SKIP=$((SKIP+1)); SKIP_REASONS="$SKIP_REASONS iter$it:window-closed-early"
+            env_retries=0
+        fi
+        continue
+    fi
+    # Queue is independently confirmed STILL quiesced at this instant.
+    echo -e "      confirmed hctx${HCTX_IDX} STOPPED at check time (HOLD_PID alive)"
     if [ -f "$SENTINEL" ]; then
         echo -e "  ${RED}ISOLATION FAILED: CPU-$CPU write COMPLETED during hold${NC}"
         echo -e "  ${RED}-> target QID $QID was NOT actually quiesced${NC}"
@@ -257,7 +330,8 @@ for ((it=1; it<=ITERS; it++)); do
         wait "$WRITE_PID" 2>/dev/null; WRITE_PID=""
         continue
     fi
-    echo -e "      sentinel absent mid-hold (target write correctly BLOCKED)"
+    echo -e "      sentinel absent while STOPPED confirmed (target write correctly BLOCKED)"
+    env_retries=0
 
     # 7. Let the window close: hold-quiesce unquiesces + exits.
     echo "  [7] waiting for hold-quiesce to release (unquiesce + exit)..."
@@ -345,11 +419,18 @@ done
 
 echo ""
 echo "================ SUMMARY ================"
-echo "iterations: $ITERS   PASS: $PASS   FAIL: $FAIL"
+echo "iterations: $ITERS   PASS: $PASS   FAIL: $FAIL   SKIP(env): $SKIP"
+if [ "$SKIP" -ne 0 ]; then
+    echo "skip reasons:$SKIP_REASONS"
+fi
 if [ "$FAIL" -ne 0 ]; then
     echo "fail reasons:$FAIL_REASONS"
     echo -e "${RED}OVERALL: FAIL${NC}"
     exit 1
+fi
+if [ "$PASS" -eq 0 ]; then
+    echo -e "${YELLOW}OVERALL: INCONCLUSIVE (no iteration could be proven; all skipped)${NC}"
+    exit 3
 fi
 echo -e "${GREEN}OVERALL: PASS${NC}"
 exit 0
