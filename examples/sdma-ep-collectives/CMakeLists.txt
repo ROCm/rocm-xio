@@ -3,7 +3,10 @@
 cmake_minimum_required(VERSION 3.21)
 project(sdma-ep-collectives LANGUAGES CXX HIP)
 
-set(CMAKE_PREFIX_PATH "/home/dasidler/rocm-xio/install;/opt/rocm" ${CMAKE_PREFIX_PATH})
+# Pass -DCMAKE_PREFIX_PATH=/path/to/rocm-xio/install (and optionally
+# /opt/rocm) on the cmake command line, or set rocm-xio_DIR /
+# hsa-runtime64_DIR in the environment to point at non-default install
+# trees. No developer-specific paths are baked into this CMake file.
 
 find_package(rocm-xio REQUIRED)
 find_package(hsa-runtime64 CONFIG REQUIRED)

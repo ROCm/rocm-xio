@@ -75,18 +75,27 @@ public:
   }
 };
 
-// Device utility: Cross-GPU barrier synchronization
-// Reusable across all collectives
-__device__ inline void crossGpuBarrier(uint64_t*** remoteBarrierSignals,
+// Device utility: Cross-GPU barrier synchronization.
+//
+// Layout matches the engine: `remoteBarrierSignals` is a flat
+// `uint64_t**` of size `nBlocks * nPeer`, where slot
+// `block * nPeer + peerLocalIdx` points into the corresponding peer's
+// signal buffer at this rank's slot. `localBarrierSignals` is a flat
+// `uint64_t*` of the same size on this rank.
+//
+// Each block reads/writes only its own row of `nPeer` slots, so the
+// load index includes `blockIdx` (a previous version dropped this and
+// would have aliased rows across blocks).
+__device__ inline void crossGpuBarrier(uint64_t** remoteBarrierSignals,
                                        uint64_t* localBarrierSignals,
                                        int blockIdx, int nPeer,
                                        uint64_t expectedSignal) {
   if (threadIdx.x < static_cast<uint32_t>(nPeer)) {
-    int slotIdx = blockIdx * nPeer + threadIdx.x;
-    __atomic_store_n(remoteBarrierSignals[threadIdx.x][slotIdx], expectedSignal,
+    int slotIdx = blockIdx * nPeer + static_cast<int>(threadIdx.x);
+    __atomic_store_n(remoteBarrierSignals[slotIdx], expectedSignal,
                      __ATOMIC_RELAXED);
-    while (__atomic_load_n(&localBarrierSignals[threadIdx.x],
-                           __ATOMIC_RELAXED) < expectedSignal) {
+    while (__atomic_load_n(&localBarrierSignals[slotIdx], __ATOMIC_RELAXED) <
+           expectedSignal) {
     }
   }
   __syncthreads();
@@ -170,9 +179,14 @@ private:
   xio::sdma_ep::SdmaQueueInfo* queueInfos_ = nullptr;
   std::vector<xio::sdma_ep::SdmaQueueHostHandle> hostHandles_;
 
-  // IPC handles to peer GPUs
-  int* remoteBufs_[MAX_GPUS];
-  int* remoteDst_[MAX_GPUS];
+  // IPC handles to peer GPUs. The arrays below store the base
+  // pointers returned by hipIpcOpenMemHandle() for each peer so they
+  // can be released in cleanup(). Without this we would leak the
+  // mappings for the lifetime of the process.
+  int* remoteBufs_[MAX_GPUS] = {};
+  int* remoteDst_[MAX_GPUS] = {};
+  uint64_t* peerBarrierBases_[MAX_GPUS] = {};
+  uint64_t* peerSdmaBases_[MAX_GPUS] = {};
   uint64_t** remoteBarrierSignals_ = nullptr;
   uint64_t** remoteSdmaSignals_ = nullptr;
 };

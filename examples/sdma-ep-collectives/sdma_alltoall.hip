@@ -36,8 +36,11 @@ struct AlltoallArgs {
 
 // Kernel: Device-initiated AllToAll
 // In-place operation: data already in localResult buffer at correct offset
-// Single block with 7 warps (448 threads), each warp handles one peer
-// Uses counter-based synchronization for efficient completion tracking
+// Single block launched with `nranks` warps (e.g. 8 warps / 512 threads
+// for nranks=8): warps 0..nPeer-1 each push this rank's segment to a
+// distinct peer, and warp `nPeer` performs the local self-copy from
+// localInput into localResult. Uses counter-based synchronization for
+// efficient completion tracking.
 __global__ void sdmaAlltoallKernel(AlltoallArgs args, int nBlocks,
                                    uint64_t expectedSignal) {
   const int rank = args.myrank;
@@ -47,8 +50,9 @@ __global__ void sdmaAlltoallKernel(AlltoallArgs args, int nBlocks,
   const int warpId = threadIdx.x / WARP_SIZE;
   const int nPeer = nranks - 1;
 
-  // Only use warpId < nPeer (7 warps for 8 ranks)
-  if (warpId >= nranks)
+  // Warps 0..nPeer-1 service peers; warp nPeer handles the self-copy.
+  // Any extra warps from rounding the launch geometry exit early.
+  if (warpId > nPeer)
     return;
 
   // Map warpId to peer rank

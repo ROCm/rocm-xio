@@ -8,6 +8,9 @@
 #include "sdma_common.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,6 +25,61 @@ namespace xio {
 void enablePeerAccess(int srcDevice, int dstDevice);
 }
 
+namespace {
+
+// Parse a non-negative integer argument. Rejects empty strings, trailing
+// junk, negative numbers, and values outside [0, INT_MAX].
+int parseIntArg(const char* flag, const char* value) {
+  if (value == nullptr || *value == '\0') {
+    fprintf(stderr, "Missing value for %s\n", flag);
+    exit(1);
+  }
+  errno = 0;
+  char* end = nullptr;
+  long parsed = strtol(value, &end, 10);
+  if (end == value || end == nullptr || *end != '\0') {
+    fprintf(stderr, "Invalid value for %s: %s\n", flag, value);
+    exit(1);
+  }
+  if (errno == ERANGE || parsed < 0 || parsed > INT_MAX) {
+    fprintf(stderr, "Out-of-range value for %s: %s\n", flag, value);
+    exit(1);
+  }
+  return static_cast<int>(parsed);
+}
+
+// Parse an unsigned size argument. Rejects empty strings, trailing junk,
+// and overflow. Returns the parsed size_t value.
+size_t parseSizeArg(const char* flag, const char* value) {
+  if (value == nullptr || *value == '\0') {
+    fprintf(stderr, "Missing value for %s\n", flag);
+    exit(1);
+  }
+  // Reject leading '-' so that strtoull does not silently wrap negatives.
+  const char* p = value;
+  while (std::isspace(static_cast<unsigned char>(*p))) {
+    ++p;
+  }
+  if (*p == '-') {
+    fprintf(stderr, "Invalid value for %s: %s\n", flag, value);
+    exit(1);
+  }
+  errno = 0;
+  char* end = nullptr;
+  unsigned long long parsed = strtoull(value, &end, 0);
+  if (end == value || end == nullptr || *end != '\0') {
+    fprintf(stderr, "Invalid value for %s: %s\n", flag, value);
+    exit(1);
+  }
+  if (errno == ERANGE || parsed > static_cast<unsigned long long>(SIZE_MAX)) {
+    fprintf(stderr, "Out-of-range value for %s: %s\n", flag, value);
+    exit(1);
+  }
+  return static_cast<size_t>(parsed);
+}
+
+} // namespace
+
 SdmaTestEngine::SdmaTestEngine(int argc, char** argv, SdmaTestColl* coll)
   : coll_(coll) {
   parseArgs(argc, argv);
@@ -33,40 +91,42 @@ SdmaTestEngine::~SdmaTestEngine() {
 void SdmaTestEngine::parseArgs(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
-      warmup_ = atoi(argv[++i]);
+      warmup_ = parseIntArg("-w", argv[++i]);
     } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
-      iters_ = atoi(argv[++i]);
+      int v = parseIntArg("-n", argv[++i]);
+      if (v < 1) {
+        fprintf(stderr, "-n must be >= 1 (got %d)\n", v);
+        exit(1);
+      }
+      iters_ = v;
     } else if (strcmp(argv[i], "--min-bytes") == 0 && i + 1 < argc) {
-      const char* value = argv[++i];
-      char* end = nullptr;
-      unsigned long long parsed = strtoull(value, &end, 0);
-      if (end == value) {
-        fprintf(stderr, "Invalid value for --min-bytes: %s\n", value);
+      size_t v = parseSizeArg("--min-bytes", argv[++i]);
+      if (v == 0) {
+        fprintf(stderr, "--min-bytes must be > 0\n");
         exit(1);
       }
-      minBytes_ = static_cast<size_t>(parsed);
+      minBytes_ = v;
     } else if (strcmp(argv[i], "--max-bytes") == 0 && i + 1 < argc) {
-      const char* value = argv[++i];
-      char* end = nullptr;
-      unsigned long long parsed = strtoull(value, &end, 0);
-      if (end == value) {
-        fprintf(stderr, "Invalid value for --max-bytes: %s\n", value);
+      size_t v = parseSizeArg("--max-bytes", argv[++i]);
+      if (v == 0) {
+        fprintf(stderr, "--max-bytes must be > 0\n");
         exit(1);
       }
-      maxBytes_ = static_cast<size_t>(parsed);
+      maxBytes_ = v;
     } else if (strcmp(argv[i], "--step-factor") == 0 && i + 1 < argc) {
-      const char* value = argv[++i];
-      char* end = nullptr;
-      unsigned long long parsed = strtoull(value, &end, 0);
-      if (end == value || parsed == 0) {
-        fprintf(stderr, "Invalid value for --step-factor: %s\n", value);
+      size_t v = parseSizeArg("--step-factor", argv[++i]);
+      if (v <= 1) {
+        fprintf(stderr, "--step-factor must be > 1 (got %zu)\n", v);
         exit(1);
       }
-      stepFactor_ = static_cast<size_t>(parsed);
+      stepFactor_ = v;
     } else if (strcmp(argv[i], "--device-triggered") == 0) {
       config_.deviceTriggered = true;
     } else if (strcmp(argv[i], "--no-validate") == 0) {
       validate_ = false;
+    } else {
+      fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+      exit(1);
     }
   }
 }
@@ -149,8 +209,23 @@ void SdmaTestEngine::bootstrapMPI() {
 }
 
 void SdmaTestEngine::allocateBuffers() {
-  // Allocate maximum size buffers
-  size_t maxElemsPerRank = maxBytes_ / sizeof(int);
+  // `maxBytes_` is the total message size used in the sweep loop
+  // (see runBenchmark, which derives elemsPerRank from total bytes).
+  // The per-rank element count is therefore total / nranks. Buffer
+  // sizes for AllGather / AllToAll already scale by `nranks`, so
+  // computing maxElemsPerRank without the divide-by-nranks would
+  // over-allocate by a factor of `nranks` and easily OOM.
+  size_t maxElemsPerRank = (maxBytes_ / sizeof(int)) /
+                           static_cast<size_t>(nranks_);
+  if (maxElemsPerRank == 0) {
+    if (rank_ == 0) {
+      fprintf(stderr,
+              "max-bytes (%zu) is too small for nranks=%d "
+              "(need >= %zu bytes for one int per rank)\n",
+              maxBytes_, nranks_, static_cast<size_t>(nranks_) * sizeof(int));
+    }
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
 
   size_t inputBytes = coll_->getInputBufferSize(maxElemsPerRank, nranks_);
   size_t resultBytes = coll_->getResultBufferSize(maxElemsPerRank, nranks_);
@@ -290,8 +365,8 @@ void SdmaTestEngine::setupIpcHandles() {
     int peerIdx = PeerIndexing::peerToLocalIndex(rank_, peer);
     int myIdxOnPeer = PeerIndexing::myIndexOnPeer(rank_, peer);
 
-    uint64_t* peerBarrierSignals;
-    uint64_t* peerSdmaSignals;
+    uint64_t* peerBarrierSignals = nullptr;
+    uint64_t* peerSdmaSignals = nullptr;
 
     HIP_CHECK(hipIpcOpenMemHandle((void**)&peerBarrierSignals,
                                   allBarrierHandles[peer],
@@ -299,6 +374,10 @@ void SdmaTestEngine::setupIpcHandles() {
     HIP_CHECK(hipIpcOpenMemHandle((void**)&peerSdmaSignals,
                                   allSdmaHandles[peer],
                                   hipIpcMemLazyEnablePeerAccess));
+
+    // Stash the IPC mapping base pointers so cleanup() can release them.
+    peerBarrierBases_[peer] = peerBarrierSignals;
+    peerSdmaBases_[peer] = peerSdmaSignals;
 
     for (int b = 0; b < config_.nBlocks; ++b) {
       int slot = PeerIndexing::signalSlot(b, peerIdx, nPeer);
@@ -504,6 +583,43 @@ void SdmaTestEngine::reportResults(double avgTimeMs, size_t totalBytes,
 }
 
 void SdmaTestEngine::cleanup() {
+  // Close all peer IPC mappings opened in setupIpcHandles(). Use the
+  // base pointers returned by hipIpcOpenMemHandle(), not derived
+  // offsets. Errors are non-fatal: this is shutdown.
+  for (int peer = 0; peer < nranks_; ++peer) {
+    if (peer == rank_)
+      continue;
+    if (remoteBufs_[peer]) {
+      (void)hipIpcCloseMemHandle(remoteBufs_[peer]);
+      remoteBufs_[peer] = nullptr;
+    }
+    if (remoteDst_[peer]) {
+      (void)hipIpcCloseMemHandle(remoteDst_[peer]);
+      remoteDst_[peer] = nullptr;
+    }
+    if (peerBarrierBases_[peer]) {
+      (void)hipIpcCloseMemHandle(peerBarrierBases_[peer]);
+      peerBarrierBases_[peer] = nullptr;
+    }
+    if (peerSdmaBases_[peer]) {
+      (void)hipIpcCloseMemHandle(peerSdmaBases_[peer]);
+      peerSdmaBases_[peer] = nullptr;
+    }
+  }
+
+  // Destroy SDMA queues we created. For device-triggered (host) queues
+  // the project does not expose a separate destroy entry point, so we
+  // rely on shutdownEndpoint() / process exit to reclaim them.
+  if (queueInfos_ && !config_.deviceTriggered) {
+    for (int peer = 0; peer < nranks_; ++peer) {
+      if (peer == rank_)
+        continue;
+      if (queueInfos_[peer].deviceHandle != nullptr) {
+        xio::sdma_ep::destroyQueue(&queueInfos_[peer]);
+      }
+    }
+  }
+
   if (inputBuf_)
     HIP_CHECK(hipFree(inputBuf_));
   if (resultBuf_)
@@ -521,6 +637,17 @@ void SdmaTestEngine::cleanup() {
 
   delete[] expectedBuf_;
   delete[] queueInfos_;
+  inputBuf_ = nullptr;
+  resultBuf_ = nullptr;
+  barrierSignals_ = nullptr;
+  sdmaSignals_ = nullptr;
+  triggerFlags_ = nullptr;
+  remoteBarrierSignals_ = nullptr;
+  remoteSdmaSignals_ = nullptr;
+  expectedBuf_ = nullptr;
+  queueInfos_ = nullptr;
+
+  xio::sdma_ep::shutdownEndpoint();
 
   MPI_Finalize();
 }
