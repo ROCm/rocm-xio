@@ -1,3 +1,7 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
 # SDMA Collective Examples
 
 cmake_minimum_required(VERSION 3.21)
