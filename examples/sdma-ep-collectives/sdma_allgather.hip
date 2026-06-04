@@ -65,10 +65,11 @@ __global__ void sdmaAllgatherKernel(AllgatherArgs args, int nBlocks,
     // Destination: same offset in peer's buffer
     void* dst = &args.remoteDst[peer][rankOffset];
 
-    // Put data, increment signal, and increment counter
+    // Use SdmaQueueState for caching optimization
+    sdma_ep::SdmaQueueState state;
     sdma_ep::putSignalCounter(*args.queues[peer], dst, src, bytes,
                               args.remoteSdmaSignals[warpId],
-                              &args.localCounters[warpId]);
+                              &args.localCounters[warpId], &state);
 
     // Wait for peer's data to arrive
     sdma_ep::waitSignal(&args.localSdmaSignals[warpId], expectedSignal);

@@ -38,8 +38,6 @@ struct SdmaEpConfig {
                                    transfer. */
   bool useCounter = false;    /**< Use counter-based
                                    completion tracking. */
-  bool useFlush = false;      /**< Use flush-based
-                                   completion tracking. */
   int srcDeviceId = -1;       /**< Source HIP device ID.
                                    -1 = default (0). */
   int dstDeviceId = -1;       /**< Destination HIP device ID.

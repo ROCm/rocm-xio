@@ -61,16 +61,20 @@ __global__ void sdmaAlltoallKernel(AlltoallArgs args, int nBlocks,
   // This rank's data segment (already in buffer at rank*nelemsPerRank)
   size_t bytes = nelemsPerRank * sizeof(int);
 
+  // Use SdmaQueueState for caching optimization
+  sdma_ep::SdmaQueueState state;
+
   // Each warp does put+signal+counter to its assigned peer
   if (laneId == 0 && warpId < nPeer) {
     // Source: this rank's data in local buffer
     void* src = &args.localInput[peer * nelemsPerRank];
     // Destination: same offset in peer's buffer
     void* dst = &args.remoteDst[peer][rank * nelemsPerRank];
+
     // Put data, increment signal, and increment counter
     sdma_ep::putSignalCounter(*args.queues[peer], dst, src, bytes,
                               args.remoteSdmaSignals[warpId],
-                              &args.localCounters[peer]);
+                              &args.localCounters[peer], &state);
 
     // Wait for peer's data to arrive
     sdma_ep::waitSignal(&args.localSdmaSignals[warpId], expectedSignal);
@@ -84,7 +88,7 @@ __global__ void sdmaAlltoallKernel(AlltoallArgs args, int nBlocks,
     void* dst = &args.localResult[rank * nelemsPerRank];
     // Put data, increment signal, and increment counter
     sdma_ep::putCounter(*args.queues[rank], dst, src, bytes,
-                        &args.localCounters[rank]);
+                        &args.localCounters[rank], &state);
     // Wait for our counter to reach expected value (operation complete)
     sdma_ep::waitCounter(&args.localCounters[rank], expectedSignal);
   }

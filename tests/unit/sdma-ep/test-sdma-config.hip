@@ -24,7 +24,6 @@ int test_config_defaults() {
   ASSERT_TRUE(!cfg.useHostDst);
   ASSERT_TRUE(!cfg.verifyData);
   ASSERT_TRUE(!cfg.useCounter);
-  ASSERT_TRUE(!cfg.useFlush);
   ASSERT_EQ(cfg.srcDeviceId, -1);
   ASSERT_EQ(cfg.dstDeviceId, -1);
   ASSERT_EQ(cfg.transferSize, static_cast<size_t>(4096));
@@ -62,7 +61,6 @@ int test_validate_rejects_counter_and_flush() {
   SdmaEpConfig cfg;
   cfg.testType = "ping-pong";
   cfg.useCounter = true;
-  cfg.useFlush = true;
 
   std::string err = validateConfig(&cfg);
   ASSERT_TRUE(!err.empty());
