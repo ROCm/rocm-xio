@@ -59,7 +59,7 @@ endif()
 # -- Build ----------------------------------------------
 message(STATUS "Building: ${BUILD_DIR}")
 execute_process(
-  COMMAND ${CMAKE_COMMAND} --build ${BUILD_DIR} --parallel 1
+  COMMAND ${CMAKE_COMMAND} --build ${BUILD_DIR}
   RESULT_VARIABLE _rc
 )
 if(_rc)
