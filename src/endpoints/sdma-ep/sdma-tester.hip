@@ -64,10 +64,6 @@ std::string validateConfig(SdmaEpConfig* config) {
     return "Missing test subcommand. Available: "
            "p2p, ping-pong, buffer-reuse";
   }
-  if (config->useCounter && config->useFlush) {
-    return "Cannot use both --use-counter and "
-           "--use-flush at the same time";
-  }
   if (config->transferSize == 0)
     return "transfer-size must be > 0";
   if (config->transferSize % 4 != 0)
@@ -126,7 +122,7 @@ __global__ void sdma_p2p_kernel(sdma_ep::SdmaQueueHandle* handle, void* dstBuf,
 __global__ void sdma_ping_pong_kernel(
   sdma_ep::SdmaQueueHandle* handle, void* dstBuf, void* srcBuf, size_t nElem,
   unsigned iterations, uint64_t** signals, int rank, uint64_t* counter,
-  bool use_counter, bool use_flush, unsigned long long* startTimes,
+  bool use_counter, unsigned long long* startTimes,
   unsigned long long* endTimes, volatile bool* stopRequested) {
   if (rank > 1)
     return;
@@ -145,7 +141,6 @@ __global__ void sdma_ping_pong_kernel(
   uint64_t* remote_signal = signals[1 - rank];
   // Use value to track index of put operation
   // This is an advanced optimization
-  uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
     if (stopRequested && i % 100 == 0 && *stopRequested)
@@ -169,10 +164,6 @@ __global__ void sdma_ping_pong_kernel(
         if (use_counter) {
           sdma_ep::putSignalCounter(sdma_handle, dst, src, nElem * sizeof(int),
                                     remote_signal, counter);
-        } else if (use_flush) {
-          sdma_ep::put_signal_counter_impl<true, true, false>(
-            sdma_handle, dst, src, nElem * sizeof(int), remote_signal,
-            /* counter*/ nullptr, &put_index);
         } else {
           sdma_ep::putSignal(sdma_handle, dst, src, nElem * sizeof(int),
                              remote_signal);
@@ -183,8 +174,6 @@ __global__ void sdma_ping_pong_kernel(
       if (threadIdx.x == 0) {
         if (use_counter) {
           sdma_ep::waitCounter(counter, i + 1);
-        } else if (use_flush) {
-          sdma_ep::flush(sdma_handle, put_index);
         } else {
           sdma_ep::quiet(sdma_handle);
         }
@@ -236,11 +225,6 @@ __global__ void sdma_ping_pong_kernel(
         if (use_counter) {
           sdma_ep::putSignalCounter(sdma_handle, dst, src, nElem * sizeof(int),
                                     remote_signal, counter);
-        } else if (use_flush) {
-          sdma_ep::put_signal_counter_impl<true, true, false>(
-            sdma_handle, dst, src, nElem * sizeof(int), remote_signal,
-            /* counter */ nullptr, &put_index);
-
         } else {
           sdma_ep::putSignal(sdma_handle, dst, src, nElem * sizeof(int),
                              remote_signal);
@@ -251,8 +235,6 @@ __global__ void sdma_ping_pong_kernel(
       if (threadIdx.x == 0) {
         if (use_counter) {
           sdma_ep::waitCounter(counter, i + 1);
-        } else if (use_flush) {
-          sdma_ep::flush(sdma_handle, put_index);
         } else {
           sdma_ep::quiet(sdma_handle);
         }
@@ -269,7 +251,7 @@ __global__ void sdma_ping_pong_kernel(
 __global__ void sdma_buffer_reuse_kernel(
   sdma_ep::SdmaQueueHandle* handle, void* dstBuf, void* srcBuf, size_t nElem,
   unsigned iterations, uint64_t** signals, int rank, uint64_t* counter,
-  bool use_counter, bool use_flush, unsigned long long* startTimes,
+  bool use_counter, unsigned long long* startTimes,
   unsigned long long* endTimes, volatile bool* stopRequested) {
   if (rank > 1)
     return;
@@ -289,7 +271,6 @@ __global__ void sdma_buffer_reuse_kernel(
 
   // Use value to track index of put operation
   // This is an advanced optimization
-  uint64_t put_index = 0;
 
   for (unsigned i = 0; i < iterations; i++) {
     if (stopRequested && i % 100 == 0 && *stopRequested)
@@ -314,10 +295,6 @@ __global__ void sdma_buffer_reuse_kernel(
                                         nElem * sizeof(int), remote_signal,
                                         counter);
 
-            } else if (use_flush) {
-              sdma_ep::put_signal_counter_impl<true, true, false>(
-                sdma_handle, dst + offset, src, nElem * sizeof(int),
-                remote_signal, /*counter*/ nullptr, &put_index);
             } else {
               sdma_ep::putSignal(sdma_handle, dst + offset, src,
                                  nElem * sizeof(int), remote_signal);
@@ -326,10 +303,6 @@ __global__ void sdma_buffer_reuse_kernel(
             if (use_counter) {
               sdma_ep::putCounter(sdma_handle, dst + offset, src,
                                   nElem * sizeof(int), counter);
-            } else if (use_flush) {
-              sdma_ep::put_signal_counter_impl<true, false, false>(
-                sdma_handle, dst + offset, src, nElem * sizeof(int),
-                /* signal*/ nullptr, /*counter*/ nullptr, &put_index);
             } else {
               sdma_ep::put(sdma_handle, dst + offset, src, nElem * sizeof(int));
             }
@@ -340,8 +313,6 @@ __global__ void sdma_buffer_reuse_kernel(
           if (use_counter) {
             sdma_ep::waitCounter(counter,
                                  (i * transfers_per_iteration) + t + 1);
-          } else if (use_flush) {
-            sdma_ep::flush(sdma_handle, put_index);
           } else {
             sdma_ep::quiet(sdma_handle);
           }
@@ -407,7 +378,6 @@ hipError_t run(XioEndpointConfig* config) {
   size_t transferSize = 4096;
   std::string testType = "";
   bool useCounter = false;
-  bool useFlush = false;
   if (config->endpointConfig) {
     const auto* epConfig = static_cast<const sdma_ep::SdmaEpConfig*>(
       config->endpointConfig);
@@ -418,7 +388,6 @@ hipError_t run(XioEndpointConfig* config) {
     cfgDst = epConfig->dstDeviceId;
     transferSize = epConfig->transferSize;
     useCounter = epConfig->useCounter;
-    useFlush = epConfig->useFlush;
   }
 
   int numGpus = 0;
@@ -857,9 +826,8 @@ hipError_t run(XioEndpointConfig* config) {
     hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
                        srcBuf, nElem, config->iterations, signals[0],
-                       /*rank*/ 0, counter0, useCounter, useFlush,
-                       config->startTimes, config->endTimes,
-                       config->stopRequested);
+                       /*rank*/ 0, counter0, useCounter, config->startTimes,
+                       config->endTimes, config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -872,9 +840,8 @@ hipError_t run(XioEndpointConfig* config) {
     hipLaunchKernelGGL(sdma_buffer_reuse_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
                        dstBuf, nElem, config->iterations, signals[1],
-                       /*rank*/ 1, counter1, useCounter, useFlush,
-                       config->startTimes, config->endTimes,
-                       config->stopRequested);
+                       /*rank*/ 1, counter1, useCounter, config->startTimes,
+                       config->endTimes, config->stopRequested);
   } else if (testType == "ping-pong") {
     // For ping-pong kernel, launch on both GPUs with different ranks
     // signals[0] and signals[1] are device arrays containing signal pointers
@@ -889,9 +856,8 @@ hipError_t run(XioEndpointConfig* config) {
     hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[0], dstBuf,
                        srcBuf, nElem, config->iterations, signals[0],
-                       /*rank*/ 0, counter0, useCounter, useFlush,
-                       config->startTimes, config->endTimes,
-                       config->stopRequested);
+                       /*rank*/ 0, counter0, useCounter, config->startTimes,
+                       config->endTimes, config->stopRequested);
 
     // Launch rank 1 (responder) on destination GPU with dstGpu->srcGpu handle
     // Swap buffer arguments: rank 1's src should point to where rank 0 wrote
@@ -904,9 +870,8 @@ hipError_t run(XioEndpointConfig* config) {
     hipLaunchKernelGGL(sdma_ping_pong_kernel, dim3(numBlocks),
                        dim3(threadsPerBlock), 0, 0, sdmaHandles[1], srcBuf,
                        dstBuf, nElem, config->iterations, signals[1],
-                       /*rank*/ 1, counter1, useCounter, useFlush,
-                       config->startTimes, config->endTimes,
-                       config->stopRequested);
+                       /*rank*/ 1, counter1, useCounter, config->startTimes,
+                       config->endTimes, config->stopRequested);
   } else {
     std::cerr << "Unknown test type: " << testType << std::endl;
     cleanupAll();

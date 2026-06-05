@@ -381,16 +381,11 @@ void registerSdmaEpCliOptions(CLI::App& app, xio::sdma_ep::SdmaEpConfig* cfg) {
   pingPong
     ->add_flag("--use-counter", cfg->useCounter, "Use counter-based completion")
     ->group("Endpoint Options");
-  pingPong->add_flag("--use-flush", cfg->useFlush, "Use flush-based completion")
-    ->group("Endpoint Options");
 
   CLI::App* bufferReuse = app.add_subcommand("buffer-reuse",
                                              "Test buffer reuse patterns");
   bufferReuse
     ->add_flag("--use-counter", cfg->useCounter, "Use counter-based completion")
-    ->group("Endpoint Options");
-  bufferReuse
-    ->add_flag("--use-flush", cfg->useFlush, "Use flush-based completion")
     ->group("Endpoint Options");
 }
 
