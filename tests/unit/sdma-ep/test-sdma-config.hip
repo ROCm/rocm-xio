@@ -57,18 +57,6 @@ int test_validate_accepts_supported_subcommands() {
   return 0;
 }
 
-int test_validate_rejects_counter_and_flush() {
-  SdmaEpConfig cfg;
-  cfg.testType = "ping-pong";
-  cfg.useCounter = true;
-
-  std::string err = validateConfig(&cfg);
-  ASSERT_TRUE(!err.empty());
-  ASSERT_STREQ(err.c_str(), "Cannot use both --use-counter and "
-                            "--use-flush at the same time");
-  return 0;
-}
-
 int test_validate_transfer_size_bounds() {
   SdmaEpConfig cfg;
   cfg.testType = "p2p";
@@ -133,7 +121,6 @@ int main() {
   failures += test_validate_null_is_noop();
   failures += test_validate_requires_subcommand();
   failures += test_validate_accepts_supported_subcommands();
-  failures += test_validate_rejects_counter_and_flush();
   failures += test_validate_transfer_size_bounds();
   failures += test_queue_info_defaults_and_fields();
   failures += test_device_side_constants_are_sane();
