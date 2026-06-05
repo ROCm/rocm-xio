@@ -602,9 +602,6 @@ __device__ __forceinline__ void put_signal_counter_impl(
     auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, fused_addr, 1,
                                                 false, nullptr, 0, 0);
     handle.placePacket(ws_pkt, pendingWptr, offset);
-    if (put_index != nullptr) {
-      *put_index = pendingWptr;
-    }
     offset = 0;
 
     if constexpr (both) {
