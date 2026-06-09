@@ -157,6 +157,25 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->group(nvme_group);
 
   app
+    .add_option("--kv-op", cfg->ioParams.kvOp,
+                "NVMe Key-Value op: 'store' or 'retrieve'. When set, the "
+                "endpoint issues KV commands (key in CDW2/3/14/15, value via "
+                "PRP) against the KV namespace instead of block I/O. Use "
+                "--read-io N for retrieve count, --write-io N for store count.")
+    ->check(CLI::IsMember({"store", "retrieve"}))
+    ->group(nvme_group);
+  app
+    .add_option("--key", cfg->ioParams.kvKey,
+                "KV key (string, 1..16 bytes) for --kv-op.")
+    ->group(nvme_group);
+  app
+    .add_option("--value-size", cfg->ioParams.kvValueLen,
+                "KV value size in bytes for --kv-op (store: bytes written; "
+                "retrieve: host buffer size). Default: --data-buffer-size.")
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+
+  app
     .add_option("--lbas-per-io", cfg->ioParams.lbasPerIo,
                 "Number of LBAs per I/O operation (default: 1).")
     ->default_val(1)

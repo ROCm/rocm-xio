@@ -18,6 +18,7 @@
  * NVMe Definitions for rocm-xio nvme-ep Endpoint
  */
 #include "nvme-ep-generated.h"
+#include "nvme-kv.h"
 
 namespace xio::nvme_ep {
 
@@ -74,6 +75,12 @@ struct nvmeIoParams {
   bool infiniteMode;      /**< Run until stopRequested is set. */
   uint32_t batchSize;     /**< SQEs per doorbell; 1=serial, 0=all. */
   uint32_t wavefrontSize; /**< Hardware wavefront size in threads. */
+
+  /* --- NVMe Key-Value mode (kvOpcode == 0 selects normal block mode) --- */
+  uint8_t kvOpcode;    /**< KV opcode (store/retrieve); 0 = block mode. */
+  uint32_t kvKeyLen;   /**< KV key length in bytes (1..16). */
+  uint32_t kvValueLen; /**< KV value / host-buffer size (SQE CDW10). */
+  uint32_t kvKey[4];   /**< KV key bytes, packed little-endian (16 B). */
 };
 
 /**
@@ -814,6 +821,11 @@ struct nvmeEpConfig {
     uint32_t lbasPerIo;        /**< Number of LBAs per I/O. */
     bool infiniteMode;         /**< Run until stopRequested is set. */
     uint32_t batchSize;        /**< SQEs per doorbell; 1=serial, 0=all. */
+    /* KV mode (empty kvOp => normal block mode). Trailing defaulted members so
+     * the brace-init in the constructor stays valid. */
+    std::string kvOp = "";     /**< "store", "retrieve", or "" (block). */
+    std::string kvKey = "";    /**< KV key string (up to 16 bytes). */
+    uint32_t kvValueLen = 0;   /**< KV value size; 0 => --data-buffer-size. */
   } ioParams;                  /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
