@@ -9,6 +9,11 @@
 #include <string.h>
 #include <stdint.h>
 int main(int argc, char**argv){
+  if(argc<6){
+    fprintf(stderr,"usage: %s <ceph.conf> <keyring> <pool> <image> <size-MiB>\n",
+            argv[0]);
+    return 2;
+  }
   const char*conf=argv[1],*keyring=argv[2],*pool=argv[3],*img=argv[4];
   uint64_t sz=(uint64_t)atoll(argv[5])*1024*1024;
   rados_t cl; if(rados_create(&cl,"admin")){fprintf(stderr,"create\n");return 1;}

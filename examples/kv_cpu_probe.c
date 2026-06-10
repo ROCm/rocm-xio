@@ -64,7 +64,15 @@ int main(int argc, char **argv) {
   const char *dev = argc > 1 ? argv[1] : "/dev/nvme0";
   uint32_t nsid = argc > 2 ? (uint32_t)atoi(argv[2]) : 1;
   const char *key = argc > 3 ? argv[3] : "cpukey01";
-  uint8_t keylen = (uint8_t)strlen(key);
+  size_t klen = strlen(key);
+  if (klen < 1 || klen > 16) {
+    fprintf(stderr,
+            "FATAL: key '%s' is %zu bytes; NVMe-KV inline keys must be 1..16 "
+            "bytes\n",
+            key, klen);
+    return 2;
+  }
+  uint8_t keylen = (uint8_t)klen;
 
   int fd = open(dev, O_RDWR);
   if (fd < 0) {
@@ -76,6 +84,13 @@ int main(int argc, char **argv) {
   uint32_t vlen = 4096;
   uint8_t *wbuf = aligned_alloc(4096, vlen);
   uint8_t *rbuf = aligned_alloc(4096, vlen);
+  if (!wbuf || !rbuf) {
+    fprintf(stderr, "FATAL: aligned_alloc(%u) failed\n", vlen);
+    free(wbuf);
+    free(rbuf);
+    close(fd);
+    return 2;
+  }
   for (uint32_t i = 0; i < vlen; i++) {
     wbuf[i] = (uint8_t)('A' + (i % 26));
   }

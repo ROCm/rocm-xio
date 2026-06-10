@@ -90,4 +90,29 @@ __host__ __device__ static inline void kvSqeSetup(struct nvme_sqe* sqe,
   sqe->metadata = 0;
 }
 
+/**
+ * @brief Packed multi-key layout for wavefront/batched KV.
+ *
+ * The wavefront KV path fetches/stores a whole manifest of keys in one launch,
+ * so the keys live in a device-side array instead of inline SQE dwords. Each
+ * key occupies a fixed stride of @ref NVME_KV_PACKED_WORDS_PER_KEY uint32 words:
+ * words 0..3 are the 16-byte little-endian key image (same layout the single-key
+ * @ref kvSqeSetup expects), word 4 is the key length in bytes (1..16). A single
+ * contiguous array of N*stride words therefore carries N variable-length keys.
+ */
+#define NVME_KV_PACKED_WORDS_PER_KEY 5
+
+/**
+ * @brief Encode KV SQE fields from one packed key (see packed layout above).
+ *
+ * @param sqe         SQE to fill (DPTR/opcode/nsid/command_id set by caller).
+ * @param packed_key  Pointer to this key's @ref NVME_KV_PACKED_WORDS_PER_KEY
+ *                    words: [0..3] = 16-byte LE key image, [4] = key length.
+ * @param value_len   Value size (Store) or host-buffer size (Retrieve) -> CDW10.
+ */
+__host__ __device__ static inline void kvSqeSetupPacked(
+  struct nvme_sqe* sqe, const uint32_t* packed_key, uint32_t value_len) {
+  kvSqeSetup(sqe, packed_key, packed_key[4], value_len);
+}
+
 #endif /* NVME_KV_H */

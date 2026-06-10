@@ -81,6 +81,12 @@ struct nvmeIoParams {
   uint32_t kvKeyLen;   /**< KV key length in bytes (1..16). */
   uint32_t kvValueLen; /**< KV value / host-buffer size (SQE CDW10). */
   uint32_t kvKey[4];   /**< KV key bytes, packed little-endian (16 B). */
+
+  /* Wavefront/batched KV: a device-side manifest of keys, packed
+   * NVME_KV_PACKED_WORDS_PER_KEY uint32 per key (see nvme-kv.h). The single-key
+   * serial path ignores these and uses kvKey[]/kvKeyLen above. */
+  const uint32_t* kvKeysPacked; /**< Device ptr to packed key array, or null. */
+  uint32_t kvNumKeys;           /**< Number of keys in kvKeysPacked (0 = none). */
 };
 
 /**
@@ -826,6 +832,7 @@ struct nvmeEpConfig {
     std::string kvOp = "";     /**< "store", "retrieve", or "" (block). */
     std::string kvKey = "";    /**< KV key string (up to 16 bytes). */
     uint32_t kvValueLen = 0;   /**< KV value size; 0 => --data-buffer-size. */
+    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest, wavefront KV. */
   } ioParams;                  /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */

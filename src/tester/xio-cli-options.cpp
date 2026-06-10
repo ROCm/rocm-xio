@@ -169,6 +169,13 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
                 "KV key (string, 1..16 bytes) for --kv-op.")
     ->group(nvme_group);
   app
+    .add_option("--keys", cfg->ioParams.kvKeys,
+                "KV key manifest (space-separated, each 1..16 bytes) for "
+                "wavefront/batched --kv-op: one key per in-flight op. Requires "
+                "--batch-size > 1; the batch fetches/stores up to --batch-size "
+                "keys per doorbell ring.")
+    ->group(nvme_group);
+  app
     .add_option("--value-size", cfg->ioParams.kvValueLen,
                 "KV value size in bytes for --kv-op (store: bytes written; "
                 "retrieve: host buffer size). Default: --data-buffer-size.")
