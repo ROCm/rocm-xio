@@ -914,6 +914,12 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
       }
       cqe_new = nvme_ep::cqeRead(cqe_entry);
       if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase) {
+        // Acquire: the phase bit is the CQE last dword, but cqeRead copies
+        // cdw0 first — one read can capture a stale cdw0 (0) with the
+        // freshly-flipped phase. Fence + re-read so DW0 (KV value length)
+        // is coherent before use.
+        __threadfence_system();
+        cqe_new = nvme_ep::cqeRead(cqe_entry);
         break;
       }
       if (++poll_count >= NVME_EP_MAX_POLLS) {
@@ -1148,6 +1154,12 @@ __device__ static void driveEndpointKvWavefront(
           }
           cqe_new = nvme_ep::cqeRead(cqe_entry);
           if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase) {
+            // Acquire: the phase bit is the CQE last dword, but cqeRead copies
+            // cdw0 first — one read can capture a stale cdw0 (0) with the
+            // freshly-flipped phase. Fence + re-read so DW0 (KV value length)
+            // is coherent before use.
+            __threadfence_system();
+            cqe_new = nvme_ep::cqeRead(cqe_entry);
             break;
           }
           poll_count++;
