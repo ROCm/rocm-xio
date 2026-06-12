@@ -189,7 +189,7 @@ post_create_hammer() {
             --cpus_allowed="$CPU" --ioengine=libaio --direct=1 \
             --offset="$HAMMER_OFFSET" --size="$HAMMER_REGION_BYTES" \
             --io_size="$HAMMER_BYTES" --verify=crc32c \
-            --verify_fatal=1 --group_reporting \
+            --verify_fatal=1 --verify_state_save=0 --group_reporting \
             >"$TMP/fio.log" 2>&1
         rc=$?
     else
