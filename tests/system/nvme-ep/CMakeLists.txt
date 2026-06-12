@@ -582,3 +582,27 @@ xio_add_script_test(
     "STRESS_HALF_WRAPS=3"
     "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
 )
+
+# --- Gated GPU-driven delete/create stress test ---------------------
+# Faithful end-to-end variant of nvme-qid-recreate-stress: the warm
+# phase is a real xio-tester GPU hijack of the queue (not a synthesised
+# admin-passthru DELETE), so on xio-tester exit the module schedules the
+# resurrect via its kprobe. Then kernel I/O hammers the recreated queue.
+# Gated behind STRESS_USE_GPU=1: needs a working gfx1030 GPU (the AMD
+# reset bug can wedge it), so by default the script SKIPs cleanly. Reuses
+# the prebuilt xio-tester target.
+set(_qid_recreate_gpu_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-recreate-gpu-stress.sh)
+
+xio_add_script_test(
+  NAME nvme-qid-recreate-gpu-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress gpu
+  TIMEOUT 900
+  ARGS ${_qid_recreate_gpu_stress}
+  ENVIRONMENT
+    "STRESS_USE_GPU=1"
+    "STRESS_ITERS=3"
+    "STRESS_HALF_WRAPS=3"
+    "XIO_TESTER=${CMAKE_BINARY_DIR}/xio-tester"
+)
