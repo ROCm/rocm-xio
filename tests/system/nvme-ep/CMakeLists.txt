@@ -518,3 +518,67 @@ xio_add_script_test(
     "STRESS_HALF_WRAPS=3"
     "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
 )
+
+# --- QID quiesce isolation + delete/create stress tests --------------
+# Two GPU-free CPU-only stress tests that exercise rocm-xio queue
+# manipulation against a WARM kernel (after heavy prior I/O):
+#   nvme-qid-quiesce-stress  -- proves QUIESCE_NS stops dispatch to the
+#       target hctx under load while other queues keep flowing, and that
+#       UNQUIESCE_NS cleanly resumes it (ordering-proven, not just slow).
+#   nvme-qid-recreate-stress -- proves a DELETE + resurrect cycle leaves
+#       the recreated queue usable under a sustained post-create hammer.
+#
+# Both drive the PRODUCTION rocm-xio ioctls via tiny C helpers. As with
+# resurrect-qid above, the helpers are plain C compiled as CXX (the
+# top-level project enables only CXX/HIP). quiesce-qid/unquiesce-qid
+# issue QUIESCE_NS/UNQUIESCE_NS; hold-quiesce holds the controlling fd
+# open for a fixed window (the module auto-restarts a quiesced hctx the
+# instant that fd closes, so a fire-and-exit quiesce would not hold).
+set_source_files_properties(
+  ${CMAKE_SOURCE_DIR}/scripts/test/quiesce-qid.c
+  ${CMAKE_SOURCE_DIR}/scripts/test/unquiesce-qid.c
+  ${CMAKE_SOURCE_DIR}/scripts/test/hold-quiesce.c
+  PROPERTIES LANGUAGE CXX)
+add_executable(quiesce-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/quiesce-qid.c)
+add_executable(unquiesce-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/unquiesce-qid.c)
+add_executable(hold-quiesce
+  ${CMAKE_SOURCE_DIR}/scripts/test/hold-quiesce.c)
+set_target_properties(quiesce-qid unquiesce-qid hold-quiesce PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+set(_qid_quiesce_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-quiesce-stress.sh)
+set(_qid_recreate_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-recreate-stress.sh)
+
+# Quiesce isolation: needs the hold-quiesce helper to keep the window
+# open; QUIESCE_HOLD_S must exceed FIRST_IO_TIMEOUT_S+3 (hardened
+# preflight), so pass 12 against the default 8s first-IO timeout.
+xio_add_script_test(
+  NAME nvme-qid-quiesce-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress
+  TIMEOUT 600
+  ARGS ${_qid_quiesce_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=3"
+    "QUIESCE_HOLD_S=12"
+    "HOLD_HELPER=${CMAKE_BINARY_DIR}/hold-quiesce"
+    "QUIESCE_HELPER=${CMAKE_BINARY_DIR}/quiesce-qid"
+    "UNQUIESCE_HELPER=${CMAKE_BINARY_DIR}/unquiesce-qid"
+)
+
+# Delete/create resilience: reuses the resurrect-qid helper built above.
+xio_add_script_test(
+  NAME nvme-qid-recreate-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress
+  TIMEOUT 600
+  ARGS ${_qid_recreate_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=5"
+    "STRESS_HALF_WRAPS=3"
+    "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
+)
