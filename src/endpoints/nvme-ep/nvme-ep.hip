@@ -888,9 +888,11 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
     uint32_t prpOff = nvmePrpListWordOffset(bufferParams, 0, is_store);
     uint64_t* prpSlot =
       bufferParams.prpListPool ? bufferParams.prpListPool + prpOff : nullptr;
-    uint64_t prpSlotDma = prpListDmaForSlot(
-      bufferParams, nvmePrpListDmaSlotIndex(bufferParams, 0, is_store));
-    calculatePrps(addr, value_len, &sqeLocal, prpSlot, prpSlotDma, valPhys, 0);
+    uint32_t prpSlotIdx = nvmePrpListDmaSlotIndex(bufferParams, 0, is_store);
+    uint64_t prpSlotDma = prpListDmaForSlot(bufferParams, prpSlotIdx);
+    calculatePrps(addr, value_len, &sqeLocal, prpSlot, prpSlotDma, valPhys, 0,
+                  prpListPagePhysForSlot(bufferParams, prpSlotIdx),
+                  nvmePrpListPagesPerCmdVal(bufferParams));
 
     // KV key + key length + value size (CDW2/3/10/11/14/15).
     kvSqeSetup(&sqeLocal, ioParams.kvKey, ioParams.kvKeyLen, value_len);
@@ -1083,8 +1085,9 @@ __device__ static void driveEndpointKvWavefront(
         uint64_t* prpSlot = bufferParams.prpListPool
                               ? bufferParams.prpListPool + prpOff
                               : nullptr;
-        uint64_t prpSlotDma = prpListDmaForSlot(
-          bufferParams, nvmePrpListDmaSlotIndex(bufferParams, b, is_store));
+        uint32_t prpSlotIdx =
+          nvmePrpListDmaSlotIndex(bufferParams, b, is_store);
+        uint64_t prpSlotDma = prpListDmaForSlot(bufferParams, prpSlotIdx);
 
         bool prp_valid = false;
         if (valBuf != nullptr && value_len > 0 &&
@@ -1093,7 +1096,8 @@ __device__ static void driveEndpointKvWavefront(
                           : valDma ? (valDma + buf_off)
                                    : (uint64_t)(valBuf + buf_off);
           calculatePrps(addr, value_len, sqe, prpSlot, prpSlotDma, valPhys,
-                        pageOff);
+                        pageOff, prpListPagePhysForSlot(bufferParams, prpSlotIdx),
+                        nvmePrpListPagesPerCmdVal(bufferParams));
           prp_valid = true;
         }
 
@@ -1958,20 +1962,39 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                          ? (uint64_t)ioParams.kvValueLen
                          : (uint64_t)nvmeConfig->ioParams.lbasPerIo *
                              nvmeConfig->ioParams.lbaSize;
-  constexpr uint32_t kMaxPrpListEntries = NVME_PAGE_SIZE / sizeof(uint64_t);
+  const uint32_t kEntriesPerPage = NVME_PAGE_SIZE / sizeof(uint64_t);
   uint32_t xfer_pages = (uint32_t)((xfer_size + NVME_PAGE_SIZE - 1) /
                                    NVME_PAGE_SIZE);
-  if (xfer_pages > kMaxPrpListEntries + 1) {
-    ROCXIO_LOG_ERROR("Transfer size %llu bytes (%u pages) "
-                     "exceeds single PRP list page limit "
-                     "(%u + 1 pages). Reduce --lbas-per-io.\n",
-                     (unsigned long long)xfer_size, xfer_pages,
-                     kMaxPrpListEntries);
+  // Pages described by the PRP list (everything beyond PRP1). 0 or 1 such pages
+  // need no list page (PRP1, or PRP1 + a direct PRP2).
+  uint32_t prp_list_entries = (xfer_pages > 1u) ? (xfer_pages - 1u) : 0u;
+  // Physical PRP-list pages needed, with chaining: each non-final list page
+  // spends one of its entriesPerPage slots on a chain pointer to the next page
+  // (so it carries entriesPerPage-1 data entries), the final page carries up
+  // to entriesPerPage. Capacity(L) = (L-1)*(entriesPerPage-1) + entriesPerPage.
+  uint32_t listPagesPerCmd = 0;
+  if (prp_list_entries >= 2u) {
+    listPagesPerCmd = 1u;
+    while ((uint64_t)(listPagesPerCmd - 1u) * (kEntriesPerPage - 1u) +
+             kEntriesPerPage <
+           prp_list_entries) {
+      listPagesPerCmd++;
+    }
+  }
+  // Bound PRP-pool memory. 128 list pages (chained) ~= up to ~256 MiB of value
+  // per command; the pool is sized to the *actual* listPagesPerCmd, so this is
+  // only a rejection threshold. 64 MiB needs 33 list pages.
+  const uint32_t kMaxListPagesPerCmd = 128u;
+  if (listPagesPerCmd > kMaxListPagesPerCmd) {
+    ROCXIO_LOG_ERROR("Transfer size %llu bytes (%u pages) needs %u PRP list "
+                     "pages, exceeds max %u. Reduce --value-size/--lbas-per-io.\n",
+                     (unsigned long long)xfer_size, xfer_pages, listPagesPerCmd,
+                     kMaxListPagesPerCmd);
     return hipErrorInvalidValue;
   }
-  uint32_t prpEntriesPerCmd = (xfer_size > NVME_PAGE_SIZE)
-                                ? prpListEntriesPerPage()
-                                : 0;
+  // Reserve whole list pages per command so each slot is page-aligned and its
+  // pages can be chained by physical address.
+  uint32_t prpEntriesPerCmd = listPagesPerCmd * kEntriesPerPage;
   uint32_t prpStridePerCmd = prpEntriesPerCmd;
   uint32_t prpSlotsPerBatch = (nvmeConfig->ioParams.readIo != 0 &&
                                nvmeConfig->ioParams.writeIo != 0)
@@ -2227,9 +2250,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       }
 
       uint64_t* page_dmas = nullptr;
-      const uint32_t prp_dma_slots = effBatch * prpSlotsPerBatch;
+      const uint32_t prp_cmd_slots = effBatch * prpSlotsPerBatch;
+      // A command slot reserves listPagesPerCmd physically-distinct list pages;
+      // the device chains them by physical address, so record every page.
+      const uint32_t list_pages_per_cmd =
+        (prpStridePerCmd > 0u) ? (prpStridePerCmd / kEntriesPerPage) : 1u;
+      const uint32_t prp_dma_entries = prp_cmd_slots * list_pages_per_cmd;
       hipError_t dmas_err = hipHostMalloc((void**)&page_dmas,
-                                          sizeof(*page_dmas) * prp_dma_slots,
+                                          sizeof(*page_dmas) * prp_dma_entries,
                                           hipHostMallocMapped);
       if (dmas_err != hipSuccess || !page_dmas) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list DMA "
@@ -2239,19 +2267,24 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
-      memset(page_dmas, 0, sizeof(*page_dmas) * prp_dma_slots);
-      for (uint32_t s = 0; s < prp_dma_slots; s++) {
-        uint8_t* slot = static_cast<uint8_t*>(pool) +
-                        (size_t)s * prpStridePerCmd * sizeof(uint64_t);
-        page_dmas[s] = getPhysAddr(slot);
-        if (!page_dmas[s] || (page_dmas[s] & (NVME_PAGE_SIZE - 1)) != 0) {
-          ROCXIO_LOG_ERROR("Failed to get PRP list page "
-                           "phys addr for queue %u slot %u\n",
-                           qid, s);
-          (void)hipHostFree(page_dmas);
-          (void)hipHostFree(pool);
-          result = hipErrorInvalidValue;
-          goto cleanup;
+      memset(page_dmas, 0, sizeof(*page_dmas) * prp_dma_entries);
+      for (uint32_t s = 0; s < prp_cmd_slots; s++) {
+        for (uint32_t p = 0; p < list_pages_per_cmd; p++) {
+          uint8_t* listPage =
+            static_cast<uint8_t*>(pool) +
+            ((size_t)s * prpStridePerCmd + (size_t)p * kEntriesPerPage) *
+              sizeof(uint64_t);
+          uint64_t pa = getPhysAddr(listPage);
+          if (!pa || (pa & (NVME_PAGE_SIZE - 1)) != 0) {
+            ROCXIO_LOG_ERROR("Failed to get PRP list page "
+                             "phys addr for queue %u slot %u page %u\n",
+                             qid, s, p);
+            (void)hipHostFree(page_dmas);
+            (void)hipHostFree(pool);
+            result = hipErrorInvalidValue;
+            goto cleanup;
+          }
+          page_dmas[s * list_pages_per_cmd + p] = pa;
         }
       }
       void* gpu_page_dmas = nullptr;
@@ -2319,6 +2352,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     qBufParams.prpListPoolDma = prpPools[q].dma;
     qBufParams.prpEntriesPerCmd = prpStridePerCmd;
     qBufParams.prpSlotsPerBatch = prpSlotsPerBatch;
+    qBufParams.prpListPagesPerCmd =
+      (prpStridePerCmd > 0u) ? (prpStridePerCmd / kEntriesPerPage) : 1u;
 
     XioEndpointConfig kernelConfig = *config;
     kernelConfig.endpointConfig = nullptr;

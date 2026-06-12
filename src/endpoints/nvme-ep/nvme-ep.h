@@ -120,9 +120,20 @@ struct nvmeBufferParams {
   uint32_t readNumPages;        /**< Entries in readPagePhysAddrs. */
   uint32_t writeNumPages;       /**< Entries in writePagePhysAddrs. */
   uint64_t* prpListPool;        /**< PRP list backing storage for commands. */
-  uint64_t* prpListPageDmas;    /**< DMA address per PRP list command slot. */
+  uint64_t* prpListPageDmas;    /**< DMA address per PRP list page. When a
+                                  *   command reserves more than one list page
+                                  *   (see @c prpListPagesPerCmd), the pages for
+                                  *   command slot @c s occupy table entries
+                                  *   @c [s*prpListPagesPerCmd .. +pagesPerCmd).
+                                  */
   uint64_t prpListPoolDma;      /**< DMA address of prpListPool. */
   uint32_t prpEntriesPerCmd;    /**< PRP entries reserved per command. */
+  /**
+   * Physical PRP-list pages reserved per command slot (1 for transfers that
+   * fit in a single list page; >1 enables a chained PRP list for large
+   * values/transfers). 0 is treated as 1.
+   */
+  uint32_t prpListPagesPerCmd;
   /**
    * 1 for a single PRP list per batch, or 2 when read and write both use PRP
    * lists so each batch reserves separate list pages for each direction.
@@ -153,7 +164,9 @@ __host__ __device__ static inline uint32_t prpListEntriesPerPage() {
 __host__ __device__ static inline uint64_t prpListDmaForSlot(
   const nvmeBufferParams& params, uint32_t slot) {
   if (params.prpListPageDmas)
-    return params.prpListPageDmas[slot];
+    return params.prpListPageDmas[slot * (params.prpListPagesPerCmd
+                                            ? params.prpListPagesPerCmd
+                                            : 1u)];
   if (params.prpListPoolDma && params.prpEntriesPerCmd) {
     uint32_t stride = params.prpEntriesPerCmd;
     if (stride < prpListEntriesPerPage())
@@ -207,6 +220,30 @@ __host__ __device__ static inline uint32_t nvmePrpListDmaSlotIndex(
   if (mul > 1u)
     return batchIdx * mul + (isWrite ? 1u : 0u);
   return batchIdx;
+}
+
+/**
+ * @brief Physical PRP-list pages reserved per command slot (>=1).
+ */
+__host__ __device__ static inline uint32_t nvmePrpListPagesPerCmdVal(
+  const nvmeBufferParams& p) {
+  return p.prpListPagesPerCmd ? p.prpListPagesPerCmd : 1u;
+}
+
+/**
+ * @brief Per-list-page physical-address table for command slot @p slot.
+ *
+ * Returns a pointer into @c prpListPageDmas at the first list page of @p slot,
+ * so element @c [k] is the physical address of the slot's k-th list page.
+ * @c nullptr when no DMA table is configured (chaining unavailable; the caller
+ * falls back to a single list page).
+ */
+__host__ __device__ static inline const uint64_t* prpListPagePhysForSlot(
+  const nvmeBufferParams& params, uint32_t slot) {
+  if (!params.prpListPageDmas)
+    return nullptr;
+  return params.prpListPageDmas +
+         (uint64_t)slot * nvmePrpListPagesPerCmdVal(params);
 }
 
 /**
@@ -688,7 +725,8 @@ __host__ __device__ static inline uint8_t cqeStatusType(
 __host__ __device__ static inline void calculatePrps(
   uint64_t bufferAddr, uint32_t bufferSize, struct nvme_sqe* sqe,
   uint64_t* prpList, uint64_t prpListDma, const uint64_t* pagePhysAddrs,
-  uint32_t bufPageOffset) {
+  uint32_t bufPageOffset, const uint64_t* prpListPagePhys = nullptr,
+  uint32_t prpListPageCount = 1) {
   sqe->dptr.prp.prp1 = bufferAddr;
   sqe->dptr.prp.prp2 = 0;
 
@@ -699,36 +737,70 @@ __host__ __device__ static inline void calculatePrps(
     return;
   }
 
+  // Physical address of the i-th buffer page beyond PRP1 (page index 1 + i).
+  // Non-contiguous buffers carry a per-page table; otherwise pages are
+  // contiguous from the (aligned) buffer base.
+#define ROCXIO_PRP_DATA_PAGE(i)                                              \
+  (pagePhysAddrs                                                            \
+     ? pagePhysAddrs[bufPageOffset + 1 + (i)]                              \
+     : (((bufferAddr + first_page_size) & ~((uint64_t)(NVME_PAGE_SIZE - 1))) \
+        + (uint64_t)(i) * NVME_PAGE_SIZE))
+
   uint32_t remaining = (uint32_t)(bufferSize - first_page_size);
   uint32_t num_remaining_pages = (remaining + NVME_PAGE_SIZE - 1) /
                                  NVME_PAGE_SIZE;
 
-  constexpr uint32_t kMaxPrpListEntries = NVME_PAGE_SIZE / sizeof(uint64_t);
-  if (num_remaining_pages > kMaxPrpListEntries) {
-    num_remaining_pages = kMaxPrpListEntries;
-  }
+  const uint32_t entriesPerPage = NVME_PAGE_SIZE / sizeof(uint64_t);
 
+  // Single page beyond PRP1: PRP2 addresses it directly (no list).
   if (num_remaining_pages == 1) {
-    if (pagePhysAddrs) {
-      sqe->dptr.prp.prp2 = pagePhysAddrs[bufPageOffset + 1];
-    } else {
-      sqe->dptr.prp.prp2 = (bufferAddr + first_page_size) &
-                           ~((uint64_t)(NVME_PAGE_SIZE - 1));
-    }
+    sqe->dptr.prp.prp2 = ROCXIO_PRP_DATA_PAGE(0);
     return;
   }
 
-  for (uint32_t i = 0; i < num_remaining_pages; i++) {
-    if (pagePhysAddrs) {
-      prpList[i] = pagePhysAddrs[bufPageOffset + 1 + i];
-    } else {
-      prpList[i] = ((bufferAddr + first_page_size) &
-                    ~((uint64_t)(NVME_PAGE_SIZE - 1))) +
-                   (uint64_t)i * NVME_PAGE_SIZE;
+  const bool canChain =
+    (prpListPagePhys != nullptr) && (prpListPageCount > 1u);
+
+  // Fits in one list page, or chaining unavailable: emit a single PRP list
+  // page (clamping to its capacity, preserving legacy behavior).
+  if (num_remaining_pages <= entriesPerPage || !canChain) {
+    uint32_t cnt = num_remaining_pages;
+    if (cnt > entriesPerPage)
+      cnt = entriesPerPage;
+    for (uint32_t i = 0; i < cnt; i++) {
+      prpList[i] = ROCXIO_PRP_DATA_PAGE(i);
+    }
+    sqe->dptr.prp.prp2 = prpListDma;
+    return;
+  }
+
+  // Chained PRP list across prpListPageCount physically-distinct list pages.
+  // Every non-final list page holds (entriesPerPage - 1) data entries plus a
+  // trailing chain pointer to the next list page; the final page uses all
+  // entriesPerPage slots for data. Capacity bounds the walk defensively.
+  uint32_t capacity =
+    (prpListPageCount - 1u) * (entriesPerPage - 1u) + entriesPerPage;
+  uint32_t total = num_remaining_pages;
+  if (total > capacity)
+    total = capacity;
+
+  uint32_t written = 0;
+  for (uint32_t p = 0; p < prpListPageCount && written < total; p++) {
+    uint64_t* listPage = prpList + (uint64_t)p * entriesPerPage;
+    const bool isFinal = (p == prpListPageCount - 1u);
+    const uint32_t dataSlots = isFinal ? entriesPerPage : (entriesPerPage - 1u);
+    uint32_t k = 0;
+    for (; k < dataSlots && written < total; k++, written++) {
+      listPage[k] = ROCXIO_PRP_DATA_PAGE(written);
+    }
+    // Chain to the next list page only when more data entries remain.
+    if (!isFinal && written < total) {
+      listPage[entriesPerPage - 1u] = prpListPagePhys[p + 1];
     }
   }
 
-  sqe->dptr.prp.prp2 = prpListDma;
+  sqe->dptr.prp.prp2 = prpListPagePhys[0];
+#undef ROCXIO_PRP_DATA_PAGE
 }
 
 /**
