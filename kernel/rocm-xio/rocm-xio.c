@@ -1217,23 +1217,64 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       if (!sgt) /* emulated buffers have no P2PDMA sg_table */
         return -EOPNOTSUPP;
 
-      for_each_sg(sgt->sgl, sg, sgt->nents, i) {
-        dma_addr_t seg = sg_dma_address(sg);
-        unsigned int seg_len = sg_dma_len(sg);
-        unsigned int off;
+      /*
+       * Emit exactly one DMA address per logical @page_size page of the
+       * transfer, walking the sg segments as a single concatenated byte
+       * stream. The registered buffer's sg mapping may cover MORE bytes than
+       * the caller's transfer (the VRAM allocation is rounded up), and a
+       * naive per-segment walk both over-counts and rounds each segment up
+       * independently (so Sum(ceil(seg_len/ps)) can exceed
+       * ceil(total/ps)). We therefore stop once @max_pages logical pages
+       * have been produced, and we guard against a logical page that would
+       * straddle two physically-discontiguous segments (only possible when a
+       * non-final segment's length is not a multiple of @page_size): such a
+       * page is not representable by a single PRP entry, so we report rather
+       * than silently mis-address.
+       */
+      {
+        unsigned int carry = 0; /* leftover bytes consumed from prev segment */
 
-        for (off = 0; off < seg_len; off += page_size) {
-          __u64 pa = (__u64)seg + off;
+        for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+          dma_addr_t seg = sg_dma_address(sg);
+          unsigned int seg_len = sg_dma_len(sg);
+          unsigned int off = 0;
 
-          if (count >= req.max_pages) {
-            pr_err("rocm-axiio: GET_BUFFER_PAGES: needs > %u pages\n",
-                   req.max_pages);
-            return -E2BIG;
+          if (count >= req.max_pages)
+            break;
+
+          /*
+           * A previous segment ended mid-page. A full PRP page must be a
+           * single contiguous 4096-region, so this is only valid if the
+           * previous segment ended exactly on a page boundary (carry == 0).
+           */
+          if (carry != 0) {
+            pr_err("rocm-axiio: GET_BUFFER_PAGES: segment %d not "
+                   "page-aligned (carry=%u); page straddles discontiguous "
+                   "VRAM segments\n",
+                   i, carry);
+            return -EINVAL;
           }
-          if (put_user(pa, &uaddrs[count]))
-            return -EFAULT;
-          count++;
+
+          for (off = 0; off + page_size <= seg_len; off += page_size) {
+            __u64 pa = (__u64)seg + off;
+
+            if (count >= req.max_pages)
+              break;
+            if (put_user(pa, &uaddrs[count]))
+              return -EFAULT;
+            count++;
+          }
+
+          /* Track a trailing partial page for the straddle guard above. */
+          carry = seg_len - off;
         }
+      }
+
+      if (count < req.max_pages) {
+        pr_err("rocm-axiio: GET_BUFFER_PAGES: only %u of %u pages "
+               "available\n",
+               count, req.max_pages);
+        return -E2BIG;
       }
 
       req.num_pages = count;
