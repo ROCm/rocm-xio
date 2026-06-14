@@ -40,10 +40,24 @@ enum {
   nvme_kv_cmd_list = 0x06,     /**< KV List. */
   nvme_kv_cmd_delete = 0x10,   /**< KV Delete. */
   nvme_kv_cmd_exist = 0x14,    /**< KV Exist. */
+  nvme_kv_cmd_exec = 0x83,     /**< KV Exec (vendor, ADR-0005/0014). */
 };
 
 /** @brief Maximum KV key length in bytes (inline in CDW2/3/14/15). */
 #define NVME_KV_KEY_MAX_LEN 16
+
+/**
+ * @brief Maximum KV Exec key length in bytes — the WIRE-CONTRACT cap.
+ *
+ * Exec carries the key length-prefixed in the DPTR payload head (ADR-0014
+ * Option 1), not in the inline CDW slots, so the protocol is not bound by the
+ * 16-byte inline cap; the target accepts 1..255. NOTE: this tester does NOT yet
+ * exercise the full range — its device-side key store (ioParams.kvKey is
+ * uint32_t[4] = 16 bytes) and CLI validation cap Exec keys at
+ * NVME_KV_KEY_MAX_LEN (16). Widen kvKey[] + the CLI check to use this constant
+ * before sending keys > 16 bytes.
+ */
+#define NVME_KV_EXEC_KEY_MAX_LEN 255
 
 /* KV status codes (SCT = Generic). */
 #define NVME_KV_SC_INVALID_VALUE_SIZE 0x85
@@ -85,6 +99,48 @@ __host__ __device__ static inline void kvSqeSetup(struct nvme_sqe* sqe,
   /* CDW12/CDW13 unused for plain Store/Retrieve. */
   sqe->cdw12 = 0;
   sqe->cdw13 = 0;
+
+  sqe->flags = 0;
+  sqe->metadata = 0;
+}
+
+/**
+ * @brief Encode the KV Exec (vendor 0x83) SQE metadata dwords.
+ *
+ * Exec departs from Store/Retrieve: the key does NOT ride the inline CDW
+ * slots. It is carried length-prefixed at the head of the DPTR request payload
+ * ([u16 key_len][key][input], ADR-0014 Option 1), so the inline key dwords are
+ * reserved/zero for this opcode. The caller must already have set opcode,
+ * command_id, nsid, and the DPTR (PRP1/PRP2) at the bidirectional buffer that
+ * holds the staged request and receives the response.
+ *
+ * Field assignment matches the host encoder (lib/nvme/nvme_kv.c) and the
+ * target decoder (lib/nvmf/ctrlr_kvdev.c):
+ *   - CDW10: TOTAL request payload length = sizeof(u16) + key_len + input_len.
+ *   - CDW12: output buffer size (osize) the device may scatter back.
+ *   - CDW13: operation ID selecting the server-side op.
+ *
+ * @param sqe         SQE to fill (DPTR/opcode/nsid/command_id set by caller).
+ * @param payload_len Total request payload bytes -> CDW10.
+ * @param osize       Output buffer cap -> CDW12.
+ * @param op_id       Operation ID -> CDW13.
+ *
+ * @note Callable from host and device code.
+ */
+__host__ __device__ static inline void kvExecSqeSetup(struct nvme_sqe* sqe,
+                                                      uint32_t payload_len,
+                                                      uint32_t osize,
+                                                      uint32_t op_id) {
+  /* Key leaves the inline slots for Exec: keep CDW2/3/11/14/15 reserved. */
+  sqe->cdw2 = 0;
+  sqe->cdw3 = 0;
+  sqe->cdw11 = 0;
+  sqe->cdw14 = 0;
+  sqe->cdw15 = 0;
+
+  sqe->cdw10 = payload_len;
+  sqe->cdw12 = osize;
+  sqe->cdw13 = op_id;
 
   sqe->flags = 0;
   sqe->metadata = 0;

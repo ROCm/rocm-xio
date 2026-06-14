@@ -854,10 +854,39 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
   }
 
   // Seed the value buffer with a deterministic pattern for Store.
+  //
+  // spdk-5co coherence findings (iGPU-passthrough + qemu-memfd controller):
+  //  - The data buffer MUST be coherent/fine-grained (see allocateGpuAccessible
+  //    buffer); a non-coherent buffer caps bulk Store at a fixed ~382B prefix.
+  //  - Producer stores: NON-TEMPORAL (write-through) beat normal cached stores.
+  //    Coherent buffer + NORMAL stores lands mostly ZEROS (cache not flushed to
+  //    the DMA-visible point by __threadfence_system); NT stores write through.
+  //  - Coherent buffer + NT lands much more (hundreds of KB+) but a RESIDUAL
+  //    doorbell<->data race remains (variable prefix). The real fix is host/
+  //    bridge-side: observing the doorbell must imply data coherence (spdk-5co).
+  // Emit the pattern with NT stores from the start (block==0 dataPattern).
   if (is_store && valBuf != nullptr && value_len > 0) {
-    xio::DataPatternParams pp{valBuf, value_len, 0, ioParams.lbaSize,
-                              ioParams.lfsrSeed, nullptr};
-    xio::dataPattern(false, pp);
+    for (uint32_t i = 0; i < value_len; ++i) {
+      uint32_t rng = ioParams.lfsrSeed + i;  // block==0 => base_seed 0, seed^0
+      rng ^= rng >> 16;
+      rng *= 0x85ebca6b;
+      rng ^= rng >> 13;
+      rng *= 0xc2b2ae35;
+      rng ^= rng >> 16;
+      __builtin_nontemporal_store((uint8_t)(rng & 0xFFu), &valBuf[i]);
+    }
+    __threadfence_system();
+  }
+
+  // spdk-5co DIAGNOSTIC: optional settle-spin between staging the value and the
+  // first doorbell ring. If a delay makes the stored content complete, the bulk
+  // Store race is pure drain-timing (data lands given time, the doorbell just
+  // beat it); if not, it is lost writes. Swept via --stage-settle-cycles
+  // (wall_clock64 ticks). 0 = off (default).
+  if (is_store && ioParams.stageSettleCycles > 0) {
+    unsigned long long t0 = wall_clock64();
+    while ((unsigned long long)(wall_clock64() - t0) < ioParams.stageSettleCycles) {
+    }
   }
 
   unsigned total_ops =
@@ -942,6 +971,15 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
         // Retrieve completion DW0 carries the TRUE stored value length.
         printf("KV retrieve OK: returned value length = %u bytes\n",
                (unsigned)cqe_new.cdw0);
+#ifdef NKVX_DBG
+        // spdk-5co axis-2 apparatus: controller->GPU read into this clean,
+        // never-GPU-written buffer reads CORRECT content with no invalidate.
+        __threadfence_system();
+        printf("DBG readbuf[0..11]=%02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x\n",
+               valBuf[0], valBuf[1], valBuf[2], valBuf[3], valBuf[4], valBuf[5],
+               valBuf[6], valBuf[7], valBuf[8], valBuf[9], valBuf[10], valBuf[11]);
+#endif
       }
     } else if (sct == NVME_SCT_GENERIC && sc == NVME_KV_SC_KEY_DOES_NOT_EXIST) {
       if (op == 0) {
@@ -951,6 +989,245 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
       printf("NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n", (unsigned)sc,
              (unsigned)sct, op);
       __builtin_trap();
+    }
+
+    cq_head = (cq_head + 1) % ioParams.queueSize;
+    if (cq_head == 0) {
+      expected_phase ^= 1;
+    }
+    nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                          doorbellParams.doorbellOffset +
+                            nvme_ep::doorBellStride);
+    op++;
+  }
+}
+
+/**
+ * NVMe Key-Value Exec path (vendor opcode 0x83), single-thread serial.
+ *
+ * Exec is bidirectional over ONE data buffer (ADR-0014): the GPU stages the
+ * request [u16 key_len][key][input] at the head of the (GPU-accessible) read
+ * buffer, the controller gathers it host->device, runs the op-ID-selected
+ * server-side operation, and scatters the result back into the same buffer.
+ * The true output length lands in completion DW0 (Retrieve-style truncation).
+ *
+ * Unlike Store/Retrieve the key does NOT ride the inline CDW slots; it is
+ * length-prefixed in the payload head. CDW10 carries the TOTAL request payload
+ * length (2 + key_len + input_len), CDW12 the output-buffer cap (osize), CDW13
+ * the operation ID. Reuses the same queue / doorbell / PRP / CQ-poll machinery
+ * as @ref driveEndpointKv. Selected when @c ioParams.kvOpcode == 0x83.
+ */
+__device__ static void driveEndpointKvExec(
+  const XioEndpointConfig& config, const nvmeIoParams& ioParams,
+  const nvmeDoorbellParams& doorbellParams,
+  const nvmeBufferParams& bufferParams) {
+  // Serial single-thread routine: it owns the SQ/CQ ring state in locals, so
+  // only thread 0 may drive it (the rest would race the shared queues).
+  if (threadIdx.x != 0 || blockIdx.x != 0) {
+    return;
+  }
+
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+
+  // The single bidirectional buffer is the WRITE buffer. Exec gathers the staged
+  // request host->controller (same direction as Store, which is proven to make
+  // GPU-written bytes visible to the controller); the read buffer is set up for
+  // the controller->GPU direction only, so GPU writes into it are not visible to
+  // the controller's gather (yielding a zeroed key -> INVALID_KEY_SIZE). The
+  // controller scatters the response back into this same buffer.
+  uint8_t* buf = bufferParams.writeBuffer;
+  uint64_t bufDma = bufferParams.writeBufferDma;
+  uint64_t* bufPhys = bufferParams.writePagePhysAddrs;
+
+  uint32_t key_len = ioParams.kvKeyLen;
+  uint32_t input_len = ioParams.kvInputLen;
+
+  // osize = output-buffer cap (CDW12), bounded by the actual buffer. The PRP
+  // transfer length advertised to the controller is osize; the target clamps
+  // the scatter-back to it.
+  uint32_t osize = ioParams.kvValueLen;
+  if (osize > (uint32_t)bufferParams.bufferSize) {
+    osize = (uint32_t)bufferParams.bufferSize;
+  }
+
+  // Total request payload [u16 key_len][key][input]. The target rejects
+  // payload_len > osize, so bound the input to make the request fit.
+  uint32_t header_len = (uint32_t)sizeof(uint16_t) + key_len;
+  if (header_len > osize) {
+    printf("NVMe KV Exec: key_len %u + header exceeds osize %u\n",
+           (unsigned)key_len, (unsigned)osize);
+    __builtin_trap();
+  }
+  if (input_len > osize - header_len) {
+    input_len = osize - header_len;
+  }
+  uint32_t payload_len = header_len + input_len;
+
+  // Exec drives off the write buffer, so it is gated on --write-io like Store.
+  unsigned total_ops = (unsigned)ioParams.writeIo;
+  if (!ioParams.infiniteMode && total_ops == 0) {
+    total_ops = 1;
+  }
+
+  uint16_t cq_head = 0;
+  uint8_t expected_phase = 1;
+  uint16_t sq_tail = 0;
+
+  unsigned op = 0;
+  while ((ioParams.infiniteMode || op < total_ops) &&
+         (config.stopRequested == nullptr || !*config.stopRequested)) {
+    // ---- stage the request payload [u16 key_len][key][input] ----
+    // Restaged every op: the controller overwrites the buffer with the result,
+    // so the next request must be re-laid before resubmission.
+    if (buf != nullptr) {
+      // Non-temporal (write-through) stores: plain GPU stores linger in L2 and
+      // are not flushed to the memfd-backed system memory the host controller
+      // DMAs (read works, write does not -- proven asymmetry). Write-through
+      // stores bypass the cache so the bytes reach system memory directly.
+      const uint8_t* keyBytes = reinterpret_cast<const uint8_t*>(ioParams.kvKey);
+      __builtin_nontemporal_store((uint8_t)(key_len & 0xFFu), &buf[0]);
+      __builtin_nontemporal_store((uint8_t)((key_len >> 8) & 0xFFu), &buf[1]);
+      for (uint32_t i = 0; i < key_len; ++i) {
+        __builtin_nontemporal_store(keyBytes[i], &buf[sizeof(uint16_t) + i]);
+      }
+      // Input: deterministic pattern so the server-side op has real bytes.
+      // MUST be non-temporal like the key above (and the Store path): a cached
+      // xio::dataPattern() store would linger in L2 and the controller's gather
+      // would read stale/zero input. Inline xio::dataPattern's block==0 case
+      // (offset 0) with write-through stores. NOTE (spdk-5co): this lands small
+      // inputs; a BULK input still races the pci-mmio-bridge doorbell.
+      for (uint32_t i = 0; i < input_len; ++i) {
+        uint32_t rng = ioParams.lfsrSeed + i;
+        rng ^= rng >> 16;
+        rng *= 0x85ebca6b;
+        rng ^= rng >> 13;
+        rng *= 0xc2b2ae35;
+        rng ^= rng >> 16;
+        __builtin_nontemporal_store((uint8_t)(rng & 0xFFu), &buf[header_len + i]);
+      }
+      // Publish the staged request to system memory BEFORE the controller
+      // gathers it: the raw byte stores above otherwise linger in GPU cache and
+      // the controller reads stale (zero) bytes from the DPTR IOVA -> klp=0 ->
+      // INVALID_KEY_SIZE. System-scope fence makes them globally visible.
+      __threadfence_system();
+    }
+#ifdef NKVX_DBG
+    // spdk-5co reproduction apparatus: dump the staged request + SQE so the
+    // GPU-side encoding can be verified byte-for-byte against ADR-0014. Build
+    // with -DNKVX_DBG to re-demonstrate the coherence bug.
+    if (op == 0) {
+      printf("DBG exec stage: buf=%p bufPhys=%p bufDma=0x%llx key_len=%u "
+             "input_len=%u payload_len=%u osize=%u bytes[0..4]=%02x %02x %02x %02x %02x\n",
+             (void*)buf, (void*)bufPhys, (unsigned long long)bufDma,
+             (unsigned)key_len, (unsigned)input_len, (unsigned)payload_len,
+             (unsigned)osize,
+             buf ? buf[0] : 0xEE, buf ? buf[1] : 0xEE, buf ? buf[2] : 0xEE,
+             buf ? buf[3] : 0xEE, buf ? buf[4] : 0xEE);
+    }
+#endif
+
+    // ---- build the KV Exec SQE ----
+    sqeType sqeLocal = {};
+    sqeLocal.opcode = nvme_kv_cmd_exec;
+    sqeLocal.command_id = (uint16_t)(op & 0xFFFFu);
+    sqeLocal.nsid = ioParams.nsid;
+
+    // Bidirectional buffer -> PRP1/PRP2; the transfer length is osize. Use the
+    // write-buffer PRP sub-slot (is_store == true), same convention as Store.
+    uint64_t addr = bufPhys ? bufPhys[0]
+                    : bufDma ? bufDma
+                             : (uint64_t)buf;
+    uint32_t prpOff = nvmePrpListWordOffset(bufferParams, 0, true);
+    uint64_t* prpSlot =
+      bufferParams.prpListPool ? bufferParams.prpListPool + prpOff : nullptr;
+    uint32_t prpSlotIdx = nvmePrpListDmaSlotIndex(bufferParams, 0, true);
+    uint64_t prpSlotDma = prpListDmaForSlot(bufferParams, prpSlotIdx);
+    calculatePrps(addr, osize, &sqeLocal, prpSlot, prpSlotDma, bufPhys, 0,
+                  prpListPagePhysForSlot(bufferParams, prpSlotIdx),
+                  nvmePrpListPagesPerCmdVal(bufferParams));
+
+    // CDW10 = payload_len, CDW12 = osize, CDW13 = op_id; key rides the payload.
+    kvExecSqeSetup(&sqeLocal, payload_len, osize, ioParams.kvOpId);
+#ifdef NKVX_DBG
+    if (op == 0) {
+      printf("DBG exec sqe: opcode=0x%02x nsid=%u prp1=0x%llx prp2=0x%llx "
+             "addr=0x%llx cdw10=%u cdw12=%u cdw13=%u\n",
+             (unsigned)sqeLocal.opcode, (unsigned)sqeLocal.nsid,
+             (unsigned long long)sqeLocal.dptr.prp.prp1,
+             (unsigned long long)sqeLocal.dptr.prp.prp2,
+             (unsigned long long)addr, (unsigned)sqeLocal.cdw10,
+             (unsigned)sqeLocal.cdw12, (unsigned)sqeLocal.cdw13);
+    }
+#endif
+
+    if (!ioParams.infiniteMode && config.startTimes != nullptr) {
+      config.startTimes[op] = wall_clock64();
+    }
+
+    nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+    sq_tail = (sq_tail + 1) % ioParams.queueSize;
+    nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+
+    // ---- poll the completion ----
+    volatile cqeType* cqe_entry = &cqeAddr[cq_head];
+    cqeType cqe_new;
+    unsigned poll_count = 0;
+    while (true) {
+      if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
+          *config.stopRequested) {
+        return;
+      }
+      cqe_new = nvme_ep::cqeRead(cqe_entry);
+      if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase) {
+        // Fence + re-read so DW0 (true output length) is coherent (same torn-
+        // read guard as the Retrieve path).
+        __threadfence_system();
+        cqe_new = nvme_ep::cqeRead(cqe_entry);
+        break;
+      }
+      if (++poll_count >= NVME_EP_MAX_POLLS) {
+        printf("NVMe KV Exec CQ poll timeout (cq_head=%u expected_phase=%u)\n",
+               (unsigned)cq_head, (unsigned)expected_phase);
+        __builtin_trap();
+      }
+    }
+
+    if (!ioParams.infiniteMode && config.endTimes != nullptr) {
+      config.endTimes[op] = wall_clock64();
+    }
+
+    uint8_t sc = nvme_ep::cqeStatusCode(&cqe_new);
+    uint8_t sct = nvme_ep::cqeStatusType(&cqe_new);
+    if (sct == NVME_SCT_GENERIC && sc == NVME_SC_SUCCESS) {
+      if (op == 0) {
+        // Exec completion DW0 carries the TRUE output length (may exceed osize:
+        // BUFFER_TOO_SMALL semantics, the buffer holds the first osize bytes).
+        printf("KV exec OK: op_id=%u returned output length = %u bytes%s\n",
+               (unsigned)ioParams.kvOpId, (unsigned)cqe_new.cdw0,
+               cqe_new.cdw0 > osize ? " (truncated to osize)" : "");
+#ifdef NKVX_DBG
+        // spdk-5co axis-3 apparatus: the scattered-back result lives in system
+        // memory; reading it via this same buffer the GPU just staged returns
+        // STALE L2 (nontemporal_load is insufficient) -- demonstrates the
+        // self-written-buffer read hazard. A real consumer needs a cache
+        // invalidate or a fresh buffer.
+        __threadfence_system();
+        uint8_t r[8];
+        for (int i = 0; i < 8; ++i) {
+          r[i] = __builtin_nontemporal_load(&buf[i]);
+        }
+        printf("DBG exec result[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+               r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+#endif
+      }
+    } else {
+      // Report and stop gracefully (no __builtin_trap): a trap raises an HSA
+      // hardware exception that wedges the queue and masks the real status. The
+      // non-zero status above is the diagnostic.
+      printf("NVMe KV Exec CQE error: sc=0x%02x sct=0x%02x (op=%u)\n",
+             (unsigned)sc, (unsigned)sct, op);
+      return;
     }
 
     cq_head = (cq_head + 1) % ioParams.queueSize;
@@ -1246,7 +1523,10 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
                               const nvmeDoorbellParams& doorbellParams,
                               const nvmeBufferParams& bufferParams) {
   if (ioParams.kvOpcode != 0) {
-    if (ioParams.batchSize > 1) {
+    if (ioParams.kvOpcode == nvme_kv_cmd_exec) {
+      // Exec is serial single-thread (one bidirectional buffer); no wavefront.
+      driveEndpointKvExec(config, ioParams, doorbellParams, bufferParams);
+    } else if (ioParams.batchSize > 1) {
       driveEndpointKvWavefront(config, ioParams, doorbellParams, bufferParams);
     } else {
       driveEndpointKv(config, ioParams, doorbellParams, bufferParams);
@@ -1435,41 +1715,82 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     }
     config->ioParams.lbaSize = detected_lba_size;
   } else {
-    if (config->ioParams.kvOp != "store" && config->ioParams.kvOp != "retrieve") {
-      return "--kv-op must be 'store' or 'retrieve'";
+    if (config->ioParams.kvOp != "store" && config->ioParams.kvOp != "retrieve" &&
+        config->ioParams.kvOp != "exec") {
+      return "--kv-op must be 'store', 'retrieve', or 'exec'";
     }
-    // KV mode needs at least one key, via --key (single) or --keys (manifest).
-    const bool haveSingle = !config->ioParams.kvKey.empty();
-    const bool haveManifest = !config->ioParams.kvKeys.empty();
-    if (!haveSingle && !haveManifest) {
-      return "KV mode requires --key or --keys";
-    }
-    if (haveSingle && config->ioParams.kvKey.size() > NVME_KV_KEY_MAX_LEN) {
-      return "--key must be 1..16 bytes for KV mode";
-    }
-    for (const std::string& k : config->ioParams.kvKeys) {
-      if (k.empty() || k.size() > NVME_KV_KEY_MAX_LEN) {
-        return "each --keys entry must be 1..16 bytes for KV mode";
+    if (config->ioParams.kvOp == "exec") {
+      // Exec uses one bidirectional buffer (request in, result out) and is
+      // serial single-thread: no key manifest, no wavefront batching.
+      if (config->ioParams.kvKey.empty()) {
+        return "--kv-op exec requires --key";
       }
-    }
-    // The multi-key manifest is only consumed by the wavefront path
-    // (--batch-size > 1); a single key drives the serial path.
-    if (config->ioParams.kvKeys.size() > 1 &&
-        config->ioParams.batchSize <= 1) {
-      return "--keys (multiple) requires --batch-size > 1 (wavefront KV)";
-    }
-    // Tie the op direction to the buffer that actually gets allocated: store
-    // sources the write buffer (gated on --write-io), retrieve lands in the
-    // read buffer (gated on --read-io). Without this the run aborts with a PRP
-    // setup failure because the needed buffer was never allocated.
-    if (config->ioParams.kvOp == "store" && config->ioParams.writeIo == 0) {
-      return "--kv-op store requires --write-io > 0";
-    }
-    if (config->ioParams.kvOp == "retrieve" && config->ioParams.readIo == 0) {
-      return "--kv-op retrieve requires --read-io > 0";
-    }
-    if (config->ioParams.lbaSize == 0) {
-      config->ioParams.lbaSize = 512;
+      if (config->ioParams.kvKey.size() > NVME_KV_KEY_MAX_LEN) {
+        return "--key must be 1..16 bytes for --kv-op exec";
+      }
+      if (!config->ioParams.kvKeys.empty()) {
+        return "--kv-op exec does not support --keys (manifest)";
+      }
+      if (config->ioParams.batchSize > 1) {
+        return "--kv-op exec does not support --batch-size > 1";
+      }
+      // Exec gathers the staged request from the write buffer (host->controller,
+      // like Store), so gate on --write-io to ensure that buffer is allocated.
+      if (config->ioParams.writeIo == 0) {
+        return "--kv-op exec requires --write-io > 0";
+      }
+      // The osize buffer must hold the staged request [u16 key_len][key][input].
+      const uint32_t osize =
+        config->ioParams.kvValueLen ? config->ioParams.kvValueLen
+                                    : (uint32_t)config->bufferParams.bufferSize;
+      const uint32_t header_len =
+        (uint32_t)sizeof(uint16_t) + (uint32_t)config->ioParams.kvKey.size();
+      // Pre-check input against the headroom BEFORE summing, so a pathological
+      // --input-size near UINT32_MAX cannot wrap the uint32 sum and slip past
+      // (mirrors the SPDK host encoder's input_len > output_len guard).
+      if (header_len > osize ||
+          config->ioParams.kvInputLen > osize - header_len) {
+        return "--kv-op exec: 2 + key_len + --input-size exceeds the output "
+               "buffer (--value-size / --data-buffer-size)";
+      }
+      if (config->ioParams.lbaSize == 0) {
+        config->ioParams.lbaSize = 512;
+      }
+    } else {
+      // ---- store / retrieve gates ----
+      // KV mode needs at least one key, via --key (single) or --keys (manifest).
+      const bool haveSingle = !config->ioParams.kvKey.empty();
+      const bool haveManifest = !config->ioParams.kvKeys.empty();
+      if (!haveSingle && !haveManifest) {
+        return "KV mode requires --key or --keys";
+      }
+      if (haveSingle && config->ioParams.kvKey.size() > NVME_KV_KEY_MAX_LEN) {
+        return "--key must be 1..16 bytes for KV mode";
+      }
+      for (const std::string& k : config->ioParams.kvKeys) {
+        if (k.empty() || k.size() > NVME_KV_KEY_MAX_LEN) {
+          return "each --keys entry must be 1..16 bytes for KV mode";
+        }
+      }
+      // The multi-key manifest is only consumed by the wavefront path
+      // (--batch-size > 1); a single key drives the serial path.
+      if (config->ioParams.kvKeys.size() > 1 &&
+          config->ioParams.batchSize <= 1) {
+        return "--keys (multiple) requires --batch-size > 1 (wavefront KV)";
+      }
+      // Tie the op direction to the buffer that actually gets allocated: store
+      // sources the write buffer (gated on --write-io), retrieve lands in the
+      // read buffer (gated on --read-io). Without this the run aborts with a PRP
+      // setup failure because the needed buffer was never allocated.
+      if (config->ioParams.kvOp == "store" && config->ioParams.writeIo == 0) {
+        return "--kv-op store requires --write-io > 0";
+      }
+      if (config->ioParams.kvOp == "retrieve" && config->ioParams.readIo == 0) {
+        return "--kv-op retrieve requires --read-io > 0";
+      }
+      if (config->ioParams.lbaSize == 0) {
+        config->ioParams.lbaSize = 512;
+      }
     }
   }
 
@@ -1867,6 +2188,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.batchSize =
     kvMode ? effBatch : (uint32_t)nvmeConfig->ioParams.batchSize;
   ioParams.wavefrontSize = nvmeConfig->wavefrontSize;
+  ioParams.stageSettleCycles = nvmeConfig->ioParams.stageSettleCycles;
 
   // ---- NVMe Key-Value mode (kvOpcode == 0 => normal block mode) ----
   ioParams.kvOpcode = 0;
@@ -1876,10 +2198,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     ioParams.kvKey[3] = 0;
   ioParams.kvKeysPacked = nullptr;
   ioParams.kvNumKeys = 0;
+  ioParams.kvOpId = 0;
+  ioParams.kvInputLen = 0;
   if (!nvmeConfig->ioParams.kvOp.empty()) {
-    ioParams.kvOpcode = (nvmeConfig->ioParams.kvOp == "store")
-                          ? (uint8_t)nvme_kv_cmd_store
-                          : (uint8_t)nvme_kv_cmd_retrieve;
+    if (nvmeConfig->ioParams.kvOp == "store") {
+      ioParams.kvOpcode = (uint8_t)nvme_kv_cmd_store;
+    } else if (nvmeConfig->ioParams.kvOp == "exec") {
+      ioParams.kvOpcode = (uint8_t)nvme_kv_cmd_exec;
+      ioParams.kvOpId = nvmeConfig->ioParams.kvOpId;
+      ioParams.kvInputLen = nvmeConfig->ioParams.kvInputLen;
+    } else {
+      ioParams.kvOpcode = (uint8_t)nvme_kv_cmd_retrieve;
+    }
     // Single-key serial path uses kvKey[]; if only --keys was given, seed it
     // from the first manifest entry so batch-size 1 still works.
     const std::string& kstr = (!nvmeConfig->ioParams.kvKey.empty() ||

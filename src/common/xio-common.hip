@@ -2568,9 +2568,20 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
+    // spdk-5co: UNCACHED VRAM. Plain hipMalloc (XIO_DEVICE_MEM_HIP) is coarse-
+    // grained device memory: GPU stores may only become system-visible at KERNEL
+    // COMPLETION. The GPU-initiated path rings the doorbell from WITHIN the still-
+    // running kernel, so the NVMe P2PDMA reader sees only a partial prefix of bulk
+    // writes (device-side analog of the host non-coherent bug). Fine-grained HSA
+    // memory (XIO_DEVICE_MEM_FINE_GRAINED) fixes visibility but is NOT dma-buf/P2P
+    // exportable here (hsa_amd_portable_export_dmabuf -> status 4100). UNCACHED
+    // device memory (hipExtMallocWithFlags hipDeviceMallocUncached) bypasses the
+    // GPU cache so writes are immediately P2P-visible AND stays dma-buf-exportable.
+    // Verified: fixes bulk Store to >=4 MiB. (A separate ~4 MiB P2P-mapping cap
+    // remains for >4 MiB transfers -- distinct bug, clean power-of-2 boundary.)
     hsa_status_t s = allocDeviceMemory(size, &bufferInfo->hostPtr,
                                        "GPU accessible buffer",
-                                       XIO_DEVICE_MEM_HIP);
+                                       XIO_DEVICE_MEM_UNCACHED);
     if (s != HSA_STATUS_SUCCESS) {
       ROCXIO_LOG_ERROR("allocDeviceMemory failed\n");
       return hipErrorMemoryAllocation;
@@ -2594,7 +2605,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                        strerror(-ret));
       ROCXIO_LOG_ERROR("  Device memory was requested but "
                        "dmabuf export is not available\n");
-      freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+      freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
     }
@@ -2651,9 +2662,14 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     bufferInfo->gpuPtr = bufferInfo->hostPtr;
     bufferInfo->isDeviceMemory = true;
   } else {
+    // spdk-5co: COHERENT (fine-grained) host memory. Plain XIO_HOST_MEM_MAPPED
+    // (hipHostMallocMapped, no Coherent flag) is non-coherent/coarse-grained, so
+    // GPU writes are not reliably visible to the host controller's DMA -> bulk
+    // Store content lands as a partial prefix. Fine-grained coherence makes GPU
+    // writes globally visible.
     hipError_t buf_err = allocHostMemory(size, &bufferInfo->hostPtr,
                                          "GPU accessible buffer host",
-                                         XIO_HOST_MEM_MAPPED);
+                                         XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT);
     if (buf_err != hipSuccess)
       return buf_err;
 
@@ -2755,7 +2771,7 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   }
 
   if (bufferInfo->isDeviceMemory) {
-    freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+    freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
   } else {
     freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
   }
