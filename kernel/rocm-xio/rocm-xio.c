@@ -2261,31 +2261,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         mode = QUIESCED_NS_MODE_HCTX;
       }
 
-      mutex_lock(&quiesced_ns_lock);
-      list_for_each_entry(existing, &quiesced_ns, list) {
-        if (existing->owner != file || existing->bd != bd)
-          continue;
-        if (existing->mode == QUIESCED_NS_MODE_FULL &&
-            mode == QUIESCED_NS_MODE_FULL) {
-          mutex_unlock(&quiesced_ns_lock);
-          pr_info("rocm-axiio: QUIESCE_NS: %pg already fully quiesced by "
-                  "this fd\n",
-                  bd);
-          fput(bdev_file);
-          return 0;
-        }
-        if (existing->mode == QUIESCED_NS_MODE_HCTX &&
-            mode == QUIESCED_NS_MODE_HCTX && existing->hctx_idx == hctx_idx) {
-          mutex_unlock(&quiesced_ns_lock);
-          pr_info("rocm-axiio: QUIESCE_NS: %pg qid %u already stopped by "
-                  "this fd\n",
-                  bd, req.qid);
-          fput(bdev_file);
-          return 0;
-        }
-      }
-      mutex_unlock(&quiesced_ns_lock);
-
       entry = kmalloc(sizeof(*entry), GFP_KERNEL);
       if (!entry) {
         fput(bdev_file);
@@ -2297,6 +2272,44 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->owner = file;
       entry->mode = mode;
       entry->hctx_idx = hctx_idx;
+
+      /*
+       * Hold quiesced_ns_lock across the duplicate check, the blk-mq
+       * quiesce, AND the list_add as a single critical section. If the
+       * lock were dropped between the check and the insert, two
+       * concurrent QUIESCE_NS calls for the same (fd, bd, mode, hctx)
+       * could both pass the duplicate check and both call
+       * blk_mq_quiesce_queue(): the block layer's quiesce_depth would be
+       * raised twice while only one entry is tracked, so a single
+       * unquiesce at release/explicit-unquiesce time would leave the
+       * queue permanently quiesced (all I/O hung). The lock is a mutex,
+       * so sleeping inside blk_mq_quiesce_queue() is permitted.
+       */
+      mutex_lock(&quiesced_ns_lock);
+      list_for_each_entry(existing, &quiesced_ns, list) {
+        if (existing->owner != file || existing->bd != bd)
+          continue;
+        if (existing->mode == QUIESCED_NS_MODE_FULL &&
+            mode == QUIESCED_NS_MODE_FULL) {
+          mutex_unlock(&quiesced_ns_lock);
+          pr_info("rocm-axiio: QUIESCE_NS: %pg already fully quiesced by "
+                  "this fd\n",
+                  bd);
+          kfree(entry);
+          fput(bdev_file);
+          return 0;
+        }
+        if (existing->mode == QUIESCED_NS_MODE_HCTX &&
+            mode == QUIESCED_NS_MODE_HCTX && existing->hctx_idx == hctx_idx) {
+          mutex_unlock(&quiesced_ns_lock);
+          pr_info("rocm-axiio: QUIESCE_NS: %pg qid %u already stopped by "
+                  "this fd\n",
+                  bd, req.qid);
+          kfree(entry);
+          fput(bdev_file);
+          return 0;
+        }
+      }
 
       if (mode == QUIESCED_NS_MODE_FULL) {
         blk_mq_quiesce_queue(q);
@@ -2321,7 +2334,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
                 hctx_idx, req.qid, bd);
       }
 
-      mutex_lock(&quiesced_ns_lock);
       list_add(&entry->list, &quiesced_ns);
       mutex_unlock(&quiesced_ns_lock);
 
