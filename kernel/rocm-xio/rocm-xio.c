@@ -2774,7 +2774,22 @@ static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
      */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
   LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-    if (snap.dev) {
+    /*
+     * Liveness/identity re-validation before trusting snap.dev.
+     *
+     * snap.dev is a raw struct nvme_dev* captured >=250ms ago with NO
+     * refcount; snap.pdev/pci_dev_get keeps the pci_dev alive but NOT
+     * the nvme_dev, which the NVMe driver kfree()s on unbind/remove/
+     * error-recovery. If the driver detached in that window, reading
+     * dev_layout->queues and taking live_nvmeq->sq_lock below would be
+     * a use-after-free. The upstream nvme_pci driver stores the
+     * nvme_dev as pdev drvdata, so pci_get_drvdata(pdev) == snap.dev
+     * confirms the same nvme_dev is still attached to this pdev. This
+     * is best-effort (a TOCTOU detach in the tiny window after the
+     * check is theoretically possible) but it closes the real-world
+     * window -- a driver that detached long ago.
+     */
+    if (snap.dev && pci_get_drvdata(pdev) == snap.dev) {
       struct rocm_xio_nvme_dev_layout* dev_layout =
         (struct rocm_xio_nvme_dev_layout*)snap.dev;
       if (dev_layout->queues) {
@@ -2824,6 +2839,12 @@ static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
                 "desync)\n",
                 pci_name(pdev), pe->qid);
       }
+    } else if (snap.dev) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u nvme driver detached "
+              "(pci_get_drvdata != snapshot nvme_dev); skipping host "
+              "ring-pointer reset to avoid use-after-free on the freed "
+              "nvme_dev (queue may still desync)\n",
+              pci_name(pdev), pe->qid);
     } else {
       pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot has no nvme_dev, "
               "skipping host ring-pointer reset\n",
