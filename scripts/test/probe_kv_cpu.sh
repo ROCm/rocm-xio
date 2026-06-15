@@ -67,7 +67,7 @@ done
 [ "$up" = 1 ] || { echo "guest SSH never came up"; tail -30 "$RUN/console.log"; exit 1; }
 echo "  guest up."
 
-$SCP "$HOME/src/rocm-xio/examples/kv_cpu_probe.c" "$USER@localhost:/tmp/kv_cpu_probe.c" >/dev/null 2>&1
+$SCP "$HOME/src/rocm-xio/examples/nvme-kv/kv_cpu_probe.c" "$USER@localhost:/tmp/kv_cpu_probe.c" >/dev/null 2>&1
 echo "== GUEST: what did the NVMe driver do with a KV-only controller? =="
 $SSH "S(){ sudo \"\$@\"; }
       echo '--- nvme dmesg ---'; S dmesg 2>/dev/null | grep -iE 'nvme' | tail -15

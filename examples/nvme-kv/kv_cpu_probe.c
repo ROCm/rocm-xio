@@ -7,11 +7,12 @@
  * GPU-FREE validation of the NVMe Key-Value path: issues a KV Store then a KV
  * Retrieve through /dev/nvme0 using the kernel's NVMe IO passthrough ioctl. This
  * exercises everything the GPU path does EXCEPT the doorbell (which is already
- * proven for block I/O): guest enumeration of the KV controller, the exact KV
+ * proven for block I/O): host enumeration of the KV controller, the exact KV
  * SQE encoding (key in CDW2/3/14/15, key length in CDW11, value size in CDW10),
- * SPDK kvdev command handling, and RADOS storage.
+ * SPDK kvdev command handling, and RADOS storage. Runs wherever /dev/nvme0 is a
+ * KV controller -- in a VM guest today, or on bare metal (e.g. behind a DPU).
  *
- * Build (in guest): gcc -O2 -o kv_cpu_probe kv_cpu_probe.c
+ * Build: gcc -O2 -o kv_cpu_probe kv_cpu_probe.c
  * Usage: kv_cpu_probe [/dev/nvme0] [nsid] [key]
  */
 #define _GNU_SOURCE
@@ -77,7 +78,7 @@ int main(int argc, char **argv) {
   int fd = open(dev, O_RDWR);
   if (fd < 0) {
     fprintf(stderr, "FATAL: open %s: %s\n", dev, strerror(errno));
-    fprintf(stderr, "  -> the guest did NOT bring up the KV controller char dev\n");
+    fprintf(stderr, "  -> the host did NOT bring up the KV controller char dev\n");
     return 2;
   }
 
@@ -128,10 +129,10 @@ int main(int argc, char **argv) {
   }
 
   printf("\nVERDICT: %s\n",
-         ok ? "KV Store+Retrieve WORK from the guest CPU -> guest enumerates the "
-              "KV controller and the KV SQE format is correct; only the GPU "
+         ok ? "KV Store+Retrieve WORK from the host CPU -> the host enumerates "
+              "the KV controller and the KV SQE format is correct; only the GPU "
               "doorbell remains (already proven for block)."
-            : "KV path did NOT complete from the guest CPU -- see status/errno "
+            : "KV path did NOT complete from the host CPU -- see status/errno "
               "above (controller enumeration or KV command handling).");
   close(fd);
   return ok ? 0 : 1;
