@@ -787,7 +787,10 @@ static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
    * Extract admin_q from struct nvme_dev. Layout (from pahole on
    * 6.8.0-117-generic): struct nvme_ctrl is embedded in nvme_dev
    * at offset 496; nvme_ctrl->admin_q is at offset 56 within
-   * nvme_ctrl. Total = 552.
+   * nvme_ctrl. Total = 552. These offsets are version specific, so
+   * only read them on the kernel range we have verified; on any other
+   * kernel leave admin_q NULL (the resurrect path tolerates a NULL
+   * admin_q) rather than type-pun a pointer from an unverified offset.
    */
   pend = kmalloc(sizeof(*pend), GFP_ATOMIC);
   if (!pend) {
@@ -795,6 +798,8 @@ static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
                  ctx->qid);
     return 0;
   }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
   {
     const size_t NVME_DEV_CTRL_OFFSET = 496;
     const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
@@ -802,6 +807,9 @@ static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
                                               NVME_DEV_CTRL_OFFSET +
                                               NVME_CTRL_ADMIN_Q_OFFSET);
   }
+#else
+  pend->admin_q = NULL;
+#endif
   pend->nvme_dev = ctx->nvme_dev;
   pend->qid = (u16)ctx->qid;
   pend->sq_dma_addr = nvmeq->sq_dma_addr;
@@ -868,6 +876,12 @@ static int nvme_create_queue_ret_handler(struct kretprobe_instance* ri,
       ctx->qid);
     return 0;
   }
+  /*
+   * admin_q offsets are version specific (see nvme_alloc_queue_ret_handler);
+   * only read them on the verified kernel range, else leave NULL.
+   */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
   {
     const size_t NVME_DEV_CTRL_OFFSET = 496;
     const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
@@ -875,6 +889,9 @@ static int nvme_create_queue_ret_handler(struct kretprobe_instance* ri,
                                               NVME_DEV_CTRL_OFFSET +
                                               NVME_CTRL_ADMIN_Q_OFFSET);
   }
+#else
+  pend->admin_q = NULL;
+#endif
   pend->nvme_dev = nvme_dev_ptr;
   pend->qid = (u16)ctx->qid;
   pend->sq_dma_addr = nvmeq->sq_dma_addr;
