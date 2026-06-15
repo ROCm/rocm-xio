@@ -2447,6 +2447,12 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
        */
       struct rocm_xio_debug_resurrect_req req;
 
+      /* This debug trigger drives admin NVMe commands at an arbitrary
+       * (bdf, qid); gate it behind CAP_SYS_ADMIN so it cannot be abused
+       * if /dev/rocm-xio is ever made accessible to unprivileged users. */
+      if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
 
