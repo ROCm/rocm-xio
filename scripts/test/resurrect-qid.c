@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
   req.bdf = (unsigned short)strtoul(argv[1], NULL, 0);
   req.qid = (unsigned short)strtoul(argv[2], NULL, 0);
 
-  int fd = open("/dev/rocm-xio", O_RDWR);
+  int fd = open("/dev/rocm-xio", O_RDWR | O_CLOEXEC);
   if (fd < 0) {
     perror("open /dev/rocm-xio");
     return 1;

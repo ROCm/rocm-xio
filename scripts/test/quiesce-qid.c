@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
     perror("open bdev");
     return 1;
   }
-  int kfd = open("/dev/rocm-xio", O_RDWR);
+  int kfd = open("/dev/rocm-xio", O_RDWR | O_CLOEXEC);
   if (kfd < 0) {
     perror("open /dev/rocm-xio");
     close(bdev_fd);
