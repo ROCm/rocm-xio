@@ -154,8 +154,6 @@ HAMMER_TIMEOUT_S=$(( POST_HAMMER_MB > 30 ? POST_HAMMER_MB : 30 ))
 # region (LBA 0..) and the hammer region (1 GiB..1 GiB+region). Place at
 # 2 GiB, well clear of LBA 0.
 VERIFY_BYTES="${STRESS_VERIFY_BYTES:-$((256 * 1024))}"
-VERIFY_BLOCKS=$(( VERIFY_BYTES / LBA_SIZE ))
-VERIFY_NLB=$(( VERIFY_BLOCKS - 1 ))             # nvme-cli block-count is zero-based
 VERIFY_LBA=$(( 2 * 1024 * 1024 * 1024 / LBA_SIZE ))
 PATTERN="$TMP/pattern.bin"
 head -c "$VERIFY_BYTES" /dev/urandom > "$PATTERN"

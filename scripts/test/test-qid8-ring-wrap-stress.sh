@@ -109,9 +109,7 @@ trap 'rm -rf "$TMP"' EXIT
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Error: must run as root${NC}"; exit 2
 fi
-for f in "$NVME_CTRL"; do
-    [ -e "$f" ] || { echo -e "${RED}Error: $f not found${NC}"; exit 2; }
-done
+[ -e "$NVME_CTRL" ] || { echo -e "${RED}Error: $NVME_CTRL not found${NC}"; exit 2; }
 [ -b "$NVME_BDEV" ] || { echo -e "${RED}Error: $NVME_BDEV not a block dev${NC}"; exit 2; }
 
 # Resolve the controller BDF (0xBBDD form) for the resurrect ioctl.

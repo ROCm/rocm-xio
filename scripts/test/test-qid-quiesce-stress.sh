@@ -191,7 +191,8 @@ hctx_is_stopped() {
 # Re-check at iteration end that the target hctx is NOT left stopped and a
 # direct read works. Returns 0 if healthy.
 target_hctx_healthy() {
-    local statef="/sys/kernel/debug/block/$(basename "$NVME_BDEV")/hctx${HCTX_IDX}/state"
+    local statef
+    statef="/sys/kernel/debug/block/$(basename "$NVME_BDEV")/hctx${HCTX_IDX}/state"
     if [ -r "$statef" ] && grep -qiw STOPPED "$statef" 2>/dev/null; then
         return 1
     fi
