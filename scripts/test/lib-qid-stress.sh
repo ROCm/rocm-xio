@@ -81,6 +81,6 @@ timed_io() {
     fi
     rc=$?
     t1=$(date +%s.%N)
-    awk "BEGIN{printf \"%.2f\", \$t1-\$t0}"
+    awk "BEGIN{printf \"%.2f\", $t1-$t0}"
     return $rc
 }
