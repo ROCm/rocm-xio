@@ -157,6 +157,54 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->group(nvme_group);
 
   app
+    .add_option("--kv-op", cfg->ioParams.kvOp,
+                "NVMe Key-Value op: 'store', 'retrieve', or 'exec'. When set, "
+                "the endpoint issues KV commands against the KV namespace "
+                "instead of block I/O. Store/retrieve carry the key in "
+                "CDW2/3/14/15 and the value via PRP; exec (vendor 0x83) carries "
+                "the key length-prefixed in the DPTR payload head and runs an "
+                "--op-id-selected server-side op. Use --read-io N for retrieve "
+                "count, --write-io N for store/exec count.")
+    ->check(CLI::IsMember({"store", "retrieve", "exec"}))
+    ->group(nvme_group);
+  app
+    .add_option("--key", cfg->ioParams.kvKey,
+                "KV key (string, 1..16 bytes) for --kv-op.")
+    ->group(nvme_group);
+  app
+    .add_option("--keys", cfg->ioParams.kvKeys,
+                "KV key manifest (space-separated, each 1..16 bytes) for "
+                "wavefront/batched --kv-op: one key per in-flight op. Requires "
+                "--batch-size > 1; the batch fetches/stores up to --batch-size "
+                "keys per doorbell ring.")
+    ->group(nvme_group);
+  app
+    .add_option("--value-size", cfg->ioParams.kvValueLen,
+                "KV value size in bytes for --kv-op (store: bytes written; "
+                "retrieve: host buffer size; exec: output-buffer cap / osize). "
+                "Default: --data-buffer-size.")
+    ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+  app
+    .add_option("--op-id", cfg->ioParams.kvOpId,
+                "KV Exec operation ID (SQE CDW13) selecting the server-side op. "
+                "Only used with --kv-op exec.")
+    ->group(nvme_group);
+  app
+    .add_option("--input-size", cfg->ioParams.kvInputLen,
+                "KV Exec input length in bytes staged into the request payload "
+                "[u16 key_len][key][input]. Must fit 2 + key_len + input-size "
+                "<= output buffer. Only used with --kv-op exec.")
+    ->group(nvme_group);
+  app
+    .add_option("--stage-settle-cycles", cfg->ioParams.stageSettleCycles,
+                "DIAGNOSTIC (spdk-5co): GPU wall_clock64 ticks to busy-spin after "
+                "staging a KV Store value, before ringing the doorbell. Tests "
+                "whether the bulk-Store data race is drain-timing vs lost writes. "
+                "0 = off (default).")
+    ->group(nvme_group);
+
+  app
     .add_option("--lbas-per-io", cfg->ioParams.lbasPerIo,
                 "Number of LBAs per I/O operation (default: 1).")
     ->default_val(1)
