@@ -171,7 +171,7 @@ run_gpu_hijack() {
 # Wait until dmesg (since marker) shows the resurrect DONE line for our
 # BDF+QID, or until RESURRECT_WAIT_S elapses. Returns 0 if seen.
 wait_for_resurrect() {
-    local marker="$1" deadline elapsed
+    local marker="$1" deadline
     deadline=$(( SECONDS + RESURRECT_WAIT_S ))
     while [ "$SECONDS" -lt "$deadline" ]; do
         if dmesg_bad_since "$marker" "$QID" >/dev/null 2>&1; then : ; fi

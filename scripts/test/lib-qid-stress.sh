@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # lib-qid-stress.sh — shared helpers for QID stress tests.
 # Source this; do not execute. Mirrors idioms proven in
 # test-qid8-ring-wrap-stress.sh.
