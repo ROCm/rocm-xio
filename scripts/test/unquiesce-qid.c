@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
 
   int bdev_fd = open(bdev, O_RDONLY | O_CLOEXEC);
   if (bdev_fd < 0) { perror("open bdev"); return 1; }
-  int kfd = open("/dev/rocm-xio", O_RDWR);
+  int kfd = open("/dev/rocm-xio", O_RDWR | O_CLOEXEC);
   if (kfd < 0) { perror("open /dev/rocm-xio"); close(bdev_fd); return 1; }
 
   struct rocm_xio_quiesce_ns_req req;
