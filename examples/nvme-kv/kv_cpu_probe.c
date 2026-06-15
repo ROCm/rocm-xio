@@ -26,6 +26,11 @@
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
 
+/* KV Command Set opcodes. Kept as local literals on purpose: this probe is a
+ * dependency-free standalone gcc build, so it cannot pull in rocm-xio's
+ * src/include/nvme-kv.h (which needs HIP + nvme-ep-generated.h). These values
+ * are the public NVMe KV spec and match nvme_kv_cmd_store/retrieve in
+ * nvme-kv.h (and SPDK's spdk_nvme_kv_opcode: SPDK_NVME_OPC_KV_STORE/RETRIEVE). */
 #define KV_OPC_STORE 0x01
 #define KV_OPC_RETRIEVE 0x02
 
