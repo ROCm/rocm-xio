@@ -2538,6 +2538,7 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
   struct poisoned_qid_entry *pe, *pe_tmp;
   unsigned long flags_irq;
+  bool clone_oom = false;
   LIST_HEAD(to_resurrect);
 
   (void)w;
@@ -2550,25 +2551,42 @@ static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
   spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
   list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
     if (pe->needs_resurrect) {
-      pe->needs_resurrect = false;
-      pe->created = false; /* fresh slate: we're handing the QID back */
       /* Detach a clone-ish view: build a parallel list of small
        * structs for the worker to iterate without holding the
-       * spinlock. */
-      {
-        struct poisoned_qid_entry* clone = kmalloc(sizeof(*clone), GFP_ATOMIC);
-        if (clone) {
-          clone->bdf = pe->bdf;
-          clone->qid = pe->qid;
-          clone->created = false;
-          clone->needs_resurrect = false;
-          INIT_LIST_HEAD(&clone->list);
-          list_add_tail(&clone->list, &to_resurrect);
-        }
+       * spinlock.
+       *
+       * Allocate the clone BEFORE clearing the flags. If the
+       * GFP_ATOMIC allocation fails we must NOT consume the
+       * needs_resurrect flag: doing so would permanently strand the
+       * QID (the device deleted it, but the kernel still believes it
+       * exists, and no future event would re-trigger us because
+       * @created would also be cleared). Instead leave the entry
+       * untouched and reschedule a retry below.
+       */
+      struct poisoned_qid_entry* clone = kmalloc(sizeof(*clone), GFP_ATOMIC);
+      if (!clone) {
+        clone_oom = true;
+        continue;
       }
+      pe->needs_resurrect = false;
+      pe->created = false; /* fresh slate: we're handing the QID back */
+      clone->bdf = pe->bdf;
+      clone->qid = pe->qid;
+      clone->created = false;
+      clone->needs_resurrect = false;
+      INIT_LIST_HEAD(&clone->list);
+      list_add_tail(&clone->list, &to_resurrect);
     }
   }
   spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  if (clone_oom) {
+    pr_warn("rocm-axiio: resurrect: clone alloc failed under memory "
+            "pressure; retrying in %u ms\n",
+            ROCM_XIO_RESURRECT_DELAY_MS);
+    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
+                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
+  }
 
   list_for_each_entry_safe(pe, pe_tmp, &to_resurrect, list) {
     struct pci_dev* pdev;
