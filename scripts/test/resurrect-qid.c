@@ -8,20 +8,21 @@
  * path without the GPU/xio-tester hijack (needed on hosts where the
  * Navi 21 GPU is wedged by the AMD reset bug).
  */
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <fcntl.h>
+#include <linux/types.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include <linux/types.h>
 
 #define ROCM_XIO_IOC_MAGIC 'R'
 struct rocm_xio_debug_resurrect_req {
   __u16 bdf;
   __u16 qid;
 };
-#define ROCM_XIO_DEBUG_RESURRECT_QID \
+#define ROCM_XIO_DEBUG_RESURRECT_QID                                           \
   _IOW(ROCM_XIO_IOC_MAGIC, 15, struct rocm_xio_debug_resurrect_req)
 
 int main(int argc, char** argv) {
