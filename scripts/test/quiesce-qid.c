@@ -6,19 +6,20 @@
  *
  * Used by test-qid-quiesce-stress.sh. Mirrors resurrect-qid.c.
  */
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <fcntl.h>
+#include <linux/types.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include <linux/types.h>
 
 #define ROCM_XIO_IOC_MAGIC 'R'
 struct rocm_xio_quiesce_ns_req {
   __s32 bdev_fd;
   __u32 qid;
 };
-#define ROCM_XIO_QUIESCE_NS \
+#define ROCM_XIO_QUIESCE_NS                                                    \
   _IOW(ROCM_XIO_IOC_MAGIC, 13, struct rocm_xio_quiesce_ns_req)
 
 int main(int argc, char** argv) {
