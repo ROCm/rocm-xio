@@ -924,12 +924,9 @@ __host__ __device__ static inline void XioComDoorbell(T* addr, T value) {
  * @brief Ring a doorbell register via direct MMIO write.
  *
  * Uses XioComDoorbell for a single pre-fence + atomic
- * store.  For MMIO coherence debugging on RDNA GPUs,
- * see ringDoorbellFenced() which adds ISA-level cache
- * invalidations inspired by from-germany coherence testing.
- *
- * When XIO_DOORBELL_FENCE_AGGRESSIVE is defined at compile
- * time, this function delegates to ringDoorbellFenced().
+ * store.  When XIO_DOORBELL_FENCE_AGGRESSIVE is defined at
+ * compile time, delegates to ringDoorbellFenced() for
+ * extra ISA-level cache invalidations.
  *
  * @param doorbell_addr GPU-accessible doorbell pointer.
  * @param value Value to write (typically queue tail).
@@ -940,20 +937,11 @@ __host__ __device__ static inline void ringDoorbell(
 /**
  * @brief Ring a doorbell with aggressive ISA-level fencing.
  *
- * On RDNA 2/3 GPUs (gfx10xx / gfx11xx), emits explicit
- * s_waitcnt + s_waitcnt_vscnt drains, a global_store_dword
- * with GLC|SLC|DLC flags to bypass caches, and full GL0/GL1
- * cache invalidation.
- *
- * On RDNA 4 GPUs (gfx12xx), uses the restructured GFX12
- * wait instructions (s_wait_kmcnt, s_wait_loadcnt,
- * s_wait_storecnt) and global_store_b32 with SCOPE_SYS.
- *
- * On CDNA GPUs this falls back to the same
- * __threadfence_system() path as ringDoorbell().
- *
- * Use this variant when debugging doorbell ordering issues
- * on consumer RDNA hardware.
+ * On RDNA GPUs emits explicit wait/drain plus cache-bypass
+ * store and cache invalidation to force MMIO ordering; on
+ * CDNA falls back to the __threadfence_system() path used by
+ * ringDoorbell(). Use when debugging doorbell ordering on
+ * consumer RDNA hardware.
  *
  * @param doorbell_addr GPU-accessible doorbell pointer.
  * @param value Value to write (typically queue tail).

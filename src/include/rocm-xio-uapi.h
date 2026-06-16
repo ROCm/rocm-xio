@@ -83,15 +83,9 @@ extern "C" {
 /**
  * @brief TEST-ONLY: force the kernel-queue resurrect path for (bdf, qid).
  *
- * Marks (bdf, qid) created+needs_resurrect and schedules the same
- * delayed work the DELETE_CQ kprobe schedules, so the resurrect path
- * (CREATE_CQ + CREATE_SQ from the captured snapshot, plus the
- * host-side ring-pointer reset) can be exercised WITHOUT the GPU /
- * xio-tester hijack. Used by scripts/test/test-qid8-ring-wrap-stress.sh
- * to test the resurrect code path on hosts where the Navi 21 GPU is
- * wedged by the AMD reset bug and xio-tester cannot run. Has no effect
- * unless a snapshot for (bdf, qid) already exists. Not used by
- * xio-tester or any production path.
+ * Schedules the same delayed work the DELETE_CQ kprobe schedules so the
+ * resurrect path can be exercised without the GPU/xio-tester hijack.
+ * No effect unless a snapshot for (bdf, qid) already exists.
  */
 #define ROCM_XIO_DEBUG_RESURRECT_QID                                           \
   _IOW(ROCM_XIO_IOC_MAGIC, 15, struct rocm_xio_debug_resurrect_req)
@@ -201,21 +195,13 @@ struct rocm_xio_free_contig_req {
  * isolates a single NVMe I/O queue ID from the in-kernel block
  * dispatcher.
  *
- * When @c qid is non-zero the kernel module calls
- * ``blk_mq_stop_hw_queue()`` on the matching ``blk_mq_hw_ctx`` so
- * the kernel keeps using the namespace's *other* hardware queues
- * normally. The mapping ``hctx_idx = qid - 1`` matches the
- * NVMe PCI driver's default I/O queue allocation. A brief
- * ``blk_mq_quiesce_queue()`` is held while the stop bit is set so
- * any in-flight dispatch on the target queue drains before
- * rocm-xio reclaims the SQ/CQ memory.
- *
+ * When @c qid is non-zero only the matching hardware queue is
+ * stopped (``blk_mq_stop_hw_queue()``) so the namespace's other
+ * hardware queues keep dispatching; a brief quiesce drains any
+ * in-flight dispatch before rocm-xio reclaims the SQ/CQ memory.
  * When @c qid is zero the entire namespace ``request_queue`` is
- * quiesced (``blk_mq_quiesce_queue()``), which is the more
- * conservative behaviour and matches the very first revision of
- * this ioctl. The fd may be closed after the ioctl returns; the
- * kernel module pins the block device for the duration of the
- * quiesced window.
+ * quiesced. The fd may be closed after the ioctl returns; the
+ * kernel module pins the block device for the quiesced window.
  */
 struct rocm_xio_quiesce_ns_req {
   __s32 bdev_fd; /**< File descriptor opened on a namespace bdev. */
@@ -225,9 +211,8 @@ struct rocm_xio_quiesce_ns_req {
 /**
  * @brief TEST-ONLY request for ROCM_XIO_DEBUG_RESURRECT_QID.
  *
- * Identifies the (bdf, qid) whose kernel queue should be resurrected
- * via the production rocm_xio_resurrect_work_fn path. See the ioctl
- * definition above for the rationale.
+ * Identifies the (bdf, qid) whose kernel queue should be resurrected.
+ * See the ioctl definition above for the rationale.
  */
 struct rocm_xio_debug_resurrect_req {
   __u16 bdf; /**< Target NVMe device in 0xBBDD form (bus<<8 | devfn). */

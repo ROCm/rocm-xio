@@ -1987,10 +1987,8 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
     return -errno;
   }
 
-  // Keep kmod_fd open for the mapping to remain valid
-  // Note: In a production system, you might want to track this fd
-  // and close it on cleanup, but for simplicity we'll leave it open
-  // The kernel will clean it up when the process exits
+  // Keep kmod_fd open so the mapping stays valid; the kernel reclaims
+  // it at process exit.
 
   *virt_addr = mapped;
   ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
@@ -2094,12 +2092,8 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
   ROCXIO_LOG_INFO("PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
 
-  // Register with HIP for GPU access.
-  // hipHostRegisterIoMemory ensures the mapping uses non-cacheable
-  // attributes appropriate for MMIO regions (e.g. NVMe BAR0
-  // doorbells).  hipHostRegisterMapped alone may allow GPU caching
-  // that defeats doorbell write ordering -- an issue observed in
-  // independent GPU-NVMe coherence testing (from-germany repro).
+  // Register MMIO as IoMemory: hipHostRegisterMapped may allow GPU
+  // caching that defeats doorbell write ordering.
   void* gpu_ptr = nullptr;
   hipError_t hip_err = hipHostRegister(mapped, bar_size,
                                        hipHostRegisterIoMemory);

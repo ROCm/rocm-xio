@@ -1500,11 +1500,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // ---- Check GPU lockup timeout for infinite mode ----
-  // Multi-wavefront kernels with __syncthreads() barriers
-  // cannot be preempted by the GPU scheduler. If the
-  // amdgpu lockup_timeout is finite, the driver will
-  // reset the GPU after the timeout expires. The param
-  // is read-only at runtime; set at module load time.
+  // Multi-wavefront kernels with __syncthreads() barriers cannot be
+  // preempted, so a finite amdgpu lockup_timeout triggers a GPU reset.
   if (ioParams.infiniteMode && kernelThreads > nvmeConfig->wavefrontSize) {
     const char* sysfs_path = "/sys/module/amdgpu/parameters/lockup_timeout";
     FILE* f = fopen(sysfs_path, "r");
@@ -1547,17 +1544,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // ---- Isolate the rocm-xio-owned NVMe queue IDs from the
   // ---- in-kernel block dispatcher.
   //
-  // The in-kernel NVMe driver maps namespace request_queue work
-  // to a hardware queue based on the CPU that issued the I/O. If
-  // a foreground task is pinned to a CPU mapped to the same
-  // hardware queue ID that rocm-xio reclaims for GPU-initiated
-  // I/O, the driver's tail pointer drifts away from the
-  // controller's, which manifests as NVMe I/O timeouts and even
-  // a blk_mq_complete_request_remote() NULL deref kernel panic.
-  // The kernel module's ROCM_XIO_QUIESCE_NS ioctl stops only the
-  // matching blk_mq_hw_ctx via blk_mq_stop_hw_queue(), so the
-  // namespace's other hardware queues keep dispatching kernel
-  // I/O normally.
+  // If the kernel keeps dispatching to a hardware queue that
+  // rocm-xio has reclaimed, the two tail pointers diverge and
+  // cause NVMe I/O timeouts or a panic. QUIESCE_NS stops only the
+  // matching hctx so other queues keep serving kernel I/O.
   {
     NvmeDevicePath nvme_path;
     int path_ret = xio::resolveNvmeDevicePath(nvmeConfig->controller.c_str(),
@@ -2114,9 +2104,8 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace with retry for both status
-  // errors and invalid response data (e.g. lbads=0 from
-  // transient controller state after VRAM queue teardown)
+  // Retry Identify Namespace on status errors and invalid response
+  // data (e.g. lbads=0 from transient post-teardown controller state).
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -2248,9 +2237,8 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace with retry for both status
-  // errors and invalid response data (nsze=0 from
-  // transient controller state after VRAM queue teardown)
+  // Retry Identify Namespace on status errors and invalid response
+  // data (nsze=0 from transient post-teardown controller state).
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -2512,15 +2500,9 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
     return -EINVAL;
   }
 
-  // Delete existing queues if they exist (ignore errors - queue may not exist)
-  // Delete SQ first, then CQ (NVMe spec requirement: CQ cannot be deleted
-  // while associated SQ exists)
-
-  // Delete Submission Queue (DELETE_SQ)
-  // Note: DELETE_SQ may take time if the queue has pending commands - the
-  // controller waits for all commands to complete before deletion
-  // Also note: DELETE_SQ on a non-existent queue ID may hang - this is
-  // expected behavior per NVMe spec
+  // Delete SQ before CQ (NVMe spec: CQ cannot be deleted while its SQ
+  // exists). Errors are ignored since the queue may not exist.
+  // DELETE_SQ may block on pending commands or a non-existent QID.
   ROCXIO_LOG_INFO(
     "Sending DELETE_SQ command for queue_id=%u (this may take time if "
     "queue has pending commands or doesn't exist)...\n",
