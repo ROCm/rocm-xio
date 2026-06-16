@@ -997,6 +997,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_unregister_queue_addr_req req;
       struct queue_addr_entry *entry, *tmp;
       bool found = false;
+      __u16 found_nvme_bdf = 0;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -1005,6 +1006,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       list_for_each_entry_safe(entry, tmp, &queue_addrs, list) {
         if (entry->virt_addr == req.virt_addr) {
           list_del(&entry->list);
+          found_nvme_bdf = entry->nvme_bdf;
           kfree(entry);
           found = true;
           break;
@@ -1020,7 +1022,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       {
         char pci_addr[16];
-        format_bdf_as_pci_addr(entry->nvme_bdf, pci_addr, sizeof(pci_addr));
+        format_bdf_as_pci_addr(found_nvme_bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
           pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx "
                   "(%s)\n",
