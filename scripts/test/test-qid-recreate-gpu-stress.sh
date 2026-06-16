@@ -16,9 +16,8 @@
 # reset). After that automatic resurrect, this test hammers the recreated
 # queue with sustained PURE KERNEL I/O and verifies integrity.
 #
-# This requires a working Navi 21 / gfx1030 GPU (the AMD reset bug can
-# wedge it; recovery needs a host power-cycle). It is therefore GATED:
-# unless STRESS_USE_GPU=1 it SKIPs cleanly (exit 0). Its GPU-free sibling
+# This requires a working GPU and is therefore GATED: unless
+# STRESS_USE_GPU=1 it SKIPs cleanly (exit 0). Its GPU-free sibling
 # test-qid-recreate-stress.sh covers the same queue-lifecycle + ring-
 # pointer-reset logic without a GPU and runs everywhere.
 #

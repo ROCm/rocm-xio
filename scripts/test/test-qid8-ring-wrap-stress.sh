@@ -27,13 +27,8 @@
 # === How the wedge is driven ===
 # The faithful end-to-end trigger is xio-tester's GPU workload, which
 # hijacks QID 8 and issues DELETE_SQ/DELETE_CQ on exit (the module's
-# kprobe then schedules the resurrect). On hosts where that path is
-# available, set STRESS_USE_XIO_TESTER=1. However, on the Navi 21 /
-# gfx1030 passthrough host the AMD GPU reset bug can wedge the GPU's
-# peer-DMA/HSA path (a guest reboot does NOT recover it; the PSP fails
-# to reload firmware -- only a host power-cycle does), making xio-tester
-# crash with HSA_STATUS_ERROR_EXCEPTION before it can be used as a test
-# driver. For that reason the DEFAULT driver here is GPU-free and
+# kprobe then schedules the resurrect); set STRESS_USE_XIO_TESTER=1 where
+# a working GPU is available. The DEFAULT driver here is GPU-free and
 # reproduces the EXACT same wedge + resurrect the module performs:
 #   1. DELETE_SQ + DELETE_CQ for QID 8 via `nvme admin-passthru` --
 #      these are the identical admin commands xio-tester issues on exit;
@@ -115,7 +110,6 @@ fi
 # Resolve the controller BDF (0xBBDD form) for the resurrect ioctl.
 CTRL_NAME="$(basename "$NVME_CTRL")"
 PCI_BDF_FULL="$(basename "$(readlink -f "/sys/class/nvme/$CTRL_NAME/device")")"
-# e.g. 0000:05:00.0 -> bus=05 devfn=00 -> 0x0500
 PCI_BUS="0x$(echo "$PCI_BDF_FULL" | cut -d: -f2)"
 PCI_SLOT="$(echo "$PCI_BDF_FULL" | cut -d: -f3 | cut -d. -f1)"
 PCI_FUNC="$(echo "$PCI_BDF_FULL" | cut -d. -f2)"
@@ -162,9 +156,8 @@ PREWRAP_CMDS=$(( HALF_WRAPS * QUEUE_LENGTH / 2 ))
 echo "LBA size: $LBA_SIZE bytes; pre-wrap reads/iter: $PREWRAP_CMDS"
 
 # Verify region well clear of LBA 0 (xio-tester writes at base_lba 0).
-# Keep the transfer under the controller MDTS (max data transfer size):
-# a single nvme-cli write/read must fit in one command. 256 KiB is well
-# under typical MDTS (this controller's MDTS=7 -> 512 KiB cap).
+# Keep the transfer under the controller MDTS so a single nvme-cli
+# write/read fits in one command; 256 KiB is well under typical MDTS.
 VERIFY_BYTES="${STRESS_VERIFY_BYTES:-$((256 * 1024))}"
 VERIFY_BLOCKS=$((VERIFY_BYTES / LBA_SIZE))
 # nvme-cli --block-count is ZERO-BASED (the NLB field), i.e. blocks - 1.

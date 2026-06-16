@@ -133,10 +133,9 @@ LBA_SIZE="$(lba_size "$NVME_BDEV")"
 
 VERIFY_BLOCKS=$((VERIFY_BYTES / LBA_SIZE))
 VERIFY_NLB=$((VERIFY_BLOCKS - 1))
-# Verify region for the TARGET (blocked) CPU: well clear of LBA 0 (at the
-# 256 GiB mark) and clear of the control region below.
+# Target/control verify regions: two distinct high LBAs, clear of LBA 0
+# and of each other.
 TARGET_LBA=$(( 256 * 1024 * 1024 * 1024 / LBA_SIZE ))
-# Control region for the cross-CPU read: a separate high LBA (320 GiB).
 CTRL_LBA=$(( 320 * 1024 * 1024 * 1024 / LBA_SIZE ))
 
 # ---- temp area + cleanup trap -------------------------------------------
@@ -273,28 +272,14 @@ for ((it=1; it<=ITERS; it++)); do
     fi
     echo -e "      control read OK in ${cdt}s (cross-CPU liveness intact)"
 
-    # 6. ISOLATION assertion -- anchored to "the queue is STILL provably
-    #    quiesced AT THE MOMENT OF THE CHECK", not to elapsed wall time.
-    #
-    #    The control read above can have consumed up to FIRST_IO_TIMEOUT_S
-    #    inside the hold window, so a bare `sleep 1` is not enough to prove
-    #    we are still inside the window. Instead, we independently confirm
-    #    the queue is still stopped using two signals:
-    #       (a) the hold-quiesce process is still alive (HOLD_PID), and
-    #       (b) the target hctx state file STILL reports STOPPED.
-    #    (b) is the authoritative kernel-side signal -- it reads the actual
-    #    blk-mq hctx flag rather than reasoning about timing.
-    #
-    #    Only while BOTH hold (window still active) is true do we assert the
-    #    sentinel is absent: a non-blocked 256 KiB write completes in ms, so
-    #    an absent sentinel WHILE the queue is confirmed STOPPED is robust
-    #    proof the target write is being held off by the quiesce.
-    #
-    #    If the window has already closed at check time (HOLD_PID gone or
-    #    hctx no longer STOPPED), we can no longer prove isolation either
-    #    way -- that is a test-ENVIRONMENT error for this iteration (the
-    #    control read ate the window), NOT a pass and NOT an isolation FAIL.
-    #    Retry the iteration a bounded number of times, else skip it.
+    # 6. ISOLATION assertion -- anchored to the queue being provably
+    #    quiesced AT CHECK TIME, not to elapsed wall time. Confirm via two
+    #    signals: hold-quiesce still alive (HOLD_PID) and the hctx state
+    #    file still reporting STOPPED (authoritative kernel-side flag). Only
+    #    then assert the sentinel is absent (a non-blocked write completes
+    #    in ms, so absent-while-STOPPED proves the write is held off). If
+    #    the window already closed, isolation is unprovable -- an env error
+    #    for this iteration (not pass, not FAIL); retry bounded, else skip.
     sleep 1
     if ! kill -0 "$HOLD_PID" 2>/dev/null || ! hctx_is_stopped; then
         # Window closed before we could assert. Determine which signal.

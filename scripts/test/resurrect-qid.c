@@ -5,8 +5,7 @@
  *   e.g. resurrect-qid 0x0500 8
  *
  * Used by test-qid8-ring-wrap-stress.sh to exercise the resurrect code
- * path without the GPU/xio-tester hijack (needed on hosts where the
- * Navi 21 GPU is wedged by the AMD reset bug).
+ * path without the GPU/xio-tester hijack.
  */
 #include <stdio.h>
 #include <stdlib.h>
