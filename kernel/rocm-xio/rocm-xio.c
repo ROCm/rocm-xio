@@ -1612,20 +1612,27 @@ static void __exit rocm_xio_exit(void) {
   spin_unlock(&queue_addrs_lock);
 
   /* Clean up registered buffers */
-  spin_lock(&vram_buffers_lock);
-  list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
-    list_del(&entry->list);
-    /* Cleanup passthrough attachment if needed */
-    if (entry->is_passthrough && entry->sgt && entry->attach && entry->dmabuf) {
-      dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
-      dma_buf_detach(entry->dmabuf, entry->attach);
-      dma_buf_put(entry->dmabuf);
-      if (entry->nvme_pdev)
-        pci_dev_put(entry->nvme_pdev);
+  {
+    LIST_HEAD(to_free);
+
+    spin_lock(&vram_buffers_lock);
+    list_splice_init(&vram_buffers, &to_free);
+    spin_unlock(&vram_buffers_lock);
+
+    list_for_each_entry_safe(entry, tmp, &to_free, list) {
+      list_del(&entry->list);
+      /* Cleanup passthrough attachment if needed */
+      if (entry->is_passthrough && entry->sgt && entry->attach &&
+          entry->dmabuf) {
+        dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+        dma_buf_detach(entry->dmabuf, entry->attach);
+        dma_buf_put(entry->dmabuf);
+        if (entry->nvme_pdev)
+          pci_dev_put(entry->nvme_pdev);
+      }
+      kfree(entry);
     }
-    kfree(entry);
   }
-  spin_unlock(&vram_buffers_lock);
 
   /* Clean up contiguous DMA allocations */
   {
