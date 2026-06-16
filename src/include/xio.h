@@ -616,6 +616,52 @@ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr, size_t size,
                  const char* queue_name);
 
 /**
+ * @brief Isolate one NVMe I/O queue from the in-kernel block layer.
+ *
+ * Calls @c ROCM_XIO_QUIESCE_NS on the kernel module. When @p qid
+ * is non-zero only the matching @c blk_mq_hw_ctx is stopped via
+ * @c blk_mq_stop_hw_queue() and the namespace's other hardware
+ * queues keep dispatching I/O. When @p qid is zero the entire
+ * namespace @c request_queue is quiesced via
+ * @c blk_mq_quiesce_queue(), pausing host I/O on every hardware
+ * queue backing the namespace until the matching unquiesce call.
+ *
+ * Older kernel modules without QUIESCE_NS support return
+ * @c -ENOTTY. Callers should treat that as a soft warning and
+ * continue, since older deployments simply lose the extra
+ * defence-in-depth rather than become broken.
+ *
+ * @param kmod_fd Open file descriptor for /dev/rocm-xio.
+ * @param ns_path Block-device path for the namespace
+ *        (for example "/dev/nvme2n1").
+ * @param qid NVMe I/O queue ID to isolate; pass 0 to quiesce the
+ *        whole namespace request_queue instead.
+ * @return 0 on success, negative errno on failure.
+ */
+__host__ int xioQuiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                     uint32_t qid);
+
+/**
+ * @brief Restart a previously isolated NVMe I/O queue.
+ *
+ * Pairs with @ref xioQuiesceNvmeNamespace. The same @p qid that
+ * was passed to the quiesce call must be passed here so the
+ * kernel module restarts the matching hctx (or unquiesces the
+ * whole namespace when @p qid is zero). The rocm-xio character
+ * device also auto-restarts any hctx this fd left stopped when
+ * it is closed, so it is safe (but not encouraged) to skip the
+ * explicit unquiesce on the abort path.
+ *
+ * @param kmod_fd Open file descriptor for /dev/rocm-xio.
+ * @param ns_path Block-device path for the namespace.
+ * @param qid NVMe I/O queue ID that was previously quiesced, or
+ *        0 for a whole-namespace unquiesce.
+ * @return 0 on success, negative errno on failure.
+ */
+__host__ int xioUnquiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                       uint32_t qid);
+
+/**
  * @brief Queue setup structure for unified initialization.
  */
 struct xioQueueSetup {

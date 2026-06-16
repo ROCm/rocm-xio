@@ -1523,6 +1523,105 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   return 0;
 }
 
+__host__ int xioQuiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                     uint32_t qid) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: failed to open %s: %s\n", ns_path,
+                    strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+  req.qid = qid;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_QUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      ROCXIO_LOG_INFO(
+        "xioQuiesceNvmeNamespace: kernel module lacks QUIESCE_NS "
+        "(ENOTTY) for %s; continuing without block-layer quiesce\n",
+        ns_path);
+      return -ENOTTY;
+    }
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: ioctl(%s, qid=%u) failed: %s\n",
+                    ns_path, qid, strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  if (qid == 0) {
+    ROCXIO_LOG_INFO("xioQuiesceNvmeNamespace: quiesced entire "
+                    "request_queue for %s\n",
+                    ns_path);
+  } else {
+    ROCXIO_LOG_INFO("xioQuiesceNvmeNamespace: stopped hctx for qid %u on "
+                    "%s; other queues continue to dispatch\n",
+                    qid, ns_path);
+  }
+  return 0;
+}
+
+__host__ int xioUnquiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                       uint32_t qid) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: failed to open %s: %s\n",
+                    ns_path, strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+  req.qid = qid;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_UNQUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      return -ENOTTY;
+    }
+    if (saved_errno == ENOENT) {
+      ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: %s qid %u was not "
+                      "quiesced by this fd\n",
+                      ns_path, qid);
+      return -ENOENT;
+    }
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: ioctl(%s, qid=%u) failed: "
+                    "%s\n",
+                    ns_path, qid, strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  if (qid == 0) {
+    ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: resumed entire "
+                    "request_queue for %s\n",
+                    ns_path);
+  } else {
+    ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: restarted hctx for qid %u "
+                    "on %s\n",
+                    qid, ns_path);
+  }
+  return 0;
+}
+
 __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
                                   void** gpu_ptr_out) {
   if (!host_ptr || size == 0 || !name || !gpu_ptr_out) {
