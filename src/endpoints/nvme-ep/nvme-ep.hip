@@ -1426,6 +1426,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   std::vector<hipStream_t> streams(numQueues, nullptr);
   std::vector<XioTimingStats*> perQueueStats(numQueues, nullptr);
 
+  // Block-layer quiesce state: see the comment near the
+  // QUIESCE_NS call below for the rationale.
+  std::string quiesce_ns_path;
+  int quiesce_kmod_fd = -1;
+  std::vector<uint32_t> quiesced_qids;
+
   uint64_t xfer_size = (uint64_t)nvmeConfig->ioParams.lbasPerIo *
                        nvmeConfig->ioParams.lbaSize;
   constexpr uint32_t kMaxPrpListEntries = NVME_PAGE_SIZE / sizeof(uint64_t);
@@ -1494,11 +1500,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // ---- Check GPU lockup timeout for infinite mode ----
-  // Multi-wavefront kernels with __syncthreads() barriers
-  // cannot be preempted by the GPU scheduler. If the
-  // amdgpu lockup_timeout is finite, the driver will
-  // reset the GPU after the timeout expires. The param
-  // is read-only at runtime; set at module load time.
+  // Multi-wavefront kernels with __syncthreads() barriers cannot be
+  // preempted, so a finite amdgpu lockup_timeout triggers a GPU reset.
   if (ioParams.infiniteMode && kernelThreads > nvmeConfig->wavefrontSize) {
     const char* sysfs_path = "/sys/module/amdgpu/parameters/lockup_timeout";
     FILE* f = fopen(sysfs_path, "r");
@@ -1534,6 +1537,60 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                         "  Then: sudo update-initramfs -u "
                         "&& sudo reboot\n");
         return hipErrorNotSupported;
+      }
+    }
+  }
+
+  // ---- Isolate the rocm-xio-owned NVMe queue IDs from the
+  // ---- in-kernel block dispatcher.
+  //
+  // If the kernel keeps dispatching to a hardware queue that
+  // rocm-xio has reclaimed, the two tail pointers diverge and
+  // cause NVMe I/O timeouts or a panic. QUIESCE_NS stops only the
+  // matching hctx so other queues keep serving kernel I/O.
+  {
+    NvmeDevicePath nvme_path;
+    int path_ret = xio::resolveNvmeDevicePath(nvmeConfig->controller.c_str(),
+                                              nvmeConfig->ioParams.nsid,
+                                              &nvme_path);
+    if (path_ret == 0 && !nvme_path.namespacePath.empty()) {
+      quiesce_ns_path = nvme_path.namespacePath;
+    } else {
+      ROCXIO_LOG_WARN("Could not resolve namespace path for %s "
+                      "(ret=%d); skipping block-layer quiesce.\n",
+                      nvmeConfig->controller.c_str(), path_ret);
+    }
+  }
+
+  if (!quiesce_ns_path.empty()) {
+    quiesce_kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+    if (quiesce_kmod_fd < 0) {
+      ROCXIO_LOG_WARN("Could not open %s for namespace quiesce: %s; "
+                      "continuing without block-layer quiesce.\n",
+                      ROCM_XIO_DEVICE_PATH, strerror(errno));
+    } else {
+      bool kmod_too_old = false;
+      bool any_isolated = false;
+      for (uint16_t q = 0; q < numQueues; q++) {
+        uint32_t qid = static_cast<uint32_t>(baseQueueId + q);
+        int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd,
+                                           quiesce_ns_path.c_str(), qid);
+        if (qret == 0) {
+          quiesced_qids.push_back(qid);
+          any_isolated = true;
+        } else if (qret == -ENOTTY) {
+          kmod_too_old = true;
+          break;
+        } else {
+          ROCXIO_LOG_WARN("Failed to isolate namespace %s qid %u (%s); "
+                          "continuing anyway.\n",
+                          quiesce_ns_path.c_str(), qid, strerror(-qret));
+        }
+      }
+      if (kmod_too_old && !any_isolated) {
+        ROCXIO_LOG_INFO(
+          "kernel module lacks per-hctx QUIESCE_NS; running without "
+          "block-layer isolation.\n");
       }
     }
   }
@@ -1964,6 +2021,26 @@ cleanup:
     }
   }
 
+  // ---- Restart each isolated hctx now that the NVMe queues
+  // ---- have been deleted (or the run aborted before the
+  // ---- queues were created). The kernel module's fd-close
+  // ---- auto-restart is a belt-and-braces fallback.
+  if (quiesce_kmod_fd >= 0) {
+    for (uint32_t qid : quiesced_qids) {
+      int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd,
+                                           quiesce_ns_path.c_str(), qid);
+      if (uret != 0 && uret != -ENOTTY) {
+        ROCXIO_LOG_WARN("Failed to restart namespace %s qid %u (%s); "
+                        "the kernel module will auto-restart on fd "
+                        "close.\n",
+                        quiesce_ns_path.c_str(), qid, strerror(-uret));
+      }
+    }
+    quiesced_qids.clear();
+    close(quiesce_kmod_fd);
+    quiesce_kmod_fd = -1;
+  }
+
   // Free per-queue PRP list pools
   for (uint16_t q = 0; q < numQueues; q++) {
     if (prpPools[q].pageDmas) {
@@ -2027,9 +2104,8 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace with retry for both status
-  // errors and invalid response data (e.g. lbads=0 from
-  // transient controller state after VRAM queue teardown)
+  // Retry Identify Namespace on status errors and invalid response
+  // data (e.g. lbads=0 from transient post-teardown controller state).
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -2161,9 +2237,8 @@ __host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
     goto cleanup;
   }
 
-  // Send Identify Namespace with retry for both status
-  // errors and invalid response data (nsze=0 from
-  // transient controller state after VRAM queue teardown)
+  // Retry Identify Namespace on status errors and invalid response
+  // data (nsze=0 from transient post-teardown controller state).
   for (int attempt = 0; attempt < 5; attempt++) {
     memset(&cmd, 0, sizeof(cmd));
     cmd.opcode = nvme_admin_identify;
@@ -2425,15 +2500,9 @@ __host__ int deleteQueue(int nvme_fd, uint16_t queue_id) {
     return -EINVAL;
   }
 
-  // Delete existing queues if they exist (ignore errors - queue may not exist)
-  // Delete SQ first, then CQ (NVMe spec requirement: CQ cannot be deleted
-  // while associated SQ exists)
-
-  // Delete Submission Queue (DELETE_SQ)
-  // Note: DELETE_SQ may take time if the queue has pending commands - the
-  // controller waits for all commands to complete before deletion
-  // Also note: DELETE_SQ on a non-existent queue ID may hang - this is
-  // expected behavior per NVMe spec
+  // Delete SQ before CQ (NVMe spec: CQ cannot be deleted while its SQ
+  // exists). Errors are ignored since the queue may not exist.
+  // DELETE_SQ may block on pending commands or a non-existent QID.
   ROCXIO_LOG_INFO(
     "Sending DELETE_SQ command for queue_id=%u (this may take time if "
     "queue has pending commands or doesn't exist)...\n",

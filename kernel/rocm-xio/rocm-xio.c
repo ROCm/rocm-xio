@@ -29,10 +29,13 @@
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
+#include <linux/blk-mq.h>
+#include <linux/blkdev.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/io_uring.h>
 #include <linux/kernel.h>
@@ -45,6 +48,8 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
+#include <linux/xarray.h>
 
 #define DEVICE_NAME ROCM_XIO_DEVICE_NAME
 #define CLASS_NAME "rocm_axiio"
@@ -119,6 +124,83 @@ static LIST_HEAD(contig_allocs);
 static DEFINE_SPINLOCK(contig_allocs_lock);
 static __u32 contig_alloc_next_id = 1;
 
+/*
+ * Tracking for quiesced NVMe namespace request_queues.
+ *
+ * Each entry pins the userspace-provided block-device file so the
+ * underlying struct block_device (and its request_queue) stays
+ * valid for the duration of the quiesce window. Entries are owned
+ * by the rocm-xio file that issued ROCM_XIO_QUIESCE_NS and are
+ * released either by an explicit ROCM_XIO_UNQUIESCE_NS ioctl or
+ * automatically when that fd is closed.
+ *
+ * Two flavours exist:
+ *
+ *   - mode == QUIESCED_NS_MODE_FULL: blk_mq_quiesce_queue() was
+ *     called on the entire namespace request_queue. The block
+ *     layer stops dispatching new I/O on every hardware queue
+ *     backing this namespace.
+ *
+ *   - mode == QUIESCED_NS_MODE_HCTX: only the hardware context
+ *     matching @hctx_idx (= qid - 1) is stopped via
+ *     blk_mq_stop_hw_queue(). The kernel continues to dispatch
+ *     I/O for the same namespace on the namespace's other
+ *     hardware queues, which is the usual ask when rocm-xio only
+ *     reclaims a single NVMe I/O queue ID.
+ */
+enum quiesced_ns_mode {
+  QUIESCED_NS_MODE_FULL = 0,
+  QUIESCED_NS_MODE_HCTX = 1,
+};
+
+struct quiesced_ns_entry {
+  struct file* bdev_file;  /* pinned namespace bdev file */
+  struct block_device* bd; /* convenience pointer (no extra ref) */
+  struct file* owner;      /* rocm-xio fd that quiesced this ns */
+  enum quiesced_ns_mode mode;
+  unsigned int hctx_idx; /* only valid when mode == HCTX */
+  struct list_head list;
+};
+
+static LIST_HEAD(quiesced_ns);
+static DEFINE_MUTEX(quiesced_ns_lock);
+
+static struct block_device* rocm_xio_file_to_bdev(struct file* bdev_file) {
+  struct inode* inode;
+
+  if (!bdev_file)
+    return NULL;
+
+  /*
+   * The real bdev inode that I_BDEV() expects lives at
+   * f_mapping->host, not file_inode() (which is the devtmpfs inode on
+   * Linux 6.5+); using file_inode() yields a wild block_device pointer.
+   */
+  if (bdev_file->f_mapping)
+    inode = bdev_file->f_mapping->host;
+  else
+    inode = file_inode(bdev_file);
+  if (!inode || !S_ISBLK(inode->i_mode))
+    return NULL;
+  return I_BDEV(inode);
+}
+
+/*
+ * Look up a hardware context by index on a request_queue. Storage is
+ * version-specific: an xarray (@hctx_table) on 6.5+, an array
+ * (@queue_hw_ctx) before.
+ */
+static struct blk_mq_hw_ctx* rocm_xio_hctx_at(struct request_queue* q,
+                                              unsigned int idx) {
+  if (!q || idx >= q->nr_hw_queues)
+    return NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+  return xa_load(&q->hctx_table, idx);
+#else
+  return q->queue_hw_ctx[idx];
+#endif
+}
+
 static void contig_alloc_release(struct kref* ref) {
   struct contig_alloc_entry* ca = container_of(ref, struct contig_alloc_entry,
                                                ref);
@@ -126,6 +208,675 @@ static void contig_alloc_release(struct kref* ref) {
   pci_dev_put(ca->pdev);
   kfree(ca);
 }
+
+/*
+ * QID wedge fix: when xio-tester reclaims a QID the kernel still owns,
+ * the kprobe re-points the device-side queue and xio-tester's later
+ * DELETE_SQ/DELETE_CQ destroy it without recreating it; the kernel's
+ * struct nvme_queue still believes it is live, so the next kernel I/O
+ * on that hctx times out and forces a controller reset.
+ *
+ * Fix: snapshot each kernel queue's DMA addrs/depth/vector at
+ * nvme_alloc_queue() time, track which (pdev, qid) pairs the kprobe
+ * hijacked, and on the wedge event re-issue CREATE_CQ + CREATE_SQ from
+ * the snapshot so the device's per-QID context lines back up with the
+ * still-intact nvme_queue.
+ *
+ * Struct-layout assumptions live in the nvmeq_layout mirror below,
+ * version-gated so a kernel that reshuffles struct nvme_queue gets a
+ * compile-time hint.
+ */
+
+/* Forward declaration -- exported from nvme-core, declared here to
+ * avoid pulling in drivers/nvme/host/nvme.h which is not in
+ * /lib/modules/.../build/include.
+ */
+extern int nvme_submit_sync_cmd(struct request_queue* q,
+                                struct nvme_command* cmd, void* buf,
+                                unsigned bufflen);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0) ||                            \
+  LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+#warning "rocm-xio QID-restore code: struct nvme_queue layout copied from "    \
+         "v6.8 drivers/nvme/host/pci.c. Re-verify on this kernel."
+#endif
+
+/*
+ * Mirror of the private struct nvme_queue (drivers/nvme/host/pci.c).
+ * Layout is version-specific; do not reorder or extend without
+ * re-verifying against the running kernel's pci.c.
+ */
+struct rocm_xio_nvmeq_layout {
+  void* dev; /* struct nvme_dev * */
+  spinlock_t sq_lock;
+  void* sq_cmds;
+  spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;
+  void* cqes; /* struct nvme_completion * */
+  dma_addr_t sq_dma_addr;
+  dma_addr_t cq_dma_addr;
+  u32 __iomem* q_db;
+  u32 q_depth;
+  u16 cq_vector;
+  u16 sq_tail;
+  u16 last_sq_tail;
+  u16 cq_head;
+  u16 qid;
+  u8 cq_phase;
+  u8 sqes;
+  unsigned long flags;
+};
+
+/* Bit positions within nvme_queue->flags. NVMEQ_POLLED is the only
+ * one we read.
+ */
+#define ROCM_XIO_NVMEQ_ENABLED 0
+#define ROCM_XIO_NVMEQ_SQ_CMB 1
+#define ROCM_XIO_NVMEQ_DELETE_ERROR 2
+#define ROCM_XIO_NVMEQ_POLLED 3
+
+/*
+ * Mirror of the leading portion of struct nvme_dev. We only need the
+ * @queues pointer and @dev (for to_pci_dev). queue_count lives inside
+ * the embedded nvme_ctrl but we never read it from here; we always
+ * cross-reference against our own snapshot list.
+ */
+struct rocm_xio_nvme_dev_layout {
+  void* queues; /* struct nvme_queue * */
+};
+
+/*
+ * Snapshot of one (pci_dev, qid) kernel-side NVMe queue. Keyed by
+ * (pdev, qid). We hold a pci_dev ref so the bus address stays
+ * meaningful even if the device unbinds.
+ *
+ * @admin_q is captured at snapshot time so we don't have to chase
+ * private nvme_ctrl layout offsets at recreation time. It is the
+ * request_queue we feed to nvme_submit_sync_cmd().
+ */
+struct nvme_queue_snapshot {
+  struct pci_dev* pdev;
+  u16 qid;
+  dma_addr_t sq_dma_addr;
+  dma_addr_t cq_dma_addr;
+  u32 q_depth;
+  u16 cq_vector;
+  bool polled;
+  struct request_queue* admin_q;
+  /*
+   * The struct nvme_dev* that owns this queue. Captured so the
+   * resurrect path can reach the live struct nvme_queue via
+   * dev->queues[qid] and reset its host-side ring pointers after
+   * CREATE_CQ/CREATE_SQ (see rocm_xio_resurrect_work_fn). Stored as
+   * void* because we never pull private nvme_dev fields through it
+   * except @queues, which we reach via rocm_xio_nvme_dev_layout.
+   */
+  void* dev; /* struct nvme_dev * */
+  struct list_head list;
+};
+
+static LIST_HEAD(nvme_queue_snapshots);
+static DEFINE_SPINLOCK(nvme_queue_snapshots_lock);
+
+/*
+ * Per-(bdf, qid) record of queues that have been wedged by
+ * xio-tester. Entries are added when the kprobe sees a hijacked
+ * CREATE_SQ/CREATE_CQ. Entries are marked "needs_resurrect" when
+ * the kprobe sees a DELETE_SQ/DELETE_CQ for the same (bdf, qid)
+ * pair. A workqueue then runs in process context to issue
+ * CREATE_CQ + CREATE_SQ via the snapshotted admin_q.
+ *
+ * Keyed globally by (bdf, qid), NOT by file owner. xio-tester
+ * splits queue registration, contig allocation, and the actual
+ * NVMe ops across multiple file descriptors, so a per-fd model
+ * fires release-time resurrect against the wrong fd's lifetime.
+ * Watching DELETE in the kprobe and scheduling work matches the
+ * real "wedge event" (device-side queue destroyed by user
+ * command).
+ *
+ * We deliberately store BDF rather than pci_dev* here because the
+ * kprobe records entries from atomic context where
+ * pci_get_domain_bus_and_slot() (which may sleep on the PCI bus
+ * mutex) is not safe to call.
+ */
+struct poisoned_qid_entry {
+  u16 bdf;
+  u16 qid;
+  bool created;         /* kprobe saw injected CREATE_* */
+  bool needs_resurrect; /* kprobe saw DELETE_*, work not yet done */
+  struct list_head list;
+};
+
+static LIST_HEAD(poisoned_qids);
+static DEFINE_SPINLOCK(poisoned_qids_lock);
+
+/*
+ * Pending snapshot capture deferred to process context.
+ *
+ * The kretprobe return handlers run with preemption disabled (atomic
+ * context), but resolving struct nvme_dev* -> struct pci_dev* requires
+ * walking the global PCI bus via for_each_pci_dev() / pci_get_device(),
+ * whose klist iteration may SLEEP. So the handlers only read the
+ * already-allocated queue's scalar fields (plain memory reads, atomic
+ * safe), stash them here, and kick rocm_xio_snapshot_work which performs
+ * the bus walk and nvme_queue_snapshot_store() in process context.
+ *
+ * This mirrors the poisoned_qids principle above: defer anything that
+ * may sleep (the PCI lookup) out of the kprobe's atomic context.
+ */
+struct pending_snapshot_entry {
+  void* nvme_dev; /* struct nvme_dev * -- match key for pci_get_drvdata */
+  u16 qid;
+  dma_addr_t sq_dma_addr;
+  dma_addr_t cq_dma_addr;
+  u32 q_depth;
+  u16 cq_vector;
+  bool polled;
+  struct request_queue* admin_q;
+  struct list_head list;
+};
+
+static LIST_HEAD(pending_snapshots);
+static DEFINE_SPINLOCK(pending_snapshots_lock);
+
+/* kretprobe storage: pass nvmeq + qid from entry to return handler.
+ * Used by both nvme_alloc_queue (initial allocation) and
+ * nvme_create_queue (per-create / per-reset).
+ */
+struct rocm_xio_alloc_queue_ctx {
+  void* nvme_dev; /* struct nvme_dev *  (alloc_queue path) */
+  void* nvmeq;    /* struct nvme_queue * (create_queue path) */
+  int qid;
+};
+
+/*
+ * Store or update a snapshot for (pdev, qid). Caller must hold a
+ * reference on @pdev; on success the snapshot owns one additional
+ * reference (we always pci_dev_get inside).
+ */
+static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
+                                      dma_addr_t sq_dma, dma_addr_t cq_dma,
+                                      u32 depth, u16 cq_vector, bool polled,
+                                      struct request_queue* admin_q,
+                                      void* nvme_dev) {
+  struct nvme_queue_snapshot *snap, *existing;
+  unsigned long flags_irq;
+  bool replaced = false;
+
+  snap = kmalloc(sizeof(*snap), GFP_ATOMIC);
+  if (!snap) {
+    pr_warn("rocm-axiio: snapshot kmalloc failed for %s qid=%u\n",
+            pci_name(pdev), qid);
+    return;
+  }
+  snap->pdev = pci_dev_get(pdev);
+  snap->qid = qid;
+  snap->sq_dma_addr = sq_dma;
+  snap->cq_dma_addr = cq_dma;
+  snap->q_depth = depth;
+  snap->cq_vector = cq_vector;
+  snap->polled = polled;
+  snap->admin_q = admin_q;
+  snap->dev = nvme_dev;
+  INIT_LIST_HEAD(&snap->list);
+
+  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
+  list_for_each_entry(existing, &nvme_queue_snapshots, list) {
+    if (existing->pdev == pdev && existing->qid == qid) {
+      existing->sq_dma_addr = sq_dma;
+      existing->cq_dma_addr = cq_dma;
+      existing->q_depth = depth;
+      existing->cq_vector = cq_vector;
+      existing->polled = polled;
+      existing->admin_q = admin_q;
+      existing->dev = nvme_dev;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced)
+    list_add(&snap->list, &nvme_queue_snapshots);
+  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
+
+  if (replaced) {
+    pci_dev_put(snap->pdev);
+    kfree(snap);
+    pr_info("rocm-axiio: nvme queue snapshot UPDATED %s qid=%u "
+            "sq=0x%llx cq=0x%llx depth=%u vec=%u polled=%d admin_q=%p\n",
+            pci_name(pdev), qid, (unsigned long long)sq_dma,
+            (unsigned long long)cq_dma, depth, cq_vector, (int)polled, admin_q);
+  } else {
+    pr_info("rocm-axiio: nvme queue snapshot CAPTURED %s qid=%u "
+            "sq=0x%llx cq=0x%llx depth=%u vec=%u polled=%d admin_q=%p\n",
+            pci_name(pdev), qid, (unsigned long long)sq_dma,
+            (unsigned long long)cq_dma, depth, cq_vector, (int)polled, admin_q);
+  }
+}
+
+/* Return a copy of the snapshot for (pdev, qid), or false if none. */
+static bool nvme_queue_snapshot_lookup(struct pci_dev* pdev, u16 qid,
+                                       struct nvme_queue_snapshot* out) {
+  struct nvme_queue_snapshot* s;
+  unsigned long flags_irq;
+  bool found = false;
+
+  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
+  list_for_each_entry(s, &nvme_queue_snapshots, list) {
+    if (s->pdev == pdev && s->qid == qid) {
+      *out = *s;
+      INIT_LIST_HEAD(&out->list);
+      out->pdev = pdev; /* do not transfer ref */
+      found = true;
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
+  return found;
+}
+
+static void nvme_queue_snapshots_free_all(void) {
+  struct nvme_queue_snapshot *s, *tmp;
+  unsigned long flags_irq;
+  LIST_HEAD(to_free);
+
+  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
+  list_for_each_entry_safe(s, tmp, &nvme_queue_snapshots, list) {
+    list_del(&s->list);
+    list_add(&s->list, &to_free);
+  }
+  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
+
+  list_for_each_entry_safe(s, tmp, &to_free, list) {
+    list_del(&s->list);
+    pci_dev_put(s->pdev);
+    kfree(s);
+  }
+}
+
+/*
+ * Process-context worker that drains pending_snapshots. The kretprobe
+ * return handlers can only read the queue scalars (atomic context);
+ * resolving struct nvme_dev* -> struct pci_dev* requires a
+ * for_each_pci_dev() bus walk that may sleep, so it is done here.
+ */
+static void rocm_xio_snapshot_work_fn(struct work_struct* w) {
+  struct pending_snapshot_entry *entry, *tmp;
+  unsigned long flags_irq;
+  LIST_HEAD(local);
+
+  /* Splice out under the lock so we don't hold it across the (sleeping)
+   * bus walk below. */
+  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
+  list_splice_init(&pending_snapshots, &local);
+  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
+
+  list_for_each_entry_safe(entry, tmp, &local, list) {
+    struct pci_dev* iter = NULL;
+    struct pci_dev* pdev = NULL;
+
+    /* Legal here (process context): for_each_pci_dev() may sleep.
+     * The macro auto-puts the previous iterator when advancing, but a
+     * 'break' leaves a ref on the matching dev. nvme_queue_snapshot_store
+     * takes its own ref via pci_dev_get, so we drop this extra one with
+     * pci_dev_put after storing. */
+    for_each_pci_dev(iter) {
+      if (iter->driver && pci_get_drvdata(iter) == entry->nvme_dev) {
+        pdev = iter;
+        break;
+      }
+    }
+
+    if (pdev) {
+      nvme_queue_snapshot_store(pdev, entry->qid, entry->sq_dma_addr,
+                                entry->cq_dma_addr, entry->q_depth,
+                                entry->cq_vector, entry->polled, entry->admin_q,
+                                entry->nvme_dev);
+      pci_dev_put(pdev);
+    } else {
+      pr_warn("rocm-axiio: snapshot: could not resolve pci_dev for "
+              "nvme_dev=%p qid=%u\n",
+              entry->nvme_dev, entry->qid);
+    }
+
+    list_del(&entry->list);
+    kfree(entry);
+  }
+}
+
+/* Forward decl: workqueue handler does the actual resurrect.
+ *
+ * Use delayed_work with a short delay so we run AFTER the user-issued
+ * DELETE_SQ/DELETE_CQ pair has completed on the device. The kprobe
+ * fires in pre-handler context (before the kernel submits the
+ * DELETE command to the controller), so an immediate schedule_work
+ * can race the controller-side teardown and we'd CREATE_CQ against
+ * a still-live CQ (returns 0x4101 Invalid Queue Identifier).
+ *
+ * 250ms is well over a single admin-command latency in the worst
+ * case while still being unnoticeable to the next kernel I/O on
+ * that hctx.
+ */
+#define ROCM_XIO_RESURRECT_DELAY_MS 250
+static void rocm_xio_resurrect_work_fn(struct work_struct* w);
+static DECLARE_DELAYED_WORK(rocm_xio_resurrect_work,
+                            rocm_xio_resurrect_work_fn);
+
+/*
+ * Process-context worker that drains pending_snapshots and performs the
+ * (sleeping) PCI bus walk + nvme_queue_snapshot_store() that the atomic
+ * kretprobe return handlers must not do themselves.
+ */
+static void rocm_xio_snapshot_work_fn(struct work_struct* w);
+static DECLARE_WORK(rocm_xio_snapshot_work, rocm_xio_snapshot_work_fn);
+
+/*
+ * Mark (bdf, qid) as hijacked by a kprobe-injected CREATE_*.
+ * Idempotent. Called from kprobe pre-handler (atomic).
+ */
+static void poisoned_qid_mark_created(u16 bdf, u16 qid) {
+  struct poisoned_qid_entry *e, *existing = NULL;
+  unsigned long flags_irq;
+
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  list_for_each_entry(e, &poisoned_qids, list) {
+    if (e->bdf == bdf && e->qid == qid) {
+      existing = e;
+      break;
+    }
+  }
+  if (existing) {
+    existing->created = true;
+    spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+    return;
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  e = kmalloc(sizeof(*e), GFP_ATOMIC);
+  if (!e) {
+    pr_warn("rocm-axiio: poisoned_qid kmalloc failed for bdf=0x%04x qid=%u\n",
+            bdf, qid);
+    return;
+  }
+  e->bdf = bdf;
+  e->qid = qid;
+  e->created = true;
+  e->needs_resurrect = false;
+  INIT_LIST_HEAD(&e->list);
+
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  /* Re-check under lock */
+  list_for_each_entry(existing, &poisoned_qids, list) {
+    if (existing->bdf == bdf && existing->qid == qid) {
+      existing->created = true;
+      spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+      kfree(e);
+      return;
+    }
+  }
+  list_add(&e->list, &poisoned_qids);
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  pr_info("rocm-axiio: tracked hijacked CREATE_* on bdf 0x%04x qid %u\n", bdf,
+          qid);
+}
+
+/*
+ * Mark (bdf, qid) as deleted on the device by a user-issued
+ * DELETE_*. If we previously saw a hijacked CREATE_* for the same
+ * pair, schedule resurrection. Called from kprobe pre-handler
+ * (atomic).
+ *
+ * Note: this must be called on DELETE_CQ (opcode 0x04), not
+ * DELETE_SQ. DELETE_SQ is sent first, DELETE_CQ second, and the
+ * device must have processed BOTH before we can issue CREATE_CQ
+ * for the same QID -- otherwise the controller still sees a live
+ * CQ and rejects our CREATE_CQ with Invalid Queue Identifier
+ * (0x4101). Scheduling on DELETE_CQ guarantees the pair has at
+ * least reached the controller.
+ */
+static void poisoned_qid_mark_deleted(u16 bdf, u16 qid) {
+  struct poisoned_qid_entry* e;
+  unsigned long flags_irq;
+  bool schedule = false;
+
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  list_for_each_entry(e, &poisoned_qids, list) {
+    if (e->bdf == bdf && e->qid == qid) {
+      if (e->created) {
+        e->needs_resurrect = true;
+        schedule = true;
+      }
+      break;
+    }
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  if (schedule) {
+    pr_info("rocm-axiio: user DELETE on bdf 0x%04x qid %u; scheduling "
+            "queue resurrection in %u ms\n",
+            bdf, qid, ROCM_XIO_RESURRECT_DELAY_MS);
+    /* mod_delayed_work coalesces multiple DELETE events into a
+     * single resurrect pass at the latest scheduled time. */
+    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
+                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
+  }
+}
+
+/* kretprobe entry for nvme_alloc_queue(dev, qid, depth):
+ * stash (dev, qid) from RDI/RSI.
+ */
+static int nvme_alloc_queue_entry_handler(struct kretprobe_instance* ri,
+                                          struct pt_regs* regs) {
+  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
+                                           ri->data;
+#ifdef CONFIG_X86_64
+  ctx->nvme_dev = (void*)regs->di;
+  ctx->nvmeq = NULL;
+  ctx->qid = (int)regs->si;
+#else
+  ctx->nvme_dev = NULL;
+  ctx->nvmeq = NULL;
+  ctx->qid = -1;
+#endif
+  return 0;
+}
+
+/* kretprobe entry for nvme_create_queue(nvmeq, qid, polled):
+ * stash (nvmeq, qid) from RDI/RSI.
+ */
+static int nvme_create_queue_entry_handler(struct kretprobe_instance* ri,
+                                           struct pt_regs* regs) {
+  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
+                                           ri->data;
+#ifdef CONFIG_X86_64
+  ctx->nvme_dev = NULL;
+  ctx->nvmeq = (void*)regs->di;
+  ctx->qid = (int)regs->si;
+#else
+  ctx->nvme_dev = NULL;
+  ctx->nvmeq = NULL;
+  ctx->qid = -1;
+#endif
+  return 0;
+}
+
+/* kretprobe return: if call succeeded, snapshot dev->queues[qid]. */
+static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
+                                        struct pt_regs* regs) {
+  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
+                                           ri->data;
+  struct rocm_xio_nvme_dev_layout* dev_layout;
+  struct rocm_xio_nvmeq_layout* nvmeq;
+  struct pending_snapshot_entry* pend;
+  unsigned long flags_irq;
+  long retval;
+
+#ifdef CONFIG_X86_64
+  retval = (long)regs->ax;
+#else
+  return 0;
+#endif
+
+  if (retval != 0)
+    return 0; /* alloc failed, nothing to snapshot */
+  if (!ctx->nvme_dev || ctx->qid < 0)
+    return 0;
+
+  dev_layout = (struct rocm_xio_nvme_dev_layout*)ctx->nvme_dev;
+  if (!dev_layout->queues)
+    return 0;
+
+  /*
+   * dev->queues is an array of struct nvme_queue; stride is the real
+   * kernel sizeof(struct nvme_queue) (version-specific), NOT our
+   * mirror's size.
+   */
+  {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+    const size_t kernel_nvmeq_stride = 192;
+#else
+    const size_t kernel_nvmeq_stride = sizeof(struct rocm_xio_nvmeq_layout);
+#endif
+    nvmeq = (struct rocm_xio_nvmeq_layout*)((u8*)dev_layout->queues +
+                                            (size_t)ctx->qid *
+                                              kernel_nvmeq_stride);
+  }
+
+  /*
+   * Atomic context: read the queue's scalar fields here, but defer the
+   * (sleeping) nvme_dev -> pci_dev bus walk + snapshot_store to
+   * rocm_xio_snapshot_work_fn().
+   *
+   * admin_q is read from version-specific struct nvme_dev offsets, so
+   * only on the verified kernel range; elsewhere leave it NULL (the
+   * resurrect path tolerates that) rather than type-pun an unverified
+   * offset.
+   */
+  pend = kmalloc(sizeof(*pend), GFP_ATOMIC);
+  if (!pend) {
+    pr_warn_once("rocm-axiio: snapshot: pending kmalloc failed (qid=%d)\n",
+                 ctx->qid);
+    return 0;
+  }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+  {
+    const size_t NVME_DEV_CTRL_OFFSET = 496;
+    const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
+    pend->admin_q = *(struct request_queue**)((u8*)ctx->nvme_dev +
+                                              NVME_DEV_CTRL_OFFSET +
+                                              NVME_CTRL_ADMIN_Q_OFFSET);
+  }
+#else
+  pend->admin_q = NULL;
+#endif
+  pend->nvme_dev = ctx->nvme_dev;
+  pend->qid = (u16)ctx->qid;
+  pend->sq_dma_addr = nvmeq->sq_dma_addr;
+  pend->cq_dma_addr = nvmeq->cq_dma_addr;
+  pend->q_depth = nvmeq->q_depth;
+  pend->cq_vector = nvmeq->cq_vector;
+  pend->polled = test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags);
+  INIT_LIST_HEAD(&pend->list);
+
+  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
+  list_add(&pend->list, &pending_snapshots);
+  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
+  schedule_work(&rocm_xio_snapshot_work);
+  return 0;
+}
+
+static struct kretprobe nvme_alloc_queue_krp = {
+  .kp.symbol_name = "nvme_alloc_queue",
+  .entry_handler = nvme_alloc_queue_entry_handler,
+  .handler = nvme_alloc_queue_ret_handler,
+  .data_size = sizeof(struct rocm_xio_alloc_queue_ctx),
+  .maxactive = 32,
+};
+
+static bool nvme_alloc_queue_krp_registered = false;
+
+/* kretprobe return for nvme_create_queue: read nvmeq fields directly.
+ * Snapshot is captured for every (pdev, qid) on every reset, since
+ * nvme_create_queue is invoked each time the controller comes back.
+ */
+static int nvme_create_queue_ret_handler(struct kretprobe_instance* ri,
+                                         struct pt_regs* regs) {
+  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
+                                           ri->data;
+  struct rocm_xio_nvmeq_layout* nvmeq;
+  struct pending_snapshot_entry* pend;
+  unsigned long flags_irq;
+  void* nvme_dev_ptr;
+  long retval;
+
+#ifdef CONFIG_X86_64
+  retval = (long)regs->ax;
+#else
+  return 0;
+#endif
+
+  if (retval != 0)
+    return 0;
+  if (!ctx->nvmeq || ctx->qid < 0)
+    return 0;
+
+  nvmeq = (struct rocm_xio_nvmeq_layout*)ctx->nvmeq;
+  nvme_dev_ptr = nvmeq->dev;
+
+  /*
+   * As in the alloc handler: this runs in atomic context, so we cannot
+   * walk the PCI bus here (it may sleep). Read the queue scalars now and
+   * defer the bus walk + snapshot_store to rocm_xio_snapshot_work_fn().
+   */
+  pend = kmalloc(sizeof(*pend), GFP_ATOMIC);
+  if (!pend) {
+    pr_warn_once(
+      "rocm-axiio: snapshot(create_queue): pending kmalloc failed (qid=%d)\n",
+      ctx->qid);
+    return 0;
+  }
+  /*
+   * admin_q offsets are version specific (see nvme_alloc_queue_ret_handler);
+   * only read them on the verified kernel range, else leave NULL.
+   */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+  {
+    const size_t NVME_DEV_CTRL_OFFSET = 496;
+    const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
+    pend->admin_q = *(struct request_queue**)((u8*)nvme_dev_ptr +
+                                              NVME_DEV_CTRL_OFFSET +
+                                              NVME_CTRL_ADMIN_Q_OFFSET);
+  }
+#else
+  pend->admin_q = NULL;
+#endif
+  pend->nvme_dev = nvme_dev_ptr;
+  pend->qid = (u16)ctx->qid;
+  pend->sq_dma_addr = nvmeq->sq_dma_addr;
+  pend->cq_dma_addr = nvmeq->cq_dma_addr;
+  pend->q_depth = nvmeq->q_depth;
+  pend->cq_vector = nvmeq->cq_vector;
+  pend->polled = test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags);
+  INIT_LIST_HEAD(&pend->list);
+
+  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
+  list_add(&pend->list, &pending_snapshots);
+  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
+  schedule_work(&rocm_xio_snapshot_work);
+  return 0;
+}
+
+static struct kretprobe nvme_create_queue_krp = {
+  .kp.symbol_name = "nvme_create_queue",
+  .entry_handler = nvme_create_queue_entry_handler,
+  .handler = nvme_create_queue_ret_handler,
+  .data_size = sizeof(struct rocm_xio_alloc_queue_ctx),
+  .maxactive = 32,
+};
+
+static bool nvme_create_queue_krp_registered = false;
 
 static void contig_vma_open(struct vm_area_struct* vma) {
   struct contig_alloc_entry* ca = vma->vm_private_data;
@@ -791,6 +1542,39 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
               opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
     }
     pr_info("  Queue ID: %u\n", queue_id);
+
+    /*
+     * If we've previously seen the kernel's CREATE_* for this
+     * (bdf, qid) get hijacked, the device is about to lose the
+     * queue. Trigger resurrection on DELETE_CQ (opcode 0x04), which
+     * is the second of the DELETE_SQ/DELETE_CQ pair. By the time
+     * the device acks DELETE_CQ, the CQ no longer exists and our
+     * CREATE_CQ won't collide.
+     *
+     * For DELETE we don't have a registered queue_addr lookup that
+     * reliably gives BDF (the ubuffer at DELETE time might not be
+     * the queue's PRP). So if lookup_queue_bdf returned 0 we fall
+     * back to "any bdf with a matching qid in the poisoned list".
+     */
+    if (opcode == 0x04) {
+      if (bdf) {
+        poisoned_qid_mark_deleted(bdf, queue_id);
+      } else {
+        struct poisoned_qid_entry* pe;
+        unsigned long flags_irq;
+        u16 found_bdf = 0;
+        spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+        list_for_each_entry(pe, &poisoned_qids, list) {
+          if (pe->qid == queue_id && pe->created) {
+            found_bdf = pe->bdf;
+            break;
+          }
+        }
+        spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+        if (found_bdf)
+          poisoned_qid_mark_deleted(found_bdf, queue_id);
+      }
+    }
   }
 
   /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
@@ -816,6 +1600,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     phys_addr = lookup_queue_phys_addr(ubuffer);
     if (phys_addr) {
       __u64 prp2_val;
+      u16 hijack_bdf;
 
       cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
       pr_info("  Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
@@ -825,6 +1610,15 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
         cmd->common.dptr.prp2 = cpu_to_le64(prp2_val);
         pr_info("  Injected PRP2: 0x%016llx\n", (unsigned long long)prp2_val);
       }
+
+      /*
+       * Track that (bdf, qid) had its kernel CREATE_* hijacked.
+       * The actual resurrect is triggered later when xio-tester
+       * issues DELETE_SQ for the same (bdf, qid).
+       */
+      hijack_bdf = lookup_queue_bdf(ubuffer);
+      if (hijack_bdf)
+        poisoned_qid_mark_created(hijack_bdf, queue_id);
     } else {
       pr_info("rocm-axiio: Queue not registered, "
               "using ubuffer directly\n");
@@ -1356,6 +2150,279 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_QUIESCE_NS: {
+      struct rocm_xio_quiesce_ns_req req;
+      struct file* bdev_file;
+      struct block_device* bd;
+      struct request_queue* q;
+      struct blk_mq_hw_ctx* hctx = NULL;
+      struct quiesced_ns_entry* entry;
+      struct quiesced_ns_entry* existing;
+      enum quiesced_ns_mode mode;
+      unsigned int hctx_idx = 0;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      if (req.bdev_fd < 0)
+        return -EINVAL;
+
+      bdev_file = fget(req.bdev_fd);
+      if (!bdev_file) {
+        pr_err("rocm-axiio: QUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
+        return -EBADF;
+      }
+
+      bd = rocm_xio_file_to_bdev(bdev_file);
+      if (!bd) {
+        pr_err("rocm-axiio: QUIESCE_NS: fd %d is not a block device\n",
+               req.bdev_fd);
+        fput(bdev_file);
+        return -ENOTBLK;
+      }
+
+      q = bdev_get_queue(bd);
+      if (!q) {
+        pr_err("rocm-axiio: QUIESCE_NS: no request_queue for bdev\n");
+        fput(bdev_file);
+        return -ENODEV;
+      }
+
+      if (req.qid == 0) {
+        mode = QUIESCED_NS_MODE_FULL;
+      } else {
+        /*
+         * NVMe IO queue ID @qid maps to blk-mq hctx index
+         * @qid - 1 in the default I/O queue map used by the
+         * upstream NVMe PCI driver. Validate against the live
+         * queue topology so a stale qid does not index past
+         * the array.
+         */
+        if (!queue_is_mq(q)) {
+          pr_err("rocm-axiio: QUIESCE_NS: %pg is not a blk-mq queue\n", bd);
+          fput(bdev_file);
+          return -EOPNOTSUPP;
+        }
+        hctx_idx = req.qid - 1;
+        if (hctx_idx >= q->nr_hw_queues) {
+          pr_err("rocm-axiio: QUIESCE_NS: qid %u out of range "
+                 "(%pg has %u hw queues)\n",
+                 req.qid, bd, q->nr_hw_queues);
+          fput(bdev_file);
+          return -ERANGE;
+        }
+        hctx = rocm_xio_hctx_at(q, hctx_idx);
+        if (!hctx) {
+          pr_err("rocm-axiio: QUIESCE_NS: no hctx for qid %u on %pg\n", req.qid,
+                 bd);
+          fput(bdev_file);
+          return -ENODEV;
+        }
+        mode = QUIESCED_NS_MODE_HCTX;
+      }
+
+      entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+      if (!entry) {
+        fput(bdev_file);
+        return -ENOMEM;
+      }
+
+      entry->bdev_file = bdev_file;
+      entry->bd = bd;
+      entry->owner = file;
+      entry->mode = mode;
+      entry->hctx_idx = hctx_idx;
+
+      /*
+       * Hold quiesced_ns_lock across the duplicate check, the blk-mq
+       * quiesce, AND the list_add as a single critical section. If the
+       * lock were dropped between the check and the insert, two
+       * concurrent QUIESCE_NS calls for the same (fd, bd, mode, hctx)
+       * could both pass the duplicate check and both call
+       * blk_mq_quiesce_queue(): the block layer's quiesce_depth would be
+       * raised twice while only one entry is tracked, so a single
+       * unquiesce at release/explicit-unquiesce time would leave the
+       * queue permanently quiesced (all I/O hung). The lock is a mutex,
+       * so sleeping inside blk_mq_quiesce_queue() is permitted.
+       */
+      mutex_lock(&quiesced_ns_lock);
+      list_for_each_entry(existing, &quiesced_ns, list) {
+        if (existing->owner != file || existing->bd != bd)
+          continue;
+        if (existing->mode == QUIESCED_NS_MODE_FULL &&
+            mode == QUIESCED_NS_MODE_FULL) {
+          mutex_unlock(&quiesced_ns_lock);
+          pr_info("rocm-axiio: QUIESCE_NS: %pg already fully quiesced by "
+                  "this fd\n",
+                  bd);
+          kfree(entry);
+          fput(bdev_file);
+          return 0;
+        }
+        if (existing->mode == QUIESCED_NS_MODE_HCTX &&
+            mode == QUIESCED_NS_MODE_HCTX && existing->hctx_idx == hctx_idx) {
+          mutex_unlock(&quiesced_ns_lock);
+          pr_info("rocm-axiio: QUIESCE_NS: %pg qid %u already stopped by "
+                  "this fd\n",
+                  bd, req.qid);
+          kfree(entry);
+          fput(bdev_file);
+          return 0;
+        }
+      }
+
+      if (mode == QUIESCED_NS_MODE_FULL) {
+        blk_mq_quiesce_queue(q);
+        pr_info("rocm-axiio: QUIESCE_NS: quiesced entire request_queue "
+                "for %pg\n",
+                bd);
+      } else {
+        /*
+         * Hold a brief whole-queue quiesce while we mark the
+         * target hctx stopped. blk_mq_quiesce_queue() waits for
+         * any in-flight dispatch (including one that may already
+         * be touching the SQ we are about to reclaim) to
+         * complete; the unquiesce immediately afterwards lets
+         * the namespace's other hardware queues resume normal
+         * I/O while our target hctx stays stopped.
+         */
+        blk_mq_quiesce_queue(q);
+        blk_mq_stop_hw_queue(hctx);
+        blk_mq_unquiesce_queue(q);
+        pr_info("rocm-axiio: QUIESCE_NS: stopped hctx %u (qid %u) on %pg; "
+                "other queues continue to dispatch\n",
+                hctx_idx, req.qid, bd);
+      }
+
+      list_add(&entry->list, &quiesced_ns);
+      mutex_unlock(&quiesced_ns_lock);
+
+      return 0;
+    }
+
+    case ROCM_XIO_UNQUIESCE_NS: {
+      struct rocm_xio_quiesce_ns_req req;
+      struct file* bdev_file;
+      struct block_device* bd;
+      struct request_queue* q;
+      struct quiesced_ns_entry *entry, *tmp;
+      struct quiesced_ns_entry* found = NULL;
+      unsigned int hctx_idx = 0;
+      enum quiesced_ns_mode want_mode;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      if (req.bdev_fd < 0)
+        return -EINVAL;
+
+      bdev_file = fget(req.bdev_fd);
+      if (!bdev_file) {
+        pr_err("rocm-axiio: UNQUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
+        return -EBADF;
+      }
+
+      bd = rocm_xio_file_to_bdev(bdev_file);
+      if (!bd) {
+        pr_err("rocm-axiio: UNQUIESCE_NS: fd %d is not a block device\n",
+               req.bdev_fd);
+        fput(bdev_file);
+        return -ENOTBLK;
+      }
+
+      if (req.qid == 0) {
+        want_mode = QUIESCED_NS_MODE_FULL;
+      } else {
+        want_mode = QUIESCED_NS_MODE_HCTX;
+        hctx_idx = req.qid - 1;
+      }
+
+      mutex_lock(&quiesced_ns_lock);
+      list_for_each_entry_safe(entry, tmp, &quiesced_ns, list) {
+        if (entry->owner != file || entry->bd != bd)
+          continue;
+        if (entry->mode != want_mode)
+          continue;
+        if (want_mode == QUIESCED_NS_MODE_HCTX && entry->hctx_idx != hctx_idx)
+          continue;
+        list_del(&entry->list);
+        found = entry;
+        break;
+      }
+      mutex_unlock(&quiesced_ns_lock);
+
+      if (!found) {
+        pr_warn("rocm-axiio: UNQUIESCE_NS: no quiesce entry for %pg (qid %u)\n",
+                bd, req.qid);
+        fput(bdev_file);
+        return -ENOENT;
+      }
+
+      q = bdev_get_queue(found->bd);
+      if (q) {
+        if (found->mode == QUIESCED_NS_MODE_FULL) {
+          blk_mq_unquiesce_queue(q);
+          pr_info("rocm-axiio: UNQUIESCE_NS: resumed entire request_queue "
+                  "for %pg\n",
+                  found->bd);
+        } else {
+          struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, found->hctx_idx);
+          if (hctx) {
+            blk_mq_start_hw_queue(hctx);
+            pr_info("rocm-axiio: UNQUIESCE_NS: started hctx %u (qid %u) "
+                    "on %pg\n",
+                    found->hctx_idx, req.qid, found->bd);
+          } else {
+            pr_warn("rocm-axiio: UNQUIESCE_NS: lost hctx %u for %pg\n",
+                    found->hctx_idx, found->bd);
+          }
+        }
+      } else {
+        pr_warn("rocm-axiio: UNQUIESCE_NS: lost request_queue for %pg\n",
+                found->bd);
+      }
+
+      fput(found->bdev_file);
+      kfree(found);
+      fput(bdev_file);
+      return 0;
+    }
+
+    case ROCM_XIO_DEBUG_RESURRECT_QID: {
+      /*
+       * TEST-ONLY: drive the production resurrect path for (bdf, qid)
+       * without the GPU/xio-tester hijack, reusing the exact real
+       * DELETE_CQ-triggered sequence (mark created + needs_resurrect,
+       * then schedule the work). No production caller uses this.
+       *
+       * Requires a previously captured snapshot for (bdf, qid), and the
+       * caller must have already issued DELETE_SQ + DELETE_CQ so the
+       * controller side is actually gone.
+       */
+      struct rocm_xio_debug_resurrect_req req;
+
+      /* This debug trigger drives admin NVMe commands at an arbitrary
+       * (bdf, qid); gate it behind CAP_SYS_ADMIN so it cannot be abused
+       * if /dev/rocm-xio is ever made accessible to unprivileged users. */
+      if (!capable(CAP_SYS_ADMIN))
+        return -EPERM;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      pr_info("rocm-axiio: DEBUG_RESURRECT_QID: forcing resurrect of "
+              "bdf=0x%04x qid=%u (test-only path)\n",
+              req.bdf, req.qid);
+
+      /* poisoned_qid_mark_created is idempotent; it creates the entry
+       * if absent and sets created=true. Then mark_deleted flips
+       * needs_resurrect and schedules the delayed work -- identical to
+       * the kprobe-driven sequence. */
+      poisoned_qid_mark_created(req.bdf, req.qid);
+      poisoned_qid_mark_deleted(req.bdf, req.qid);
+      return 0;
+    }
+
     case ROCM_XIO_FREE_CONTIG_QUEUE: {
       struct rocm_xio_free_contig_req req;
       struct contig_alloc_entry *ca, *tmp;
@@ -1511,9 +2578,305 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
   return -ENOSYS;
 }
 
+/*
+ * Resurrect every NVMe queue currently flagged as needing it.
+ *
+ * For each entry in poisoned_qids with needs_resurrect=true:
+ *   1. Resolve the pci_dev and look up our cached snapshot.
+ *   2. Submit CREATE_CQ then CREATE_SQ to the controller's admin
+ *      queue with the kernel's original DMA addresses. This makes
+ *      the device side of the QID line back up with the kernel's
+ *      still-intact struct nvme_queue, so the next kernel I/O on
+ *      that hctx no longer times out.
+ *
+ * Runs as workqueue work_struct -- process context, may sleep.
+ *
+ * Logging is verbose by design -- a malformed CREATE_SQ from kernel
+ * context can panic the controller, so we want a clear breadcrumb
+ * trail in dmesg if something misbehaves.
+ */
+static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
+  struct poisoned_qid_entry *pe, *pe_tmp;
+  unsigned long flags_irq;
+  bool clone_oom = false;
+  LIST_HEAD(to_resurrect);
+
+  (void)w;
+
+  /*
+   * Snapshot the set of entries that need resurrection AND
+   * atomically clear the flag, so we don't double-fire if another
+   * DELETE schedules us again while we're running.
+   */
+  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+  list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
+    if (pe->needs_resurrect) {
+      /* Detach a clone-ish view: build a parallel list of small
+       * structs for the worker to iterate without holding the
+       * spinlock.
+       *
+       * Allocate the clone BEFORE clearing the flags. If the
+       * GFP_ATOMIC allocation fails we must NOT consume the
+       * needs_resurrect flag: doing so would permanently strand the
+       * QID (the device deleted it, but the kernel still believes it
+       * exists, and no future event would re-trigger us because
+       * @created would also be cleared). Instead leave the entry
+       * untouched and reschedule a retry below.
+       */
+      struct poisoned_qid_entry* clone = kmalloc(sizeof(*clone), GFP_ATOMIC);
+      if (!clone) {
+        clone_oom = true;
+        continue;
+      }
+      pe->needs_resurrect = false;
+      pe->created = false; /* fresh slate: we're handing the QID back */
+      clone->bdf = pe->bdf;
+      clone->qid = pe->qid;
+      clone->created = false;
+      clone->needs_resurrect = false;
+      INIT_LIST_HEAD(&clone->list);
+      list_add_tail(&clone->list, &to_resurrect);
+    }
+  }
+  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+
+  if (clone_oom) {
+    pr_warn("rocm-axiio: resurrect: clone alloc failed under memory "
+            "pressure; retrying in %u ms\n",
+            ROCM_XIO_RESURRECT_DELAY_MS);
+    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
+                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
+  }
+
+  list_for_each_entry_safe(pe, pe_tmp, &to_resurrect, list) {
+    struct pci_dev* pdev;
+    struct nvme_queue_snapshot snap;
+    struct nvme_command c;
+    int rc;
+    unsigned int bus, devfn;
+    int cq_flags;
+
+    list_del(&pe->list);
+
+    bus = (pe->bdf >> 8) & 0xFF;
+    devfn = pe->bdf & 0xFF;
+    pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
+    if (!pdev) {
+      pr_warn("rocm-axiio: resurrect: pci_dev for bdf 0x%04x not found, "
+              "skipping qid=%u\n",
+              pe->bdf, pe->qid);
+      kfree(pe);
+      continue;
+    }
+
+    if (!nvme_queue_snapshot_lookup(pdev, pe->qid, &snap)) {
+      pr_warn("rocm-axiio: resurrect: NO snapshot for %s qid=%u; "
+              "kernel will hit a one-time timeout on this QID. "
+              "(Snapshot will be captured on the controller reset that "
+              "follows.)\n",
+              pci_name(pdev), pe->qid);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    if (!snap.admin_q) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u has snapshot but no admin_q, "
+              "skipping\n",
+              pci_name(pdev), pe->qid);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    if (snap.q_depth == 0 || snap.sq_dma_addr == 0 || snap.cq_dma_addr == 0) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot looks bogus "
+              "(depth=%u sq=0x%llx cq=0x%llx), skipping\n",
+              pci_name(pdev), pe->qid, snap.q_depth,
+              (unsigned long long)snap.sq_dma_addr,
+              (unsigned long long)snap.cq_dma_addr);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    /* ---- CREATE_CQ ---- (must come first; SQ references the CQ) */
+    memset(&c, 0, sizeof(c));
+    cq_flags = NVME_QUEUE_PHYS_CONTIG;
+    if (!snap.polled)
+      cq_flags |= NVME_CQ_IRQ_ENABLED;
+
+    c.create_cq.opcode = nvme_admin_create_cq;
+    c.create_cq.prp1 = cpu_to_le64(snap.cq_dma_addr);
+    c.create_cq.cqid = cpu_to_le16(pe->qid);
+    c.create_cq.qsize = cpu_to_le16(snap.q_depth - 1);
+    c.create_cq.cq_flags = cpu_to_le16(cq_flags);
+    c.create_cq.irq_vector = cpu_to_le16(snap.cq_vector);
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_CQ "
+            "prp1=0x%llx qsize=%u cq_flags=0x%x vec=%u\n",
+            pci_name(pdev), pe->qid, (unsigned long long)snap.cq_dma_addr,
+            snap.q_depth - 1, cq_flags, snap.cq_vector);
+
+    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
+    if (rc) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_CQ failed: %d\n",
+              pci_name(pdev), pe->qid, rc);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    /* ---- CREATE_SQ ---- */
+    memset(&c, 0, sizeof(c));
+    c.create_sq.opcode = nvme_admin_create_sq;
+    c.create_sq.prp1 = cpu_to_le64(snap.sq_dma_addr);
+    c.create_sq.sqid = cpu_to_le16(pe->qid);
+    c.create_sq.qsize = cpu_to_le16(snap.q_depth - 1);
+    c.create_sq.sq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG);
+    c.create_sq.cqid = cpu_to_le16(pe->qid);
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_SQ "
+            "prp1=0x%llx qsize=%u\n",
+            pci_name(pdev), pe->qid, (unsigned long long)snap.sq_dma_addr,
+            snap.q_depth - 1);
+
+    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
+    if (rc) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_SQ failed: %d "
+              "(controller now has CQ but no SQ for this qid; a kernel "
+              "I/O on this hctx will still time out and trigger a reset)\n",
+              pci_name(pdev), pe->qid, rc);
+      pci_dev_put(pdev);
+      kfree(pe);
+      continue;
+    }
+
+    /*
+     * ---- Host-side ring-pointer write-back ----
+     *
+     * CREATE_CQ + CREATE_SQ reset the controller's internal SQ-head /
+     * CQ-tail to the top, but the kernel's host-side copies in struct
+     * nvme_queue are untouched because nvme_init_queue() is never
+     * called on our passthrough resurrect path. Without this the host
+     * keeps stale sq_tail/cq_head/cq_phase and the first post-resurrect
+     * I/O writes the wrong SQ slot / checks the wrong phase and hangs.
+     *
+     * Mirror exactly the four ring pointers nvme_init_queue sets:
+     *   sq_tail = 0; last_sq_tail = 0; cq_head = 0; cq_phase = 1;
+     * (and clear the CQE ring, below, so a stale phase-1 CQE at the old
+     * cq_head is not mistaken for a fresh completion). The other
+     * nvme_init_queue side effects are inert here: q_db is unchanged
+     * across resurrect, dbbuf is not advertised by this controller, and
+     * online_queues must not be bumped (the queue was never torn down
+     * host-side).
+     *
+     * SAFETY / LOCKING:
+     *   sq_tail/last_sq_tail are written by the submit path under
+     *   nvmeq->sq_lock; we take that same (offset-verified) lock so the
+     *   reset is atomic w.r.t. concurrent dispatch. The lock is never
+     *   taken from hard-IRQ context, so plain spin_lock is correct.
+     *
+     *   cq_head/cq_phase are written lock-free by the completion path.
+     *   We rely on the queue being wedged at resurrect time (device has
+     *   no such QID and QUIESCE_NS stopped this hctx), so no completion
+     *   can be in flight. wmb() publishes the reset before the first
+     *   post-UNQUIESCE I/O.
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
+  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
+    /*
+     * Liveness/identity re-validation before trusting snap.dev: it is
+     * a raw nvme_dev* captured earlier with no refcount (the pci_dev
+     * ref does not keep the nvme_dev alive), so reading its fields
+     * after a driver detach would be a use-after-free. The nvme_pci
+     * driver stores nvme_dev as pdev drvdata, so matching it confirms
+     * the same nvme_dev is still attached. Best-effort (a tiny TOCTOU
+     * window remains) but closes the long-detached case.
+     */
+    if (snap.dev && pci_get_drvdata(pdev) == snap.dev) {
+      struct rocm_xio_nvme_dev_layout* dev_layout =
+        (struct rocm_xio_nvme_dev_layout*)snap.dev;
+      if (dev_layout->queues) {
+        /*
+         * dev->queues is an array of struct nvme_queue (NOT pointers);
+         * stride is the real kernel sizeof (version-specific). Index by
+         * qid and cast to the mirror.
+         */
+        const size_t kernel_nvmeq_stride = 192;
+        struct rocm_xio_nvmeq_layout* live_nvmeq =
+          (struct rocm_xio_nvmeq_layout*)((u8*)dev_layout->queues +
+                                          (size_t)pe->qid *
+                                            kernel_nvmeq_stride);
+
+        /*
+         * Clear the CQE ring (matches nvme_init_queue) so a stale
+         * phase-1 CQE at the old cq_head is not mistaken for a fresh
+         * completion after we reset cq_head=0, cq_phase=1.
+         */
+        if (live_nvmeq->cqes && snap.q_depth)
+          memset(live_nvmeq->cqes, 0,
+                 (size_t)snap.q_depth * sizeof(struct nvme_completion));
+
+        /* sq_tail / last_sq_tail under sq_lock (submit-path lock). */
+        spin_lock(&live_nvmeq->sq_lock);
+        live_nvmeq->sq_tail = 0;
+        live_nvmeq->last_sq_tail = 0;
+        spin_unlock(&live_nvmeq->sq_lock);
+
+        /* cq_head / cq_phase: no concurrent writer at resurrect time
+         * (see SAFETY note above). */
+        live_nvmeq->cq_head = 0;
+        live_nvmeq->cq_phase = 1;
+
+        wmb(); /* publish before the first post-resurrect I/O */
+
+        pr_info("rocm-axiio: resurrect: %s qid=%u host ring pointers "
+                "reset (sq_tail=last_sq_tail=cq_head=0, cq_phase=1)\n",
+                pci_name(pdev), pe->qid);
+      } else {
+        pr_warn("rocm-axiio: resurrect: %s qid=%u dev->queues NULL, "
+                "skipping host ring-pointer reset (queue may still "
+                "desync)\n",
+                pci_name(pdev), pe->qid);
+      }
+    } else if (snap.dev) {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u nvme driver detached "
+              "(pci_get_drvdata != snapshot nvme_dev); skipping host "
+              "ring-pointer reset to avoid use-after-free on the freed "
+              "nvme_dev (queue may still desync)\n",
+              pci_name(pdev), pe->qid);
+    } else {
+      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot has no nvme_dev, "
+              "skipping host ring-pointer reset\n",
+              pci_name(pdev), pe->qid);
+    }
+#else
+    pr_warn("rocm-axiio: resurrect: host ring-pointer reset compiled out "
+            "(kernel not in [6.8, 6.10)); mirror layout unverified for "
+            "this kernel -- qid=%u may desync\n",
+            pe->qid);
+#endif
+
+    pr_info("rocm-axiio: resurrect: %s qid=%u DONE\n", pci_name(pdev), pe->qid);
+
+    pci_dev_put(pdev);
+    kfree(pe);
+  }
+}
+
 static int rocm_xio_release(struct inode* inode, struct file* file) {
   struct contig_alloc_entry *ca, *tmp;
+  struct quiesced_ns_entry *qn, *qn_tmp;
   LIST_HEAD(to_release);
+  LIST_HEAD(quiesce_release);
+
+  /*
+   * Queue resurrection no longer runs here; it is triggered from the
+   * kprobe on the user DELETE_* (the real "device-side queue is gone"
+   * event), which may pre-date close and span multiple fds. Per-fd
+   * release was unreliable.
+   */
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
@@ -1531,6 +2894,41 @@ static int rocm_xio_release(struct inode* inode, struct file* file) {
             "size=%zu\n",
             ca->id, (unsigned long long)ca->dma_addr, ca->size);
     kref_put(&ca->ref, contig_alloc_release);
+  }
+
+  /*
+   * Auto-unquiesce any namespaces this fd left quiesced. The
+   * block layer would otherwise stay quiesced forever if a
+   * caller crashed between QUIESCE_NS and UNQUIESCE_NS.
+   */
+  mutex_lock(&quiesced_ns_lock);
+  list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
+    if (qn->owner == file) {
+      list_del(&qn->list);
+      list_add(&qn->list, &quiesce_release);
+    }
+  }
+  mutex_unlock(&quiesced_ns_lock);
+
+  list_for_each_entry_safe(qn, qn_tmp, &quiesce_release, list) {
+    struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
+    list_del(&qn->list);
+    if (q) {
+      if (qn->mode == QUIESCED_NS_MODE_FULL) {
+        blk_mq_unquiesce_queue(q);
+        pr_info("rocm-axiio: release: auto-unquiesced request_queue for %pg\n",
+                qn->bd);
+      } else {
+        struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, qn->hctx_idx);
+        if (hctx) {
+          blk_mq_start_hw_queue(hctx);
+          pr_info("rocm-axiio: release: auto-restarted hctx %u for %pg\n",
+                  qn->hctx_idx, qn->bd);
+        }
+      }
+    }
+    fput(qn->bdev_file);
+    kfree(qn);
   }
 
   return 0;
@@ -1586,6 +2984,36 @@ static int __init rocm_xio_init(void) {
     }
   }
 
+  /*
+   * Register kretprobe on nvme_alloc_queue so we snapshot each I/O
+   * queue's DMA addrs/depth/vector for the resurrection path.
+   *
+   * Queues allocated BEFORE this module loads are not captured; the
+   * first controller reset after load re-invokes nvme_alloc_queue and
+   * from then on we have snapshots.
+   */
+  ret = register_kretprobe(&nvme_alloc_queue_krp);
+  if (ret < 0) {
+    pr_warn("rocm-axiio: Failed to register nvme_alloc_queue kretprobe: %d\n",
+            ret);
+    pr_warn("  Initial queue snapshot disabled (only matters at probe).\n");
+  } else {
+    nvme_alloc_queue_krp_registered = true;
+    pr_info("rocm-axiio: nvme_alloc_queue kretprobe registered at %p\n",
+            nvme_alloc_queue_krp.kp.addr);
+  }
+
+  ret = register_kretprobe(&nvme_create_queue_krp);
+  if (ret < 0) {
+    pr_warn("rocm-axiio: Failed to register nvme_create_queue kretprobe: %d\n",
+            ret);
+    pr_warn("  QID resurrection on release will be disabled.\n");
+  } else {
+    nvme_create_queue_krp_registered = true;
+    pr_info("rocm-axiio: nvme_create_queue kretprobe registered at %p\n",
+            nvme_create_queue_krp.kp.addr);
+  }
+
   pr_info("rocm-axiio: Module loaded\n");
   pr_info("  Device: /dev/%s\n", DEVICE_NAME);
   pr_info("  Major number: %d\n", major_number);
@@ -1601,6 +3029,63 @@ static void __exit rocm_xio_exit(void) {
   /* Unregister kprobe */
   if (inject_enabled) {
     unregister_kprobe(&nvme_kp);
+  }
+
+  if (nvme_alloc_queue_krp_registered) {
+    unregister_kretprobe(&nvme_alloc_queue_krp);
+    nvme_alloc_queue_krp_registered = false;
+    pr_info("rocm-axiio: nvme_alloc_queue kretprobe unregistered "
+            "(missed=%d)\n",
+            nvme_alloc_queue_krp.nmissed);
+  }
+  if (nvme_create_queue_krp_registered) {
+    unregister_kretprobe(&nvme_create_queue_krp);
+    nvme_create_queue_krp_registered = false;
+    pr_info("rocm-axiio: nvme_create_queue kretprobe unregistered "
+            "(missed=%d)\n",
+            nvme_create_queue_krp.nmissed);
+  }
+
+  /* Wait for any pending snapshot/resurrect work to finish before
+   * tearing down the snapshot/pending/poisoned lists. The kretprobes
+   * are already unregistered above, so no new pending entries can be
+   * enqueued. cancel_work_sync lets an already-scheduled snapshot work
+   * run to completion (draining pending_snapshots) before returning. */
+  cancel_work_sync(&rocm_xio_snapshot_work);
+  cancel_delayed_work_sync(&rocm_xio_resurrect_work);
+
+  /* Defensively drain any pending snapshot captures that were enqueued
+   * but never processed (should be empty after cancel_work_sync, but
+   * avoid a leak if one slipped in). */
+  {
+    struct pending_snapshot_entry *pse, *pse_tmp;
+    unsigned long flags_irq;
+    LIST_HEAD(to_free);
+    spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
+    list_splice_init(&pending_snapshots, &to_free);
+    spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
+    list_for_each_entry_safe(pse, pse_tmp, &to_free, list) {
+      list_del(&pse->list);
+      kfree(pse);
+    }
+  }
+
+  /* Free any remaining queue snapshots and poisoned-qid entries */
+  nvme_queue_snapshots_free_all();
+  {
+    struct poisoned_qid_entry *pe, *pe_tmp;
+    unsigned long flags_irq;
+    LIST_HEAD(to_free);
+    spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
+    list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
+      list_del(&pe->list);
+      list_add(&pe->list, &to_free);
+    }
+    spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
+    list_for_each_entry_safe(pe, pe_tmp, &to_free, list) {
+      list_del(&pe->list);
+      kfree(pe);
+    }
   }
 
   /* Clean up registered queue addresses */
@@ -1652,6 +3137,40 @@ static void __exit rocm_xio_exit(void) {
               "id=%u dma=0x%llx size=%zu\n",
               ca->id, (unsigned long long)ca->dma_addr, ca->size);
       kref_put(&ca->ref, contig_alloc_release);
+    }
+  }
+
+  /* Unquiesce any namespaces still held by the module */
+  {
+    struct quiesced_ns_entry *qn, *qn_tmp;
+    LIST_HEAD(qn_free);
+
+    mutex_lock(&quiesced_ns_lock);
+    list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
+      list_del(&qn->list);
+      list_add(&qn->list, &qn_free);
+    }
+    mutex_unlock(&quiesced_ns_lock);
+
+    list_for_each_entry_safe(qn, qn_tmp, &qn_free, list) {
+      struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
+      list_del(&qn->list);
+      if (q) {
+        if (qn->mode == QUIESCED_NS_MODE_FULL) {
+          blk_mq_unquiesce_queue(q);
+          pr_info("rocm-axiio: exit: unquiesced request_queue for %pg\n",
+                  qn->bd);
+        } else {
+          struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, qn->hctx_idx);
+          if (hctx) {
+            blk_mq_start_hw_queue(hctx);
+            pr_info("rocm-axiio: exit: restarted hctx %u for %pg\n",
+                    qn->hctx_idx, qn->bd);
+          }
+        }
+      }
+      fput(qn->bdev_file);
+      kfree(qn);
     }
   }
 

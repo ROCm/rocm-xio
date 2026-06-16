@@ -1523,6 +1523,105 @@ __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
   return 0;
 }
 
+__host__ int xioQuiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                     uint32_t qid) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: failed to open %s: %s\n", ns_path,
+                    strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+  req.qid = qid;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_QUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      ROCXIO_LOG_INFO(
+        "xioQuiesceNvmeNamespace: kernel module lacks QUIESCE_NS "
+        "(ENOTTY) for %s; continuing without block-layer quiesce\n",
+        ns_path);
+      return -ENOTTY;
+    }
+    ROCXIO_LOG_WARN("xioQuiesceNvmeNamespace: ioctl(%s, qid=%u) failed: %s\n",
+                    ns_path, qid, strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  if (qid == 0) {
+    ROCXIO_LOG_INFO("xioQuiesceNvmeNamespace: quiesced entire "
+                    "request_queue for %s\n",
+                    ns_path);
+  } else {
+    ROCXIO_LOG_INFO("xioQuiesceNvmeNamespace: stopped hctx for qid %u on "
+                    "%s; other queues continue to dispatch\n",
+                    qid, ns_path);
+  }
+  return 0;
+}
+
+__host__ int xioUnquiesceNvmeNamespace(int kmod_fd, const char* ns_path,
+                                       uint32_t qid) {
+  if (kmod_fd < 0 || !ns_path || !*ns_path) {
+    return -EINVAL;
+  }
+
+  int bdev_fd = open(ns_path, O_RDONLY | O_CLOEXEC);
+  if (bdev_fd < 0) {
+    int err = errno;
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: failed to open %s: %s\n",
+                    ns_path, strerror(err));
+    return -err;
+  }
+
+  struct rocm_xio_quiesce_ns_req req;
+  memset(&req, 0, sizeof(req));
+  req.bdev_fd = bdev_fd;
+  req.qid = qid;
+
+  int ret = ioctl(kmod_fd, ROCM_XIO_UNQUIESCE_NS, &req);
+  int saved_errno = errno;
+  close(bdev_fd);
+
+  if (ret < 0) {
+    if (saved_errno == ENOTTY) {
+      return -ENOTTY;
+    }
+    if (saved_errno == ENOENT) {
+      ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: %s qid %u was not "
+                      "quiesced by this fd\n",
+                      ns_path, qid);
+      return -ENOENT;
+    }
+    ROCXIO_LOG_WARN("xioUnquiesceNvmeNamespace: ioctl(%s, qid=%u) failed: "
+                    "%s\n",
+                    ns_path, qid, strerror(saved_errno));
+    return -saved_errno;
+  }
+
+  if (qid == 0) {
+    ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: resumed entire "
+                    "request_queue for %s\n",
+                    ns_path);
+  } else {
+    ROCXIO_LOG_INFO("xioUnquiesceNvmeNamespace: restarted hctx for qid %u "
+                    "on %s\n",
+                    qid, ns_path);
+  }
+  return 0;
+}
+
 __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
                                   void** gpu_ptr_out) {
   if (!host_ptr || size == 0 || !name || !gpu_ptr_out) {
@@ -1888,10 +1987,8 @@ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
     return -errno;
   }
 
-  // Keep kmod_fd open for the mapping to remain valid
-  // Note: In a production system, you might want to track this fd
-  // and close it on cleanup, but for simplicity we'll leave it open
-  // The kernel will clean it up when the process exits
+  // Keep kmod_fd open so the mapping stays valid; the kernel reclaims
+  // it at process exit.
 
   *virt_addr = mapped;
   ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer mapped: GPA=0x%llx, "
@@ -1995,12 +2092,8 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
 
   ROCXIO_LOG_INFO("PCI BAR%u mapped at %p (size=%zu)\n", bar, mapped, bar_size);
 
-  // Register with HIP for GPU access.
-  // hipHostRegisterIoMemory ensures the mapping uses non-cacheable
-  // attributes appropriate for MMIO regions (e.g. NVMe BAR0
-  // doorbells).  hipHostRegisterMapped alone may allow GPU caching
-  // that defeats doorbell write ordering -- an issue observed in
-  // independent GPU-NVMe coherence testing (from-germany repro).
+  // Register MMIO as IoMemory: hipHostRegisterMapped may allow GPU
+  // caching that defeats doorbell write ordering.
   void* gpu_ptr = nullptr;
   hipError_t hip_err = hipHostRegister(mapped, bar_size,
                                        hipHostRegisterIoMemory);

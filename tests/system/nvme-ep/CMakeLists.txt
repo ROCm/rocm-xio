@@ -481,3 +481,128 @@ xio_add_script_test(
     "READ_IO=128"
     "BUILD_DIR=${CMAKE_BINARY_DIR}"
 )
+
+# --- QID-8 ring-wrap resurrect stress test --------------
+# Proves the kernel-module resurrect path resets the host-side NVMe
+# ring pointers (sq_tail/last_sq_tail/cq_head/cq_phase) after a deleted
+# queue is recreated. Drives an odd number of half-ring-wraps so
+# cq_phase flips to 0, deletes + resurrects QID 8, then verifies a
+# CPU-7-pinned write/read round-trips. Without the fix the first
+# post-resurrect I/O hangs and the controller resets.
+#
+# Default driver is GPU-free (nvme admin-passthru DELETE + the
+# test-only ROCM_XIO_DEBUG_RESURRECT_QID ioctl), so it runs even where
+# the Navi 21 GPU is wedged by the AMD reset bug. The helper binary
+# issues that ioctl.
+# Compile the tiny C helper as CXX: the top-level project only enables
+# CXX and HIP (not C), and the helper is plain C that is valid C++.
+set_source_files_properties(
+  ${CMAKE_SOURCE_DIR}/scripts/test/resurrect-qid.c
+  PROPERTIES LANGUAGE CXX)
+add_executable(resurrect-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/resurrect-qid.c)
+set_target_properties(resurrect-qid PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+set(_qid8_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid8-ring-wrap-stress.sh)
+
+xio_add_script_test(
+  NAME nvme-qid8-ring-wrap-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme verify
+  TIMEOUT 300
+  ARGS ${_qid8_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=5"
+    "STRESS_HALF_WRAPS=3"
+    "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
+)
+
+# --- QID quiesce isolation + delete/create stress tests --------------
+# Two GPU-free CPU-only stress tests that exercise rocm-xio queue
+# manipulation against a WARM kernel (after heavy prior I/O):
+#   nvme-qid-quiesce-stress  -- proves QUIESCE_NS stops dispatch to the
+#       target hctx under load while other queues keep flowing, and that
+#       UNQUIESCE_NS cleanly resumes it (ordering-proven, not just slow).
+#   nvme-qid-recreate-stress -- proves a DELETE + resurrect cycle leaves
+#       the recreated queue usable under a sustained post-create hammer.
+#
+# Both drive the PRODUCTION rocm-xio ioctls via tiny C helpers. As with
+# resurrect-qid above, the helpers are plain C compiled as CXX (the
+# top-level project enables only CXX/HIP). quiesce-qid/unquiesce-qid
+# issue QUIESCE_NS/UNQUIESCE_NS; hold-quiesce holds the controlling fd
+# open for a fixed window (the module auto-restarts a quiesced hctx the
+# instant that fd closes, so a fire-and-exit quiesce would not hold).
+set_source_files_properties(
+  ${CMAKE_SOURCE_DIR}/scripts/test/quiesce-qid.c
+  ${CMAKE_SOURCE_DIR}/scripts/test/unquiesce-qid.c
+  ${CMAKE_SOURCE_DIR}/scripts/test/hold-quiesce.c
+  PROPERTIES LANGUAGE CXX)
+add_executable(quiesce-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/quiesce-qid.c)
+add_executable(unquiesce-qid
+  ${CMAKE_SOURCE_DIR}/scripts/test/unquiesce-qid.c)
+add_executable(hold-quiesce
+  ${CMAKE_SOURCE_DIR}/scripts/test/hold-quiesce.c)
+set_target_properties(quiesce-qid unquiesce-qid hold-quiesce PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
+set(_qid_quiesce_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-quiesce-stress.sh)
+set(_qid_recreate_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-recreate-stress.sh)
+
+# Quiesce isolation: needs the hold-quiesce helper to keep the window
+# open; QUIESCE_HOLD_S must exceed FIRST_IO_TIMEOUT_S+3 (hardened
+# preflight), so pass 12 against the default 8s first-IO timeout.
+xio_add_script_test(
+  NAME nvme-qid-quiesce-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress
+  TIMEOUT 600
+  ARGS ${_qid_quiesce_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=3"
+    "QUIESCE_HOLD_S=12"
+    "HOLD_HELPER=${CMAKE_BINARY_DIR}/hold-quiesce"
+    "QUIESCE_HELPER=${CMAKE_BINARY_DIR}/quiesce-qid"
+    "UNQUIESCE_HELPER=${CMAKE_BINARY_DIR}/unquiesce-qid"
+)
+
+# Delete/create resilience: reuses the resurrect-qid helper built above.
+xio_add_script_test(
+  NAME nvme-qid-recreate-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress
+  TIMEOUT 600
+  ARGS ${_qid_recreate_stress}
+  ENVIRONMENT
+    "STRESS_ITERS=5"
+    "STRESS_HALF_WRAPS=3"
+    "RESURRECT_HELPER=${CMAKE_BINARY_DIR}/resurrect-qid"
+)
+
+# --- Gated GPU-driven delete/create stress test ---------------------
+# Faithful end-to-end variant of nvme-qid-recreate-stress: the warm
+# phase is a real xio-tester GPU hijack of the queue (not a synthesised
+# admin-passthru DELETE), so on xio-tester exit the module schedules the
+# resurrect via its kprobe. Then kernel I/O hammers the recreated queue.
+# Gated behind STRESS_USE_GPU=1: needs a working gfx1030 GPU (the AMD
+# reset bug can wedge it), so by default the script SKIPs cleanly. Reuses
+# the prebuilt xio-tester target.
+set(_qid_recreate_gpu_stress
+  ${CMAKE_SOURCE_DIR}/scripts/test/test-qid-recreate-gpu-stress.sh)
+
+xio_add_script_test(
+  NAME nvme-qid-recreate-gpu-stress
+  SCRIPT ${_verify_wrapper}
+  LABELS hardware nvme stress gpu
+  TIMEOUT 900
+  ARGS ${_qid_recreate_gpu_stress}
+  ENVIRONMENT
+    "STRESS_USE_GPU=1"
+    "STRESS_ITERS=3"
+    "STRESS_HALF_WRAPS=3"
+    "XIO_TESTER=${CMAKE_BINARY_DIR}/xio-tester"
+)
