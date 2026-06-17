@@ -296,14 +296,22 @@ void register_sdma_ep(nb::module_& m) {
     .def_rw("committed_wptr", &sdma_ep::SdmaQueuePythonDeviceCtx::committedWptr,
             "Committed write pointer");
 
-  // Tile class
+  // Tile struct for 2D transfers
   nb::class_<sdma_ep::Tile>(m, "Tile")
     .def(nb::init<>())
     .def_rw("pid_m", &sdma_ep::Tile::pid_m, "Tile coordinate in M dimension")
     .def_rw("pid_n", &sdma_ep::Tile::pid_n, "Tile coordinate in N dimension")
     .def_rw("block_m", &sdma_ep::Tile::block_m, "Block size in M dimension")
     .def_rw("block_n", &sdma_ep::Tile::block_n, "Block size in N dimension")
-    .def_rw("data", &sdma_ep::Tile::data, "Pointer to tile data (uintptr_t)")
+    .def_prop_rw(
+      "data",
+      [](const sdma_ep::Tile& t) {
+        return reinterpret_cast<uintptr_t>(t.data);
+      },
+      [](sdma_ep::Tile& t, uintptr_t ptr) {
+        t.data = reinterpret_cast<void*>(ptr);
+      },
+      "Pointer to tile data")
     .def_rw("elem_size", &sdma_ep::Tile::elem_size, "Element size in bytes")
     .def_rw("src_stride", &sdma_ep::Tile::src_stride,
             "Source row stride in bytes (0 = contiguous)")
