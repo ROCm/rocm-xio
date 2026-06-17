@@ -96,7 +96,7 @@ struct nvmeIoParams {
    * NVME_KV_PACKED_WORDS_PER_KEY uint32 per key (see nvme-kv.h). The single-key
    * serial path ignores these and uses kvKey[]/kvKeyLen above. */
   const uint32_t* kvKeysPacked; /**< Device ptr to packed key array, or null. */
-  uint32_t kvNumKeys;           /**< Number of keys in kvKeysPacked (0 = none). */
+  uint32_t kvNumKeys; /**< Number of keys in kvKeysPacked (0 = none). */
 };
 
 /**
@@ -131,11 +131,11 @@ struct nvmeBufferParams {
   uint32_t writeNumPages;       /**< Entries in writePagePhysAddrs. */
   uint64_t* prpListPool;        /**< PRP list backing storage for commands. */
   uint64_t* prpListPageDmas;    /**< DMA address per PRP list page. When a
-                                  *   command reserves more than one list page
-                                  *   (see @c prpListPagesPerCmd), the pages for
-                                  *   command slot @c s occupy table entries
-                                  *   @c [s*prpListPagesPerCmd .. +pagesPerCmd).
-                                  */
+                                 *   command reserves more than one list page
+                                 *   (see @c prpListPagesPerCmd), the pages for
+                                 *   command slot @c s occupy table entries
+                                 *   @c [s*prpListPagesPerCmd .. +pagesPerCmd).
+                                 */
   uint64_t prpListPoolDma;      /**< DMA address of prpListPool. */
   uint32_t prpEntriesPerCmd;    /**< PRP entries reserved per command. */
   /**
@@ -731,6 +731,15 @@ __host__ __device__ static inline uint8_t cqeStatusType(
  *                       page within pagePhysAddrs (the
  *                       buffer may start partway into
  *                       the allocation)
+ * @param prpListPagePhys  Physical addresses of the PRP list
+ *                         pages, used to chain across multiple
+ *                         list pages for transfers exceeding a
+ *                         single list page's capacity. nullptr
+ *                         disables chaining (single list page).
+ * @param prpListPageCount  Number of list pages available at
+ *                          prpList/prpListPagePhys. Must be > 1
+ *                          (with a non-null prpListPagePhys) to
+ *                          enable chaining; defaults to 1.
  */
 __host__ __device__ static inline void calculatePrps(
   uint64_t bufferAddr, uint32_t bufferSize, struct nvme_sqe* sqe,
@@ -750,11 +759,11 @@ __host__ __device__ static inline void calculatePrps(
   // Physical address of the i-th buffer page beyond PRP1 (page index 1 + i).
   // Non-contiguous buffers carry a per-page table; otherwise pages are
   // contiguous from the (aligned) buffer base.
-#define ROCXIO_PRP_DATA_PAGE(i)                                              \
-  (pagePhysAddrs                                                            \
-     ? pagePhysAddrs[bufPageOffset + 1 + (i)]                              \
-     : (((bufferAddr + first_page_size) & ~((uint64_t)(NVME_PAGE_SIZE - 1))) \
-        + (uint64_t)(i) * NVME_PAGE_SIZE))
+#define ROCXIO_PRP_DATA_PAGE(i)                                                \
+  (pagePhysAddrs                                                               \
+     ? pagePhysAddrs[bufPageOffset + 1 + (i)]                                  \
+     : (((bufferAddr + first_page_size) & ~((uint64_t)(NVME_PAGE_SIZE - 1))) + \
+        (uint64_t)(i) * NVME_PAGE_SIZE))
 
   uint32_t remaining = (uint32_t)(bufferSize - first_page_size);
   uint32_t num_remaining_pages = (remaining + NVME_PAGE_SIZE - 1) /
@@ -768,8 +777,7 @@ __host__ __device__ static inline void calculatePrps(
     return;
   }
 
-  const bool canChain =
-    (prpListPagePhys != nullptr) && (prpListPageCount > 1u);
+  const bool canChain = (prpListPagePhys != nullptr) && (prpListPageCount > 1u);
 
   // Fits in one list page, or chaining unavailable: emit a single PRP list
   // page (clamping to its capacity, preserving legacy behavior).
@@ -788,8 +796,8 @@ __host__ __device__ static inline void calculatePrps(
   // Every non-final list page holds (entriesPerPage - 1) data entries plus a
   // trailing chain pointer to the next list page; the final page uses all
   // entriesPerPage slots for data. Capacity bounds the walk defensively.
-  uint32_t capacity =
-    (prpListPageCount - 1u) * (entriesPerPage - 1u) + entriesPerPage;
+  uint32_t capacity = (prpListPageCount - 1u) * (entriesPerPage - 1u) +
+                      entriesPerPage;
   uint32_t total = num_remaining_pages;
   if (total > capacity)
     total = capacity;
@@ -911,15 +919,17 @@ struct nvmeEpConfig {
     uint32_t batchSize;        /**< SQEs per doorbell; 1=serial, 0=all. */
     /* KV mode (empty kvOp => normal block mode). Trailing defaulted members so
      * the brace-init in the constructor stays valid. */
-    std::string kvOp = "";     /**< "store", "retrieve", "exec", or "" (block). */
-    std::string kvKey = "";    /**< KV key string (up to 16 bytes). */
-    uint32_t kvValueLen = 0;   /**< KV value size; 0 => --data-buffer-size.
-                                 *  For exec this is the output-buffer cap. */
-    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest, wavefront KV. */
-    uint32_t kvOpId = 0;       /**< KV Exec operation ID (--op-id). */
-    uint32_t kvInputLen = 0;   /**< KV Exec input length (--input-size). */
-    uint32_t stageSettleCycles = 0; /**< spdk-5co diag: settle spin after Store stage. */
-  } ioParams;                  /**< I/O operation parameters. */
+    std::string kvOp = "";   /**< "store", "retrieve", "exec", or "" (block). */
+    std::string kvKey = "";  /**< KV key string (up to 16 bytes). */
+    uint32_t kvValueLen = 0; /**< KV value size; 0 => --data-buffer-size.
+                              *  For exec this is the output-buffer cap. */
+    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest, wavefront KV.
+                                           */
+    uint32_t kvOpId = 0;            /**< KV Exec operation ID (--op-id). */
+    uint32_t kvInputLen = 0;        /**< KV Exec input length (--input-size). */
+    uint32_t stageSettleCycles = 0; /**< spdk-5co diag: settle spin after Store
+                                       stage. */
+  } ioParams;                       /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
 

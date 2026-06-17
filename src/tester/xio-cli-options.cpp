@@ -157,14 +157,15 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->group(nvme_group);
 
   app
-    .add_option("--kv-op", cfg->ioParams.kvOp,
-                "NVMe Key-Value op: 'store', 'retrieve', or 'exec'. When set, "
-                "the endpoint issues KV commands against the KV namespace "
-                "instead of block I/O. Store/retrieve carry the key in "
-                "CDW2/3/14/15 and the value via PRP; exec (vendor 0x83) carries "
-                "the key length-prefixed in the DPTR payload head and runs an "
-                "--op-id-selected server-side op. Use --read-io N for retrieve "
-                "count, --write-io N for store/exec count.")
+    .add_option(
+      "--kv-op", cfg->ioParams.kvOp,
+      "NVMe Key-Value op: 'store', 'retrieve', or 'exec'. When set, "
+      "the endpoint issues KV commands against the KV namespace "
+      "instead of block I/O. Store/retrieve carry the key in "
+      "CDW2/3/14/15 and the value via PRP; exec (vendor 0x83) carries "
+      "the key length-prefixed in the DPTR payload head and runs an "
+      "--op-id-selected server-side op. Use --read-io N for retrieve "
+      "count, --write-io N for store/exec count.")
     ->check(CLI::IsMember({"store", "retrieve", "exec"}))
     ->group(nvme_group);
   app
@@ -186,9 +187,10 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
   app
-    .add_option("--op-id", cfg->ioParams.kvOpId,
-                "KV Exec operation ID (SQE CDW13) selecting the server-side op. "
-                "Only used with --kv-op exec.")
+    .add_option(
+      "--op-id", cfg->ioParams.kvOpId,
+      "KV Exec operation ID (SQE CDW13) selecting the server-side op. "
+      "Only used with --kv-op exec.")
     ->group(nvme_group);
   app
     .add_option("--input-size", cfg->ioParams.kvInputLen,
@@ -197,11 +199,12 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
                 "<= output buffer. Only used with --kv-op exec.")
     ->group(nvme_group);
   app
-    .add_option("--stage-settle-cycles", cfg->ioParams.stageSettleCycles,
-                "DIAGNOSTIC (spdk-5co): GPU wall_clock64 ticks to busy-spin after "
-                "staging a KV Store value, before ringing the doorbell. Tests "
-                "whether the bulk-Store data race is drain-timing vs lost writes. "
-                "0 = off (default).")
+    .add_option(
+      "--stage-settle-cycles", cfg->ioParams.stageSettleCycles,
+      "DIAGNOSTIC (spdk-5co): GPU wall_clock64 ticks to busy-spin after "
+      "staging a KV Store value, before ringing the doorbell. Tests "
+      "whether the bulk-Store data race is drain-timing vs lost writes. "
+      "0 = off (default).")
     ->group(nvme_group);
 
   app

@@ -71,14 +71,17 @@ value size.
 Files touched
 -------------
 
-- ``src/include/nvme-kv.h`` (new) --- KV opcodes, status codes, ``kvSqeSetup()``.
+- ``src/include/nvme-kv.h`` (new) --- KV opcodes, status codes,
+  ``kvSqeSetup()``.
 - ``src/endpoints/nvme-ep/nvme-ep.h`` --- ``#include "nvme-kv.h"``; KV fields on
-  ``nvmeIoParams`` (``kvOpcode``, ``kvKeyLen``, ``kvValueLen``, ``kvKey[4]``) and
+  ``nvmeIoParams`` (``kvOpcode``, ``kvKeyLen``, ``kvValueLen``,
+  ``kvKey[4]``) and
   on the host ``nvmeEpConfig::ioParams`` (``kvOp``, ``kvKey``, ``kvValueLen``).
 - ``src/endpoints/nvme-ep/nvme-ep.hip`` --- ``driveEndpointKv()`` (serial) and
   ``driveEndpointKvWavefront()`` (cooperative batch); dispatch in
   ``driveEndpoint()``; gate the block-only LBA-size and capacity queries in KV
-  mode; pack the key + value size and upload the multi-key manifest in ``run()``.
+  mode; pack the key + value size and upload the multi-key manifest in
+  ``run()``.
 - ``src/tester/xio-cli-options.cpp`` --- ``--kv-op``, ``--key``, ``--keys``,
   ``--value-size``.
 
@@ -95,16 +98,18 @@ Usage
    xio-tester nvme-ep --controller /dev/nvme0 \
        --kv-op retrieve --key gpukey01 --value-size 4096 --read-io 1 --pci-mmio-bridge
 
-``--read-io N`` / ``--write-io N`` set the op count (Retrieve / Store). The value
-buffer is ``--data-buffer-size`` (default 1 MiB); ``--value-size`` caps the
+``--read-io N`` / ``--write-io N`` set the op count (Retrieve / Store). The
+value buffer is ``--data-buffer-size`` (default 1 MiB); ``--value-size`` caps
+the
 transfer.
 
 Wavefront/batched KV (multi-key)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``--keys`` takes a manifest of keys and, with ``--batch-size B > 1``, drives the
-cooperative ``driveEndpointKvWavefront()`` path: threads ``1..B`` each encode one
-key's Store/Retrieve into its own value-buffer slot (``b * value_size``), and
+cooperative ``driveEndpointKvWavefront()`` path: threads ``1..B`` each encode
+one key's Store/Retrieve into its own value-buffer slot (``b * value_size``),
+and
 thread 0 rings the SQ doorbell once, polls the ``B`` completions, and rings the
 CQ doorbell --- the KV sibling of the block wavefront path. One key is processed
 per op (the manifest is cycled in ``--infinite`` mode).
@@ -125,8 +130,9 @@ The value buffer must hold ``batch-size * value-size`` bytes (each in-flight key
 needs its own slot); ``run()`` validates this. A single ``--key`` continues to
 use the serial path at ``--batch-size 1``.
 
-``scripts/test/stage3_kv_wavefront_gpu.sh`` runs this end-to-end against the SPDK
-kvdev_rados target: it batched-Stores a key manifest, batched-Retrieves it (host
+``scripts/test/stage3_kv_wavefront_gpu.sh`` runs this end-to-end against the
+SPDK kvdev_rados target: it batched-Stores a key manifest, batched-Retrieves it
+(host
 buffer and VRAM/P2PDMA), and ``rados stat``\ s every object. The SPDK kvdev
 target needs no changes for the batched path --- the NVMf KV handler is async
 with per-command request context, and the rados backend uses librados aio, so
