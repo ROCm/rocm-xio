@@ -59,7 +59,7 @@ cp "$OVMF_VARS_SRC" "$VARS"
 
 echo "== SPDK vfio-user NVMe-KV namespace backed by RADOS kvdev_rados =="
 LD_LIBRARY_PATH="$CEPH/lib" "$SPDK/build/bin/nvmf_tgt" -r "$SOCK" -m 0x1 --no-huge -s 1024 >"$RUN/tgt.log" 2>&1 &
-TGT_PID=$!; for i in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
+TGT_PID=$!; for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.1; done
 rpc nvmf_create_transport -t VFIOUSER -q 1024 -m 16 >/dev/null
 rpc kvdev_rados_register_cluster ceph0 --user admin --config-file "$CEPH/ceph.conf" --key-file "$CEPH/keyring" >/dev/null || { echo "register_cluster FAILED"; tail -10 "$RUN/tgt.log"; exit 1; }
 rpc kvdev_rados_create KvRados0 ceph0 "$KV_POOL" --namespace "$KV_NS" >/dev/null || { echo "kvdev_rados_create FAILED"; tail -10 "$RUN/tgt.log"; exit 1; }
@@ -87,7 +87,7 @@ QEMU_PID=$!
 echo "  qemu pid=$QEMU_PID  RUN=$RUN  (waiting for guest SSH)"
 
 up=0
-for i in $(seq 1 90); do
+for _ in $(seq 1 90); do
   $SSH 'echo ok' >/dev/null 2>&1 && { up=1; break; }
   kill -0 "$QEMU_PID" 2>/dev/null || { echo "QEMU exited early"; tail -30 "$RUN/qemu.log" "$RUN/console.log"; exit 1; }
   sleep 2

@@ -5,41 +5,44 @@
  * kv_cpu_probe.c
  *
  * GPU-FREE validation of the NVMe Key-Value path: issues a KV Store then a KV
- * Retrieve through /dev/nvme0 using the kernel's NVMe IO passthrough ioctl. This
- * exercises everything the GPU path does EXCEPT the doorbell (which is already
- * proven for block I/O): host enumeration of the KV controller, the exact KV
- * SQE encoding (key in CDW2/3/14/15, key length in CDW11, value size in CDW10),
- * SPDK kvdev command handling, and RADOS storage. Runs wherever /dev/nvme0 is a
- * KV controller -- in a VM guest today, or on bare metal (e.g. behind a DPU).
+ * Retrieve through /dev/nvme0 using the kernel's NVMe IO passthrough ioctl.
+ * This exercises everything the GPU path does EXCEPT the doorbell (which is
+ * already proven for block I/O): host enumeration of the KV controller, the
+ * exact KV SQE encoding (key in CDW2/3/14/15, key length in CDW11, value size
+ * in CDW10), SPDK kvdev command handling, and RADOS storage. Runs wherever
+ * /dev/nvme0 is a KV controller -- in a VM guest today, or on bare metal (e.g.
+ * behind a DPU).
  *
  * Build: gcc -O2 -o kv_cpu_probe kv_cpu_probe.c
  * Usage: kv_cpu_probe [/dev/nvme0] [nsid] [key]
  */
 #define _GNU_SOURCE
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
+
 #include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 /* KV Command Set opcodes. Kept as local literals on purpose: this probe is a
  * dependency-free standalone gcc build, so it cannot pull in rocm-xio's
  * src/include/nvme-kv.h (which needs HIP + nvme-ep-generated.h). These values
  * are the public NVMe KV spec and match nvme_kv_cmd_store/retrieve in
- * nvme-kv.h (and SPDK's spdk_nvme_kv_opcode: SPDK_NVME_OPC_KV_STORE/RETRIEVE). */
+ * nvme-kv.h (and SPDK's spdk_nvme_kv_opcode: SPDK_NVME_OPC_KV_STORE/RETRIEVE).
+ */
 #define KV_OPC_STORE 0x01
 #define KV_OPC_RETRIEVE 0x02
 
 /* Issue one KV command via NVMe IO passthrough. Returns the ioctl result:
  * 0 = success, >0 = NVMe status code, <0 = -errno. *result_out gets CQE DW0
  * (the returned value length for Retrieve). */
-static int kv_cmd(int fd, uint8_t opcode, uint32_t nsid, const uint8_t *key,
-                  uint8_t keylen, void *buf, uint32_t buflen,
-                  uint32_t *result_out) {
+static int kv_cmd(int fd, uint8_t opcode, uint32_t nsid, const uint8_t* key,
+                  uint8_t keylen, void* buf, uint32_t buflen,
+                  uint32_t* result_out) {
   struct nvme_passthru_cmd c;
   memset(&c, 0, sizeof(c));
   c.opcode = opcode;
@@ -47,7 +50,8 @@ static int kv_cmd(int fd, uint8_t opcode, uint32_t nsid, const uint8_t *key,
   c.addr = (uint64_t)(uintptr_t)buf;
   c.data_len = buflen;
 
-  /* Key: low 8 bytes -> CDW2/CDW3, high 8 -> CDW14/CDW15 (flat little-endian). */
+  /* Key: low 8 bytes -> CDW2/CDW3, high 8 -> CDW14/CDW15 (flat little-endian).
+   */
   uint32_t k[4] = {0, 0, 0, 0};
   memcpy(k, key, keylen > 16 ? 16 : keylen);
   c.cdw2 = k[0];
@@ -55,7 +59,7 @@ static int kv_cmd(int fd, uint8_t opcode, uint32_t nsid, const uint8_t *key,
   c.cdw14 = k[2];
   c.cdw15 = k[3];
 
-  c.cdw10 = buflen;        /* value size (store) / host buffer size (retrieve) */
+  c.cdw10 = buflen; /* value size (store) / host buffer size (retrieve) */
   c.cdw11 = keylen & 0xFF; /* key length */
   c.timeout_ms = 5000;
 
@@ -66,10 +70,10 @@ static int kv_cmd(int fd, uint8_t opcode, uint32_t nsid, const uint8_t *key,
   return rc;
 }
 
-int main(int argc, char **argv) {
-  const char *dev = argc > 1 ? argv[1] : "/dev/nvme0";
+int main(int argc, char** argv) {
+  const char* dev = argc > 1 ? argv[1] : "/dev/nvme0";
   uint32_t nsid = argc > 2 ? (uint32_t)atoi(argv[2]) : 1;
-  const char *key = argc > 3 ? argv[3] : "cpukey01";
+  const char* key = argc > 3 ? argv[3] : "cpukey01";
   size_t klen = strlen(key);
   if (klen < 1 || klen > 16) {
     fprintf(stderr,
@@ -83,13 +87,14 @@ int main(int argc, char **argv) {
   int fd = open(dev, O_RDWR);
   if (fd < 0) {
     fprintf(stderr, "FATAL: open %s: %s\n", dev, strerror(errno));
-    fprintf(stderr, "  -> the host did NOT bring up the KV controller char dev\n");
+    fprintf(stderr,
+            "  -> the host did NOT bring up the KV controller char dev\n");
     return 2;
   }
 
   uint32_t vlen = 4096;
-  uint8_t *wbuf = aligned_alloc(4096, vlen);
-  uint8_t *rbuf = aligned_alloc(4096, vlen);
+  uint8_t* wbuf = aligned_alloc(4096, vlen);
+  uint8_t* rbuf = aligned_alloc(4096, vlen);
   if (!wbuf || !rbuf) {
     fprintf(stderr, "FATAL: aligned_alloc(%u) failed\n", vlen);
     free(wbuf);
@@ -106,7 +111,7 @@ int main(int argc, char **argv) {
          keylen, vlen);
 
   uint32_t res = 0;
-  int rc = kv_cmd(fd, KV_OPC_STORE, nsid, (const uint8_t *)key, keylen, wbuf,
+  int rc = kv_cmd(fd, KV_OPC_STORE, nsid, (const uint8_t*)key, keylen, wbuf,
                   vlen, &res);
   printf("[STORE]    ioctl rc=%d (0=ok, >0=nvme-status) ", rc);
   if (rc < 0) {
@@ -116,8 +121,8 @@ int main(int argc, char **argv) {
   }
 
   res = 0;
-  rc = kv_cmd(fd, KV_OPC_RETRIEVE, nsid, (const uint8_t *)key, keylen, rbuf, vlen,
-              &res);
+  rc = kv_cmd(fd, KV_OPC_RETRIEVE, nsid, (const uint8_t*)key, keylen, rbuf,
+              vlen, &res);
   printf("[RETRIEVE] ioctl rc=%d ", rc);
   if (rc < 0) {
     printf("errno=%d (%s)\n", errno, strerror(errno));
@@ -134,11 +139,12 @@ int main(int argc, char **argv) {
   }
 
   printf("\nVERDICT: %s\n",
-         ok ? "KV Store+Retrieve WORK from the host CPU -> the host enumerates "
-              "the KV controller and the KV SQE format is correct; only the GPU "
-              "doorbell remains (already proven for block)."
-            : "KV path did NOT complete from the host CPU -- see status/errno "
-              "above (controller enumeration or KV command handling).");
+         ok
+           ? "KV Store+Retrieve WORK from the host CPU -> the host enumerates "
+             "the KV controller and the KV SQE format is correct; only the GPU "
+             "doorbell remains (already proven for block)."
+           : "KV path did NOT complete from the host CPU -- see status/errno "
+             "above (controller enumeration or KV command handling).");
   close(fd);
   return ok ? 0 : 1;
 }
