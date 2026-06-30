@@ -47,7 +47,7 @@ struct ernic_device_sq : public ernic_device_wq {
   uint32_t qp_handle;
   /* pci-mmio-bridge doorbell routing */
   void* mmio_bridge_shadow;
-  uint16_t ernic_target_bdf;
+  uint32_t ernic_target_bdf;
   bool use_mmio_bridge;
   uint32_t uar_bar_offset;
   volatile int32_t* sq_ring_prod_tail;

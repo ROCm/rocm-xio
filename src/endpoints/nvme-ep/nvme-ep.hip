@@ -1002,7 +1002,7 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
 
   // Detect PCI MMIO bridge BDF if --pci-mmio-bridge is set
   if (config->doorbellParams.usePciMmioBridge) {
-    uint16_t detected_bdf = 0;
+    uint32_t detected_bdf = 0;
     int bdf_ret = detectPciMmioBridgeBdf(&detected_bdf);
     if (bdf_ret != 0) {
       return "Failed to detect PCI MMIO bridge BDF";
@@ -1011,7 +1011,7 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
   }
 
   // Detect NVMe target BDF from controller device path
-  uint16_t detected_nvme_bdf = 0;
+  uint32_t detected_nvme_bdf = 0;
   int nvme_bdf_ret = detectBdfFromDevice(config->controller.c_str(),
                                          &detected_nvme_bdf);
   if (nvme_bdf_ret != 0) {
@@ -2664,7 +2664,7 @@ static void freeQueueSetup(struct xioQueueSetup* s, bool is_device,
 
 __host__ int createQueue(const char* nvme_device,
                          const char* kernel_module_device, uint16_t queue_id,
-                         uint16_t queue_size, uint16_t nvme_bdf,
+                         uint16_t queue_size, uint32_t nvme_bdf,
                          unsigned memory_mode, struct nvme_queue_info* info) {
   int kmod_fd = -1;
   int nvme_fd = -1;

@@ -24,6 +24,28 @@ extern "C" {
 /** @brief ioctl magic value reserved for the rocm-xio character device. */
 #define ROCM_XIO_IOC_MAGIC 'R'
 
+/**
+ * @brief PCI BDF encoding used throughout the rocm-xio UAPI.
+ *
+ * All BDF fields are widened to 32 bits so that systems with multiple PCI
+ * segments (domains) are fully supported.  The layout is:
+ *
+ *   bits 31:16  PCI domain  (0x0000–0xFFFF)
+ *   bits 15:8   bus number  (0x00–0xFF)
+ *   bits  7:3   device      (0x00–0x1F)
+ *   bits  2:0   function    (0–7)
+ *
+ * Helper macro:
+ *   ROCM_XIO_BDF(domain, bus, dev, func)
+ *
+ * For domain 0 the upper 16 bits are zero, so the value is identical to the
+ * old 16-bit 0xBBDD encoding; callers that only target domain 0 need not
+ * change their BDF values.
+ */
+#define ROCM_XIO_BDF(domain, bus, dev, func)                                   \
+  (((__u32)(domain) << 16) | ((__u32)(bus) << 8) | ((__u32)(dev) << 3) |       \
+   (__u32)(func))
+
 /** @brief Resolve a VRAM DMA-BUF to a device-usable physical or DMA address. */
 #define ROCM_XIO_GET_VRAM_PHYS_ADDR                                            \
   _IOWR(ROCM_XIO_IOC_MAGIC, 1, struct rocm_xio_vram_req)
@@ -69,7 +91,7 @@ extern "C" {
 /** @brief VRAM physical address resolution request (GET_VRAM_PHYS_ADDR). */
 struct rocm_xio_vram_req {
   int dmabuf_fd;   /**< DMA-BUF fd exported from a VRAM allocation. */
-  __u16 nvme_bdf;  /**< Target NVMe device in 0xBBDD form. */
+  __u32 nvme_bdf;  /**< Target NVMe device BDF (ROCM_XIO_BDF encoding). */
   __u32 flags;     /**< ROCM_XIO_FLAG_* address selection flags. */
   __u64 phys_addr; /**< Output physical address, IOVA, or emulated GPA. */
   __u64 size;      /**< Output mapped buffer size in bytes. */
@@ -94,7 +116,7 @@ struct rocm_xio_delete_queue_req {
 
 /** @brief Bound NVMe device information returned by GET_DEVICE_INFO. */
 struct rocm_xio_device_info {
-  __u16 bdf;             /**< Bound NVMe device in 0xBBDD form. */
+  __u32 bdf;             /**< Bound NVMe device BDF (ROCM_XIO_BDF encoding). */
   __u64 bar0_addr;       /**< BAR0 physical base address. */
   __u64 bar0_size;       /**< BAR0 mapping size in bytes. */
   __u32 doorbell_stride; /**< NVMe doorbell stride in bytes. */
@@ -103,7 +125,7 @@ struct rocm_xio_device_info {
 
 /** @brief Bind request selecting the NVMe PCI function for later ioctls. */
 struct rocm_xio_bind_device_req {
-  __u16 bdf; /**< NVMe device in 0xBBDD form. */
+  __u32 bdf; /**< NVMe device BDF (ROCM_XIO_BDF encoding). */
 };
 
 /** @brief Register queue virtual/physical mapping (REGISTER_QUEUE_ADDR). */
@@ -112,9 +134,9 @@ struct rocm_xio_register_queue_addr_req {
   __u64 phys_addr;  /**< Physical or DMA queue base address. */
   __u64 size;       /**< Queue allocation size in bytes. */
   __u64 prp2;       /**< PRP2 value for multi-page queue commands. */
-  __u16 nvme_bdf;   /**< Target NVMe device in 0xBBDD form. */
+  __u32 nvme_bdf;   /**< Target NVMe device BDF (ROCM_XIO_BDF encoding). */
   __u8 queue_type;  /**< Queue type: 0 for SQ, 1 for CQ. */
-  __u8 reserved[5]; /**< Reserved for ABI alignment; must be zero. */
+  __u8 reserved[3]; /**< Reserved for ABI alignment; must be zero. */
 };
 
 /** @brief Unregister a queue mapping by userspace virtual address. */
@@ -128,7 +150,7 @@ struct rocm_xio_register_buffer_req {
   __u64 virt_addr; /**< Userspace virtual buffer base address. */
   __u64 phys_addr; /**< Physical address, IOVA, or emulated GPA. */
   __u64 size;      /**< Buffer size in bytes. */
-  __u16 nvme_bdf;  /**< Target NVMe device in 0xBBDD form. */
+  __u32 nvme_bdf;  /**< Target NVMe device BDF (ROCM_XIO_BDF encoding). */
   __u32 flags;     /**< ROCM_XIO_FLAG_* address selection flags. */
 };
 
@@ -139,7 +161,7 @@ struct rocm_xio_unregister_buffer_req {
 
 /** @brief MMIO bridge shadow buffer mapping (GET_MMIO_BRIDGE_SHADOW_BUFFER). */
 struct rocm_xio_mmio_bridge_shadow_req {
-  __u16 bridge_bdf;  /**< PCI MMIO bridge device in 0xBBDD form. */
+  __u32 bridge_bdf;  /**< PCI MMIO bridge device BDF (ROCM_XIO_BDF encoding). */
   __u64 shadow_gpa;  /**< Output guest-physical shadow buffer address. */
   __u64 shadow_size; /**< Output shadow buffer size in bytes. */
 };
@@ -147,7 +169,7 @@ struct rocm_xio_mmio_bridge_shadow_req {
 /** @brief Contiguous queue allocation (ALLOC_CONTIG_QUEUE). */
 struct rocm_xio_alloc_contig_req {
   __u64 size;        /**< Requested queue allocation size in bytes. */
-  __u16 nvme_bdf;    /**< Target NVMe device in 0xBBDD form. */
+  __u32 nvme_bdf;    /**< Target NVMe device BDF (ROCM_XIO_BDF encoding). */
   __u64 phys_addr;   /**< Output physical address of allocation. */
   __u32 mmap_offset; /**< Output mmap offset used as allocation handle. */
 };

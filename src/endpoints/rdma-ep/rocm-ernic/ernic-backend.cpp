@@ -347,7 +347,7 @@ void Backend::ernic_initialize_gpu_qp() {
   }
 
   if (config_.pci_mmio_bridge) {
-    uint16_t bridge_bdf = 0;
+    uint32_t bridge_bdf = 0;
     int bret = xio::detectPciMmioBridgeBdf(&bridge_bdf);
     if (bret != 0) {
       fprintf(stderr,
@@ -381,7 +381,7 @@ void Backend::ernic_initialize_gpu_qp() {
                    ibv.get_device_name(device_));
           char link_buf[256];
           ssize_t llen = readlink(sysfs_link, link_buf, sizeof(link_buf) - 1);
-          uint16_t ernic_bdf = 0;
+          uint32_t ernic_bdf = 0;
           if (llen > 0) {
             link_buf[llen] = '\0';
             const char* p = strrchr(link_buf, '/');
@@ -389,15 +389,15 @@ void Backend::ernic_initialize_gpu_qp() {
               p++;
             else
               p = link_buf;
-            unsigned b = 0, d = 0, f = 0;
-            if (sscanf(p, "%*x:%x:%x.%x", &b, &d, &f) == 3)
-              ernic_bdf = (uint16_t)((b << 8) | (d << 3) | f);
+            unsigned dom = 0, b = 0, d = 0, f = 0;
+            if (sscanf(p, "%x:%x:%x.%x", &dom, &b, &d, &f) == 4)
+              ernic_bdf = ((uint32_t)dom << 16) | (b << 8) | (d << 3) | f;
           }
 
           if (ernic_bdf == 0 || host_qp_->ernic_sq_.uar_bar_offset == 0) {
             fprintf(stderr,
                     "rdma_ep::ernic: pci-mmio-bridge "
-                    "cannot enable: ernic_bdf=0x%04x, "
+                    "cannot enable: ernic_bdf=0x%08x, "
                     "uar_bar_offset=0x%x "
                     "(sysfs resolution failed)\n",
                     ernic_bdf, host_qp_->ernic_sq_.uar_bar_offset);
@@ -407,8 +407,8 @@ void Backend::ernic_initialize_gpu_qp() {
             host_qp_->ernic_sq_.ernic_target_bdf = ernic_bdf;
             fprintf(stderr,
                     "rdma_ep::ernic: pci-mmio-bridge "
-                    "enabled (bridge=0x%04x, "
-                    "ernic=0x%04x, shadow=%p)\n",
+                    "enabled (bridge=0x%08x, "
+                    "ernic=0x%08x, shadow=%p)\n",
                     bridge_bdf, ernic_bdf, shadow_gpu);
           }
         }

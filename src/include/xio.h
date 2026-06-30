@@ -422,18 +422,18 @@ __host__ int resolveNvmeDevicePath(const char* device_path, uint32_t nsid,
  * Looks for Vendor ID 0x1b36 and Device ID 0x0015. Errors
  * out if zero or more than one bridge is found.
  *
- * @param bdf_out Output BDF in 0xBBDD format.
+ * @param bdf_out Output BDF in ROCM_XIO_BDF encoding (uint32_t).
  * @return 0 on success, negative error code on failure.
  */
-__host__ int detectPciMmioBridgeBdf(uint16_t* bdf_out);
+__host__ int detectPciMmioBridgeBdf(uint32_t* bdf_out);
 
 /**
  * @brief Detect PCI BDF from a device file path.
  * @param device_path Device path (e.g., "/dev/nvme0").
- * @param bdf_out Output BDF in 0xBBDD format.
+ * @param bdf_out Output BDF in ROCM_XIO_BDF encoding (uint32_t).
  * @return 0 on success, negative error code on failure.
  */
-__host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out);
+__host__ int detectBdfFromDevice(const char* device_path, uint32_t* bdf_out);
 
 /**
  * @brief Detect if an NVMe controller is emulated.
@@ -488,7 +488,7 @@ __host__ int openDeviceWithRetry(const char* device_path, int flags,
  *
  * @param vram_ptr Pointer to VRAM buffer.
  * @param size Buffer size in bytes.
- * @param nvme_bdf NVMe controller BDF (0xBBDD format).
+ * @param nvme_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param kernel_module_device Kernel module device path.
  * @param phys_addr_out Output physical/DMA address.
  * @param is_emulated true for emulated NVMe.
@@ -497,7 +497,7 @@ __host__ int openDeviceWithRetry(const char* device_path, int flags,
  * @note Requires ROCm 5.3+ with dmabuf support, kernel
  *       CONFIG_DMABUF_MOVE_NOTIFY and CONFIG_PCI_P2PDMA.
  */
-__host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
+__host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               uint64_t* phys_addr_out, bool is_emulated);
 
@@ -521,13 +521,14 @@ struct xioBufferInfo {
  *
  * @param size Buffer size in bytes.
  * @param memoryMode Memory mode flags (bit 3 = device).
- * @param targetBdf Target BDF for DMA-BUF registration.
+ * @param targetBdf Target BDF (ROCM_XIO_BDF encoding) for
+ *                  DMA-BUF registration.
  * @param devicePath Path for emulation detection.
  * @param bufferInfo Output buffer information.
  * @return hipSuccess on success, error code on failure.
  */
 __host__ hipError_t allocateGpuAccessibleBuffer(
-  size_t size, unsigned memoryMode, uint16_t targetBdf, const char* devicePath,
+  size_t size, unsigned memoryMode, uint32_t targetBdf, const char* devicePath,
   struct xioBufferInfo* bufferInfo);
 
 /**
@@ -569,14 +570,14 @@ __host__ uint64_t getPhysAddr(void* virt_addr);
  * @param buffer_ptr Buffer virtual address.
  * @param size Buffer size in bytes.
  * @param is_device true for device memory (VRAM).
- * @param nvme_bdf NVMe controller BDF.
+ * @param nvme_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param kernel_module_device Kernel module device path.
  * @param is_emulated true if NVMe is emulated.
  * @param buffer_name Name for logging.
  * @return Physical address on success, 0 on failure.
  */
 __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
-                              uint16_t nvme_bdf,
+                              uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               bool is_emulated, const char* buffer_name);
 
@@ -606,13 +607,13 @@ __host__ int getPagePhysAddrs(void* virt_addr, size_t size, uint64_t* phys_out,
  * @param phys_addr Physical address of the queue.
  * @param size Size of the queue in bytes.
  * @param queue_type 0 for SQ, 1 for CQ.
- * @param nvme_bdf NVMe controller BDF.
+ * @param nvme_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param prp2 PRP2 address for multi-page queues.
  * @param queue_name Name for logging.
  * @return 0 on success, negative error code on failure.
  */
 int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr, size_t size,
-                 uint8_t queue_type, uint16_t nvme_bdf, uint64_t prp2,
+                 uint8_t queue_type, uint32_t nvme_bdf, uint64_t prp2,
                  const char* queue_name);
 
 /**
@@ -639,14 +640,14 @@ struct xioQueueSetup {
  *
  * @param size Queue size in bytes.
  * @param is_device true for device memory.
- * @param nvme_bdf NVMe controller BDF.
+ * @param nvme_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param kernel_module_device Kernel module device path.
  * @param is_emulated true if NVMe is emulated.
  * @param queue_name Name for logging.
  * @param setup Output structure with pointers/handles.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
+__host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               bool is_emulated, const char* queue_name,
                               struct xioQueueSetup* setup);
@@ -677,7 +678,7 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
  * for GPU access (same pattern as mapPciBar).
  *
  * @param size Queue size in bytes.
- * @param nvme_bdf NVMe controller BDF (0xBBDD format).
+ * @param nvme_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param queue_name Name for logging.
  * @param setup Output structure with pointers/handles.
  * @param kernel_module_device Kernel module device path
@@ -685,7 +686,7 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
  * @return 0 on success, negative error code on failure.
  */
 __host__ int setupContigQueueForGpu(
-  size_t size, uint16_t nvme_bdf, const char* queue_name,
+  size_t size, uint32_t nvme_bdf, const char* queue_name,
   struct xioQueueSetup* setup,
   const char* kernel_module_device = ROCM_XIO_DEVICE_PATH);
 
@@ -1006,7 +1007,8 @@ struct pci_mmio_bridge_ring_meta {
  *        (matches QEMU device).
  */
 struct pci_mmio_bridge_command {
-  uint16_t target_bdf; /**< Target PCI device in 0xBBDD form. */
+  uint16_t target_bdf; /**< Target bus:device:function (no domain; QEMU
+                          protocol). */
   uint8_t target_bar;  /**< Target BAR number. */
   uint8_t reserved1;   /**< Reserved padding; must be zero. */
   uint32_t offset;     /**< Byte offset within the target BAR. */
@@ -1020,11 +1022,11 @@ struct pci_mmio_bridge_command {
 
 /**
  * @brief Map PCI MMIO bridge shadow buffer via kmod.
- * @param bridge_bdf Bridge BDF in 0xBBDD format.
+ * @param bridge_bdf Bridge BDF in ROCM_XIO_BDF encoding.
  * @param virt_addr Output mapped virtual address.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr);
+__host__ int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr);
 
 /**
  * @brief Register shadow buffer for GPU access.
@@ -1039,14 +1041,14 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
 
 /**
  * @brief Map a PCI BAR for GPU access.
- * @param pci_bdf PCI device BDF in 0xBBDD format.
+ * @param pci_bdf PCI device BDF in ROCM_XIO_BDF encoding.
  * @param bar BAR number (0-5).
  * @param bar_cpu Output CPU-accessible BAR pointer.
  * @param bar_gpu Output GPU-accessible BAR pointer.
  * @param bar_size Size to map (defaults to 8192 if 0).
  * @return 0 on success, negative error code on failure.
  */
-__host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
+__host__ int mapPciBar(uint32_t pci_bdf, uint8_t bar, void** bar_cpu,
                        void** bar_gpu, size_t bar_size);
 
 /**
@@ -1056,11 +1058,11 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
  * controller requires physically contiguous I/O queues.
  * Reads via sysfs BAR0 resource mmap.
  *
- * @param pci_bdf NVMe controller BDF (0xBBDD format).
+ * @param pci_bdf NVMe controller BDF (ROCM_XIO_BDF encoding).
  * @param cqr_out Output: true if contiguous required.
  * @return 0 on success, negative error code on failure.
  */
-__host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out);
+__host__ int readNvmeCapCqr(uint32_t pci_bdf, bool* cqr_out);
 
 /**
  * @brief Generate and submit a PCI MMIO bridge command.
@@ -1068,8 +1070,15 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out);
  * Handles ring buffer management, command structure
  * population, and memory ordering.
  *
+ * @note The QEMU PCI MMIO bridge command protocol carries only a
+ *       16-bit bus:device:function field (no domain).  Callers with
+ *       a full 32-bit ROCM_XIO_BDF value should pass the lower 16 bits
+ *       (bits 15:0) which encode bus, device, and function.  Domain 0
+ *       is the only domain supported by this bridge.
+ *
  * @param shadowBufferVirt Shadow buffer pointer.
- * @param targetBdf Target device BDF (0xBBDD format).
+ * @param targetBdf Target device bus:device:function (lower 16 bits of
+ *                  ROCM_XIO_BDF, i.e. domain must be 0).
  * @param targetBar Target BAR number.
  * @param offset Offset within BAR.
  * @param value Value to write (or read result).

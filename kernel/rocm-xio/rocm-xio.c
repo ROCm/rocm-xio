@@ -78,7 +78,7 @@ struct queue_addr_entry {
   __u64 phys_addr;
   __u64 size;
   __u8 queue_type; /* 0=SQ, 1=CQ */
-  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
+  __u32 nvme_bdf;  /* NVMe device BDF (ROCM_XIO_BDF encoding) */
   __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
   struct list_head list;
 };
@@ -409,32 +409,34 @@ cleanup_no_attach:
  * Returns attachment info via output parameters - caller must keep alive
  */
 /* Extract BDF from pci_dev structure */
-static __u16 pci_dev_to_bdf(struct pci_dev* pdev) {
+static __u32 pci_dev_to_bdf(struct pci_dev* pdev) {
   if (!pdev)
     return 0;
-  /* Encode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
-  return ((__u16)(pdev->bus->number) << 8) | (__u16)(pdev->devfn);
+  /* Encode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
+  return ((__u32)pci_domain_nr(pdev->bus) << 16) |
+         ((__u32)(pdev->bus->number) << 8) | (__u32)(pdev->devfn);
 }
 
 /* Format BDF as PCI address string (e.g., "0000:85:00.0") */
-static void format_bdf_as_pci_addr(__u16 bdf, char* buf, size_t buf_size) {
+static void format_bdf_as_pci_addr(__u32 bdf, char* buf, size_t buf_size) {
   if (bdf == 0 || !buf || buf_size < 13) {
     if (buf && buf_size > 0)
       buf[0] = '\0';
     return;
   }
 
-  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
+  unsigned int domain = (bdf >> 16) & 0xFFFF;
   unsigned int bus = (bdf >> 8) & 0xFF;
   unsigned int devfn = bdf & 0xFF;
   unsigned int device = (devfn >> 3) & 0x1F;
   unsigned int function = devfn & 0x7;
 
-  /* Format as DDDD:BB:DD.F (domain is always 0000 for now) */
-  snprintf(buf, buf_size, "0000:%02x:%02x.%x", bus, device, function);
+  /* Format as DDDD:BB:DD.F */
+  snprintf(buf, buf_size, "%04x:%02x:%02x.%x", domain, bus, device, function);
 }
 
-static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
+static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
                                 __u64* size, struct dma_buf** dmabuf_out,
                                 struct dma_buf_attachment** attach_out,
                                 struct sg_table** sgt_out,
@@ -448,10 +450,10 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
   int ret = 0;
   unsigned int domain, bus, devfn;
 
-  /* Decode BDF: format is 0x0BDF (bus=B, dev=D, func=F) */
+  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
+  domain = (nvme_bdf >> 16) & 0xFFFF;
   bus = (nvme_bdf >> 8) & 0xFF;
   devfn = nvme_bdf & 0xFF;
-  domain = 0; /* Assume domain 0 for now */
 
   /* Find the NVMe PCI device */
   pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -461,7 +463,7 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
     if (pci_addr[0] != '\0') {
       pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
     } else {
-      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", nvme_bdf);
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%08x)\n", nvme_bdf);
     }
     return -ENODEV;
   }
@@ -537,15 +539,15 @@ err_put_pci:
 }
 
 /* Get NVMe device info */
-static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
+static int get_nvme_device_info(__u32 bdf, struct rocm_xio_device_info* info) {
   struct pci_dev* nvme_dev = NULL;
   unsigned int domain, bus, devfn;
   resource_size_t bar0_start, bar0_size;
 
-  /* Decode BDF: format is 0x0BDF (bus=B, dev=D, func=F) */
+  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
+  domain = (bdf >> 16) & 0xFFFF;
   bus = (bdf >> 8) & 0xFF;
   devfn = bdf & 0xFF;
-  domain = 0; /* Assume domain 0 for now */
 
   /* Find the NVMe PCI device */
   nvme_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -555,7 +557,7 @@ static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
     if (pci_addr[0] != '\0') {
       pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
     } else {
-      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", bdf);
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%08x)\n", bdf);
     }
     return -ENODEV;
   }
@@ -580,7 +582,7 @@ static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
     if (pci_addr[0] != '\0') {
       pr_info("rocm-axiio: Device info for %s:\n", pci_addr);
     } else {
-      pr_info("rocm-axiio: Device info for BDF 0x%04x:\n", bdf);
+      pr_info("rocm-axiio: Device info for BDF 0x%08x:\n", bdf);
     }
   }
   pr_info("  BAR0: 0x%llx (size: 0x%llx)\n", (u64)info->bar0_addr,
@@ -594,16 +596,16 @@ static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
 
 /* Get PCI MMIO bridge shadow buffer GPA from PCI config space */
 static int get_mmio_bridge_shadow_buffer(
-  __u16 bridge_bdf, struct rocm_xio_mmio_bridge_shadow_req* req) {
+  __u32 bridge_bdf, struct rocm_xio_mmio_bridge_shadow_req* req) {
   struct pci_dev* bridge_dev = NULL;
   unsigned int domain, bus, devfn;
   __u32 gpa_low = 0, gpa_high = 0;
   __u64 shadow_gpa = 0;
 
-  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
+  domain = (bridge_bdf >> 16) & 0xFFFF;
   bus = (bridge_bdf >> 8) & 0xFF;
   devfn = bridge_bdf & 0xFF;
-  domain = 0; /* Assume domain 0 for now */
 
   /* Find the PCI MMIO bridge device */
   bridge_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -613,7 +615,7 @@ static int get_mmio_bridge_shadow_buffer(
     if (pci_addr[0] != '\0') {
       pr_err("rocm-axiio: PCI MMIO bridge device not found (%s)\n", pci_addr);
     } else {
-      pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%04x)\n",
+      pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%08x)\n",
              bridge_bdf);
     }
     return -ENODEV;
@@ -667,9 +669,9 @@ static __u64 lookup_queue_phys_addr(__u64 virt_addr) {
  * Look up BDF for queue address.
  * Returns BDF if found, 0 otherwise.
  */
-static __u16 lookup_queue_bdf(__u64 virt_addr) {
+static __u32 lookup_queue_bdf(__u64 virt_addr) {
   struct queue_addr_entry* entry;
-  __u16 bdf = 0;
+  __u32 bdf = 0;
 
   spin_lock(&queue_addrs_lock);
   list_for_each_entry(entry, &queue_addrs, list) {
@@ -780,7 +782,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if (opcode == 0x00 || opcode == 0x04) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    __u16 bdf = lookup_queue_bdf(ubuffer);
+    __u32 bdf = lookup_queue_bdf(ubuffer);
     char pci_addr[16];
     format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
@@ -797,7 +799,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    __u16 bdf = lookup_queue_bdf(ubuffer);
+    __u32 bdf = lookup_queue_bdf(ubuffer);
     char pci_addr[16];
     format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
@@ -882,7 +884,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
                   pci_addr);
         } else {
           pr_info("rocm-axiio: Getting VRAM physical address for NVMe BDF "
-                  "0x%04x\n",
+                  "0x%08x\n",
                   req.nvme_bdf);
         }
       }
@@ -942,7 +944,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         if (pci_addr[0] != '\0') {
           pr_info("rocm-axiio: Device binding requested for %s\n", pci_addr);
         } else {
-          pr_info("rocm-axiio: Device binding requested for BDF 0x%04x\n",
+          pr_info("rocm-axiio: Device binding requested for BDF 0x%08x\n",
                   req.bdf);
         }
       }
@@ -997,7 +999,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_unregister_queue_addr_req req;
       struct queue_addr_entry *entry, *tmp;
       bool found = false;
-      __u16 found_nvme_bdf = 0;
+      __u32 found_nvme_bdf = 0;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
@@ -1131,7 +1133,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       req.phys_addr = phys_addr;
 
       /* Extract BDF for logging */
-      __u16 bdf = req.nvme_bdf;
+      __u32 bdf = req.nvme_bdf;
       if (bdf == 0 && entry->nvme_pdev) {
         bdf = pci_dev_to_bdf(entry->nvme_pdev);
       }
@@ -1204,7 +1206,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       }
 
       /* Extract BDF for logging */
-      __u16 bdf = 0;
+      __u32 bdf = 0;
       if (entry->nvme_pdev) {
         bdf = pci_dev_to_bdf(entry->nvme_pdev);
       }
@@ -1272,7 +1274,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_alloc_contig_req req;
       struct contig_alloc_entry* ca;
       struct pci_dev* pdev;
-      unsigned int bus, devfn;
+      unsigned int domain, bus, devfn;
       void* cpu_addr;
       dma_addr_t dma_addr;
 
@@ -1286,9 +1288,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -EINVAL;
       }
 
+      domain = (req.nvme_bdf >> 16) & 0xFFFF;
       bus = (req.nvme_bdf >> 8) & 0xFF;
       devfn = req.nvme_bdf & 0xFF;
-      pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
+      pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
       if (!pdev) {
         char pci_addr[16];
         format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
