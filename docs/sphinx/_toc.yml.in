@@ -25,6 +25,8 @@ subtrees:
   entries:
   - file: conceptual/memory-modes
     title: Memory modes, allocation, and coherence
+  - file: nvme-kv
+    title: NVMe Key-Value support
 
 - caption: Reference
   entries:

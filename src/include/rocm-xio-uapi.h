@@ -60,6 +60,9 @@ extern "C" {
 /** @brief Free contiguous queue memory allocated by the kernel helper. */
 #define ROCM_XIO_FREE_CONTIG_QUEUE                                             \
   _IOW(ROCM_XIO_IOC_MAGIC, 12, struct rocm_xio_free_contig_req)
+/** @brief Resolve per-page DMA addresses of a registered VRAM buffer. */
+#define ROCM_XIO_GET_BUFFER_PAGES                                              \
+  _IOWR(ROCM_XIO_IOC_MAGIC, 13, struct rocm_xio_get_buffer_pages_req)
 
 /** @brief Return the emulated BAR guest-physical address. */
 #define ROCM_XIO_FLAG_EMULATED (1 << 0)
@@ -135,6 +138,24 @@ struct rocm_xio_register_buffer_req {
 /** @brief Unregister a data buffer by userspace virtual address. */
 struct rocm_xio_unregister_buffer_req {
   __u64 virt_addr; /**< Userspace virtual buffer base address. */
+};
+
+/**
+ * @brief Resolve per-page DMA addresses of a registered VRAM buffer.
+ *
+ * Walks the kept-alive P2PDMA scatter-gather mapping of a buffer previously
+ * registered via REGISTER_BUFFER and returns one DMA address per @c page_size
+ * chunk across all segments. Lets a caller describe a physically
+ * non-contiguous VRAM allocation with a (chained) PRP list instead of assuming
+ * a single contiguous run from @c phys_addr. Passthrough/P2PDMA buffers only.
+ */
+struct rocm_xio_get_buffer_pages_req {
+  __u64 virt_addr;  /**< Base virt addr of a REGISTER_BUFFER'd buffer. */
+  __u64 page_addrs; /**< User ptr to __u64[max_pages], filled with DMA addrs. */
+  __u32 page_size;  /**< Page granularity in bytes (0 => 4096). */
+  __u32 max_pages;  /**< Capacity of the page_addrs array. */
+  __u32 num_pages;  /**< Output: number of pages written. */
+  __u32 reserved;   /**< Reserved for ABI alignment; must be zero. */
 };
 
 /** @brief MMIO bridge shadow buffer mapping (GET_MMIO_BRIDGE_SHADOW_BUFFER). */

@@ -2568,9 +2568,21 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
   if (dataBufferOnDevice) {
+    // spdk-5co: UNCACHED VRAM. Plain hipMalloc (XIO_DEVICE_MEM_HIP) is coarse-
+    // grained device memory: GPU stores may only become system-visible at
+    // KERNEL COMPLETION. The GPU-initiated path rings the doorbell from WITHIN
+    // the still- running kernel, so the NVMe P2PDMA reader sees only a partial
+    // prefix of bulk writes (device-side analog of the host non-coherent bug).
+    // Fine-grained HSA memory (XIO_DEVICE_MEM_FINE_GRAINED) fixes visibility
+    // but is NOT dma-buf/P2P exportable here (hsa_amd_portable_export_dmabuf ->
+    // status 4100). UNCACHED device memory (hipExtMallocWithFlags
+    // hipDeviceMallocUncached) bypasses the GPU cache so writes are immediately
+    // P2P-visible AND stays dma-buf-exportable. Verified: fixes bulk Store to
+    // >=4 MiB. (A separate ~4 MiB P2P-mapping cap remains for >4 MiB transfers
+    // -- distinct bug, clean power-of-2 boundary.)
     hsa_status_t s = allocDeviceMemory(size, &bufferInfo->hostPtr,
                                        "GPU accessible buffer",
-                                       XIO_DEVICE_MEM_HIP);
+                                       XIO_DEVICE_MEM_UNCACHED);
     if (s != HSA_STATUS_SUCCESS) {
       ROCXIO_LOG_ERROR("allocDeviceMemory failed\n");
       return hipErrorMemoryAllocation;
@@ -2594,7 +2606,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                        strerror(-ret));
       ROCXIO_LOG_ERROR("  Device memory was requested but "
                        "dmabuf export is not available\n");
-      freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+      freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
       bufferInfo->hostPtr = nullptr;
       return hipErrorInvalidValue;
     }
@@ -2604,13 +2616,62 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     ROCXIO_LOG_INFO("  GPU writes directly to VRAM\n");
     ROCXIO_LOG_INFO("  NVMe DMAs from VRAM (P2P)\n");
 
+    // Resolve the VRAM buffer's *per-page* P2PDMA addresses from its kept-alive
+    // mapping. A large VRAM allocation may be physically non-contiguous;
+    // without per-page addrs the PRP path assumes one contiguous run from
+    // dmaAddr and mis-addresses every page past the first segment (NVMe then
+    // DMAs to the wrong pages -> GPU faults). With per-page addrs the GPU emits
+    // a chained PRP describing the true layout, which SPDK coalesces back into
+    // runs. Falls back to contiguous addressing if the ioctl is unavailable.
+    {
+      constexpr size_t nvme_page = 4096;
+      uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
+      uint64_t* pa = nullptr;
+      hipError_t pa_err = hipHostMalloc((void**)&pa,
+                                        (size_t)nvme_np * sizeof(uint64_t),
+                                        hipHostMallocMapped);
+      if (pa_err == hipSuccess && pa) {
+        memset(pa, 0, (size_t)nvme_np * sizeof(uint64_t));
+        int kfd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+        bool ok = false;
+        if (kfd >= 0) {
+          struct rocm_xio_get_buffer_pages_req preq = {};
+          preq.virt_addr = (uint64_t)(uintptr_t)bufferInfo->hostPtr;
+          preq.page_addrs = (uint64_t)(uintptr_t)pa;
+          preq.page_size = (uint32_t)nvme_page;
+          preq.max_pages = nvme_np;
+          if (ioctl(kfd, ROCM_XIO_GET_BUFFER_PAGES, &preq) == 0 &&
+              preq.num_pages == nvme_np) {
+            ok = true;
+            ROCXIO_LOG_INFO("  Resolved %u per-page VRAM P2PDMA addrs\n",
+                            nvme_np);
+          }
+          close(kfd);
+        }
+        if (ok) {
+          bufferInfo->pagePhysAddrs = pa;
+          bufferInfo->numPages = nvme_np;
+        } else {
+          ROCXIO_LOG_WARN("  per-page VRAM resolve unavailable; falling back "
+                          "to contiguous addressing from base\n");
+          (void)hipHostFree(pa);
+        }
+      }
+    }
+
     // Device memory - GPU pointer is same as host pointer
     bufferInfo->gpuPtr = bufferInfo->hostPtr;
     bufferInfo->isDeviceMemory = true;
   } else {
+    // spdk-5co: COHERENT (fine-grained) host memory. Plain XIO_HOST_MEM_MAPPED
+    // (hipHostMallocMapped, no Coherent flag) is non-coherent/coarse-grained,
+    // so GPU writes are not reliably visible to the host controller's DMA ->
+    // bulk Store content lands as a partial prefix. Fine-grained coherence
+    // makes GPU writes globally visible.
     hipError_t buf_err = allocHostMemory(size, &bufferInfo->hostPtr,
                                          "GPU accessible buffer host",
-                                         XIO_HOST_MEM_MAPPED);
+                                         XIO_HOST_MEM_MAPPED |
+                                           XIO_HOST_MEM_COHERENT);
     if (buf_err != hipSuccess)
       return buf_err;
 
@@ -2634,10 +2695,14 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                         hipHostMallocMapped);
       if (pa_err == hipSuccess && pa) {
         memset(pa, 0, pa_bytes);
-        uint64_t sys_addrs[1024];
-        uint32_t max_sys = (sys_np <= 1024) ? sys_np : 1024;
-        int ret = getPagePhysAddrs(bufferInfo->hostPtr, size, sys_addrs,
-                                   max_sys);
+        /* Heap-allocate the per-system-page scratch table: a stack array would
+         * cap the buffer at 1024 pages (4 MiB at 4 KiB pages); large KV values
+         * (up to 64 MiB) need one entry per page (16384). */
+        uint64_t* sys_addrs = (uint64_t*)malloc((size_t)sys_np *
+                                                sizeof(uint64_t));
+        int ret = sys_addrs ? getPagePhysAddrs(bufferInfo->hostPtr, size,
+                                               sys_addrs, sys_np)
+                            : -ENOMEM;
         if (ret < 0) {
           ROCXIO_LOG_WARN("Failed to resolve per-page "
                           "phys addrs: %s\n",
@@ -2659,6 +2724,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                           "addrs for host buffer\n",
                           nvme_np);
         }
+        free(sys_addrs);
       }
     }
 
@@ -2707,7 +2773,7 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   }
 
   if (bufferInfo->isDeviceMemory) {
-    freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_HIP);
+    freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
   } else {
     freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
   }
