@@ -77,9 +77,9 @@ struct queue_addr_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
-  __u8 queue_type; /* 0=SQ, 1=CQ */
-  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
-  __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
+  __u8 queue_type;    /* 0=SQ, 1=CQ */
+  __u16 nvme_bdf;     /* NVMe device BDF (0xBBDD format) */
+  __u64 prp2;         /* PRP2 for PC=0 queues (0=none) */
   struct file* owner; /* fd that registered this entry */
   struct list_head list;
 };
