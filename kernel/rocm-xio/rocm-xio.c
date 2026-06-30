@@ -217,8 +217,8 @@ static int extract_vram_offset_from_amdgpu_bo(struct dma_buf* dmabuf,
 
   /* Sanity check: offset should be within BAR size */
   if (*offset >= bar_size) {
-    pr_warn("Calculated offset 0x%llx exceeds BAR size 0x%llx\n",
-            *offset, (u64)bar_size);
+    pr_warn("Calculated offset 0x%llx exceeds BAR size 0x%llx\n", *offset,
+            (u64)bar_size);
     /* Continue anyway - might be correct for large VRAM BARs */
   }
 
@@ -247,8 +247,8 @@ static int extract_vram_offset_from_sg(struct sg_table* sgt,
     phys_addr = sg_phys(sg);
     dma_addr = sg_dma_address(sg);
 
-    pr_info("sg[%d]: phys=0x%llx dma=0x%llx len=%u\n", i,
-            (u64)phys_addr, (u64)dma_addr, sg->length);
+    pr_info("sg[%d]: phys=0x%llx dma=0x%llx len=%u\n", i, (u64)phys_addr,
+            (u64)dma_addr, sg->length);
 
     /* Check if physical address is within the GPU BAR range */
     if (phys_addr >= bar_start && phys_addr < (bar_start + bar_size)) {
@@ -290,8 +290,7 @@ static int extract_vram_offset_from_sg(struct sg_table* sgt,
   }
 
   pr_err("Could not extract VRAM offset from sg_table or TTM\n");
-  pr_err("dma_addr=0x%llx bar_size=0x%llx\n", (u64)dma_addr,
-         (u64)bar_size);
+  pr_err("dma_addr=0x%llx bar_size=0x%llx\n", (u64)dma_addr, (u64)bar_size);
 
   return -EINVAL;
 }
@@ -375,8 +374,8 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
       if (extract_vram_offset_from_sg(sgt, gpu_dev, bar_start, bar_size, dmabuf,
                                       &vram_offset) == 0) {
         *bar_gpa = bar_start + vram_offset;
-        pr_info("BAR GPA=0x%llx (base=0x%llx + offset=0x%llx)\n",
-                *bar_gpa, (u64)bar_start, vram_offset);
+        pr_info("BAR GPA=0x%llx (base=0x%llx + offset=0x%llx)\n", *bar_gpa,
+                (u64)bar_start, vram_offset);
       } else {
         /* Fallback: return BAR base (will be wrong but better than crashing) */
         *bar_gpa = bar_start;
@@ -433,8 +432,8 @@ static void format_bdf_as_pci_addr(__u32 bdf, char* buf, size_t buf_size) {
   unsigned int devfn = bdf & 0xFF;
 
   /* Format as DDDD:BB:DD.F using kernel PCI helpers for slot/func */
-  snprintf(buf, buf_size, "%04x:%02x:%02x.%x", domain, bus,
-           PCI_SLOT(devfn), PCI_FUNC(devfn));
+  snprintf(buf, buf_size, "%04x:%02x:%02x.%x", domain, bus, PCI_SLOT(devfn),
+           PCI_FUNC(devfn));
 }
 
 static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
@@ -502,8 +501,7 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
   if (sgt->nents > 0) {
     dma_addr = sg_dma_address(sgt->sgl);
     *phys_addr = (__u64)dma_addr;
-    pr_info("✅ P2PDMA address: 0x%llx (size: %llu)\n", *phys_addr,
-            *size);
+    pr_info("✅ P2PDMA address: 0x%llx (size: %llu)\n", *phys_addr, *size);
   } else {
     pr_err("No DMA segments\n");
     ret = -EINVAL;
@@ -599,8 +597,7 @@ static int get_mmio_bridge_shadow_buffer(
     if (pci_addr[0] != '\0') {
       pr_err("PCI MMIO bridge device not found (%s)\n", pci_addr);
     } else {
-      pr_err("PCI MMIO bridge device not found (BDF: 0x%08x)\n",
-             bridge_bdf);
+      pr_err("PCI MMIO bridge device not found (BDF: 0x%08x)\n", bridge_bdf);
     }
     return -ENODEV;
   }
@@ -864,8 +861,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         char pci_addr[16];
         format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Getting VRAM physical address for NVMe %s\n",
-                  pci_addr);
+          pr_info("Getting VRAM physical address for NVMe %s\n", pci_addr);
         } else {
           pr_info("Getting VRAM physical address for NVMe BDF "
                   "0x%08x\n",
@@ -928,8 +924,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         if (pci_addr[0] != '\0') {
           pr_info("Device binding requested for %s\n", pci_addr);
         } else {
-          pr_info("Device binding requested for BDF 0x%08x\n",
-                  req.bdf);
+          pr_info("Device binding requested for BDF 0x%08x\n", req.bdf);
         }
       }
       return 0;
@@ -1049,8 +1044,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
           char pci_addr[16];
           format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
           if (pci_addr[0] != '\0') {
-            pr_info("Emulated NVMe (%s) - using GPU BAR GPA\n",
-                    pci_addr);
+            pr_info("Emulated NVMe (%s) - using GPU BAR GPA\n", pci_addr);
           } else {
             pr_info("Emulated NVMe - using GPU BAR GPA\n");
           }
@@ -1064,8 +1058,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
           char pci_addr[16];
           format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
           if (pci_addr[0] != '\0') {
-            pr_info("Passthrough NVMe (%s) - using P2PDMA IOVA\n",
-                    pci_addr);
+            pr_info("Passthrough NVMe (%s) - using P2PDMA IOVA\n", pci_addr);
           } else {
             pr_info("Passthrough NVMe - using P2PDMA IOVA\n");
           }
@@ -1203,10 +1196,9 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         if (entry->is_passthrough && entry->sgt && entry->attach &&
             entry->dmabuf) {
           if (pci_addr[0] != '\0') {
-            pr_info(
-              "Cleaning up P2PDMA attachment for buffer 0x%016llx "
-              "(%s)\n",
-              (unsigned long long)entry->virt_addr, pci_addr);
+            pr_info("Cleaning up P2PDMA attachment for buffer 0x%016llx "
+                    "(%s)\n",
+                    (unsigned long long)entry->virt_addr, pci_addr);
           } else {
             pr_info("Cleaning up P2PDMA attachment for buffer "
                     "0x%016llx\n",
