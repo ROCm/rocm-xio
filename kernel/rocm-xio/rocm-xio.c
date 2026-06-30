@@ -29,6 +29,7 @@
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
+#include <linux/blkdev.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
@@ -738,12 +739,21 @@ static __u64 lookup_buffer_phys_addr(__u64 virt_addr) {
 /*
  * Kprobe pre-handler for nvme_submit_user_cmd.
  * Injects physical addresses into PRP1/PRP2 for NVMe commands.
+ *
+ * Admin and I/O command sets share numeric opcodes (e.g. 0x01 = CREATE_SQ
+ * in admin vs. Write in I/O).  The first argument, struct request_queue *q,
+ * is the authoritative discriminator: admin commands are always submitted on
+ * the controller's admin queue, which has no associated gendisk (q->disk ==
+ * NULL), while I/O commands are submitted on a namespace queue that does have
+ * a gendisk.  All per-command-set handlers are guarded by is_admin so that
+ * opcode 0x01 is never misclassified.
  */
 static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
+  struct request_queue* q;
   struct nvme_command* cmd;
   u64 ubuffer;
-  unsigned int bufflen;
   u8 opcode;
+  bool is_admin;
   __u64 phys_addr;
 
   if (!inject_enabled)
@@ -760,12 +770,12 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
      * RDI = arg0 (q)
      * RSI = arg1 (cmd)
      * RDX = arg2 (ubuffer)
-     * RCX = arg3 (bufflen)
+     * RCX = arg3 (bufflen, not used here)
      */
 #ifdef CONFIG_X86_64
+  q = (struct request_queue*)regs->di;
   cmd = (struct nvme_command*)regs->si;
   ubuffer = regs->dx;
-  bufflen = (unsigned int)regs->cx;
 #else
   /* For non-x86_64, we'd need architecture-specific register access */
   return 0;
@@ -774,10 +784,16 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if (!cmd)
     return 0;
 
+  /*
+   * Distinguish admin from I/O commands via the queue type.  Admin queues
+   * have no gendisk (no namespace); I/O queues always have one.
+   */
+  is_admin = (!q || !q->disk);
+
   opcode = cmd->common.opcode;
 
-  /* Handle DELETE_SQ (0x00) and DELETE_CQ (0x04) */
-  if (opcode == 0x00 || opcode == 0x04) {
+  /* Handle admin DELETE_SQ (0x00) and DELETE_CQ (0x04) */
+  if (is_admin && (opcode == 0x00 || opcode == 0x04)) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
     __u16 bdf = lookup_queue_bdf(ubuffer);
@@ -793,8 +809,8 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     pr_info("  Queue ID: %u\n", queue_id);
   }
 
-  /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
-  if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
+  /* Handle admin CREATE_CQ (0x05) and CREATE_SQ (0x01) */
+  if (is_admin && (opcode == 0x05 || opcode == 0x01) && ubuffer != 0) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
     __u16 bdf = lookup_queue_bdf(ubuffer);
@@ -833,7 +849,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   }
 
   /* Handle I/O commands (READ=0x02, WRITE=0x01) - inject buffer addresses */
-  if (opcode == 0x01 || opcode == 0x02) {
+  if (!is_admin && (opcode == 0x01 || opcode == 0x02)) {
     __u64 prp1_val = le64_to_cpu(cmd->common.dptr.prp1);
     __u64 prp2_val = le64_to_cpu(cmd->common.dptr.prp2);
 
