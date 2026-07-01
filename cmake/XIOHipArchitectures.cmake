@@ -4,10 +4,10 @@
 
 # Initialize HIP architectures before project(... LANGUAGES HIP) runs.
 #
-# If OFFLOAD_ARCH is set, use it directly. Otherwise, try to detect an AMD GPU
-# architecture via rocminfo. On hosts without an AMD GPU (for example, AWS G4
-# instances), fall back to CMAKE_HIP_ARCHITECTURES=OFF so CMake skips its own
-# rocm_agent_enumerator-based architecture probe during HIP compiler setup.
+# If OFFLOAD_ARCH is set, use it directly. Otherwise, try to detect a ROCm GPU
+# architecture via rocminfo and seed CMAKE_HIP_ARCHITECTURES before CMake's HIP
+# compiler setup runs. If rocminfo does not report a gfx* target, leave
+# CMAKE_HIP_ARCHITECTURES unset and let CMake apply its default behavior.
 
 macro(xio_init_hip_architectures)
   if(OFFLOAD_ARCH)
@@ -47,10 +47,7 @@ macro(xio_init_hip_architectures)
         "GPU architectures to compile for (auto-detected)" FORCE)
       set(OFFLOAD_ARCH_MSG "${DETECTED_ARCH} (auto-detected)")
     else()
-      set(CMAKE_HIP_ARCHITECTURES OFF CACHE STRING
-        "GPU architectures to compile for (OFF disables auto-detection)" FORCE)
-      set(OFFLOAD_ARCH_MSG
-        "none detected (HIP architectures disabled; set OFFLOAD_ARCH to override)")
+      set(OFFLOAD_ARCH_MSG "default (CMake HIP auto-detect)")
     endif()
 
     unset(DETECTED_ARCH)

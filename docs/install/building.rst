@@ -60,10 +60,8 @@ CMake configuration options
    # Specify GPU architecture (auto-detected if not specified)
    cmake -S . -B build -DOFFLOAD_ARCH=gfx942:xnack+
 
-When no AMD GPU is present at configure time, ROCm XIO disables HIP
-architecture auto-detection so the build can still configure. Set
-``OFFLOAD_ARCH`` explicitly on such hosts when you need device code for
-a specific GPU target.
+Set ``OFFLOAD_ARCH`` explicitly when you need device code for a
+specific GPU target.
 
 .. code-block:: bash
 
@@ -160,9 +158,8 @@ Build system details
   extract device code from the static library
 - **Code generation**: Automatic generation of the endpoint
   registry and external headers
-- **GPU architecture detection**: Auto-detects via ``rocminfo`` when an
-  AMD GPU is present, otherwise disables HIP architecture auto-detection.
-  You can always override this via ``OFFLOAD_ARCH``.
+- **GPU architecture detection**: Auto-detects via ``rocminfo`` or can
+  be specified via ``OFFLOAD_ARCH``.
 
 
 Install ROCm XIO

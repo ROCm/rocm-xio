@@ -72,10 +72,8 @@ Supported platforms: Linux
 
 ### Configure
 
-If no AMD GPU is present when you configure the project, rocm-xio falls
-back to disabling HIP architecture auto-detection so configuration can
-still succeed. Set ``OFFLOAD_ARCH`` explicitly on such hosts when you
-need device code for a specific target, for example:
+If you need to target a specific GPU architecture, set ``OFFLOAD_ARCH``
+explicitly, for example:
 
 ```
 cmake -S . -B build -DOFFLOAD_ARCH=gfx942:xnack+

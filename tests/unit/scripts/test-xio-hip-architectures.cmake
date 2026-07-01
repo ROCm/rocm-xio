@@ -21,7 +21,7 @@ set(_tmp_dir "/tmp/rocm-xio-xio-hip-architectures")
 file(MAKE_DIRECTORY "${_tmp_dir}")
 
 set(_rocminfo_ok "${_tmp_dir}/fake-rocminfo-ok.sh")
-file(WRITE "${_rocminfo_ok}" "#!/bin/sh\nprintf '%s\\n' 'amdgcn-amd-amdhsa--gfx950'\n")
+file(WRITE "${_rocminfo_ok}" "#!/bin/sh\nprintf '%s\\n' 'amdgcn-amd-amdhsa--gfx1010'\n")
 file(CHMOD "${_rocminfo_ok}"
   PERMISSIONS
     OWNER_READ OWNER_WRITE OWNER_EXECUTE
@@ -48,17 +48,19 @@ set(OFFLOAD_ARCH "")
 unset(CMAKE_HIP_ARCHITECTURES CACHE)
 unset(CMAKE_HIP_ARCHITECTURES)
 xio_init_hip_architectures()
-assert_equal("gfx950" "${OFFLOAD_ARCH}" "auto-detected OFFLOAD_ARCH")
-assert_equal("gfx950" "${CMAKE_HIP_ARCHITECTURES}" "auto-detected HIP arch")
-assert_equal("gfx950 (auto-detected)" "${OFFLOAD_ARCH_MSG}" "auto-detected message")
+assert_equal("gfx1010" "${OFFLOAD_ARCH}" "auto-detected OFFLOAD_ARCH")
+assert_equal("gfx1010" "${CMAKE_HIP_ARCHITECTURES}" "auto-detected HIP arch")
+assert_equal("gfx1010 (auto-detected)" "${OFFLOAD_ARCH_MSG}" "auto-detected message")
 
 set(ROCMINFO "${_rocminfo_none}")
 set(OFFLOAD_ARCH "")
 unset(CMAKE_HIP_ARCHITECTURES CACHE)
 unset(CMAKE_HIP_ARCHITECTURES)
 xio_init_hip_architectures()
-assert_equal("OFF" "${CMAKE_HIP_ARCHITECTURES}" "no-GPU fallback")
-assert_equal(
-  "none detected (HIP architectures disabled; set OFFLOAD_ARCH to override)"
-  "${OFFLOAD_ARCH_MSG}"
-  "no-GPU message")
+if(DEFINED CMAKE_HIP_ARCHITECTURES)
+  message(FATAL_ERROR
+    "no-detect fallback: expected CMAKE_HIP_ARCHITECTURES to remain unset, got "
+    "'${CMAKE_HIP_ARCHITECTURES}'")
+endif()
+assert_equal("default (CMake HIP auto-detect)" "${OFFLOAD_ARCH_MSG}"
+  "no-detect message")
