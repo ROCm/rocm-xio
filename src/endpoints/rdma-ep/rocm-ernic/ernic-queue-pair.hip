@@ -116,8 +116,9 @@ __device__ void Ops::ring_doorbell(QueuePair& qp, uint32_t slot_idx) {
 
   if (qp.ernic_sq_.use_mmio_bridge && qp.ernic_sq_.mmio_bridge_shadow) {
     xio::genPciMmioBridgeCmd(qp.ernic_sq_.mmio_bridge_shadow,
-                             qp.ernic_sq_.ernic_target_bdf, 2,
-                             qp.ernic_sq_.uar_bar_offset, val,
+                             static_cast<uint16_t>(
+                               qp.ernic_sq_.ernic_target_bdf),
+                             2, qp.ernic_sq_.uar_bar_offset, val,
                              PCI_MMIO_BRIDGE_CMD_WRITE, 4);
   } else if (qp.ernic_sq_.uar_ptr) {
     volatile uint32_t* db = qp.ernic_sq_.uar_ptr +

@@ -84,7 +84,7 @@ struct nvmeIoParams {
  */
 struct nvmeDoorbellParams {
   uint32_t doorbellOffset; /**< Doorbell register offset within BAR0. */
-  uint16_t nvmeTargetBdf;  /**< NVMe target device in 0xBBDD form. */
+  uint32_t nvmeTargetBdf;  /**< NVMe target device in ROCM_XIO_BDF encoding. */
   void* shadowBufferVirt;  /**< PCI MMIO bridge shadow buffer pointer. */
   void* nvmeBar0Gpu;       /**< GPU-accessible BAR0 pointer. */
   bool usePciMmioBridge;   /**< Use bridge mode instead of direct BAR0. */
@@ -315,7 +315,7 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id);
  *                            (e.g., "/dev/rocm-xio")
  * @param queue_id Queue ID to create (0=admin, 1+=IO queues)
  * @param queue_size Queue size in entries (must be power of 2, max 65536)
- * @param nvme_bdf NVMe device BDF in 0xBBDD format (for kernel module)
+ * @param nvme_bdf NVMe device BDF in ROCM_XIO_BDF encoding (for kernel module)
  * @param memory_mode Memory allocation mode (bits: 0=GPU write location, 1=CPU
  * write location)
  * @param info Output structure to hold queue information
@@ -323,7 +323,7 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id);
  */
 __host__ int createQueue(const char* nvme_device,
                          const char* kernel_module_device, uint16_t queue_id,
-                         uint16_t queue_size, uint16_t nvme_bdf,
+                         uint16_t queue_size, uint32_t nvme_bdf,
                          unsigned memory_mode, struct nvme_queue_info* info);
 
 /**
@@ -826,8 +826,8 @@ struct nvmeEpConfig {
   /** @brief Host-side doorbell options mirrored into nvmeDoorbellParams. */
   struct {
     bool usePciMmioBridge;  /**< Route doorbells through PCI MMIO bridge. */
-    uint16_t mmioBridgeBdf; /**< Bridge BDF in 0xBBDD form. */
-    uint16_t nvmeTargetBdf; /**< NVMe target BDF in 0xBBDD form. */
+    uint32_t mmioBridgeBdf; /**< Bridge BDF in ROCM_XIO_BDF encoding. */
+    uint32_t nvmeTargetBdf; /**< NVMe target BDF in ROCM_XIO_BDF encoding. */
     void* shadowBufferVirt; /**< Mapped MMIO bridge shadow buffer. */
     void* nvmeBar0Gpu;      /**< GPU-accessible pointer to NVMe BAR0. */
   } doorbellParams;         /**< Doorbell routing configuration. */
