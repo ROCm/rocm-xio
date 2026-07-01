@@ -80,9 +80,10 @@ struct queue_addr_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
-  __u8 queue_type; /* 0=SQ, 1=CQ */
-  __u32 nvme_bdf;  /* NVMe device BDF (ROCM_XIO_BDF encoding) */
-  __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
+  __u8 queue_type;    /* 0=SQ, 1=CQ */
+  __u32 nvme_bdf;     /* NVMe device BDF (ROCM_XIO_BDF encoding) */
+  __u64 prp2;         /* PRP2 for PC=0 queues (0=none) */
+  struct file* owner; /* fd that registered this entry */
   struct list_head list;
 };
 
@@ -91,6 +92,7 @@ struct vram_buffer_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
+  struct file* owner; /* fd that registered this entry */
   struct list_head list;
   // For passthrough NVMe - keep attachment alive for P2PDMA
   struct dma_buf* dmabuf;
@@ -964,6 +966,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->queue_type = req.queue_type;
       entry->nvme_bdf = req.nvme_bdf;
       entry->prp2 = req.prp2;
+      entry->owner = file;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
@@ -1001,7 +1004,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&queue_addrs_lock);
       list_for_each_entry_safe(entry, tmp, &queue_addrs, list) {
-        if (entry->virt_addr == req.virt_addr) {
+        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
           list_del(&entry->list);
           found_nvme_bdf = entry->nvme_bdf;
           kfree(entry);
@@ -1105,6 +1108,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->phys_addr = phys_addr;
       entry->size = req.size;
       entry->is_passthrough = !is_emulated;
+      entry->owner = file;
 
       /* Store attachment info for passthrough (keep alive) */
       if (!is_emulated) {
@@ -1184,7 +1188,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&vram_buffers_lock);
       list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
-        if (entry->virt_addr == req.virt_addr) {
+        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
           list_del(&entry->list);
           found = true;
           break;
@@ -1503,6 +1507,61 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 static int rocm_xio_release(struct inode* inode, struct file* file) {
   struct contig_alloc_entry *ca, *tmp;
   LIST_HEAD(to_release);
+
+  /* Clean up queue address registrations owned by this fd */
+  {
+    struct queue_addr_entry *qentry, *qtmp;
+    LIST_HEAD(queues_to_free);
+
+    spin_lock(&queue_addrs_lock);
+    list_for_each_entry_safe(qentry, qtmp, &queue_addrs, list) {
+      if (qentry->owner == file) {
+        list_del(&qentry->list);
+        list_add(&qentry->list, &queues_to_free);
+      }
+    }
+    spin_unlock(&queue_addrs_lock);
+
+    list_for_each_entry_safe(qentry, qtmp, &queues_to_free, list) {
+      list_del(&qentry->list);
+      pr_info("rocm-axiio: release: unregistering queue addr "
+              "virt=0x%016llx\n",
+              (unsigned long long)qentry->virt_addr);
+      kfree(qentry);
+    }
+  }
+
+  /* Clean up buffer registrations owned by this fd */
+  {
+    struct vram_buffer_entry *bentry, *btmp;
+    LIST_HEAD(buffers_to_free);
+
+    spin_lock(&vram_buffers_lock);
+    list_for_each_entry_safe(bentry, btmp, &vram_buffers, list) {
+      if (bentry->owner == file) {
+        list_del(&bentry->list);
+        list_add(&bentry->list, &buffers_to_free);
+      }
+    }
+    spin_unlock(&vram_buffers_lock);
+
+    list_for_each_entry_safe(bentry, btmp, &buffers_to_free, list) {
+      list_del(&bentry->list);
+      pr_info("rocm-axiio: release: unregistering buffer "
+              "virt=0x%016llx\n",
+              (unsigned long long)bentry->virt_addr);
+      if (bentry->is_passthrough && bentry->sgt && bentry->attach &&
+          bentry->dmabuf) {
+        dma_buf_unmap_attachment(bentry->attach, bentry->sgt,
+                                 DMA_BIDIRECTIONAL);
+        dma_buf_detach(bentry->dmabuf, bentry->attach);
+        dma_buf_put(bentry->dmabuf);
+        if (bentry->nvme_pdev)
+          pci_dev_put(bentry->nvme_pdev);
+      }
+      kfree(bentry);
+    }
+  }
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
