@@ -32,6 +32,8 @@ int main() {
                 "rocm_xio_alloc_contig_req size drift");
   static_assert(sizeof(struct rocm_xio_free_contig_req) == 4,
                 "rocm_xio_free_contig_req size drift");
+  static_assert(sizeof(struct rocm_xio_bind_device_req) == 4,
+                "rocm_xio_bind_device_req size drift");
 
   std::cout << "rocm-xio UAPI layout checks passed\n";
   return 0;

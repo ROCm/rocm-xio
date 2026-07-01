@@ -933,7 +933,7 @@ std::string extractEndpointName(int argc, char** argv) {
   return std::string();
 }
 
-int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
+int detectPciMmioBridgeBdf(uint32_t* bdf_out) {
   if (!bdf_out) {
     return -1;
   }
@@ -951,7 +951,7 @@ int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
     return -1;
   }
 
-  std::vector<uint16_t> found_bdfs;
+  std::vector<uint32_t> found_bdfs;
   struct dirent* entry;
   int devices_checked = 0;
   int devices_skipped = 0;
@@ -962,20 +962,20 @@ int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
       continue;
     }
 
-    // PCI device entries are in format "0000:BB:DD.F"
+    // PCI device entries are in format "DDDD:BB:DD.F"
     std::string dev_name = entry->d_name;
-    if (dev_name.length() < 12 || dev_name.substr(0, 5) != "0000:") {
+    if (dev_name.length() < 12) {
       devices_skipped++;
       std::cout << "Skipping entry (format check): " << dev_name
                 << " (length=" << dev_name.length() << ")" << std::endl;
       continue;
     }
 
-    // Parse BDF from device name (format: 0000:BB:DD.F)
-    unsigned int bus, device, function;
-    int parsed = sscanf(dev_name.c_str(), "0000:%02x:%02x.%x", &bus, &device,
-                        &function);
-    if (parsed != 3) {
+    // Parse BDF from device name (format: DDDD:BB:DD.F)
+    unsigned int domain, bus, device, function;
+    int parsed = sscanf(dev_name.c_str(), "%04x:%02x:%02x.%x", &domain, &bus,
+                        &device, &function);
+    if (parsed != 4) {
       devices_skipped++;
       std::cout << "Skipping entry (parse failed): " << dev_name << " (parsed "
                 << parsed << " values)" << std::endl;
@@ -1041,11 +1041,11 @@ int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
     // Check if this is the PCI MMIO bridge
     if (vendor_id == PCI_MMIO_BRIDGE_VENDOR_ID &&
         device_id == PCI_MMIO_BRIDGE_DEVICE_ID) {
-      // Encode BDF: 0xBBDD where BB=bus (bits 15:8), D=device (bits 7:3),
-      // F=function (bits 2:0)
-      uint16_t bdf = (static_cast<uint16_t>(bus) << 8) |
-                     (static_cast<uint16_t>(device) << 3) |
-                     static_cast<uint16_t>(function);
+      // Encode BDF: bits 31:16=domain, 15:8=bus, 7:3=device, 2:0=function
+      uint32_t bdf = (static_cast<uint32_t>(domain) << 16) |
+                     (static_cast<uint32_t>(bus) << 8) |
+                     (static_cast<uint32_t>(device) << 3) |
+                     static_cast<uint32_t>(function);
       found_bdfs.push_back(bdf);
     }
   }
@@ -1072,28 +1072,32 @@ int detectPciMmioBridgeBdf(uint16_t* bdf_out) {
     std::cerr << "Error: Multiple PCI MMIO bridges found (" << found_bdfs.size()
               << "):" << std::endl;
     for (size_t i = 0; i < found_bdfs.size(); ++i) {
-      uint8_t bus = (found_bdfs[i] >> 8) & 0xFF;
-      uint8_t device = (found_bdfs[i] >> 3) & 0x1F;
-      uint8_t function = found_bdfs[i] & 0x7;
-      std::cerr << "  " << i + 1 << ". 0000:" << std::hex << std::setfill('0')
-                << std::setw(2) << static_cast<unsigned>(bus) << ":"
-                << std::setw(2) << static_cast<unsigned>(device) << "."
-                << std::dec << static_cast<unsigned>(function) << std::endl;
+      uint16_t d = (found_bdfs[i] >> 16) & 0xFFFF;
+      uint8_t b = (found_bdfs[i] >> 8) & 0xFF;
+      uint8_t dev = (found_bdfs[i] >> 3) & 0x1F;
+      uint8_t func = found_bdfs[i] & 0x7;
+      std::cerr << "  " << i + 1 << ". " << std::hex << std::setfill('0')
+                << std::setw(4) << static_cast<unsigned>(d) << ":"
+                << std::setw(2) << static_cast<unsigned>(b) << ":"
+                << std::setw(2) << static_cast<unsigned>(dev) << "." << std::dec
+                << static_cast<unsigned>(func) << std::endl;
     }
     return -1;
   }
 
   // Exactly one bridge found - return its BDF
   *bdf_out = found_bdfs[0];
-  uint8_t bus = (found_bdfs[0] >> 8) & 0xFF;
-  uint8_t device = (found_bdfs[0] >> 3) & 0x1F;
-  uint8_t function = found_bdfs[0] & 0x7;
-  std::cout << "Detected PCI MMIO bridge at 0000:" << std::hex
-            << std::setfill('0') << std::setw(2) << static_cast<unsigned>(bus)
-            << ":" << std::setw(2) << static_cast<unsigned>(device) << "."
-            << std::dec << static_cast<unsigned>(function) << " (BDF: 0x"
-            << std::hex << std::setfill('0') << std::setw(4) << found_bdfs[0]
-            << std::dec << ")" << std::endl;
+  uint16_t d = (found_bdfs[0] >> 16) & 0xFFFF;
+  uint8_t b = (found_bdfs[0] >> 8) & 0xFF;
+  uint8_t dev = (found_bdfs[0] >> 3) & 0x1F;
+  uint8_t func = found_bdfs[0] & 0x7;
+  std::cout << "Detected PCI MMIO bridge at " << std::hex << std::setfill('0')
+            << std::setw(4) << static_cast<unsigned>(d) << ":" << std::setw(2)
+            << static_cast<unsigned>(b) << ":" << std::setw(2)
+            << static_cast<unsigned>(dev) << "." << std::dec
+            << static_cast<unsigned>(func) << " (BDF: 0x" << std::hex
+            << std::setfill('0') << std::setw(8) << found_bdfs[0] << std::dec
+            << ")" << std::endl;
 
   return 0;
 }
@@ -1175,7 +1179,7 @@ __host__ int resolveNvmeDevicePath(const char* device_path, uint32_t nsid,
   return 0;
 }
 
-__host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
+__host__ int detectBdfFromDevice(const char* device_path, uint32_t* bdf_out) {
   if (!device_path || !bdf_out) {
     return -EINVAL;
   }
@@ -1202,9 +1206,30 @@ __host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
   }
   link_target[len] = '\0';
 
-  // Parse PCI address from symlink target
+  // Parse PCI address from symlink target (format: DDDD:BB:DD.F)
   std::string link_str = link_target;
-  size_t pci_start = link_str.find("0000:");
+  // Find the last component that looks like a PCI address (DDDD:BB:DD.F)
+  size_t pci_start = std::string::npos;
+  size_t pos = 0;
+  while (pos < link_str.size()) {
+    size_t colon1 = link_str.find(':', pos);
+    if (colon1 == std::string::npos || colon1 + 3 >= link_str.size())
+      break;
+    size_t colon2 = link_str.find(':', colon1 + 1);
+    if (colon2 == std::string::npos)
+      break;
+    size_t dot = link_str.find('.', colon2 + 1);
+    if (dot != std::string::npos && colon1 >= 4) {
+      // Potential PCI address starts 4 chars before first colon (domain part)
+      size_t candidate = (colon1 >= 4) ? (colon1 - 4) : 0;
+      // Verify it starts after a '/' or at the beginning
+      if (candidate == 0 || link_str[candidate - 1] == '/') {
+        pci_start = candidate;
+      }
+    }
+    pos = colon1 + 1;
+  }
+
   if (pci_start == std::string::npos) {
     std::cerr << "Error: Could not find PCI address in symlink: " << link_target
               << std::endl;
@@ -1219,38 +1244,40 @@ __host__ int detectBdfFromDevice(const char* device_path, uint16_t* bdf_out) {
   }
   std::string pci_addr = link_str.substr(addr_start, addr_end - addr_start);
 
-  // Parse bus, device, function from PCI address (format: 0000:BB:DD.F)
-  unsigned int bus, device, function;
-  if (sscanf(pci_addr.c_str(), "0000:%02x:%02x.%x", &bus, &device, &function) !=
-      3) {
+  // Parse domain, bus, device, function from PCI address (format: DDDD:BB:DD.F)
+  unsigned int domain, bus, device, function;
+  if (sscanf(pci_addr.c_str(), "%04x:%02x:%02x.%x", &domain, &bus, &device,
+             &function) != 4) {
     std::cerr << "Error: Failed to parse PCI address: " << pci_addr
               << std::endl;
     return -EINVAL;
   }
 
   // Validate parsed values
-  if (bus > 0xFF || device > 0x1F || function > 0x7) {
-    std::cerr << "Error: Invalid PCI address values: bus=0x" << std::hex << bus
-              << ", device=0x" << device << ", function=0x" << function
-              << std::dec << std::endl;
+  if (domain > 0xFFFF || bus > 0xFF || device > 0x1F || function > 0x7) {
+    std::cerr << "Error: Invalid PCI address values: domain=0x" << std::hex
+              << domain << ", bus=0x" << bus << ", device=0x" << device
+              << ", function=0x" << function << std::dec << std::endl;
     return -EINVAL;
   }
 
-  // Encode BDF: 0xBBDD where BB=bus (bits 15:8), D=device (bits 7:3),
-  // F=function (bits 2:0)
-  uint16_t bdf = (static_cast<uint16_t>(bus) << 8) |
-                 (static_cast<uint16_t>(device) << 3) |
-                 static_cast<uint16_t>(function);
+  // Encode BDF: bits 31:16=domain, 15:8=bus, 7:3=device, 2:0=function
+  uint32_t bdf = (static_cast<uint32_t>(domain) << 16) |
+                 (static_cast<uint32_t>(bus) << 8) |
+                 (static_cast<uint32_t>(device) << 3) |
+                 static_cast<uint32_t>(function);
 
   *bdf_out = bdf;
 
   std::cout << "Detected PCI BDF for " << device_path << " ("
-            << nvme_path.controllerPath << "): 0000:" << std::hex
-            << std::setfill('0') << std::setw(2) << static_cast<unsigned>(bus)
-            << ":" << std::setw(2) << static_cast<unsigned>(device) << "."
-            << std::dec << static_cast<unsigned>(function) << " (BDF: 0x"
-            << std::hex << std::setfill('0') << std::setw(4) << bdf << std::dec
-            << ")" << std::endl;
+            << nvme_path.controllerPath << "): " << std::hex
+            << std::setfill('0') << std::setw(4)
+            << static_cast<unsigned>(domain) << ":" << std::setw(2)
+            << static_cast<unsigned>(bus) << ":" << std::setw(2)
+            << static_cast<unsigned>(device) << "." << std::dec
+            << static_cast<unsigned>(function) << " (BDF: 0x" << std::hex
+            << std::setfill('0') << std::setw(8) << bdf << std::dec << ")"
+            << std::endl;
 
   return 0;
 }
@@ -1283,11 +1310,24 @@ __host__ int detectEmulatedNvme(const char* device_path,
   }
   link_target[len] = '\0';
 
-  // Parse PCI address from symlink target
+  // Parse PCI address from symlink target (format: DDDD:BB:DD.F)
   std::string link_str = link_target;
 
-  // Find the PCI address pattern (0000:BB:DD.F)
-  size_t pci_start = link_str.find("0000:");
+  // Find the last path component that is a PCI address (DDDD:BB:DD.F)
+  size_t slash = link_str.rfind('/');
+  size_t pci_start = (slash != std::string::npos) ? slash + 1 : 0;
+  // Verify it looks like a PCI address (at least "0000:00:00.0" = 12 chars)
+  if (link_str.size() - pci_start < 12 ||
+      link_str.find(':', pci_start) == std::string::npos) {
+    // Fall back to scanning from the beginning for a DDDD: pattern
+    pci_start = std::string::npos;
+    for (size_t i = 0; i + 5 < link_str.size(); ++i) {
+      if (link_str[i + 4] == ':' && (i == 0 || link_str[i - 1] == '/')) {
+        pci_start = i;
+        break;
+      }
+    }
+  }
   if (pci_start == std::string::npos) {
     std::cerr << "Error: Could not find PCI address in symlink: " << link_target
               << std::endl;
@@ -1455,7 +1495,7 @@ __host__ int getPagePhysAddrs(void* virt_addr, size_t size, uint64_t* phys_out,
 }
 
 __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
-                              uint16_t nvme_bdf,
+                              uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               bool is_emulated, const char* buffer_name) {
   if (!buffer_ptr || size == 0 || !buffer_name) {
@@ -1498,7 +1538,7 @@ __host__ uint64_t getPhysAddr(void* buffer_ptr, size_t size, bool is_device,
 }
 
 __host__ int kmodRegQueue(int kmod_fd, void* virt_addr, uint64_t phys_addr,
-                          size_t size, uint8_t queue_type, uint16_t nvme_bdf,
+                          size_t size, uint8_t queue_type, uint32_t nvme_bdf,
                           uint64_t prp2, const char* queue_name) {
   if (kmod_fd < 0 || !virt_addr || size == 0 || !queue_name) {
     return -EINVAL;
@@ -1559,7 +1599,7 @@ __host__ int registerMemoryForGpu(void* host_ptr, size_t size, const char* name,
   return 0;
 }
 
-__host__ int setupQueueForGpu(size_t size, bool is_device, uint16_t nvme_bdf,
+__host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               bool is_emulated, const char* queue_name,
                               struct xioQueueSetup* setup) {
@@ -1842,7 +1882,7 @@ int loadKernelModule() {
   return 0;
 }
 
-int mapMmioBridgeShadowBuffer(uint16_t bridge_bdf, void** virt_addr) {
+int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr) {
   int kmod_fd = -1;
   int ret = 0;
   struct rocm_xio_mmio_bridge_shadow_req req;
@@ -1950,7 +1990,7 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
   return 0;
 }
 
-__host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
+__host__ int mapPciBar(uint32_t pci_bdf, uint8_t bar, void** bar_cpu,
                        void** bar_gpu, size_t bar_size) {
   if (!bar_cpu || !bar_gpu) {
     return -EINVAL;
@@ -1969,14 +2009,15 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
     bar_size = 8192;
   }
 
+  uint16_t domain = (pci_bdf >> 16) & 0xFFFF;
   uint8_t bus = (pci_bdf >> 8) & 0xFF;
   uint8_t dev = (pci_bdf >> 3) & 0x1F;
   uint8_t func = pci_bdf & 0x7;
 
   snprintf(resource_path, sizeof(resource_path),
-           "/sys/bus/pci/devices/0000:%02x:%02x.%x/"
+           "/sys/bus/pci/devices/%04x:%02x:%02x.%x/"
            "resource%u",
-           bus, dev, func, bar);
+           domain, bus, dev, func, bar);
 
   bar_fd = open(resource_path, O_RDWR);
   if (bar_fd < 0) {
@@ -2080,10 +2121,11 @@ __host__ int mapPciBar(uint16_t pci_bdf, uint8_t bar, void** bar_cpu,
   return 0;
 }
 
-__host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
+__host__ int readNvmeCapCqr(uint32_t pci_bdf, bool* cqr_out) {
   if (!cqr_out)
     return -EINVAL;
 
+  uint16_t domain = (pci_bdf >> 16) & 0xFFFF;
   uint8_t bus = (pci_bdf >> 8) & 0xFF;
   uint8_t dev = (pci_bdf >> 3) & 0x1F;
   uint8_t func = pci_bdf & 0x7;
@@ -2091,8 +2133,8 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
   char path[256];
   snprintf(path, sizeof(path),
            "/sys/bus/pci/devices/"
-           "0000:%02x:%02x.%x/resource0",
-           bus, dev, func);
+           "%04x:%02x:%02x.%x/resource0",
+           domain, bus, dev, func);
 
   int fd = open(path, O_RDONLY);
   if (fd < 0) {
@@ -2138,7 +2180,7 @@ __host__ int readNvmeCapCqr(uint16_t pci_bdf, bool* cqr_out) {
   return 0;
 }
 
-__host__ int setupContigQueueForGpu(size_t size, uint16_t nvme_bdf,
+__host__ int setupContigQueueForGpu(size_t size, uint32_t nvme_bdf,
                                     const char* queue_name,
                                     struct xioQueueSetup* setup,
                                     const char* kernel_module_device) {
@@ -2437,7 +2479,7 @@ __host__ int openDeviceWithRetry(const char* device_path, int flags,
   return -1;
 }
 
-__host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint16_t nvme_bdf,
+__host__ int exportRegVramBuf(void* vram_ptr, size_t size, uint32_t nvme_bdf,
                               const char* kernel_module_device,
                               uint64_t* phys_addr_out, bool is_emulated) {
   hsa_status_t status;
@@ -2551,7 +2593,7 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
 
 // Allocate GPU-accessible buffer for DMA operations
 __host__ hipError_t allocateGpuAccessibleBuffer(
-  size_t size, unsigned memoryMode, uint16_t targetBdf, const char* devicePath,
+  size_t size, unsigned memoryMode, uint32_t targetBdf, const char* devicePath,
   struct xioBufferInfo* bufferInfo) {
   if (!bufferInfo || size == 0) {
     return hipErrorInvalidValue;
