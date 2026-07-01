@@ -12,6 +12,14 @@ function(xio_add_bash_syntax_test name script)
     TIMEOUT 30)
 endfunction()
 
+function(xio_add_cmake_script_test name script)
+  add_test(NAME ${name}
+    COMMAND ${CMAKE_COMMAND} -P ${script})
+  set_tests_properties(${name} PROPERTIES
+    LABELS "unit;scripts"
+    TIMEOUT 30)
+endfunction()
+
 xio_add_bash_syntax_test(
   test-script-generate-endpoint-files
   ${CMAKE_SOURCE_DIR}/scripts/build/generate-endpoint-files.sh)
@@ -81,3 +89,6 @@ xio_add_bash_syntax_test(
 xio_add_bash_syntax_test(
   test-script-dkms-common
   ${CMAKE_SOURCE_DIR}/kernel/dkms-common.sh)
+xio_add_cmake_script_test(
+  test-script-xio-hip-architectures
+  ${CMAKE_SOURCE_DIR}/tests/unit/scripts/test-xio-hip-architectures.cmake)
