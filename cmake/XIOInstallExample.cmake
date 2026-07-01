@@ -46,11 +46,6 @@ if(HIP_COMPILER)
     -DCMAKE_HIP_COMPILER=${HIP_COMPILER})
 endif()
 
-if(DEFINED CMAKE_HIP_ARCHITECTURES)
-  list(APPEND _configure_args
-    -DCMAKE_HIP_ARCHITECTURES=${CMAKE_HIP_ARCHITECTURES})
-endif()
-
 message(STATUS "Configuring: ${SOURCE_DIR}")
 execute_process(
   COMMAND ${CMAKE_COMMAND} ${_configure_args}

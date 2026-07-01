@@ -778,8 +778,8 @@ void freeHostMemory(void* ptr, unsigned flags) {
     free(ptr);
 }
 
-hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
-                          uint64_t* offset_out, uint64_t flags) {
+__host__ hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
+                                   uint64_t* offset_out, uint64_t flags) {
   if (!ptr || !fd_out || !offset_out || size == 0)
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
 
@@ -794,7 +794,7 @@ hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
   return hsa_amd_portable_export_dmabuf(ptr, size, fd_out, offset_out);
 }
 
-hsa_status_t closeDmabuf(int fd) {
+__host__ hsa_status_t closeDmabuf(int fd) {
   if (fd < 0)
     return HSA_STATUS_ERROR_INVALID_ARGUMENT;
 

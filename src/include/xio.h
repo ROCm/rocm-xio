@@ -371,8 +371,8 @@ void freeHostMemory(void* ptr, unsigned flags);
  *              (default: NONE).
  * @return HSA status code.
  */
-hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
-                          uint64_t* offset_out, uint64_t flags = 0);
+__host__ hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
+                                   uint64_t* offset_out, uint64_t flags = 0);
 
 /**
  * @brief Close a dmabuf file descriptor.
@@ -382,7 +382,7 @@ hsa_status_t exportDmabuf(const void* ptr, size_t size, int* fd_out,
  * @param fd dmabuf file descriptor to close.
  * @return HSA status code.
  */
-hsa_status_t closeDmabuf(int fd);
+__host__ hsa_status_t closeDmabuf(int fd);
 
 /**
  * @brief Extract endpoint name from CLI arguments.

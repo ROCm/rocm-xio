@@ -60,11 +60,6 @@ CMake configuration options
    # Specify GPU architecture (auto-detected if not specified)
    cmake -S . -B build -DOFFLOAD_ARCH=gfx942:xnack+
 
-Set ``OFFLOAD_ARCH`` explicitly when you need device code for a
-specific GPU target.
-
-.. code-block:: bash
-
    # Specify ROCm installation path (default: /opt/rocm)
    cmake -S . -B build -DROCM_PATH=/opt/rocm-7.1.0
 
@@ -158,8 +153,8 @@ Build system details
   extract device code from the static library
 - **Code generation**: Automatic generation of the endpoint
   registry and external headers
-- **GPU architecture detection**: Auto-detects via ``rocminfo`` or can
-  be specified via ``OFFLOAD_ARCH``.
+- **GPU architecture detection**: Auto-detects via ``rocminfo``
+  or can be specified via ``OFFLOAD_ARCH``
 
 
 Install ROCm XIO

@@ -45,10 +45,9 @@ option(XIO_BUILD_PYTHON
 # detection which auto-populates CMAKE_HIP_ARCHITECTURES.
 set(OFFLOAD_ARCH "" CACHE STRING
   "GPU architecture (e.g., gfx942:xnack+ or semicolon-separated list)")
-
-if(NOT XIO_DOCS_ONLY)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/XIOHipArchitectures.cmake)
-  xio_init_hip_architectures()
+if(OFFLOAD_ARCH)
+  set(CMAKE_HIP_ARCHITECTURES "${OFFLOAD_ARCH}" CACHE STRING
+    "GPU architectures to compile for (derived from OFFLOAD_ARCH)" FORCE)
 endif()
 
 if(XIO_DOCS_ONLY)
@@ -180,6 +179,35 @@ endif()
 # This makes XIO_USE_SANITIZERS, XIO_USE_CODE_COVERAGE available as
 # cmake command-line options
 include(XIOCompilerOptions)
+
+# GPU architecture detection (OFFLOAD_ARCH cache var declared
+# before project() so it feeds CMAKE_HIP_ARCHITECTURES)
+if(NOT OFFLOAD_ARCH)
+  find_program(ROCMINFO rocminfo PATHS ${ROCM_PATH}/bin /opt/rocm/bin ENV PATH)
+  if(ROCMINFO)
+    execute_process(
+      COMMAND ${ROCMINFO}
+      OUTPUT_VARIABLE ROCMINFO_OUTPUT
+      RESULT_VARIABLE ROCMINFO_RESULT
+    )
+    if(ROCMINFO_RESULT EQUAL 0)
+      string(REGEX MATCH "gfx[0-9a-f]+" DETECTED_ARCH
+        "${ROCMINFO_OUTPUT}")
+      if(DETECTED_ARCH)
+        set(OFFLOAD_ARCH ${DETECTED_ARCH})
+        set(OFFLOAD_ARCH_MSG "${DETECTED_ARCH} (auto-detected)")
+      else()
+        set(OFFLOAD_ARCH_MSG "default (hipcc auto-detect)")
+      endif()
+    else()
+      set(OFFLOAD_ARCH_MSG "default (hipcc auto-detect)")
+    endif()
+  else()
+    set(OFFLOAD_ARCH_MSG "default (hipcc auto-detect)")
+  endif()
+else()
+  set(OFFLOAD_ARCH_MSG "${OFFLOAD_ARCH} (specified)")
+endif()
 
 message(STATUS "Building for GPU architecture: ${OFFLOAD_ARCH_MSG}")
 message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")

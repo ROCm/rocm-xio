@@ -72,13 +72,6 @@ Supported platforms: Linux
 
 ### Configure
 
-If you need to target a specific GPU architecture, set ``OFFLOAD_ARCH``
-explicitly, for example:
-
-```
-cmake -S . -B build -DOFFLOAD_ARCH=gfx942:xnack+
-```
-
 | Option | Default | Purpose |
 |--------|---------|---------|
 | OFFLOAD\_ARCH | (auto) | GPU architecture |

@@ -104,3 +104,36 @@ jobs:
       run: |
         export PYTHONPATH="${GITHUB_WORKSPACE}/python"
         python3 -c "from xio import sdma_ep; print('ok', sdma_ep.__name__)"
+
+  build-gfx11-library:
+    name: build-check for rocm-xio (${{ matrix.offload_arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        offload_arch:
+          - gfx1010
+          - gfx1101
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    steps:
+    - name: Check out code.
+      uses: actions/checkout@v5.0.0
+    - name: Install additional dependencies
+      run: |
+        apt-get update
+        apt-get install -y \
+          cmake \
+          libdrm-dev
+    - name: Configure library only for target GFX
+      run: |
+        cmake -S . -B build \
+          -DOFFLOAD_ARCH=${{ matrix.offload_arch }} \
+          -DROCM_PATH=/opt/rocm \
+          -DBUILD_CLIENTS=OFF \
+          -DBUILD_TESTING=OFF
+    - name: Build library for target GFX
+      run: cmake --build build --target rocm-xio

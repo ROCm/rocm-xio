@@ -116,11 +116,6 @@ function(xio_add_install_test)
         -DHIP_COMPILER=${CMAKE_HIP_COMPILER})
     endif()
 
-    if(DEFINED CMAKE_HIP_ARCHITECTURES)
-      list(APPEND _test_args
-        -DCMAKE_HIP_ARCHITECTURES=${CMAKE_HIP_ARCHITECTURES})
-    endif()
-
     if(XIO_IT_RUN)
       list(APPEND _test_args
         -DRUN_BINARY=${XIO_IT_NAME})
