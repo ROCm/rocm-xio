@@ -215,11 +215,14 @@ public:
     AlltoallArgs& args = kernelArgs_;
 
     if (config.deviceTriggered) {
-      // Use 1 block with 1 warp (64 threads) for device-triggered mode
-      alltoallTriggerKernel<<<1, 64, 0, stream>>>(args, 1, currentSignal_);
+      // Use 1 block with 1 warp for device-triggered mode
+      // (sufficient for up to 8 GPUs)
+      alltoallTriggerKernel<<<1, warpSize_, 0, stream>>>(args, 1, currentSignal_);
     } else {
-      // Use 1 block with 8 warps (512 threads) for device-initiated mode
-      sdmaAlltoallKernel<<<1, 512, 0, stream>>>(args, 1, currentSignal_);
+      // Use 1 block with nranks warps for device-initiated mode
+      // nranks warps: nranks-1 for peers + 1 for self-copy
+      int nThreads = nranks * warpSize_;
+      sdmaAlltoallKernel<<<1, nThreads, 0, stream>>>(args, 1, currentSignal_);
     }
     currentSignal_++;
   }
@@ -280,6 +283,12 @@ public:
     nranks_ = nranks;
     config_ = config;
 
+    // Query warp size from device
+    int deviceId;
+    HIP_CHECK(hipGetDevice(&deviceId));
+    HIP_CHECK(hipDeviceGetAttribute(&warpSize_, hipDeviceAttributeWarpSize,
+                                    deviceId));
+
     // Allocate per-peer completion
     // Use uncached memory for efficient polling by GPU and SDMA coherency
     // int nPeer = nranks - 1;
@@ -338,6 +347,7 @@ private:
   size_t currentElemsPerRank_ = 0;
   int rank_ = 0;
   int nranks_ = 0;
+  int warpSize_ = 64; // Queried from device in setRankInfo()
   SdmaTestConfig config_;
 
   uint64_t currentSignal_ = 1;

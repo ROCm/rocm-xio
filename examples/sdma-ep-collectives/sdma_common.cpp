@@ -189,20 +189,9 @@ void SdmaTestEngine::bootstrapMPI() {
     exit(1);
   }
 
-  if (nranks_ != MAX_GPUS) {
-    if (rank_ == 0) {
-      fprintf(
-        stderr,
-        "sdma-ep-collectives currently supports exactly %d ranks; got %d\n",
-        MAX_GPUS, nranks_);
-    }
-    MPI_Finalize();
-    exit(1);
-  }
-
   if (nranks_ > MAX_GPUS) {
     if (rank_ == 0)
-      fprintf(stderr, "Max supported ranks: %d\n", MAX_GPUS);
+      fprintf(stderr, "Max supported ranks: %d (got %d)\n", MAX_GPUS, nranks_);
     MPI_Finalize();
     exit(1);
   }
