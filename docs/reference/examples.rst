@@ -100,6 +100,53 @@ The example fills a 4 KiB source buffer on GPU 0 with
 ``0xAB``, transfers it to GPU 1 via SDMA, and verifies the
 destination buffer contents.
 
+``sdma-ep-bw``
+^^^^^^^^^^^^^^
+
+Multi-GPU shader-initiated SDMA bandwidth benchmark derived
+from the ``shader_sdma`` bandwidth prototype. One source GPU
+issues transfers to one or more peer GPUs using configurable
+numbers of SDMA queues, workgroups, and producer wavefronts.
+The benchmark sweeps power-of-two copy sizes and reports both
+GPU wall-clock and CPU-observed latency and aggregate bandwidth.
+
+**Requirements**:
+
+- Two or more AMD GPUs with XGMI / Infinity Fabric P2P access
+- Root access for hsakmt access to ``/dev/kfd``
+- CLI11 development package
+- Supported SDMA endpoint GPU architecture
+
+.. code-block:: bash
+
+   sudo /tmp/sdma-ep-bw-build/sdma-ep-bw \
+     --srcGpu 0 \
+     --numDestinations 1 \
+     --minCopySize 1024 \
+     --maxCopySize 1073741824 \
+     --numCopyCommands 1
+
+The prototype-compatible options ``--numOfQueuesPerDestination``,
+``--warpsPerWG``, and ``--wgsPerQueue`` control how producer
+wavefronts share SDMA queues. Verification is enabled by default;
+use ``--skip-verification`` only when measuring a known-good setup.
+Aggregate results are written to
+``MultiQueueGPU2GPU_Performance.csv`` by default.
+
+Like the original prototype, the benchmark uses separate verification,
+warmup, and timed kernel launches for each copy size. Device latency uses
+the GPU wall clock, while host latency uses HIP events around each timed
+launch.
+
+The ``scripts/`` subdirectory contains adapted single-producer,
+multi-producer, single-queue contention, and multi-queue contention
+sweeps from the original prototype. Set ``BENCHMARK`` to the built
+executable and see the script README for environment overrides and
+plotting instructions.
+
+Multi-wavefront workgroups may require the GPU power-management
+and lockup-timeout settings described in :doc:`../how-to/testing`.
+
 ``sdma-ep-allgather``
 ^^^^^^^^^^^^^^^^^^^^^
 
