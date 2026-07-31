@@ -56,3 +56,27 @@ __global__ void multiQueueSDMATransferQueueMapWG(
 
   return;
 }
+
+__global__ void triggerMultiQueueSDMATransfer(uint32_t* trigger,
+                                              size_t totalNumWarps,
+                                              uint64_t* signals,
+                                              uint64_t expectedSignal,
+                                              int64_t* start_clock_count,
+                                              int64_t* end_clock_count) {
+  const int warpId = threadIdx.x / warpSize;
+  const int laneId = threadIdx.x % warpSize;
+  const size_t signalIdx = blockIdx.x * (blockDim.x / warpSize) + warpId;
+
+  if (signalIdx >= totalNumWarps)
+    return;
+
+  if (laneId == 0) {
+    start_clock_count[signalIdx] = wall_clock64();
+    if (signalIdx == 0) {
+      __hip_atomic_fetch_add(trigger, 1, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
+    }
+    xio::sdma_ep::waitSignal(&signals[signalIdx], expectedSignal);
+    end_clock_count[signalIdx] = wall_clock64();
+  }
+}

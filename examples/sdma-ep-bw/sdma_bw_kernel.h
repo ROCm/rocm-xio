@@ -19,4 +19,11 @@ __global__ void multiQueueSDMATransferQueueMapWG(
   uint64_t* signals, uint64_t expectedSignal, int64_t* start_clock_count,
   int64_t* end_clock_count);
 
+__global__ void triggerMultiQueueSDMATransfer(uint32_t* trigger,
+                                              size_t totalNumWarps,
+                                              uint64_t* signals,
+                                              uint64_t expectedSignal,
+                                              int64_t* start_clock_count,
+                                              int64_t* end_clock_count);
+
 #endif // SDMA_BW_KERNEL_H

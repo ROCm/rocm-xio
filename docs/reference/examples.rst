@@ -133,6 +133,26 @@ use ``--skip-verification`` only when measuring a known-good setup.
 Aggregate results are written to
 ``MultiQueueGPU2GPU_Performance.csv`` by default.
 
+Device-triggered mode
+~~~~~~~~~~~~~~~~~~~~~
+
+Pass ``--device-triggered`` to pre-program host-backed SDMA queues from
+the CPU and release each batch from a GPU kernel:
+
+.. code-block:: bash
+
+   sudo /tmp/sdma-ep-bw-build/sdma-ep-bw \
+     --srcGpu 0 --numDestinations 1 \
+     --minCopySize 4096 --maxCopySize 4096 \
+     --iterations 50 --device-triggered
+
+In this mode, the CPU places ``POLL + COPY + SIGNAL`` packets in each
+SDMA queue before the timed loop. The GPU increments a device-visible
+trigger flag once per iteration; the SDMA engine observes that flag,
+performs the queued copies, and writes completion signals. The GPU then
+waits for those signals. Without this flag, the GPU constructs and submits
+the SDMA packets directly through the device-side queue API.
+
 Like the original prototype, the benchmark uses separate verification,
 warmup, and timed kernel launches for each copy size. Device latency uses
 the GPU wall clock, while host latency uses HIP events around each timed

@@ -5,15 +5,6 @@
 
 #include <stdio.h>
 
-#include <hip/hip_ext.h>
-#include <hip/hip_runtime.h>
-#include <hip/hip_runtime_api.h>
-
-#include "endpoints/sdma-ep/sdma-ep.h"
-
-#include "sdma_bw_kernel.h"
-#include "xio.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -25,7 +16,16 @@
 #include <sstream>
 #include <vector>
 
+#include <hip/hip_ext.h>
+#include <hip/hip_runtime.h>
+#include <hip/hip_runtime_api.h>
+
 #include <CLI/CLI.hpp>
+
+#include "endpoints/sdma-ep/sdma-ep.h"
+#include "endpoints/sdma-ep/sdma-host-queue.h"
+#include "sdma_bw_kernel.h"
+#include "xio.h"
 
 using namespace xio;
 
@@ -44,6 +44,7 @@ struct ExperimentParams {
   size_t numOfWGPerQueue;
   std::string resultFileName;
   bool verbose;
+  bool deviceTriggered;
 };
 
 #define CHECK_HIP_ERROR(cmd)                                                   \
@@ -57,8 +58,8 @@ struct ExperimentParams {
   } while (0)
 
 std::pair<double, double> avg_std(const std::vector<double>& values) {
-  double mean =
-    std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+  double mean = std::accumulate(values.begin(), values.end(), 0.0) /
+                values.size();
   double variance = 0.0;
   for (double v : values) {
     double delta = v - mean;
@@ -69,8 +70,8 @@ std::pair<double, double> avg_std(const std::vector<double>& values) {
 }
 
 double calcMeanLatencyofGPUTransfer(int64_t* start, int64_t* end,
-                                    size_t numDestinations,
-                                    size_t numWGsPerDst, size_t numWarpsPerWG) {
+                                    size_t numDestinations, size_t numWGsPerDst,
+                                    size_t numWarpsPerWG) {
   double totalTicks = 0.0;
   size_t warpsPerDst = numWGsPerDst * numWarpsPerWG;
   for (size_t d = 0; d < numDestinations; ++d) {
@@ -112,10 +113,46 @@ std::optional<size_t> verifyData(const std::vector<uint32_t>& hostSrc,
 void printHeader(std::ostream& os) {
   os << std::left << std::setw(6) << "Src" << std::setw(6) << "Dests"
      << std::setw(8) << "Grid" << std::setw(8) << "Block" << std::setw(14)
-     << "TransferSize" << std::setw(12) << "CopySize" << std::setw(8) << "Copies"
-     << std::setw(14) << "Device(us)" << std::setw(12) << "DevStd"
+     << "TransferSize" << std::setw(12) << "CopySize" << std::setw(8)
+     << "Copies" << std::setw(14) << "Device(us)" << std::setw(12) << "DevStd"
      << std::setw(14) << "DeviceBW" << std::setw(14) << "Host(us)"
      << std::setw(12) << "HostStd" << std::setw(12) << "HostBW";
+}
+
+void preprogramTransfers(const std::vector<int>& dstDeviceIds,
+                         const ExperimentParams& params, size_t copySize,
+                         void* srcBuf, const std::vector<void*>& dstBufs,
+                         std::vector<sdma_ep::SdmaQueueHostHandle>& hostHandles,
+                         uint32_t* trigger, uint64_t* signals,
+                         uint32_t firstTrigger, uint64_t expectedSignal) {
+  const size_t totalSize = copySize * params.numCopyCommands;
+  const size_t warpsPerBlock = params.numOfWarpsPerWG;
+
+  for (size_t d = 0; d < dstDeviceIds.size(); ++d) {
+    for (size_t q = 0; q < params.numOfQueues; ++q) {
+      auto& hostQueue = hostHandles[d * params.numOfQueues + q];
+      for (size_t wg = 0; wg < params.numOfWGPerQueue; ++wg) {
+        const size_t blockInDestination = q * params.numOfWGPerQueue + wg;
+        for (size_t warp = 0; warp < warpsPerBlock; ++warp) {
+          const size_t signalIdx = (d * params.numOfQueues *
+                                      params.numOfWGPerQueue +
+                                    blockInDestination) *
+                                     warpsPerBlock +
+                                   warp;
+          const size_t offset = ((blockInDestination * warpsPerBlock) + warp) *
+                                totalSize;
+
+          for (size_t c = 0; c < params.numCopyCommands; ++c) {
+            auto* src = static_cast<char*>(srcBuf) + offset + c * copySize;
+            auto* dst = static_cast<char*>(dstBufs[d]) + offset + c * copySize;
+            hostQueue.wait_flag_then_put(trigger, firstTrigger, dst, src,
+                                         copySize);
+          }
+          hostQueue.signal(signals + signalIdx, uint64_t{1});
+        }
+      }
+    }
+  }
 }
 
 void runExperiment(int srcDeviceId, const ExperimentParams& params) {
@@ -156,15 +193,21 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
                          params.numOfWGPerQueue * params.numOfWarpsPerWG;
 
   uint64_t* signalPtrs;
-  CHECK_HIP_ERROR(hipMalloc(&signalPtrs, sizeof(uint64_t) * totalNumWarps));
+  if (params.deviceTriggered) {
+    CHECK_HIP_ERROR(hipExtMallocWithFlags(reinterpret_cast<void**>(&signalPtrs),
+                                          sizeof(uint64_t) * totalNumWarps,
+                                          hipDeviceMallocUncached));
+  } else {
+    CHECK_HIP_ERROR(hipMalloc(&signalPtrs, sizeof(uint64_t) * totalNumWarps));
+  }
 
   size_t maxP2PTransferSize = params.maxCopySize * params.numCopyCommands *
                               params.numOfWarpsPerWG * params.numOfWGPerQueue *
                               params.numOfQueues;
 
   void* sdma_src_buf = nullptr;
-  CHECK_HIP_ERROR(
-    hipExtMallocWithFlags(&sdma_src_buf, maxP2PTransferSize, hipDeviceMallocUncached));
+  CHECK_HIP_ERROR(hipExtMallocWithFlags(&sdma_src_buf, maxP2PTransferSize,
+                                        hipDeviceMallocUncached));
 
   size_t num_elements = maxP2PTransferSize / sizeof(uint32_t);
   std::vector<uint32_t> hostSrcBuffer(num_elements, MAGIC_VALUE);
@@ -184,8 +227,8 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
   CHECK_HIP_ERROR(hipSetDevice(srcDeviceId));
 
   void** sdma_dst_bufs_d;
-  CHECK_HIP_ERROR(
-    hipMalloc((void**)&sdma_dst_bufs_d, sdmaDestBufferPtr.size() * sizeof(void*)));
+  CHECK_HIP_ERROR(hipMalloc((void**)&sdma_dst_bufs_d,
+                            sdmaDestBufferPtr.size() * sizeof(void*)));
   CHECK_HIP_ERROR(hipMemcpy(sdma_dst_bufs_d, sdmaDestBufferPtr.data(),
                             sdmaDestBufferPtr.size() * sizeof(void*),
                             hipMemcpyHostToDevice));
@@ -203,20 +246,41 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
 
   sdma_ep::SdmaQueueHandle** deviceHandles_d = nullptr;
   CHECK_HIP_ERROR(
-    hipMalloc(&deviceHandles_d, totalNumQueues * sizeof(sdma_ep::SdmaQueueHandle*)));
+    hipMalloc(&deviceHandles_d,
+              totalNumQueues * sizeof(sdma_ep::SdmaQueueHandle*)));
+
+  uint32_t* trigger_d = nullptr;
+  if (params.deviceTriggered) {
+    CHECK_HIP_ERROR(hipExtMallocWithFlags(reinterpret_cast<void**>(&trigger_d),
+                                          sizeof(uint32_t),
+                                          hipDeviceMallocUncached));
+    CHECK_HIP_ERROR(hipMemset(trigger_d, 0, sizeof(uint32_t)));
+  }
+
+  std::vector<sdma_ep::SdmaQueueHostHandle> hostHandles;
+  if (params.deviceTriggered)
+    hostHandles.reserve(totalNumQueues);
 
   size_t queueIdx = 0;
   for (auto& dstDeviceId : dstDeviceIds) {
     for (size_t q = 0; q < params.numOfQueues; q++) {
       sdma_ep::SdmaQueueInfo info = {};
-      if (sdma_ep::createQueue(srcDeviceId, dstDeviceId, &info) != 0) {
+      int rc = params.deviceTriggered
+                 ? sdma_ep::createHostQueue(srcDeviceId, dstDeviceId, &info)
+                 : sdma_ep::createQueue(srcDeviceId, dstDeviceId, &info);
+      if (rc != 0) {
         std::cerr << "ERROR: failed to create queue " << q << " for GPU "
                   << dstDeviceId << std::endl;
         exit(EXIT_FAILURE);
       }
       queueInfos.push_back(info);
-      deviceHandles_d[queueIdx] =
-        static_cast<sdma_ep::SdmaQueueHandle*>(info.deviceHandle);
+      if (params.deviceTriggered) {
+        hostHandles.push_back(
+          sdma_ep::getHostHandle(srcDeviceId, dstDeviceId, info.channelIdx));
+      } else {
+        deviceHandles_d[queueIdx] = static_cast<sdma_ep::SdmaQueueHandle*>(
+          info.deviceHandle);
+      }
       queueIdx++;
     }
   }
@@ -227,22 +291,29 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
   int64_t* start_clock_count_d;
   int64_t* end_clock_count_d;
 
-  CHECK_HIP_ERROR(hipHostMalloc(&start_clock_count,
-                                params.numIterations * totalNumWarps * sizeof(int64_t)));
-  CHECK_HIP_ERROR(hipHostMalloc(&end_clock_count,
-                                params.numIterations * totalNumWarps * sizeof(int64_t)));
-  CHECK_HIP_ERROR(hipMalloc(&start_clock_count_d,
-                            params.numIterations * totalNumWarps * sizeof(int64_t)));
-  CHECK_HIP_ERROR(hipMalloc(&end_clock_count_d,
-                            params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipHostMalloc(&start_clock_count,
+                  params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipHostMalloc(&end_clock_count,
+                  params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipMalloc(&start_clock_count_d,
+              params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipMalloc(&end_clock_count_d,
+              params.numIterations * totalNumWarps * sizeof(int64_t)));
 
-  CHECK_HIP_ERROR(hipMemset(start_clock_count_d, 0,
-                            params.numIterations * totalNumWarps * sizeof(int64_t)));
-  CHECK_HIP_ERROR(hipMemset(end_clock_count_d, 0,
-                            params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipMemset(start_clock_count_d, 0,
+              params.numIterations * totalNumWarps * sizeof(int64_t)));
+  CHECK_HIP_ERROR(
+    hipMemset(end_clock_count_d, 0,
+              params.numIterations * totalNumWarps * sizeof(int64_t)));
 
   // Kernel Launch
-  int numWgs = params.numDestinations * params.numOfQueues * params.numOfWGPerQueue;
+  int numWgs = params.numDestinations * params.numOfQueues *
+               params.numOfWGPerQueue;
   if (params.verbose) {
     std::cout << "BlockDim.x: " << wgSize << ", GridDim.x: " << numWgs
               << std::endl;
@@ -278,22 +349,36 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
       CHECK_HIP_ERROR(hipMemset(buf, 0, totalTransferSize));
     }
 
-    CHECK_HIP_ERROR(
-      hipMemset(signalPtrs, 0, sizeof(uint64_t) * totalNumWarps));
+    CHECK_HIP_ERROR(hipMemset(signalPtrs, 0, sizeof(uint64_t) * totalNumWarps));
+    if (trigger_d) {
+      CHECK_HIP_ERROR(hipMemset(trigger_d, 0, sizeof(uint32_t)));
+    }
+    CHECK_HIP_ERROR(hipDeviceSynchronize());
     uint64_t expectedSignal = 1;
 
     std::optional<size_t> numErrors;
+    uint32_t nextTrigger = 0;
     if (!params.skipVerification) {
-      hipLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0, 0, 0,
-                         sdma_src_buf, sdma_dst_bufs_d, copySize,
-                         params.numCopyCommands, params.numDestinations,
-                         params.numOfQueues, params.numOfWGPerQueue,
-                         deviceHandles_d, signalPtrs, expectedSignal,
-                         start_clock_count_d, end_clock_count_d);
+      if (params.deviceTriggered) {
+        preprogramTransfers(dstDeviceIds, params, copySize, sdma_src_buf,
+                            sdmaDestBufferPtr, hostHandles, trigger_d,
+                            signalPtrs, nextTrigger + 1, expectedSignal);
+        hipLaunchKernelGGL(triggerMultiQueueSDMATransfer, grid, block, 0, 0,
+                           trigger_d, totalNumWarps, signalPtrs, expectedSignal,
+                           start_clock_count_d, end_clock_count_d);
+        nextTrigger++;
+      } else {
+        hipLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0, 0,
+                           0, sdma_src_buf, sdma_dst_bufs_d, copySize,
+                           params.numCopyCommands, params.numDestinations,
+                           params.numOfQueues, params.numOfWGPerQueue,
+                           deviceHandles_d, signalPtrs, expectedSignal,
+                           start_clock_count_d, end_clock_count_d);
+      }
       CHECK_HIP_ERROR(hipDeviceSynchronize());
       expectedSignal++;
-      numErrors =
-        verifyData(hostSrcBuffer, sdma_dst_bufs_d, dstDeviceIds.size(), totalTransferSize);
+      numErrors = verifyData(hostSrcBuffer, sdma_dst_bufs_d,
+                             dstDeviceIds.size(), totalTransferSize);
       if (numErrors != 0) {
         std::cerr << "Data verification failed\n";
         exit(-1);
@@ -302,12 +387,22 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
 
     // Warming up
     for (size_t i = 0; i < params.nWarmupIterations; ++i) {
-      hipLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0, 0, i,
-                         sdma_src_buf, sdma_dst_bufs_d, copySize,
-                         params.numCopyCommands, params.numDestinations,
-                         params.numOfQueues, params.numOfWGPerQueue,
-                         deviceHandles_d, signalPtrs, expectedSignal,
-                         start_clock_count_d, end_clock_count_d);
+      if (params.deviceTriggered) {
+        preprogramTransfers(dstDeviceIds, params, copySize, sdma_src_buf,
+                            sdmaDestBufferPtr, hostHandles, trigger_d,
+                            signalPtrs, nextTrigger + 1, expectedSignal);
+        hipLaunchKernelGGL(triggerMultiQueueSDMATransfer, grid, block, 0, 0,
+                           trigger_d, totalNumWarps, signalPtrs, expectedSignal,
+                           start_clock_count_d, end_clock_count_d);
+        nextTrigger++;
+      } else {
+        hipLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0, 0,
+                           i, sdma_src_buf, sdma_dst_bufs_d, copySize,
+                           params.numCopyCommands, params.numDestinations,
+                           params.numOfQueues, params.numOfWGPerQueue,
+                           deviceHandles_d, signalPtrs, expectedSignal,
+                           start_clock_count_d, end_clock_count_d);
+      }
       expectedSignal++;
     }
     CHECK_HIP_ERROR(hipDeviceSynchronize());
@@ -324,35 +419,55 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
     int64_t* endTimestampPtr = end_clock_count_d;
 
     for (size_t iter = 0; iter < params.numIterations; ++iter) {
-      hipExtLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0, 0,
-                            timestamps_events[iter * 2],
-                            timestamps_events[iter * 2 + 1], 0, iter,
-                            sdma_src_buf, sdma_dst_bufs_d, copySize,
-                            params.numCopyCommands, params.numDestinations,
-                            params.numOfQueues, params.numOfWGPerQueue,
-                            deviceHandles_d, signalPtrs, expectedSignal,
-                            startTimestampPtr, endTimestampPtr);
+      if (params.deviceTriggered) {
+        preprogramTransfers(dstDeviceIds, params, copySize, sdma_src_buf,
+                            sdmaDestBufferPtr, hostHandles, trigger_d,
+                            signalPtrs, nextTrigger + 1, expectedSignal);
+        hipExtLaunchKernelGGL(triggerMultiQueueSDMATransfer, grid, block, 0, 0,
+                              timestamps_events[iter * 2],
+                              timestamps_events[iter * 2 + 1], 0, trigger_d,
+                              totalNumWarps, signalPtrs, expectedSignal,
+                              startTimestampPtr, endTimestampPtr);
+        nextTrigger++;
+      } else {
+        hipExtLaunchKernelGGL(multiQueueSDMATransferQueueMapWG, grid, block, 0,
+                              0, timestamps_events[iter * 2],
+                              timestamps_events[iter * 2 + 1], 0, iter,
+                              sdma_src_buf, sdma_dst_bufs_d, copySize,
+                              params.numCopyCommands, params.numDestinations,
+                              params.numOfQueues, params.numOfWGPerQueue,
+                              deviceHandles_d, signalPtrs, expectedSignal,
+                              startTimestampPtr, endTimestampPtr);
+      }
       startTimestampPtr += totalNumWarps;
       endTimestampPtr += totalNumWarps;
       expectedSignal++;
     }
     CHECK_HIP_ERROR(hipDeviceSynchronize());
+    if (params.deviceTriggered) {
+      for (auto& hostQueue : hostHandles) {
+        hostQueue.quiet();
+      }
+    }
 
     // Performance Metrics
-    CHECK_HIP_ERROR(hipMemcpy(start_clock_count, start_clock_count_d,
-                              params.numIterations * totalNumWarps * sizeof(int64_t),
-                              hipMemcpyDeviceToHost));
-    CHECK_HIP_ERROR(hipMemcpy(end_clock_count, end_clock_count_d,
-                              params.numIterations * totalNumWarps * sizeof(int64_t),
-                              hipMemcpyDeviceToHost));
+    CHECK_HIP_ERROR(
+      hipMemcpy(start_clock_count, start_clock_count_d,
+                params.numIterations * totalNumWarps * sizeof(int64_t),
+                hipMemcpyDeviceToHost));
+    CHECK_HIP_ERROR(
+      hipMemcpy(end_clock_count, end_clock_count_d,
+                params.numIterations * totalNumWarps * sizeof(int64_t),
+                hipMemcpyDeviceToHost));
 
     for (size_t iter = 0; iter < params.numIterations; ++iter) {
-      double device_latency_ms =
-        calcMeanLatencyofGPUTransfer(
-          start_clock_count + (iter * totalNumWarps),
-          end_clock_count + (iter * totalNumWarps), params.numDestinations,
-          params.numOfQueues * params.numOfWGPerQueue, params.numOfWarpsPerWG) /
-        1e5;
+      double device_latency_ms = calcMeanLatencyofGPUTransfer(
+                                   start_clock_count + (iter * totalNumWarps),
+                                   end_clock_count + (iter * totalNumWarps),
+                                   params.numDestinations,
+                                   params.numOfQueues * params.numOfWGPerQueue,
+                                   params.numOfWarpsPerWG) /
+                                 1e5;
 
       float host_latency_ms;
       CHECK_HIP_ERROR(hipEventElapsedTime(&host_latency_ms,
@@ -368,10 +483,10 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
 
     double sizeAcrossAllLinks = (double)dstDeviceIds.size() * totalTransferSize;
 
-    double deviceBandwidth_gbs =
-      (sizeAcrossAllLinks / 1.0E9) / (latency_device_mean / 1000);
-    double hostBandwidth_gbs =
-      (sizeAcrossAllLinks / 1.0E9) / (latency_host_mean / 1000);
+    double deviceBandwidth_gbs = (sizeAcrossAllLinks / 1.0E9) /
+                                 (latency_device_mean / 1000);
+    double hostBandwidth_gbs = (sizeAcrossAllLinks / 1.0E9) /
+                               (latency_host_mean / 1000);
 
     std::cout << std::left << std::setw(6) << srcDeviceId << std::setw(6)
               << dstDeviceIds.size() << std::setw(8) << numWgs << std::setw(8)
@@ -404,6 +519,8 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
   CHECK_HIP_ERROR(hipFree(start_clock_count_d));
   CHECK_HIP_ERROR(hipFree(end_clock_count_d));
   CHECK_HIP_ERROR(hipFree(deviceHandles_d));
+  if (trigger_d)
+    CHECK_HIP_ERROR(hipFree(trigger_d));
   CHECK_HIP_ERROR(hipFree(signalPtrs));
   CHECK_HIP_ERROR(hipFree(sdma_src_buf));
   CHECK_HIP_ERROR(hipFree(sdma_dst_bufs_d));
@@ -464,6 +581,10 @@ int main(int argc, char** argv) {
   bool verbose{false};
   app.add_flag("-v, --verbose", verbose, "verbose output");
 
+  bool deviceTriggered{false};
+  app.add_flag("--device-triggered", deviceTriggered,
+               "Pre-program host SDMA queues and trigger them from the GPU");
+
   CLI11_PARSE(app, argc, argv);
 
   std::cout << "==== Running shader_bw doing " << numCopyCommands
@@ -483,6 +604,7 @@ int main(int argc, char** argv) {
     .numOfWGPerQueue = numOfWGPerQueue,
     .resultFileName = resultFileName,
     .verbose = verbose,
+    .deviceTriggered = deviceTriggered,
   };
 
   runExperiment(srcGpuId, params);
