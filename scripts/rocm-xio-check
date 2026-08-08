@@ -1,0 +1,277 @@
+#!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Check whether the current system satisfies ROCm XIO runtime
+# prerequisites and report endpoint-specific readiness.
+
+set -u
+
+STRICT=false
+ROOT_DIR=""
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--strict] [--root DIR]
+
+Check a system for ROCm XIO compliance.
+
+Options:
+  --strict    Treat endpoint warnings as failures.
+  --root DIR  Inspect files under DIR instead of /.
+  --help      Show this message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --strict)
+      STRICT=true
+      ;;
+    --root)
+      if [ $# -lt 2 ]; then
+        echo "ERROR: --root requires a directory argument" >&2
+        usage >&2
+        exit 2
+      fi
+      ROOT_DIR="$2"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [ -n "${ROOT_DIR}" ] && [ ! -d "${ROOT_DIR}" ]; then
+  echo "ERROR: --root path does not exist: ${ROOT_DIR}" >&2
+  exit 2
+fi
+
+root_path() {
+  local path="$1"
+
+  if [ -z "${ROOT_DIR}" ] || [ "${ROOT_DIR}" = "/" ]; then
+    printf "%s\n" "${path}"
+    return
+  fi
+
+  if [ "${path}" = "/" ]; then
+    printf "%s\n" "${ROOT_DIR%/}"
+    return
+  fi
+
+  printf "%s%s\n" "${ROOT_DIR%/}" "${path}"
+}
+
+record_status() {
+  local level="$1"
+  local name="$2"
+  local detail="$3"
+
+  printf "%-5s %-20s %s\n" "${level}" "${name}" "${detail}"
+
+  case "${level}" in
+    PASS) PASS_COUNT=$((PASS_COUNT + 1)) ;;
+    WARN) WARN_COUNT=$((WARN_COUNT + 1)) ;;
+    FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  esac
+}
+
+count_matches() {
+  local pattern="$1"
+  local matches=()
+
+  mapfile -t matches < <(compgen -G "${pattern}" || true)
+  printf "%s\n" "${#matches[@]}"
+}
+
+has_rw_access() {
+  local path="$1"
+  [ -r "${path}" ] && [ -w "${path}" ]
+}
+
+check_command() {
+  local name="$1"
+  local label="$2"
+  local guidance="$3"
+
+  if command -v "${name}" >/dev/null 2>&1; then
+    record_status PASS "${label}" \
+      "Found $(command -v "${name}")"
+    return 0
+  fi
+
+  record_status FAIL "${label}" "${guidance}"
+  return 1
+}
+
+ROCM_PATH_VALUE="${ROCM_PATH:-/opt/rocm}"
+ROCM_PATH_CHECK="$(root_path "${ROCM_PATH_VALUE}")"
+KFD_PATH="$(root_path /dev/kfd)"
+DRM_NODE_PATTERN="$(root_path "/dev/dri/render"'D*')"
+ROCM_XIO_DEVICE="$(root_path /dev/rocm-xio)"
+NVME_PATTERN="$(root_path /dev/nvme[0-9]*)"
+UDEV_RULE_ETC="$(root_path /etc/udev/rules.d/99-rocm-xio-rdma.rules)"
+UDEV_RULE_LIB="$(root_path /lib/udev/rules.d/99-rocm-xio-rdma.rules)"
+INFINIBAND_PATTERN="$(root_path /sys/class/infiniband/*)"
+
+echo "ROCm XIO compliance report"
+echo "Root: ${ROOT_DIR:-/}"
+echo ""
+
+if [ "$(uname -s)" = "Linux" ]; then
+  record_status PASS core/os "Linux host detected"
+else
+  record_status FAIL core/os "ROCm XIO currently supports Linux only"
+fi
+
+if [ -d "${ROCM_PATH_CHECK}" ]; then
+  record_status PASS core/rocm-path \
+    "ROCm path present at ${ROCM_PATH_CHECK}"
+else
+  record_status FAIL core/rocm-path \
+    "Missing ROCm path ${ROCM_PATH_CHECK}"
+fi
+
+check_command rocminfo core/rocminfo \
+  "Install ROCm userspace tools so rocminfo is available"
+
+if [ -e "${KFD_PATH}" ]; then
+  if has_rw_access "${KFD_PATH}"; then
+    record_status PASS core/kfd "Accessible ${KFD_PATH}"
+  else
+    record_status FAIL core/kfd \
+      "Current user lacks read/write access to ${KFD_PATH}"
+  fi
+else
+  record_status FAIL core/kfd "Missing ${KFD_PATH}"
+fi
+
+RENDER_NODE_COUNT="$(count_matches "${DRM_NODE_PATTERN}")"
+if [ "${RENDER_NODE_COUNT}" -gt 0 ]; then
+  record_status PASS core/render-node \
+    "Found ${RENDER_NODE_COUNT} DRM render node(s)"
+else
+  record_status FAIL core/render-node \
+    "No DRM render nodes found under $(dirname "${DRM_NODE_PATTERN}")"
+fi
+
+if command -v rocminfo >/dev/null 2>&1; then
+  if rocminfo >/dev/null 2>&1; then
+    record_status PASS core/rocminfo-run "rocminfo completed successfully"
+  else
+    record_status FAIL core/rocminfo-run \
+      "rocminfo failed; verify the ROCm runtime and GPU driver stack"
+  fi
+fi
+
+if [ "${HSA_FORCE_FINE_GRAIN_PCIE:-}" = "1" ]; then
+  record_status PASS core/fine-grain \
+    "HSA_FORCE_FINE_GRAIN_PCIE=1"
+else
+  record_status WARN core/fine-grain \
+    "Set HSA_FORCE_FINE_GRAIN_PCIE=1 before PCIe peer-to-peer tests"
+fi
+
+if [ -e "${ROCM_XIO_DEVICE}" ]; then
+  if has_rw_access "${ROCM_XIO_DEVICE}"; then
+    record_status PASS core/rocm-xio "Accessible ${ROCM_XIO_DEVICE}"
+  else
+    record_status WARN core/rocm-xio \
+      "Found ${ROCM_XIO_DEVICE} but current user lacks read/write access"
+  fi
+else
+  record_status WARN core/rocm-xio \
+    "ROCm XIO kernel module device node not present"
+fi
+
+if command -v lsmod >/dev/null 2>&1 && lsmod | grep -q '^rocm_xio '; then
+  record_status PASS core/rocm-xio-module "rocm_xio kernel module is loaded"
+else
+  record_status WARN core/rocm-xio-module \
+    "Load the rocm_xio kernel module for queue-registration endpoints"
+fi
+
+if [ "${FAIL_COUNT}" -eq 0 ]; then
+  record_status PASS endpoint/test-ep \
+    "Core runtime prerequisites are present"
+else
+  record_status WARN endpoint/test-ep \
+    "Core prerequisite failures block test-ep readiness"
+fi
+
+if [ -e "${ROCM_XIO_DEVICE}" ] && [ "$(count_matches "${NVME_PATTERN}")" -gt 0 ]; then
+  record_status PASS endpoint/nvme-ep \
+    "NVMe controller and rocm-xio device node detected"
+elif [ "$(count_matches "${NVME_PATTERN}")" -gt 0 ]; then
+  record_status WARN endpoint/nvme-ep \
+    "NVMe controller detected, but ${ROCM_XIO_DEVICE} is unavailable"
+else
+  record_status WARN endpoint/nvme-ep \
+    "No NVMe controller device nodes found under $(dirname "${NVME_PATTERN}")"
+fi
+
+if command -v rdma >/dev/null 2>&1; then
+  RDMA_LINKS="$(rdma link show 2>/dev/null || true)"
+  if printf "%s\n" "${RDMA_LINKS}" | grep -q 'rocm-rdma-'; then
+    record_status PASS endpoint/rdma-ep \
+      "Found ROCm XIO RDMA device names via rdma link show"
+  elif [ -n "${RDMA_LINKS}" ] || [ "$(count_matches "${INFINIBAND_PATTERN}")" -gt 0 ]; then
+    if [ -f "${UDEV_RULE_ETC}" ] || [ -f "${UDEV_RULE_LIB}" ]; then
+      record_status WARN endpoint/rdma-ep \
+        "RDMA devices detected, but expected rocm-rdma-* names are absent"
+    else
+      record_status WARN endpoint/rdma-ep \
+        "RDMA devices detected; install the repo udev rules for rocm-rdma-* names"
+    fi
+  else
+    record_status WARN endpoint/rdma-ep \
+      "No RDMA devices detected"
+  fi
+else
+  record_status WARN endpoint/rdma-ep \
+    "Install rdma-core userspace tools so the rdma command is available"
+fi
+
+if [ "${RENDER_NODE_COUNT}" -ge 2 ]; then
+  record_status PASS endpoint/sdma-ep \
+    "At least two render nodes detected for multi-GPU SDMA testing"
+elif [ "${RENDER_NODE_COUNT}" -eq 1 ]; then
+  record_status WARN endpoint/sdma-ep \
+    "Single render node detected; only single-GPU SDMA paths are likely ready"
+else
+  record_status WARN endpoint/sdma-ep \
+    "No render nodes detected for SDMA endpoint access"
+fi
+
+echo ""
+echo "Summary: ${PASS_COUNT} pass, ${WARN_COUNT} warn, ${FAIL_COUNT} fail"
+
+if [ "${FAIL_COUNT}" -gt 0 ]; then
+  echo "Result: not compliant"
+  exit 1
+fi
+
+if [ "${STRICT}" = true ] && [ "${WARN_COUNT}" -gt 0 ]; then
+  echo "Result: warnings present (strict mode)"
+  exit 1
+fi
+
+if [ "${WARN_COUNT}" -gt 0 ]; then
+  echo "Result: core compliant, with endpoint or configuration warnings"
+else
+  echo "Result: compliant"
+fi

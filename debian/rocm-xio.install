@@ -1,4 +1,5 @@
 opt/rocm/lib/librocm-xio*
+opt/rocm/bin/rocm-xio-check
 opt/rocm/lib/cmake/rocm-xio/
 opt/rocm/include/rocm-xio/
 opt/rocm/lib/rocm-xio/rdma-core/

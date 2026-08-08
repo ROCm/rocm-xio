@@ -12,6 +12,14 @@ function(xio_add_bash_syntax_test name script)
     TIMEOUT 30)
 endfunction()
 
+function(xio_add_bash_unit_test name script)
+  add_test(NAME ${name}
+    COMMAND bash ${script})
+  set_tests_properties(${name} PROPERTIES
+    LABELS "unit;scripts"
+    TIMEOUT 30)
+endfunction()
+
 xio_add_bash_syntax_test(
   test-script-generate-endpoint-files
   ${CMAKE_SOURCE_DIR}/scripts/build/generate-endpoint-files.sh)
@@ -24,6 +32,9 @@ xio_add_bash_syntax_test(
 xio_add_bash_syntax_test(
   test-script-build-rdma-core
   ${CMAKE_SOURCE_DIR}/scripts/build/build-rdma-core.sh)
+xio_add_bash_syntax_test(
+  test-script-rocm-xio-check
+  ${CMAKE_SOURCE_DIR}/scripts/rocm-xio-check)
 xio_add_bash_syntax_test(
   test-script-fetch-nvme-headers
   ${CMAKE_SOURCE_DIR}/scripts/build/fetch-nvme-headers.sh)
@@ -81,3 +92,7 @@ xio_add_bash_syntax_test(
 xio_add_bash_syntax_test(
   test-script-dkms-common
   ${CMAKE_SOURCE_DIR}/kernel/dkms-common.sh)
+
+xio_add_bash_unit_test(
+  test-rocm-xio-check
+  ${CMAKE_SOURCE_DIR}/tests/unit/scripts/test-rocm-xio-check.sh)

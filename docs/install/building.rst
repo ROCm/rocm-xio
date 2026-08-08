@@ -51,6 +51,26 @@ Output locations:
 
 - Library: ``build/librocm-xio.a``
 - Tester: ``build/xio-tester``
+- Compliance checker: ``scripts/rocm-xio-check``
+
+Compliance checker
+------------------
+
+Run the compliance checker to verify that a target system has the core ROCm
+runtime pieces that ROCm XIO expects, along with endpoint-specific readiness
+signals for ``test-ep``, ``nvme-ep``, ``rdma-ep``, and ``sdma-ep``:
+
+.. code-block:: bash
+
+   ./scripts/rocm-xio-check
+
+Use ``--strict`` to make any warning fail the process, or ``--root`` to
+inspect an alternate filesystem root such as a mounted image:
+
+.. code-block:: bash
+
+   ./scripts/rocm-xio-check --strict
+   ./scripts/rocm-xio-check --root /mnt/target-root
 
 CMake configuration options
 ----------------------------
@@ -199,6 +219,7 @@ Install layout
 
    <prefix>/                         # /opt/rocm by default
    ├── bin/
+   │   └── rocm-xio-check
    │   └── xio-tester                # (INSTALL_TESTER=ON only)
    ├── include/rocm-xio/
    │   ├── xio.h
