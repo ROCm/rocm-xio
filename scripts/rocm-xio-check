@@ -121,7 +121,7 @@ check_command() {
 ROCM_PATH_VALUE="${ROCM_PATH:-/opt/rocm}"
 ROCM_PATH_CHECK="$(root_path "${ROCM_PATH_VALUE}")"
 KFD_PATH="$(root_path /dev/kfd)"
-DRM_PATTERN="$(root_path /dev/dri/renderD*)"
+DRM_NODE_PATTERN="$(root_path "/dev/dri/render"'D*')"
 ROCM_XIO_DEVICE="$(root_path /dev/rocm-xio)"
 NVME_PATTERN="$(root_path /dev/nvme[0-9]*)"
 UDEV_RULE_ETC="$(root_path /etc/udev/rules.d/99-rocm-xio-rdma.rules)"
@@ -160,13 +160,13 @@ else
   record_status FAIL core/kfd "Missing ${KFD_PATH}"
 fi
 
-RENDER_NODE_COUNT="$(count_matches "${DRM_PATTERN}")"
+RENDER_NODE_COUNT="$(count_matches "${DRM_NODE_PATTERN}")"
 if [ "${RENDER_NODE_COUNT}" -gt 0 ]; then
   record_status PASS core/render-node \
     "Found ${RENDER_NODE_COUNT} DRM render node(s)"
 else
   record_status FAIL core/render-node \
-    "No DRM render nodes found under $(dirname "${DRM_PATTERN}")"
+    "No DRM render nodes found under $(dirname "${DRM_NODE_PATTERN}")"
 fi
 
 if command -v rocminfo >/dev/null 2>&1; then
