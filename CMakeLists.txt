@@ -647,6 +647,13 @@ foreach(ep ${VALID_ENDPOINTS})
     endif()
 endforeach()
 
+# Install user-facing utilities.
+install(PROGRAMS
+    ${CMAKE_SOURCE_DIR}/scripts/rocm-xio-check
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT rocm-xio
+)
+
 # Optionally install tester executable
 option(INSTALL_TESTER "Install xio-tester executable" OFF)
 if(INSTALL_TESTER AND BUILD_CLIENTS)
