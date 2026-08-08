@@ -1178,6 +1178,116 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_GET_BUFFER_PAGES: {
+      /* Return per-page DMA addresses of a registered VRAM buffer by walking
+       * its kept-alive P2PDMA scatter-gather mapping. This lets userspace build
+       * a (chained) PRP list describing a physically non-contiguous VRAM
+       * allocation, rather than assuming one contiguous run from phys_addr. */
+      struct rocm_xio_get_buffer_pages_req req;
+      struct vram_buffer_entry* entry;
+      struct sg_table* sgt = NULL;
+      struct scatterlist* sg;
+      __u64 __user* uaddrs;
+      __u32 page_size, count = 0;
+      bool found = false;
+      int i;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      page_size = req.page_size ? req.page_size : 4096;
+      uaddrs = (__u64 __user*)(uintptr_t)req.page_addrs;
+      if (!uaddrs || req.max_pages == 0)
+        return -EINVAL;
+
+      /* Locate the buffer; copy its sg_table pointer under the lock. The
+       * mapping stays alive until UNREGISTER_BUFFER, so it is safe to walk
+       * after dropping the lock for this serial (single bring-up) use. */
+      spin_lock(&vram_buffers_lock);
+      list_for_each_entry(entry, &vram_buffers, list) {
+        if (entry->virt_addr == req.virt_addr) {
+          found = true;
+          sgt = entry->sgt;
+          break;
+        }
+      }
+      spin_unlock(&vram_buffers_lock);
+
+      if (!found)
+        return -ENOENT;
+      if (!sgt) /* emulated buffers have no P2PDMA sg_table */
+        return -EOPNOTSUPP;
+
+      /*
+       * Emit exactly one DMA address per logical @page_size page of the
+       * transfer, walking the sg segments as a single concatenated byte
+       * stream. The registered buffer's sg mapping may cover MORE bytes than
+       * the caller's transfer (the VRAM allocation is rounded up), and a
+       * naive per-segment walk both over-counts and rounds each segment up
+       * independently (so Sum(ceil(seg_len/ps)) can exceed
+       * ceil(total/ps)). We therefore stop once @max_pages logical pages
+       * have been produced, and we guard against a logical page that would
+       * straddle two physically-discontiguous segments (only possible when a
+       * non-final segment's length is not a multiple of @page_size): such a
+       * page is not representable by a single PRP entry, so we report rather
+       * than silently mis-address.
+       */
+      {
+        unsigned int carry = 0; /* leftover bytes consumed from prev segment */
+
+        for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+          dma_addr_t seg = sg_dma_address(sg);
+          unsigned int seg_len = sg_dma_len(sg);
+          unsigned int off = 0;
+
+          if (count >= req.max_pages)
+            break;
+
+          /*
+           * A previous segment ended mid-page. A full PRP page must be a
+           * single contiguous 4096-region, so this is only valid if the
+           * previous segment ended exactly on a page boundary (carry == 0).
+           */
+          if (carry != 0) {
+            pr_err("rocm-axiio: GET_BUFFER_PAGES: segment %d not "
+                   "page-aligned (carry=%u); page straddles discontiguous "
+                   "VRAM segments\n",
+                   i, carry);
+            return -EINVAL;
+          }
+
+          for (off = 0; off + page_size <= seg_len; off += page_size) {
+            __u64 pa = (__u64)seg + off;
+
+            if (count >= req.max_pages)
+              break;
+            if (put_user(pa, &uaddrs[count]))
+              return -EFAULT;
+            count++;
+          }
+
+          /* Track a trailing partial page for the straddle guard above. */
+          carry = seg_len - off;
+        }
+      }
+
+      if (count < req.max_pages) {
+        pr_err("rocm-axiio: GET_BUFFER_PAGES: only %u of %u pages "
+               "available\n",
+               count, req.max_pages);
+        return -E2BIG;
+      }
+
+      req.num_pages = count;
+      if (copy_to_user((void __user*)arg, &req, sizeof(req)))
+        return -EFAULT;
+
+      pr_info("rocm-axiio: GET_BUFFER_PAGES: virt=0x%llx -> %u pages "
+              "(nents=%u)\n",
+              (unsigned long long)req.virt_addr, count, sgt->nents);
+      return 0;
+    }
+
     case ROCM_XIO_UNREGISTER_BUFFER: {
       struct rocm_xio_unregister_buffer_req req;
       struct vram_buffer_entry *entry, *tmp;

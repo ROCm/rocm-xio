@@ -44,6 +44,54 @@ sqeWrite
 SSD
 ssd
 SSDs
+CDW
+CSI
+DPTR
+DW
+dwords
+IOCS
+conformant
+async
+aio
+regen
+
+# ===== NVMe Key-Value =====
+KV
+kv
+kvdev
+kvns
+kvpool
+gpukey
+ioParams
+kvKey
+kvKeyLen
+kvOp
+kvOpcode
+kvSqeSetup
+kvValueLen
+driveEndpointKv
+driveEndpointKvWavefront
+driveEndpointSingle
+
+# ===== Ceph / SPDK / NVMe-oF =====
+Ceph
+Ceph's
+ceph
+RADOS
+rados
+RBD
+rbd
+librados
+librbd
+keyring
+SPDK
+SPDKKVR
+KvRados
+NVMf
+nvmf
+nqn
+muser
+VFIOUSER
 
 # ===== RDMA and Networking =====
 ais

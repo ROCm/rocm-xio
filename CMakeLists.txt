@@ -617,6 +617,7 @@ install(FILES
     ${INCLUDE_DIR}/xio-export.h
     ${INCLUDE_DIR}/rocm-xio-uapi.h
     ${INCLUDE_DIR}/xio-endpoint-registry.h
+    ${INCLUDE_DIR}/nvme-kv.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
     COMPONENT rocm-xio
 )
