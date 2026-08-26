@@ -484,12 +484,30 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
 
   *size = dmabuf->size;
 
-  /* Attach to NVMe device */
-  attach = dma_buf_attach(dmabuf, dev);
+  /*
+   * Attach to the NVMe device.
+   *
+   * This must be a dynamic attach with allow_peer2peer set (via
+   * rocm_xio_attach_ops), matching the emulated/GPA path above. A static
+   * dma_buf_attach() makes amdgpu pin the BO into GTT (host memory) for
+   * importer compatibility, so the address returned below is a host RAM
+   * address rather than the GPU VRAM that the GPU-side virtual address
+   * maps to. The failure is silent: transfers report completion but data
+   * never appears in VRAM, and SQEs written by the GPU are never seen by
+   * the controller.
+   */
+  attach = dma_buf_dynamic_attach(dmabuf, dev, &rocm_xio_attach_ops, NULL);
   if (IS_ERR(attach)) {
-    pr_err("dma_buf_attach failed: %ld\n", PTR_ERR(attach));
+    pr_err("dma_buf_dynamic_attach failed: %ld\n", PTR_ERR(attach));
     ret = PTR_ERR(attach);
     goto err_put_dmabuf;
+  }
+
+  /* Pin so the BO cannot move while the NVMe holds its address */
+  ret = dma_buf_pin(attach);
+  if (ret) {
+    pr_err("dma_buf_pin failed: %d\n", ret);
+    goto err_detach;
   }
 
   /* Map for DMA - this is where P2PDMA magic happens */
@@ -497,14 +515,28 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
   if (IS_ERR(sgt)) {
     pr_err("dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
     ret = PTR_ERR(sgt);
-    goto err_detach;
+    goto err_unpin;
   }
 
   /* Get DMA address from scatter-gather list */
   if (sgt->nents > 0) {
+    /*
+     * Userspace resolves buffer addresses as base + offset, which is only
+     * valid when the mapping is a single contiguous segment. Refuse
+     * multi-segment mappings rather than silently mis-addressing
+     * everything past segment 0.
+     */
+    if (sgt->nents > 1) {
+      pr_err("dmabuf mapped as %u segments; non-contiguous mappings are "
+             "not supported\n",
+             sgt->nents);
+      ret = -EOPNOTSUPP;
+      goto err_unmap;
+    }
     dma_addr = sg_dma_address(sgt->sgl);
     *phys_addr = (__u64)dma_addr;
-    pr_info("✅ P2PDMA address: 0x%llx (size: %llu)\n", *phys_addr, *size);
+    pr_info("✅ P2PDMA address: 0x%llx (size: %llu, nents: %u)\n", *phys_addr,
+            *size, sgt->nents);
   } else {
     pr_err("No DMA segments\n");
     ret = -EINVAL;
@@ -521,6 +553,8 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
 
 err_unmap:
   dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+err_unpin:
+  dma_buf_unpin(attach);
 err_detach:
   dma_buf_detach(dmabuf, attach);
 err_put_dmabuf:
@@ -1095,6 +1129,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         /* Cleanup passthrough attachment if allocated */
         if (!is_emulated && sgt && attach && dmabuf) {
           dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+          dma_buf_unpin(attach);
           dma_buf_detach(dmabuf, attach);
           dma_buf_put(dmabuf);
           if (nvme_pdev)
@@ -1166,6 +1201,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
             entry->dmabuf) {
           dma_buf_unmap_attachment(entry->attach, entry->sgt,
                                    DMA_BIDIRECTIONAL);
+          dma_buf_unpin(entry->attach);
           dma_buf_detach(entry->dmabuf, entry->attach);
           dma_buf_put(entry->dmabuf);
           if (entry->nvme_pdev)
@@ -1226,6 +1262,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
           }
           dma_buf_unmap_attachment(entry->attach, entry->sgt,
                                    DMA_BIDIRECTIONAL);
+          dma_buf_unpin(entry->attach);
           dma_buf_detach(entry->dmabuf, entry->attach);
           dma_buf_put(entry->dmabuf);
           if (entry->nvme_pdev)
@@ -1554,6 +1591,7 @@ static int rocm_xio_release(struct inode* inode, struct file* file) {
           bentry->dmabuf) {
         dma_buf_unmap_attachment(bentry->attach, bentry->sgt,
                                  DMA_BIDIRECTIONAL);
+        dma_buf_unpin(bentry->attach);
         dma_buf_detach(bentry->dmabuf, bentry->attach);
         dma_buf_put(bentry->dmabuf);
         if (bentry->nvme_pdev)
@@ -1673,6 +1711,7 @@ static void __exit rocm_xio_exit(void) {
       if (entry->is_passthrough && entry->sgt && entry->attach &&
           entry->dmabuf) {
         dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+        dma_buf_unpin(entry->attach);
         dma_buf_detach(entry->dmabuf, entry->attach);
         dma_buf_put(entry->dmabuf);
         if (entry->nvme_pdev)
