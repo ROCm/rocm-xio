@@ -1158,7 +1158,8 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
       // queues the kernel would use to serve our own filesystem I/O. Selected
       // per target: the CPU-to-hctx mapping is a property of each namespace.
       uint16_t selected_queue_id = max_queue_id;
-      uint16_t requested_queues = config->numQueues == 0 ? 1 : config->numQueues;
+      uint16_t requested_queues = config->numQueues == 0 ? 1
+                                                         : config->numQueues;
       ret = selectQueueIdOutsideCurrentAffinity(nvme_path, max_queue_id,
                                                 requested_queues,
                                                 &selected_queue_id);
@@ -1658,8 +1659,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   for (size_t t = 0; t < numTargets; t++) {
     nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
     uint64_t namespace_capacity = 0;
-    int cap_ret = queryNamespaceCapacity(target.controller.c_str(),
-                                         target.nsid, &namespace_capacity);
+    int cap_ret = queryNamespaceCapacity(target.controller.c_str(), target.nsid,
+                                         &namespace_capacity);
     if (cap_ret != 0 || namespace_capacity == 0) {
       ROCXIO_LOG_ERROR("Failed to query namespace capacity on %s\n",
                        target.controller.c_str());
@@ -1744,8 +1745,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (target.topQueueId < numQueues) {
       ROCXIO_LOG_ERROR("%s: queueId %u too low for %u queues "
                        "(need queueId >= numQueues)\n",
-                       target.controller.c_str(), target.topQueueId,
-                       numQueues);
+                       target.controller.c_str(), target.topQueueId, numQueues);
       return hipErrorInvalidValue;
     }
     uint16_t base = target.topQueueId - (numQueues - 1);
@@ -2390,11 +2390,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     ROCXIO_LOG_INFO("Aggregated timing across %zu lanes: "
                     "%llu ops\n",
                     numLanes, (unsigned long long)agg->count);
-  } else if (useLessTiming && numLanes == 1 &&
-             config->timingStats != nullptr && perQueueStats[0] != nullptr) {
+  } else if (useLessTiming && numLanes == 1 && config->timingStats != nullptr &&
+             perQueueStats[0] != nullptr) {
     *config->timingStats = *perQueueStats[0];
-  } else if (useLessTiming && numLanes == 1 &&
-             config->timingStats == nullptr && perQueueStats[0] != nullptr) {
+  } else if (useLessTiming && numLanes == 1 && config->timingStats == nullptr &&
+             perQueueStats[0] != nullptr) {
     config->timingStats = perQueueStats[0];
     perQueueStats[0] = nullptr;
   }
@@ -2484,8 +2484,8 @@ cleanup:
   // ---- auto-restart is a belt-and-braces fallback.
   if (quiesce_kmod_fd >= 0) {
     for (const auto& entry : quiesced_qids) {
-      int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd,
-                                           entry.first.c_str(), entry.second);
+      int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd, entry.first.c_str(),
+                                           entry.second);
       if (uret != 0 && uret != -ENOTTY) {
         ROCXIO_LOG_WARN("Failed to restart namespace %s qid %u (%s); "
                         "the kernel module will auto-restart on fd "
@@ -3454,8 +3454,8 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
                                 uint16_t fallbackQid) -> int {
     int fd = openDeviceWithRetry(controller, O_RDWR, "NVMe device", 3, 50);
     if (fd < 0) {
-      ROCXIO_LOG_WARN("Failed to reopen %s for queue cleanup: %s\n",
-                      controller, strerror(errno));
+      ROCXIO_LOG_WARN("Failed to reopen %s for queue cleanup: %s\n", controller,
+                      strerror(errno));
       return -errno;
     }
     int r = 0;

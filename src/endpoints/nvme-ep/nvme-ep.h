@@ -795,13 +795,13 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
  * The total lane count is targets.size() * numQueues.
  */
 struct NvmeTarget {
-  std::string controller; /**< Resolved controller path, e.g. /dev/nvme3. */
-  uint16_t topQueueId = 0; /**< Highest usable I/O queue ID on this target. */
-  uint32_t nsid = 0;       /**< Namespace ID used for I/O. */
-  unsigned lbaSize = 0;    /**< LBA size in bytes, queried from the target. */
+  std::string controller;    /**< Resolved controller path, e.g. /dev/nvme3. */
+  uint16_t topQueueId = 0;   /**< Highest usable I/O queue ID on this target. */
+  uint32_t nsid = 0;         /**< Namespace ID used for I/O. */
+  unsigned lbaSize = 0;      /**< LBA size in bytes, queried from the target. */
   uint64_t lbaRangeLbas = 0; /**< Namespace capacity in LBAs. */
-  uint32_t nvmeTargetBdf = 0; /**< Target BDF in ROCM_XIO_BDF encoding. */
-  void* bar0Gpu = nullptr;    /**< GPU-accessible pointer to this BAR0. */
+  uint32_t nvmeTargetBdf = 0;     /**< Target BDF in ROCM_XIO_BDF encoding. */
+  void* bar0Gpu = nullptr;        /**< GPU-accessible pointer to this BAR0. */
   std::vector<uint16_t> queueIds; /**< Queue IDs hijacked on this target. */
   std::vector<struct nvme_queue_info> queueInfos; /**< Per-queue host state. */
   bool queuesCreated = false; /**< true once any queue here was created. */
