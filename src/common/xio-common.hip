@@ -1933,7 +1933,7 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
 
   setup->prp_list = prp_list;
   setup->prp_list_phys = prp_list_phys;
-  setup->prp2 = 0;  // Reserved for queue creation with PC=0.
+  setup->prp2 = 0; // Reserved for queue creation with PC=0.
 
   ROCXIO_LOG_INFO("%s PRP list at virt=%p "
                   "phys=0x%016llx (%zu entries)\n",
