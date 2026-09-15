@@ -15,7 +15,7 @@ function(setup_code_generation)
 
   # Endpoint registry generation
   set(GEN_SCRIPT
-    ${CMAKE_SOURCE_DIR}/scripts/build/generate-endpoint-files.sh)
+    ${PROJECT_SOURCE_DIR}/scripts/build/generate-endpoint-files.sh)
   set(GEN_SENTINEL ${CMAKE_BINARY_DIR}/.endpoint-files-generated)
 
   add_custom_command(
@@ -44,7 +44,7 @@ function(setup_code_generation)
 
   # NVMe header fetching
   set(NVME_FETCH_SCRIPT
-    ${CMAKE_SOURCE_DIR}/scripts/build/fetch-nvme-headers.sh)
+    ${PROJECT_SOURCE_DIR}/scripts/build/fetch-nvme-headers.sh)
   set(NVME_KERNEL_HEADERS
     ${GEN_NVME_HEADERS_DIR}/linux-nvme.h
     ${GEN_NVME_HEADERS_DIR}/linux-nvme_ioctl.h)
@@ -62,7 +62,7 @@ function(setup_code_generation)
 
   # NVMe defines extraction
   set(NVME_EXTRACT_SCRIPT
-    ${CMAKE_SOURCE_DIR}/scripts/build/extract-nvme-defines.sh)
+    ${PROJECT_SOURCE_DIR}/scripts/build/extract-nvme-defines.sh)
 
   add_custom_command(
     OUTPUT ${GEN_NVME_EP_GENERATED}
@@ -92,9 +92,9 @@ function(setup_code_generation)
 
   # RDMA header fetching
   set(RDMA_FETCH_SCRIPT
-    ${CMAKE_SOURCE_DIR}/scripts/build/fetch-rdma-headers.sh)
+    ${PROJECT_SOURCE_DIR}/scripts/build/fetch-rdma-headers.sh)
   set(RDMA_GEN_SCRIPT
-    ${CMAKE_SOURCE_DIR}/scripts/build/generate-rdma-vendor-headers.sh)
+    ${PROJECT_SOURCE_DIR}/scripts/build/generate-rdma-vendor-headers.sh)
 
   # RDMA headers that need to be fetched
   set(RDMA_HEADERS

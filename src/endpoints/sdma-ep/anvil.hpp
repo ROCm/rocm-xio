@@ -1,34 +1,58 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+// Only include device header when compiling with HIP compiler
+#ifdef __HIPCC__
 #include "anvil_device.hpp"
+#else
+// Forward declarations for host-only compilation
+namespace anvil {
+struct SdmaQueueDeviceHandle;
+}
+#endif
+
 #include "hsa/hsa_ext_amd.h"
 #include "hsakmt/hsakmt.h"
 #include "hsakmt/hsakmttypes.h"
+#include "sdma-host-queue.h"
 
 namespace anvil {
 
 class SdmaQueue {
 public:
   SdmaQueue(int localDeviceId, int remoteDeviceId, hsa_agent_t& localAgent,
-            uint32_t engineId);
+            uint32_t engineId, bool allocateOnHost = false);
   ~SdmaQueue();
 
   SdmaQueueDeviceHandle* deviceHandle() const;
+  xio::sdma_ep::SdmaQueuePythonDeviceCtx pythonDeviceContext() const;
+  xio::sdma_ep::SdmaQueueHostHandle hostHandle();
 
   void dump(std::ofstream&);
 
 private:
-  uint64_t* cachedWptr_;
-  uint64_t* committedWptr_;
+  friend class xio::sdma_ep::SdmaQueueHostHandle;
+
+  int remoteDeviceId_;
+  bool hostAllocated_;
+  uint64_t* cachedWptr_;    // Device-side pointer
+  uint64_t* committedWptr_; // Device-side pointer
   void* queueBuffer_;
   HsaQueueResource queue_;
   SdmaQueueDeviceHandle* deviceHandle_;
+
+  // Host-side state
+  std::atomic<uint64_t> hostCachedWptr_;
+  std::atomic<uint64_t> hostCommittedWptr_;
+  uint64_t hostCachedHwReadIndex_;
 };
 
 class AnvilLib {
@@ -46,11 +70,18 @@ public:
 
 public:
   void init();
-  bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1);
+  bool connect(int srcDeviceId, int dstDeviceId, int numChannels = 1,
+               bool allocateOnHost = false);
   SdmaQueue* getSdmaQueue(int srcDeviceId, int dstDeviceId, int channelIdx = 0);
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
-                             uint32_t engineId, int* channelIdx = nullptr);
+                             uint32_t engineId, int* channelIdx = nullptr,
+                             bool isHostQueue = false);
   int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
+  xio::sdma_ep::SdmaQueuePythonDeviceCtx getPythonDeviceCtx(int srcDeviceId,
+                                                            int dstDeviceId);
+  xio::sdma_ep::SdmaQueueHostHandle getHostHandle(int srcDeviceId,
+                                                  int dstDeviceId,
+                                                  int channelIdx = 0);
 
 private:
   /**
@@ -68,6 +99,16 @@ private:
    */
   int getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
                                  int fallbackEngineId);
+
+  using ChannelKey = std::pair<int, int>;
+  struct ChannelKeyHash {
+    std::size_t operator()(const ChannelKey& key) const noexcept {
+      const auto a = static_cast<std::uint32_t>(key.first);
+      const auto b = static_cast<std::uint32_t>(key.second);
+      return (static_cast<std::size_t>(a) << 32) ^ static_cast<std::size_t>(b);
+    }
+  };
+  using ChannelVector = std::vector<std::unique_ptr<SdmaQueue>>;
 
   /*
    * MI300X OAM MAP (XGMI topology -> SDMA engine)
@@ -93,12 +134,11 @@ private:
   int getOamId(int deviceId);
 
   std::once_flag init_flag;
-  std::unordered_map<int, std::vector<std::unique_ptr<SdmaQueue>>>
-    sdma_channels_;
+  std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> sdma_channels_;
+  std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash>
+    host_sdma_channels_;
 };
 
 extern AnvilLib& anvil;
-
-void EnablePeerAccess(int deviceId, int peerDeviceId);
 
 } // namespace anvil

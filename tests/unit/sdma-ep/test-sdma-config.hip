@@ -11,6 +11,8 @@
 #include <string>
 
 #include "sdma-ep.h"
+#include "sdma-tester.h"
+#include "sdma_device.hpp"
 #include "xio-test-assert.h"
 
 using namespace xio::sdma_ep;
@@ -22,7 +24,6 @@ int test_config_defaults() {
   ASSERT_TRUE(!cfg.useHostDst);
   ASSERT_TRUE(!cfg.verifyData);
   ASSERT_TRUE(!cfg.useCounter);
-  ASSERT_TRUE(!cfg.useFlush);
   ASSERT_EQ(cfg.srcDeviceId, -1);
   ASSERT_EQ(cfg.dstDeviceId, -1);
   ASSERT_EQ(cfg.transferSize, static_cast<size_t>(4096));
@@ -56,19 +57,6 @@ int test_validate_accepts_supported_subcommands() {
   return 0;
 }
 
-int test_validate_rejects_counter_and_flush() {
-  SdmaEpConfig cfg;
-  cfg.testType = "ping-pong";
-  cfg.useCounter = true;
-  cfg.useFlush = true;
-
-  std::string err = validateConfig(&cfg);
-  ASSERT_TRUE(!err.empty());
-  ASSERT_STREQ(err.c_str(), "Cannot use both --use-counter and "
-                            "--use-flush at the same time");
-  return 0;
-}
-
 int test_validate_transfer_size_bounds() {
   SdmaEpConfig cfg;
   cfg.testType = "p2p";
@@ -85,18 +73,6 @@ int test_validate_transfer_size_bounds() {
 
   cfg.transferSize = 1024 * 1024;
   ASSERT_TRUE(validateConfig(&cfg).empty());
-  return 0;
-}
-
-int test_connection_info_fields() {
-  SdmaConnectionInfo conn{};
-  conn.srcDeviceId = 1;
-  conn.dstDeviceId = 3;
-  conn.engineId = 7;
-
-  ASSERT_EQ(conn.srcDeviceId, 1);
-  ASSERT_EQ(conn.dstDeviceId, 3);
-  ASSERT_EQ(conn.engineId, 7u);
   return 0;
 }
 
@@ -121,10 +97,11 @@ int test_queue_info_defaults_and_fields() {
 }
 
 int test_device_side_constants_are_sane() {
-  ASSERT_EQ(SDMA_QUEUE_SIZE, 1024u * 1024u);
-  ASSERT_TRUE((SDMA_QUEUE_SIZE & (SDMA_QUEUE_SIZE - 1)) == 0);
-  ASSERT_GT(MAX_RETRIES, 0);
-  ASSERT_TRUE(!BREAK_ON_RETRIES);
+  ASSERT_EQ(xio::sdma_ep::SDMA_QUEUE_SIZE, 8u * 1024u * 1024u);
+  ASSERT_TRUE(
+    (xio::sdma_ep::SDMA_QUEUE_SIZE & (xio::sdma_ep::SDMA_QUEUE_SIZE - 1)) == 0);
+  ASSERT_GT(xio::sdma_ep::MAX_RETRIES, 0);
+  ASSERT_TRUE(!xio::sdma_ep::BREAK_ON_RETRIES);
   return 0;
 }
 
@@ -144,9 +121,7 @@ int main() {
   failures += test_validate_null_is_noop();
   failures += test_validate_requires_subcommand();
   failures += test_validate_accepts_supported_subcommands();
-  failures += test_validate_rejects_counter_and_flush();
   failures += test_validate_transfer_size_bounds();
-  failures += test_connection_info_fields();
   failures += test_queue_info_defaults_and_fields();
   failures += test_device_side_constants_are_sane();
   failures += test_getIterations_returns_fixed_value();

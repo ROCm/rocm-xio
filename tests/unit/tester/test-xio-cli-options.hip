@@ -96,7 +96,6 @@ int test_detect_sdma_ping_pong_options() {
   ASSERT_STREQ(cfg.testType.c_str(), "ping-pong");
   ASSERT_EQ(cfg.transferSize, static_cast<size_t>(8192));
   ASSERT_TRUE(cfg.useCounter);
-  ASSERT_TRUE(!cfg.useFlush);
   return 0;
 }
 

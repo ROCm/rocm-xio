@@ -1,0 +1,31 @@
+[build-system]
+requires = ["scikit-build-core", "nanobind"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "rocm-xio"
+dynamic = []
+# Keep this in sync with ROCM_XIO_LIBRARY_{MAJOR,MINOR,PATCH} in
+# CMakeLists.txt. The scikit_build_core regex provider cannot resolve
+# the CMake variable expansion used for ROCM_XIO_LIBRARY_VERSION, so
+# the wheel version is pinned here until that helper is in place.
+version = "0.1.0"
+description = "Python bindings for ROCm XIO endpoints"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["AMD", "ROCm", "XIO", "SDMA", "GPU", "DMA"]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["python/xio"]
+
+[tool.scikit-build.cmake.define]
+CMAKE_CXX_COMPILER = "/opt/rocm/bin/hipcc"
+XIO_BUILD_PYTHON = "ON"
+BUILD_CLIENTS = "OFF"
+BUILD_TESTING = "OFF"
+GDA_MLX5 = "OFF"
+GDA_BNXT = "OFF"
+GDA_IONIC = "OFF"
+GDA_ERNIC = "OFF"

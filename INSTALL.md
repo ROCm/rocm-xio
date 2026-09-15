@@ -39,6 +39,13 @@ Verify the build by listing available endpoints:
 ./build/xio-tester --list-endpoints
 ```
 
+Check whether the current machine has the expected ROCm XIO runtime
+prerequisites:
+
+```
+./scripts/rocm-xio-check
+```
+
 Run a quick NVMe test (requires an NVMe device):
 
 ```
@@ -79,6 +86,7 @@ Supported platforms: Linux
 | BUILD\_CLIENTS | ON | Build xio-tester (requires libcli11-dev) |
 | XIO\_BUILD\_DOCS | OFF | Build documentation (Sphinx) |
 | XIO\_DOCS\_ONLY | OFF | Docs-only build (no HIP) |
+| XIO\_BUILD\_PYTHON | OFF | Build Python bindings |
 | INSTALL\_TESTER | OFF | Install xio-tester binary |
 
 Sanitizer options (clang only):
@@ -108,6 +116,13 @@ The default install prefix follows ROCm conventions (`/opt/rocm`).
 
 ```
 cmake --install build
+```
+
+This installs the `rocm-xio-check` utility into `<prefix>/bin/` so you can
+verify the target system after installation:
+
+```
+/opt/rocm/bin/rocm-xio-check
 ```
 
 Custom install prefix:

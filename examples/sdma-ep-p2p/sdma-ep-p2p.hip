@@ -26,16 +26,10 @@
 #include <hip/hip_runtime.h>
 
 #include "endpoints/sdma-ep/sdma-ep.h"
+#include "endpoints/sdma-ep/sdma_device.hpp"
+#include "xio.h"
 
-#define HIP_CHECK(expr)                                                        \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "HIP error %d (%s) at %s:%d\n", _err,                    \
-              hipGetErrorString(_err), __FILE__, __LINE__);                    \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
+using namespace xio;
 
 static constexpr int SRC_GPU = 0;
 static constexpr int DST_GPU = 1;
@@ -82,14 +76,8 @@ int main() {
     return 1;
   }
 
-  sdma_ep::SdmaConnectionInfo connInfo = {};
-  rc = sdma_ep::createConnection(SRC_GPU, DST_GPU, &connInfo);
-  if (rc != 0) {
-    fprintf(stderr, "ERROR: createConnection failed (%d)\n", rc);
-    return 1;
-  }
-  printf("Connection: GPU %d -> GPU %d (engine %u)\n", connInfo.srcDeviceId,
-         connInfo.dstDeviceId, connInfo.engineId);
+  // Enable peer access
+  xio::enablePeerAccess(SRC_GPU, DST_GPU);
 
   sdma_ep::SdmaQueueInfo queueInfo = {};
   rc = sdma_ep::createQueue(SRC_GPU, DST_GPU, &queueInfo);
@@ -97,7 +85,9 @@ int main() {
     fprintf(stderr, "ERROR: createQueue failed (%d)\n", rc);
     return 1;
   }
-  printf("Queue created (channel %d)\n\n", queueInfo.channelIdx);
+  printf("Queue created: GPU %d -> GPU %d (engine %u, channel %d)\n\n",
+         queueInfo.srcDeviceId, queueInfo.dstDeviceId, queueInfo.engineId,
+         queueInfo.channelIdx);
 
   HIP_CHECK(hipSetDevice(SRC_GPU));
   uint8_t* srcBuf = nullptr;

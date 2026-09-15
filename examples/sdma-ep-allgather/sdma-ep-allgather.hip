@@ -2,14 +2,12 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Example: MPI allgather via shader-initiated SDMA.
+ * Example: MPI allgather via SDMA (device or host-initiated).
  *
- * Each MPI rank owns one GPU.  The GPU kernel uses the
- * rocm-xio sdma_ep device-side API to DMA its local
- * input buffer into the correct slot of every other
- * rank's output buffer -- implementing a GPU-initiated
- * allgather collective without CPU involvement in the
- * data path.
+ * Each MPI rank owns one GPU. By default, the GPU kernel uses the
+ * rocm-xio sdma_ep device-side API to DMA its local input buffer
+ * into the correct slot of every other rank's output buffer.
+ * With --host-initiated, the CPU uses the sdma_ep host API instead.
  *
  * Prerequisites:
  *   - N AMD GPUs with XGMI / Infinity Fabric P2P
@@ -17,7 +15,7 @@
  *   - Root access (hsakmt requires /dev/kfd)
  *
  * Usage:
- *   mpirun -np <N> sudo ./sdma-ep-allgather [chunk]
+ *   mpirun -np <N> sudo ./sdma-ep-allgather [--host-initiated] [chunk]
  *
  * The optional [chunk] argument is the per-rank
  * transfer size in integers (default: 1024 = 4 KiB).
@@ -34,16 +32,11 @@
 #include <mpi.h>
 
 #include "endpoints/sdma-ep/sdma-ep.h"
+#include "endpoints/sdma-ep/sdma-host-queue.h"
+#include "endpoints/sdma-ep/sdma_device.hpp"
+#include "xio.h"
 
-#define HIP_CHECK(expr)                                                        \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "[rank %d] HIP error %d (%s) at %s:%d\n", g_myrank,      \
-              _err, hipGetErrorString(_err), __FILE__, __LINE__);              \
-      MPI_Abort(MPI_COMM_WORLD, 1);                                            \
-    }                                                                          \
-  } while (0)
+using namespace xio;
 
 static int g_myrank = 0;
 
@@ -86,6 +79,15 @@ __global__ void sdmaAllgatherKernel(AllgatherArgs args) {
   }
 }
 
+__global__ void waitForAllgatherCompletion(uint64_t* signals, int nranks,
+                                           int myrank) {
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == myrank)
+      continue;
+    sdma_ep::waitSignal(signals + peer, 1);
+  }
+}
+
 int main(int argc, char* argv[]) {
   MPI_Init(&argc, &argv);
 
@@ -107,24 +109,31 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  bool hostInitiated = false;
   int chunkInts = DEFAULT_CHUNK_INTS;
-  if (argc > 1) {
-    char* endptr = nullptr;
-    long val = strtol(argv[1], &endptr, 10);
-    if (endptr == argv[1] || *endptr != '\0' || val <= 0 || val > INT_MAX / 2) {
-      if (myrank == 0)
-        fprintf(stderr, "ERROR: invalid chunk size '%s'\n", argv[1]);
-      MPI_Finalize();
-      return 1;
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--host-initiated") == 0) {
+      hostInitiated = true;
+    } else {
+      char* endptr = nullptr;
+      long val = strtol(argv[i], &endptr, 10);
+      if (endptr == argv[i] || *endptr != '\0' || val <= 0 ||
+          val > INT_MAX / 2) {
+        if (myrank == 0)
+          fprintf(stderr, "ERROR: invalid chunk size '%s'\n", argv[i]);
+        MPI_Finalize();
+        return 1;
+      }
+      chunkInts = static_cast<int>(val);
     }
-    chunkInts = static_cast<int>(val);
   }
   size_t chunkBytes = static_cast<size_t>(chunkInts) * sizeof(int);
 
   if (myrank == 0) {
-    printf("sdma-ep allgather: %d ranks, %d ints "
+    printf("sdma-ep allgather (%s): %d ranks, %d ints "
            "(%zu bytes) per rank\n",
-           nranks, chunkInts, chunkBytes);
+           hostInitiated ? "host-initiated" : "device-initiated", nranks,
+           chunkInts, chunkBytes);
   }
 
   int deviceCount = 0;
@@ -154,30 +163,45 @@ int main(int argc, char* argv[]) {
   args.chunkBytes = chunkBytes;
 
   sdma_ep::SdmaQueueInfo queueInfos[MAX_GPUS] = {};
+  std::vector<sdma_ep::SdmaQueueHostHandle> hostHandles;
+  if (hostInitiated) {
+    hostHandles.reserve(nranks);
+  }
+
   for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == myrank)
+    if (peer == myrank) {
+      if (hostInitiated) {
+        hostHandles.push_back(
+          sdma_ep::SdmaQueueHostHandle(nullptr)); // Placeholder
+      }
       continue;
-
-    sdma_ep::SdmaConnectionInfo connInfo = {};
-    rc = sdma_ep::createConnection(myrank, peer, &connInfo);
-    if (rc != 0) {
-      fprintf(stderr,
-              "[rank %d] createConnection(%d->%d) "
-              "failed (%d)\n",
-              myrank, myrank, peer, rc);
-      MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    rc = sdma_ep::createQueue(myrank, peer, &queueInfos[peer]);
-    if (rc != 0) {
-      fprintf(stderr,
-              "[rank %d] createQueue(%d->%d) "
-              "failed (%d)\n",
-              myrank, myrank, peer, rc);
-      MPI_Abort(MPI_COMM_WORLD, 1);
+    // Enable peer access
+    xio::enablePeerAccess(myrank, peer);
+
+    if (hostInitiated) {
+      rc = sdma_ep::createHostQueue(myrank, peer, &queueInfos[peer]);
+      if (rc != 0) {
+        fprintf(stderr,
+                "[rank %d] createHostQueue(%d->%d) "
+                "failed (%d)\n",
+                myrank, myrank, peer, rc);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+      }
+      hostHandles.push_back(sdma_ep::getHostHandle(myrank, peer, 0));
+    } else {
+      rc = sdma_ep::createQueue(myrank, peer, &queueInfos[peer]);
+      if (rc != 0) {
+        fprintf(stderr,
+                "[rank %d] createQueue(%d->%d) "
+                "failed (%d)\n",
+                myrank, myrank, peer, rc);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+      }
+      args.queues[peer] = static_cast<sdma_ep::SdmaQueueHandle*>(
+        queueInfos[peer].deviceHandle);
     }
-    args.queues[peer] = static_cast<sdma_ep::SdmaQueueHandle*>(
-      queueInfos[peer].deviceHandle);
   }
 
   int* inputBuf = nullptr;
@@ -238,11 +262,38 @@ int main(int argc, char* argv[]) {
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-  if (myrank == 0)
-    printf("\nLaunching allgather kernel...\n");
+  if (hostInitiated) {
+    if (myrank == 0)
+      printf("\nHost-initiated SDMA transfers...\n");
 
-  hipLaunchKernelGGL(sdmaAllgatherKernel, dim3(1), dim3(1), 0, nullptr, args);
-  HIP_CHECK(hipDeviceSynchronize());
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == myrank)
+        continue;
+
+      char* dst = static_cast<char*>(args.remoteDst[peer]) +
+                  static_cast<size_t>(myrank) * chunkBytes;
+
+      hostHandles[peer].put_signal(dst, args.localInput, chunkBytes,
+                                   args.remoteSignals[peer] + myrank,
+                                   static_cast<uint64_t>(1));
+    }
+
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == myrank)
+        continue;
+      hostHandles[peer].quiet();
+    }
+
+    hipLaunchKernelGGL(waitForAllgatherCompletion, dim3(1), dim3(1), 0, nullptr,
+                       args.localSignals, nranks, myrank);
+    HIP_CHECK(hipDeviceSynchronize());
+  } else {
+    if (myrank == 0)
+      printf("\nLaunching allgather kernel...\n");
+
+    hipLaunchKernelGGL(sdmaAllgatherKernel, dim3(1), dim3(1), 0, nullptr, args);
+    HIP_CHECK(hipDeviceSynchronize());
+  }
 
   MPI_Barrier(MPI_COMM_WORLD);
 
@@ -277,7 +328,9 @@ int main(int argc, char* argv[]) {
       continue;
     (void)hipIpcCloseMemHandle(args.remoteDst[peer]);
     (void)hipIpcCloseMemHandle(args.remoteSignals[peer]);
-    sdma_ep::destroyQueue(&queueInfos[peer]);
+    if (!hostInitiated) {
+      sdma_ep::destroyQueue(&queueInfos[peer]);
+    }
   }
 
   sdma_ep::shutdownEndpoint();

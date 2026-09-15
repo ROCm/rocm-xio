@@ -24,7 +24,8 @@ without CPU intervention.
 ## Installing and Using rocm-xio
 
 See [INSTALL.md](INSTALL.md) for dependencies, supported hardware, and build
-instructions.
+instructions. The repository also ships a `rocm-xio-check` utility for
+verifying ROCm XIO runtime prerequisites on a target machine.
 
 ## Documentation
 

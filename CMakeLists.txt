@@ -36,6 +36,10 @@ option(XIO_DOCS_ONLY
   "Only configure documentation targets (no HIP/ROCm needed)"
   OFF)
 
+option(XIO_BUILD_PYTHON
+  "Build Python bindings for sdma-ep"
+  OFF)
+
 # OFFLOAD_ARCH → CMAKE_HIP_ARCHITECTURES must be set BEFORE
 # project() because enabling LANGUAGES HIP triggers compiler
 # detection which auto-populates CMAKE_HIP_ARCHITECTURES.
@@ -61,7 +65,7 @@ else()
 endif()
 
 # Add cmake/ to the module search path (all modes need this)
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 if(NOT XIO_DOCS_ONLY)
 
@@ -227,11 +231,11 @@ option(XIO_SDMA_OSS7
   ${_XIO_SDMA_OSS7_DEFAULT})
 
 # Project directories
-set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
-set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
-set(ENDPOINTS_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/endpoints/common)
-set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
-set(TESTER_DIR ${CMAKE_SOURCE_DIR}/src/tester)
+set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/src/include)
+set(ENDPOINTS_DIR ${PROJECT_SOURCE_DIR}/src/endpoints)
+set(ENDPOINTS_COMMON_DIR ${PROJECT_SOURCE_DIR}/src/endpoints/common)
+set(COMMON_DIR ${PROJECT_SOURCE_DIR}/src/common)
+set(TESTER_DIR ${PROJECT_SOURCE_DIR}/src/tester)
 set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
 set(NVME_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/nvme)
@@ -288,6 +292,7 @@ file(GLOB_RECURSE LIB_SOURCES
 )
 file(GLOB_RECURSE ENDPOINT_SOURCES
   ${ENDPOINTS_DIR}/*.hip
+  ${ENDPOINTS_DIR}/*.cpp
 )
 # Filter out common directory from endpoint sources
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
@@ -295,6 +300,9 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 # Filter out vendor queue-pair device code files (they are #included from queue-pair.hip)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-queue-pair\\.hip")
+# Filter out vendor backend files (they are added conditionally based on GDA_* options)
+list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+  "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-backend\\.cpp")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
@@ -375,7 +383,8 @@ target_compile_options(rocm-xio PRIVATE
 )
 
 # HIP-specific compilation flags (relocatable device code)
-target_compile_options(rocm-xio PRIVATE -fgpu-rdc)
+# Only apply -fgpu-rdc to HIP files, not regular CXX files
+target_compile_options(rocm-xio PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
 
 # Shared library needs -fgpu-rdc at link time too so
 # the device linker resolves cross-TU device calls and
@@ -493,6 +502,11 @@ endif()
 # Dependencies on generated files
 add_dependencies(rocm-xio endpoint-registry-generated)
 add_dependencies(rocm-xio nvme-ep-generated)
+
+# Python bindings (optional)
+if(XIO_BUILD_PYTHON)
+  add_subdirectory(python)
+endif()
 
 set_source_files_properties(
   ${ENDPOINTS_DIR}/nvme-ep/nvme-ep.hip
@@ -619,7 +633,9 @@ install(FILES
 
 # Install endpoint headers
 foreach(ep ${VALID_ENDPOINTS})
-    file(GLOB EP_HEADERS ${ENDPOINTS_DIR}/${ep}/*.h)
+    file(GLOB EP_HEADERS CONFIGURE_DEPENDS
+      ${ENDPOINTS_DIR}/${ep}/*.h
+      ${ENDPOINTS_DIR}/${ep}/*.hpp)
     if(ep STREQUAL "rdma-ep")
         list(FILTER EP_HEADERS EXCLUDE REGEX ".*/rdma-common\\.h$")
     endif()
@@ -630,6 +646,13 @@ foreach(ep ${VALID_ENDPOINTS})
         )
     endif()
 endforeach()
+
+# Install user-facing utilities.
+install(PROGRAMS
+    ${CMAKE_SOURCE_DIR}/scripts/rocm-xio-check
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT rocm-xio
+)
 
 # Optionally install tester executable
 option(INSTALL_TESTER "Install xio-tester executable" OFF)
@@ -656,7 +679,7 @@ include(CMakePackageConfigHelpers)
 
 # configure_package_config_file will automatically get version from project()
 configure_package_config_file(
-    ${CMAKE_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
+    ${PROJECT_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
     ${CMAKE_BINARY_DIR}/rocm-xio-config.cmake
     INSTALL_DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
     PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR
