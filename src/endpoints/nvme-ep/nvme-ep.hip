@@ -613,6 +613,15 @@ __device__ static void driveEndpointWavefront(
   }
   __syncthreads();
 
+  // Batch-timing accumulators.  Only thread 0 ever touches these, so they stay
+  // in registers and cost nothing; folding them into config.timingStats once
+  // at exit keeps four uncached host-memory transactions off the per-completion
+  // critical path.
+  unsigned long long int tlCount = 0;
+  unsigned long long int tlSum = 0;
+  unsigned long long int tlMin = ~0ULL;
+  unsigned long long int tlMax = 0;
+
   while (!sh_stop) {
     // --- Phase 1: thread 0 computes batch parameters ---
     if (tid == 0) {
@@ -743,8 +752,12 @@ __device__ static void driveEndpointWavefront(
         nvme_ep::cqeType cqe_new;
         unsigned poll_count = 0;
         while (true) {
-          if (config.stopRequested != nullptr && poll_count % 100 == 0 &&
-              *config.stopRequested) {
+          // poll_count is reset for every CQE, so testing "% 100" alone made
+          // this uncached host read fire on the first poll of every single
+          // completion.  The batch epilogue already checks stopRequested, so
+          // only a lane that is genuinely spinning needs to re-check here.
+          if (config.stopRequested != nullptr && poll_count != 0 &&
+              poll_count % 100 == 0 && *config.stopRequested) {
             sh_stop = true;
             break;
           }
@@ -785,7 +798,13 @@ __device__ static void driveEndpointWavefront(
         } else if (useBatchTiming) {
           unsigned long long int endTime = wall_clock64();
           if (endTime > sh_startTimes[b]) {
-            updateTimingStats(config.timingStats, endTime - sh_startTimes[b]);
+            unsigned long long int d = endTime - sh_startTimes[b];
+            tlCount++;
+            tlSum += d;
+            if (d < tlMin)
+              tlMin = d;
+            if (d > tlMax)
+              tlMax = d;
           }
         }
 
@@ -813,6 +832,29 @@ __device__ static void driveEndpointWavefront(
       }
     }
     __syncthreads();
+  }
+
+  if (tid == 0 && useBatchTiming && tlCount != 0) {
+    atomicAdd((unsigned long long int*)&config.timingStats->count, tlCount);
+    atomicAdd((unsigned long long int*)&config.timingStats->sumDuration, tlSum);
+
+    unsigned long long int oldMin = config.timingStats->minDuration;
+    while (tlMin < oldMin) {
+      auto* addr = (unsigned long long int*)&config.timingStats->minDuration;
+      unsigned long long int prev = atomicCAS(addr, oldMin, tlMin);
+      if (prev == oldMin)
+        break;
+      oldMin = prev;
+    }
+
+    unsigned long long int oldMax = config.timingStats->maxDuration;
+    while (tlMax > oldMax) {
+      auto* addr = (unsigned long long int*)&config.timingStats->maxDuration;
+      unsigned long long int prev = atomicCAS(addr, oldMax, tlMax);
+      if (prev == oldMax)
+        break;
+      oldMax = prev;
+    }
   }
 }
 
