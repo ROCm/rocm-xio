@@ -96,3 +96,16 @@ xio_add_bash_syntax_test(
 xio_add_bash_unit_test(
   test-rocm-xio-check
   ${CMAKE_SOURCE_DIR}/tests/unit/scripts/test-rocm-xio-check.sh)
+
+# Runtime BTF check: verifies struct nvme_queue field offsets against the
+# rocm_xio_nvmeq_layout mirror in the kernel module. Skips (exit 77) when
+# pahole or /sys/kernel/btf/nvme is absent, so this is safe in headless CI.
+xio_add_bash_syntax_test(
+  test-script-nvme-queue-layout
+  ${CMAKE_SOURCE_DIR}/tests/unit/scripts/test-nvme-queue-layout.sh)
+xio_add_bash_unit_test(
+  test-nvme-queue-layout
+  ${CMAKE_SOURCE_DIR}/tests/unit/scripts/test-nvme-queue-layout.sh)
+set_tests_properties(test-nvme-queue-layout PROPERTIES
+  LABELS "unit;scripts;nvme;kernel"
+  SKIP_RETURN_CODE 77)

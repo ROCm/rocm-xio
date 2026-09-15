@@ -242,11 +242,8 @@ extern int nvme_submit_sync_cmd(struct request_queue* q,
                                 struct nvme_command* cmd, void* buf,
                                 unsigned bufflen);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0) ||                            \
-  LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-#warning "rocm-xio QID-restore code: struct nvme_queue layout copied from "    \
-         "v6.8 drivers/nvme/host/pci.c. Re-verify on this kernel."
-#endif
+#warning "rocm-xio QID-restore code: verify struct nvme_queue layout via: " \
+         "pahole -C nvme_queue /sys/kernel/btf/nvme"
 
 /*
  * Mirror of the private struct nvme_queue (drivers/nvme/host/pci.c).
@@ -255,6 +252,13 @@ extern int nvme_submit_sync_cmd(struct request_queue* q,
  */
 struct rocm_xio_nvmeq_layout {
   void* dev; /* struct nvme_dev * */
+  /*
+   * descriptor_pools was added between dev and sq_lock in kernels after
+   * v6.8 (confirmed present at offset 8 via BTF on 7.0.0-28-generic).
+   * Two dma_pool pointers: large (offset 8) + small (offset 16).
+   */
+  void* descriptor_pool_large; /* struct dma_pool * */
+  void* descriptor_pool_small; /* struct dma_pool * */
   spinlock_t sq_lock;
   void* sq_cmds;
   spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;
@@ -272,6 +276,16 @@ struct rocm_xio_nvmeq_layout {
   u8 sqes;
   unsigned long flags;
 };
+
+/*
+ * Compile-time check: sq_dma_addr must be at offset 80, matching the BTF
+ * layout confirmed on 7.0.0-28-generic. If this fires the struct mirror
+ * needs re-verification against the running kernel's nvme BTF.
+ */
+static_assert(offsetof(struct rocm_xio_nvmeq_layout, sq_dma_addr) == 80,
+              "rocm_xio_nvmeq_layout: sq_dma_addr offset mismatch — "
+              "re-verify struct nvme_queue layout via: "
+              "pahole -C nvme_queue /sys/kernel/btf/nvme");
 
 /* Bit positions within nvme_queue->flags. NVMEQ_POLLED is the only
  * one we read.
