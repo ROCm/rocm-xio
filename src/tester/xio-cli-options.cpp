@@ -150,6 +150,13 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
   app
+    .add_flag("--force-queue-hijack", cfg->forceQueueHijack,
+              "Allow --num-queues to take more than half "
+              "of the controller's I/O queues away from "
+              "the kernel NVMe driver. This can crash "
+              "the host; use on dedicated drives only.")
+    ->group(nvme_group);
+  app
     .add_option("--namespace", cfg->ioParams.nsid,
                 "NVMe namespace ID (must be > 0, default: 1).")
     ->default_val(1)

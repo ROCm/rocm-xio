@@ -1102,6 +1102,25 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
                config->numQueues, config->numQueues, config->queueId);
       return std::string(buf);
     }
+    // Each queue in the range is deleted from the kernel NVMe driver and
+    // recreated pointing at GPU memory. The driver keeps using its remaining
+    // queues for ordinary filesystem I/O; hijacking nearly all of them has
+    // been observed to hard-crash the host. Leave at least half of them alone
+    // unless the caller explicitly opts out.
+    uint16_t maxHijack = config->queueId / 2;
+    if (maxHijack < 1)
+      maxHijack = 1;
+    if (!config->forceQueueHijack && config->numQueues > maxHijack) {
+      char buf[320];
+      snprintf(buf, sizeof(buf),
+               "--num-queues %u would hijack %u of the controller's %u I/O "
+               "queues from the kernel NVMe driver, which can crash the host. "
+               "Use at most %u, or pass --force-queue-hijack to override",
+               config->numQueues, config->numQueues, config->queueId,
+               maxHijack);
+      return std::string(buf);
+    }
+
     uint16_t baseQid = config->queueId - (config->numQueues - 1);
     ROCXIO_LOG_INFO("Multi-queue mode: %u queues "
                     "(IDs %u..%u)\n",
@@ -2195,6 +2214,32 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     perQueueStats[0] = nullptr;
   }
 
+  // ---- Sanity check: did the drive actually complete the requested I/O? ----
+  // The device-side loop stops on the first bad CQE and unwinds without any
+  // host-visible error, so a run that submitted nothing (or stopped after one
+  // batch) used to be indistinguishable from success. Only the forced
+  // less-timing path counts CQEs per queue; the full-timing path records into
+  // endTimes instead and leaves count at zero.
+  if (result == hipSuccess && forcedLessTiming &&
+      !nvmeConfig->ioParams.infiniteMode) {
+    unsigned long long expected = static_cast<unsigned long long>(numQueues) *
+                                  static_cast<unsigned long long>(
+                                    nvmeConfig->ioParams.readIo +
+                                    nvmeConfig->ioParams.writeIo);
+    unsigned long long completed = 0;
+    for (uint16_t q = 0; q < numQueues; q++) {
+      if (perQueueStats[q])
+        completed += perQueueStats[q]->count;
+    }
+    if (expected > 0 && completed < expected) {
+      ROCXIO_LOG_ERROR("Only %llu of %llu requested I/Os completed "
+                       "(memory mode %u). The run did not do the work it "
+                       "was asked to do; treating as failure.\n",
+                       completed, expected, config->memoryMode);
+      result = hipErrorRuntimeOther;
+    }
+  }
+
 cleanup:
   if (result != hipSuccess && launchedQueues > 0) {
     ROCXIO_LOG_WARN("nvme-ep: error after launching %u queue kernel%s; "
@@ -3107,7 +3152,14 @@ __host__ int createQueue(const char* nvme_device,
       }
     }
 
-    ret = kmodRegQueue(kmod_fd, sq_setup.virt, sq_setup.phys, sq_size_bytes, 0,
+    // The kprobe injects the registered address as PRP1. When a PRP list was
+    // built the controller must be handed the list, not the queue base.
+    uint64_t sq_prp1 = sq_setup.prp_list_phys ? sq_setup.prp_list_phys
+                                              : sq_setup.phys;
+    uint64_t cq_prp1 = cq_setup.prp_list_phys ? cq_setup.prp_list_phys
+                                              : cq_setup.phys;
+
+    ret = kmodRegQueue(kmod_fd, sq_setup.virt, sq_prp1, sq_size_bytes, 0,
                        nvme_bdf, sq_setup.prp2, "submission queue");
     if (ret < 0) {
       freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
@@ -3117,7 +3169,7 @@ __host__ int createQueue(const char* nvme_device,
       goto cleanup;
     }
 
-    ret = kmodRegQueue(kmod_fd, cq_setup.virt, cq_setup.phys, cq_size_bytes, 1,
+    ret = kmodRegQueue(kmod_fd, cq_setup.virt, cq_prp1, cq_size_bytes, 1,
                        nvme_bdf, cq_setup.prp2, "completion queue");
     if (ret < 0) {
       freeQueueSetup(&sq_setup, sq_is_device, "submission queue",

@@ -818,6 +818,15 @@ struct nvmeEpConfig {
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
 
+  /**
+   * @brief Permit hijacking more than half the controller's I/O queues.
+   *
+   * Every queue this endpoint uses is deleted out from under the kernel NVMe
+   * driver and recreated. Taking nearly all of them has been observed to take
+   * a machine down, so the count is capped unless this is set.
+   */
+  bool forceQueueHijack = false;
+
   /** @brief Host-side data buffer options mirrored into nvmeBufferParams. */
   struct {
     size_t bufferSize; /**< Size of data buffers in bytes. */

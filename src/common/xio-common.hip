@@ -1878,19 +1878,15 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
                     (unsigned long long)phys_addrs[i]);
   }
 
-  // PC=0 uses standard PRP semantics (NVMe spec 4.4):
-  // PRP1 = first page, PRP2 = second page (2 pages)
-  // or PRP2 = PRP list pointer (>2 pages).
-  if (num_pages == 2) {
-    setup->prp2 = phys_addrs[1];
-    ROCXIO_LOG_INFO("%s PRP2 = 0x%016llx "
-                    "(direct 2nd page)\n",
-                    queue_name, (unsigned long long)setup->prp2);
-    return 0;
-  }
-
-  // >2 pages: build PRP list for pages 2..N
-  size_t prp_entries = num_pages - 1;
+  // Queue creation does not use the data-transfer PRP convention. For
+  // CREATE_IO_SQ/CREATE_IO_CQ with PC=0 the NVMe base spec says PRP1 is a
+  // pointer to a PRP List describing *every* page of the queue, and PRP2 is
+  // reserved. Using PRP1=page0/PRP2=page1 makes the controller fetch entries
+  // past the first page from whatever the list page happens to contain; the
+  // observed symptom was CREATE_SQ succeeding and then a status=0x8003
+  // (Invalid Field in Command) CQE with an unrecognised command id as soon as
+  // sq_head passed the one-page boundary.
+  size_t prp_entries = num_pages;
   size_t prp_list_bytes = prp_entries * sizeof(uint64_t);
 
   if (prp_list_bytes > page_sz) {
@@ -1921,8 +1917,8 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
   }
 
   uint64_t* entries = reinterpret_cast<uint64_t*>(prp_list);
-  for (size_t i = 1; i < num_pages; i++) {
-    entries[i - 1] = phys_addrs[i];
+  for (size_t i = 0; i < num_pages; i++) {
+    entries[i] = phys_addrs[i];
   }
 
   uint64_t prp_list_phys = getPhysAddr(prp_list);
@@ -1937,7 +1933,7 @@ __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
 
   setup->prp_list = prp_list;
   setup->prp_list_phys = prp_list_phys;
-  setup->prp2 = prp_list_phys;
+  setup->prp2 = 0;  // Reserved for queue creation with PC=0.
 
   ROCXIO_LOG_INFO("%s PRP list at virt=%p "
                   "phys=0x%016llx (%zu entries)\n",
