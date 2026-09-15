@@ -50,6 +50,15 @@ int main() {
   static_assert(_IOC_NR(ROCM_XIO_FREE_CONTIG_QUEUE) == 12, "");
   static_assert(_IOC_NR(ROCM_XIO_QUIESCE_NS) == 13, "");
   static_assert(_IOC_NR(ROCM_XIO_UNQUIESCE_NS) == 14, "");
+  static_assert(_IOC_NR(ROCM_XIO_DEBUG_RESURRECT_QID) == 15,
+                "DEBUG_RESURRECT_QID ioctl number drift");
+
+  static_assert(sizeof(struct rocm_xio_debug_resurrect_req) == 4,
+                "rocm_xio_debug_resurrect_req size drift");
+  static_assert(offsetof(struct rocm_xio_debug_resurrect_req, bdf) == 0,
+                "debug_resurrect_req bdf offset drift");
+  static_assert(offsetof(struct rocm_xio_debug_resurrect_req, qid) == 2,
+                "debug_resurrect_req qid offset drift");
 
   std::cout << "rocm-xio UAPI layout checks passed\n";
   return 0;
