@@ -1649,6 +1649,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   };
   std::vector<PrpPool> prpPools(numQueues);
 
+  // Kernel arguments staged during setup and consumed by the launch loop.
+  std::vector<nvme_ep::nvmeDoorbellParams> pendingDoorbell(numQueues);
+  std::vector<nvme_ep::nvmeBufferParams> pendingBufParams(numQueues);
+  std::vector<XioEndpointConfig> pendingKernelConfig(numQueues);
+
   // Allocate per-queue timing stats when forcing
   // less-timing or when the caller already set up
   // less-timing mode (timingStats != null).
@@ -1769,7 +1774,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
   }
 
-  // ---- Create queues and launch kernels ----
+  // ---- Create queues, then launch kernels ----
+  // Setup and launch are deliberately in separate loops. Per-queue setup
+  // calls hipHostMalloc() and allocateGpuAccessibleBuffer(), both of which
+  // implicitly synchronize the device; launching inside the setup loop
+  // therefore blocks on the previously launched kernel running to
+  // completion, serializing every queue and making --num-queues a no-op.
   for (uint16_t q = 0; q < numQueues; q++) {
     uint16_t qid = baseQueueId + q;
 
@@ -2064,6 +2074,16 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       config->completionQueue = cq_ptr;
     }
 
+    pendingKernelConfig[q] = kernelConfig;
+    pendingDoorbell[q] = qDoorbellParams;
+    pendingBufParams[q] = qBufParams;
+  }
+
+  // All allocation is done; no further implicit device sync can occur between
+  // launches, so the queues now actually run concurrently.
+  for (uint16_t q = 0; q < numQueues; q++) {
+    uint16_t qid = baseQueueId + q;
+
     ROCXIO_LOG_INFO("Launching kernel for queue %u "
                     "(stream %p)\n",
                     qid, (void*)streams[q]);
@@ -2071,8 +2091,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     (void)xio::clearHipLaunchError("nvme-ep", "gpuKernel", qid);
 
     hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads),
-                       dynShmemBytes, streams[q], kernelConfig, ioParams,
-                       qDoorbellParams, qBufParams);
+                       dynShmemBytes, streams[q], pendingKernelConfig[q],
+                       ioParams, pendingDoorbell[q], pendingBufParams[q]);
 
     hipError_t launchErr = xio::checkHipLaunchError("nvme-ep", "gpuKernel", qid,
                                                     1, kernelThreads,
