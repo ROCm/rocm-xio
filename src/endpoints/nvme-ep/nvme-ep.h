@@ -783,7 +783,42 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
  * groups related fields using nested structs that mirror the POD structs
  * used in device code.
  */
+/**
+ * @brief Per-controller state for one NVMe target.
+ *
+ * One nvme-ep process may drive several controllers at once. Everything that
+ * is a property of a single controller -- its resolved path, namespace, LBA
+ * size, BDF, BAR0 mapping and hijacked queue IDs -- lives here rather than in
+ * nvmeEpConfig, so the rest of the endpoint can treat targets uniformly.
+ *
+ * A "lane" is one (target, queue) pair: one HIP stream and one kernel launch.
+ * The total lane count is targets.size() * numQueues.
+ */
+struct NvmeTarget {
+  std::string controller; /**< Resolved controller path, e.g. /dev/nvme3. */
+  uint16_t topQueueId = 0; /**< Highest usable I/O queue ID on this target. */
+  uint32_t nsid = 0;       /**< Namespace ID used for I/O. */
+  unsigned lbaSize = 0;    /**< LBA size in bytes, queried from the target. */
+  uint64_t lbaRangeLbas = 0; /**< Namespace capacity in LBAs. */
+  uint32_t nvmeTargetBdf = 0; /**< Target BDF in ROCM_XIO_BDF encoding. */
+  void* bar0Gpu = nullptr;    /**< GPU-accessible pointer to this BAR0. */
+  std::vector<uint16_t> queueIds; /**< Queue IDs hijacked on this target. */
+  std::vector<struct nvme_queue_info> queueInfos; /**< Per-queue host state. */
+  bool queuesCreated = false; /**< true once any queue here was created. */
+};
+
 struct nvmeEpConfig {
+  /**
+   * @brief Controller paths from the command line, one per --controller.
+   *
+   * Populated by the CLI. validateConfig() resolves each entry into a
+   * NvmeTarget in @c targets.
+   */
+  std::vector<std::string> controllers;
+
+  /** @brief Per-controller state, built by validateConfig(). */
+  std::vector<NvmeTarget> targets;
+
   std::string controller; /**< NVMe controller or namespace device path. */
   uint16_t queueId;       /**< Highest queue ID; 0 means auto-detect. */
   uint16_t queueLength;   /**< Queue depth in entries; must be power of 2. */

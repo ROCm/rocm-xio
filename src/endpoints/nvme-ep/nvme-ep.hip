@@ -1040,92 +1040,188 @@ static int selectQueueIdOutsideCurrentAffinity(const NvmeDevicePath& nvme_path,
  * @return Empty string if valid, error message otherwise
  */
 __host__ std::string validateConfig(nvmeEpConfig* config) {
-  // Validate and normalize --controller before querying controller sysfs.
-  if (config->controller.empty()) {
+  // Callers that set the legacy scalar --controller directly (unit tests,
+  // examples) still work: treat it as a single-target list.
+  if (config->controllers.empty() && !config->controller.empty()) {
+    config->controllers.push_back(config->controller);
+  }
+  if (config->controllers.empty()) {
     return "--controller must be specified";
   }
 
-  NvmeDevicePath nvme_path;
-  int path_ret = xio::resolveNvmeDevicePath(config->controller.c_str(),
-                                            config->ioParams.nsid, &nvme_path);
-  if (path_ret != 0) {
-    return "Failed to resolve NVMe device path: " +
-           std::string(strerror(-path_ret));
-  }
-  if (config->controller != nvme_path.controllerPath) {
-    ROCXIO_LOG_INFO("Resolved NVMe path %s to controller %s "
-                    "(namespace %s)\n",
-                    config->controller.c_str(),
-                    nvme_path.controllerPath.c_str(),
-                    nvme_path.namespacePath.c_str());
-    config->controller = nvme_path.controllerPath;
+  const size_t numTargets = config->controllers.size();
+  const bool explicitQueueId = (config->queueId != 0);
+
+  if (numTargets > 1) {
+    if (config->doorbellParams.usePciMmioBridge) {
+      return "--pci-mmio-bridge supports only one --controller (the bridge "
+             "shadow buffer is scoped to a single target BDF)";
+    }
+    if (explicitQueueId) {
+      return "--queue-id cannot be combined with more than one --controller "
+             "(queue IDs are per controller; omit --queue-id to auto-detect "
+             "the top queue on each target)";
+    }
   }
 
-  // Auto-detect maximum queue ID if queueId is 0 (default)
-  if (config->queueId == 0) {
-    uint16_t max_queue_id = 0;
-    int ret = queryMaxQueueId(config->controller.c_str(), &max_queue_id);
-    if (ret != 0) {
-      return "Failed to detect maximum queue ID. "
-             "Please specify --queue-id manually.";
+  config->targets.clear();
+  config->targets.reserve(numTargets);
+
+  for (size_t t = 0; t < numTargets; t++) {
+    const std::string& requested = config->controllers[t];
+    if (requested.empty()) {
+      return "--controller must not be empty";
     }
-    uint16_t selected_queue_id = max_queue_id;
-    uint16_t requested_queues = config->numQueues == 0 ? 1 : config->numQueues;
-    ret = selectQueueIdOutsideCurrentAffinity(nvme_path, max_queue_id,
-                                              requested_queues,
-                                              &selected_queue_id);
-    if (ret == 0) {
-      config->queueId = selected_queue_id;
-      ROCXIO_LOG_INFO(
-        "Auto-selected queue ID: %u (max available queue ID: %u)\n",
-        config->queueId, max_queue_id);
+
+    NvmeTarget target;
+
+    NvmeDevicePath nvme_path;
+    int path_ret = xio::resolveNvmeDevicePath(requested.c_str(),
+                                              config->ioParams.nsid,
+                                              &nvme_path);
+    if (path_ret != 0) {
+      return "Failed to resolve NVMe device path " + requested + ": " +
+             std::string(strerror(-path_ret));
+    }
+    target.controller = nvme_path.controllerPath;
+    target.nsid = config->ioParams.nsid;
+    if (requested != target.controller) {
+      ROCXIO_LOG_INFO("Resolved NVMe path %s to controller %s "
+                      "(namespace %s)\n",
+                      requested.c_str(), nvme_path.controllerPath.c_str(),
+                      nvme_path.namespacePath.c_str());
+    }
+
+    // Compare resolved paths, not the strings as typed: /dev/nvme3 and a
+    // /dev/disk/by-id/ symlink to it are the same controller, and hijacking
+    // the same queue IDs twice would corrupt both sets of queues.
+    for (const NvmeTarget& seen : config->targets) {
+      if (seen.controller == target.controller) {
+        return "--controller " + requested + " resolves to " +
+               target.controller + ", which was already specified";
+      }
+    }
+
+    if (explicitQueueId) {
+      target.topQueueId = config->queueId;
     } else {
-      config->queueId = max_queue_id;
-      ROCXIO_LOG_WARN("Failed to auto-select queue ID outside current CPU "
-                      "affinity: %s. Falling back to queue ID %u.\n",
-                      strerror(-ret), config->queueId);
+      uint16_t max_queue_id = 0;
+      int ret = queryMaxQueueId(target.controller.c_str(), &max_queue_id);
+      if (ret != 0) {
+        return "Failed to detect maximum queue ID on " + target.controller +
+               ". Please specify --queue-id manually.";
+      }
+      // Prefer a queue range whose hardware contexts are not mapped to the
+      // CPUs this process can run on, so hijacking them does not steal the
+      // queues the kernel would use to serve our own filesystem I/O. Selected
+      // per target: the CPU-to-hctx mapping is a property of each namespace.
+      uint16_t selected_queue_id = max_queue_id;
+      uint16_t requested_queues = config->numQueues == 0 ? 1 : config->numQueues;
+      ret = selectQueueIdOutsideCurrentAffinity(nvme_path, max_queue_id,
+                                                requested_queues,
+                                                &selected_queue_id);
+      if (ret == 0) {
+        target.topQueueId = selected_queue_id;
+        ROCXIO_LOG_INFO("%s: auto-selected queue ID: %u (max available queue "
+                        "ID: %u)\n",
+                        target.controller.c_str(), target.topQueueId,
+                        max_queue_id);
+      } else {
+        target.topQueueId = max_queue_id;
+        ROCXIO_LOG_WARN("%s: failed to auto-select queue ID outside current "
+                        "CPU affinity: %s. Falling back to queue ID %u.\n",
+                        target.controller.c_str(), strerror(-ret),
+                        target.topQueueId);
+      }
     }
-  }
 
-  // Multi-queue validation: ensure enough I/O queues
-  // are available for the requested --num-queues count.
-  // Queue IDs are allocated as a contiguous range
-  // ending at queueId (i.e. queueId - numQueues + 1
-  // through queueId).
-  if (config->numQueues > 1) {
-    if (config->queueId < config->numQueues) {
-      char buf[256];
-      snprintf(buf, sizeof(buf),
-               "--num-queues %u requires at least %u "
-               "IO queue IDs but queueId is %u "
-               "(queue 0 is the admin queue)",
-               config->numQueues, config->numQueues, config->queueId);
-      return std::string(buf);
+    // Multi-queue validation: ensure enough I/O queues
+    // are available for the requested --num-queues count.
+    // Queue IDs are allocated as a contiguous range
+    // ending at topQueueId (i.e. topQueueId - numQueues + 1
+    // through topQueueId).
+    if (config->numQueues > 1) {
+      if (target.topQueueId < config->numQueues) {
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "--num-queues %u requires at least %u "
+                 "IO queue IDs but %s has queueId %u "
+                 "(queue 0 is the admin queue)",
+                 config->numQueues, config->numQueues,
+                 target.controller.c_str(), target.topQueueId);
+        return std::string(buf);
+      }
+      // Each queue in the range is deleted from the kernel NVMe driver and
+      // recreated pointing at GPU memory. The driver keeps using its remaining
+      // queues for ordinary filesystem I/O; hijacking nearly all of them has
+      // been observed to hard-crash the host. Leave at least half of them
+      // alone unless the caller explicitly opts out. The cap is evaluated per
+      // target so a controller with fewer queues cannot be over-hijacked.
+      uint16_t maxHijack = target.topQueueId / 2;
+      if (maxHijack < 1)
+        maxHijack = 1;
+      if (!config->forceQueueHijack && config->numQueues > maxHijack) {
+        char buf[384];
+        snprintf(buf, sizeof(buf),
+                 "--num-queues %u would hijack %u of %s's %u I/O "
+                 "queues from the kernel NVMe driver, which can crash the "
+                 "host. Use at most %u, or pass --force-queue-hijack to "
+                 "override",
+                 config->numQueues, config->numQueues,
+                 target.controller.c_str(), target.topQueueId, maxHijack);
+        return std::string(buf);
+      }
+
+      uint16_t baseQid = target.topQueueId - (config->numQueues - 1);
+      ROCXIO_LOG_INFO("%s: multi-queue mode: %u queues (IDs %u..%u)\n",
+                      target.controller.c_str(), config->numQueues, baseQid,
+                      target.topQueueId);
     }
-    // Each queue in the range is deleted from the kernel NVMe driver and
-    // recreated pointing at GPU memory. The driver keeps using its remaining
-    // queues for ordinary filesystem I/O; hijacking nearly all of them has
-    // been observed to hard-crash the host. Leave at least half of them alone
-    // unless the caller explicitly opts out.
-    uint16_t maxHijack = config->queueId / 2;
-    if (maxHijack < 1)
-      maxHijack = 1;
-    if (!config->forceQueueHijack && config->numQueues > maxHijack) {
+
+    // Detect LBA size from controller/namespace
+    unsigned detected_lba_size = 0;
+    int lba_ret = queryLbaSize(target.controller.c_str(), target.nsid,
+                               &detected_lba_size);
+    if (lba_ret != 0) {
+      return "Failed to obtain LBA size from " + target.controller + ": " +
+             std::string(strerror(-lba_ret));
+    }
+    target.lbaSize = detected_lba_size;
+
+    // Transfer size, PRP list geometry and data buffer sizing are computed
+    // once and shared by every lane, so a mixed-format set of controllers
+    // would silently mis-size the PRP pools.
+    if (!config->targets.empty() &&
+        target.lbaSize != config->targets.front().lbaSize) {
       char buf[320];
       snprintf(buf, sizeof(buf),
-               "--num-queues %u would hijack %u of the controller's %u I/O "
-               "queues from the kernel NVMe driver, which can crash the host. "
-               "Use at most %u, or pass --force-queue-hijack to override",
-               config->numQueues, config->numQueues, config->queueId,
-               maxHijack);
+               "%s reports %u byte LBAs but %s reports %u; all --controller "
+               "targets must share one LBA size",
+               target.controller.c_str(), target.lbaSize,
+               config->targets.front().controller.c_str(),
+               config->targets.front().lbaSize);
       return std::string(buf);
     }
 
-    uint16_t baseQid = config->queueId - (config->numQueues - 1);
-    ROCXIO_LOG_INFO("Multi-queue mode: %u queues "
-                    "(IDs %u..%u)\n",
-                    config->numQueues, baseQid, config->queueId);
+    // Detect NVMe target BDF from controller device path
+    uint32_t detected_nvme_bdf = 0;
+    int nvme_bdf_ret = detectBdfFromDevice(target.controller.c_str(),
+                                           &detected_nvme_bdf);
+    if (nvme_bdf_ret != 0) {
+      return "Failed to detect NVMe target BDF for " + target.controller +
+             ": " + std::string(strerror(-nvme_bdf_ret));
+    }
+    target.nvmeTargetBdf = detected_nvme_bdf;
+
+    config->targets.push_back(target);
   }
+
+  // Mirror target 0 into the legacy scalars so single-controller callers and
+  // the reporting paths keep seeing what they always did.
+  config->controller = config->targets[0].controller;
+  config->queueId = config->targets[0].topQueueId;
+  config->ioParams.lbaSize = config->targets[0].lbaSize;
+  config->doorbellParams.nvmeTargetBdf = config->targets[0].nvmeTargetBdf;
 
   // Validate that access pattern is valid
   if (config->ioParams.accessPattern != "sequential" &&
@@ -1182,16 +1278,6 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
              "preventing correct read-back verification)";
   }
 
-  // Detect LBA size from controller/namespace
-  unsigned detected_lba_size = 0;
-  int ret = queryLbaSize(config->controller.c_str(), config->ioParams.nsid,
-                         &detected_lba_size);
-  if (ret != 0) {
-    return "Failed to obtain LBA size from controller: " +
-           std::string(strerror(-ret));
-  }
-  config->ioParams.lbaSize = detected_lba_size;
-
   // Detect PCI MMIO bridge BDF if --pci-mmio-bridge is set
   if (config->doorbellParams.usePciMmioBridge) {
     uint32_t detected_bdf = 0;
@@ -1201,16 +1287,6 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     }
     config->doorbellParams.mmioBridgeBdf = detected_bdf;
   }
-
-  // Detect NVMe target BDF from controller device path
-  uint32_t detected_nvme_bdf = 0;
-  int nvme_bdf_ret = detectBdfFromDevice(config->controller.c_str(),
-                                         &detected_nvme_bdf);
-  if (nvme_bdf_ret != 0) {
-    return std::string("Failed to detect NVMe target BDF: ") +
-           std::string(strerror(-nvme_bdf_ret));
-  }
-  config->doorbellParams.nvmeTargetBdf = detected_nvme_bdf;
 
   // Query wavefront size and validate batch_size.
   // When batch_size > 1 the kernel uses batch_size + 1
@@ -1407,8 +1483,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   nvme_ep::nvmeEpConfig* nvmeConfig = static_cast<nvme_ep::nvmeEpConfig*>(
     config->endpointConfig);
 
-  if (nvmeConfig->controller.empty()) {
-    ROCXIO_LOG_ERROR("NVMe device not specified. "
+  if (nvmeConfig->targets.empty()) {
+    ROCXIO_LOG_ERROR("No NVMe targets resolved. "
                      "--controller is required.\n");
     return hipErrorInvalidValue;
   }
@@ -1421,17 +1497,22 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   const uint16_t numQueues = nvmeConfig->numQueues;
+  const size_t numTargets = nvmeConfig->targets.size();
+
+  // A lane is one (target, queue) pair: one HIP stream, one kernel launch.
+  // Every per-queue resource below is really per-lane.
+  const size_t numLanes = numTargets * (size_t)numQueues;
 
   // ---- Enforce less-timing mode ----
   // When batch_size > 1 or num-queues > 1, per-op
   // timing arrays (startTimes/endTimes) are not
   // meaningful.  Force the lightweight stats path.
   bool forcedLessTiming = false;
-  if (nvmeConfig->ioParams.batchSize > 1 || numQueues > 1) {
+  if (nvmeConfig->ioParams.batchSize > 1 || numLanes > 1) {
     if (config->startTimes != nullptr) {
       ROCXIO_LOG_INFO("Forcing less-timing mode "
-                      "(batch_size=%u, num_queues=%u)\n",
-                      nvmeConfig->ioParams.batchSize, numQueues);
+                      "(batch_size=%u, lanes=%zu)\n",
+                      nvmeConfig->ioParams.batchSize, numLanes);
       forcedLessTiming = true;
     }
   }
@@ -1493,27 +1574,36 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
     nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
   } else {
-    void* bar0_cpu = nullptr;
-    void* bar0_gpu = nullptr;
-    int ret_bar0 = mapPciBar(nvmeConfig->doorbellParams.nvmeTargetBdf, 0,
-                             &bar0_cpu, &bar0_gpu, 8192);
-    if (ret_bar0 < 0) {
-      ROCXIO_LOG_WARN("Failed to map NVMe BAR0 "
-                      "for direct doorbell: %s\n",
-                      strerror(-ret_bar0));
-      return hipErrorInvalidValue;
+    // One BAR0 mapping per controller. validateConfig() rejects the MMIO
+    // bridge path with more than one target, so only this branch fans out.
+    for (size_t t = 0; t < numTargets; t++) {
+      nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
+      void* bar0_cpu = nullptr;
+      void* bar0_gpu = nullptr;
+      int ret_bar0 = mapPciBar(target.nvmeTargetBdf, 0, &bar0_cpu, &bar0_gpu,
+                               8192);
+      if (ret_bar0 < 0) {
+        ROCXIO_LOG_WARN("Failed to map NVMe BAR0 for direct doorbell "
+                        "on %s: %s\n",
+                        target.controller.c_str(), strerror(-ret_bar0));
+        return hipErrorInvalidValue;
+      }
+      if (!validateGpuPointer(bar0_gpu, "BAR0", false)) {
+        ROCXIO_LOG_ERROR("NVMe BAR0 for %s is not GPU-accessible.\n",
+                         target.controller.c_str());
+        return hipErrorInvalidValue;
+      }
+      ROCXIO_LOG_INFO("%s: NVMe BAR0 mapped for direct doorbell access "
+                      "at %p.\n",
+                      target.controller.c_str(), bar0_gpu);
+      target.bar0Gpu = bar0_gpu;
     }
-    ROCXIO_LOG_INFO("NVMe BAR0 mapped for direct "
-                    "doorbell access at %p.\n",
-                    bar0_gpu);
-    nvmeConfig->doorbellParams.nvmeBar0Gpu = bar0_gpu;
+    nvmeConfig->doorbellParams.nvmeBar0Gpu = nvmeConfig->targets[0].bar0Gpu;
   }
 
   bool usePciMmioBridge = nvmeConfig->doorbellParams.usePciMmioBridge;
   void* shadowBufferVirt = nvmeConfig->doorbellParams.shadowBufferVirt;
-  void* nvmeBar0Gpu = nvmeConfig->doorbellParams.nvmeBar0Gpu;
 
-  // Verify shared GPU pointers
   if (shadowBufferVirt != nullptr) {
     if (!validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
       ROCXIO_LOG_ERROR("Shadow buffer is not "
@@ -1521,40 +1611,33 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       return hipErrorInvalidValue;
     }
   }
-  if (nvmeBar0Gpu != nullptr) {
-    if (!validateGpuPointer(nvmeBar0Gpu, "BAR0", false)) {
-      ROCXIO_LOG_ERROR("NVMe BAR0 is not "
-                       "GPU-accessible.\n");
-      return hipErrorInvalidValue;
-    }
-  }
 
-  // ---- Namespace capacity query (shared) ----
-  uint64_t lbaRangeLbas;
-  {
+  // ---- Namespace capacity query (per target) ----
+  for (size_t t = 0; t < numTargets; t++) {
+    nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
     uint64_t namespace_capacity = 0;
-    int cap_ret = queryNamespaceCapacity(nvmeConfig->controller.c_str(),
-                                         nvmeConfig->ioParams.nsid,
-                                         &namespace_capacity);
-    if (cap_ret == 0 && namespace_capacity > 0) {
-      lbaRangeLbas = namespace_capacity;
-      ROCXIO_LOG_INFO("Using full namespace capacity: "
-                      "%llu LBAs\n",
-                      (unsigned long long)lbaRangeLbas);
-    } else {
-      ROCXIO_LOG_ERROR("Failed to query namespace "
-                       "capacity\n");
+    int cap_ret = queryNamespaceCapacity(target.controller.c_str(),
+                                         target.nsid, &namespace_capacity);
+    if (cap_ret != 0 || namespace_capacity == 0) {
+      ROCXIO_LOG_ERROR("Failed to query namespace capacity on %s\n",
+                       target.controller.c_str());
       return hipErrorInvalidValue;
     }
+    target.lbaRangeLbas = namespace_capacity;
+    ROCXIO_LOG_INFO("%s: using full namespace capacity: %llu LBAs\n",
+                    target.controller.c_str(),
+                    (unsigned long long)target.lbaRangeLbas);
   }
 
   bool useRandomAccess = (nvmeConfig->ioParams.accessPattern == "random");
 
-  // ---- Build shared ioParams ----
+  // ---- Build per-target ioParams ----
+  // Every field except lbaSize, lbaRangeLbas and nsid is shared; those three
+  // are properties of the controller the lane is bound to.
   nvme_ep::nvmeIoParams ioParams;
   ioParams.lbaSize = nvmeConfig->ioParams.lbaSize;
   ioParams.baseLba = nvmeConfig->ioParams.baseLba;
-  ioParams.lbaRangeLbas = lbaRangeLbas;
+  ioParams.lbaRangeLbas = nvmeConfig->targets[0].lbaRangeLbas;
   ioParams.useRandomAccess = useRandomAccess;
   ioParams.readIo = nvmeConfig->ioParams.readIo;
   ioParams.writeIo = nvmeConfig->ioParams.writeIo;
@@ -1565,6 +1648,13 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ioParams.infiniteMode = nvmeConfig->ioParams.infiniteMode;
   ioParams.batchSize = nvmeConfig->ioParams.batchSize;
   ioParams.wavefrontSize = nvmeConfig->wavefrontSize;
+
+  std::vector<nvme_ep::nvmeIoParams> targetIoParams(numTargets, ioParams);
+  for (size_t t = 0; t < numTargets; t++) {
+    targetIoParams[t].lbaSize = nvmeConfig->targets[t].lbaSize;
+    targetIoParams[t].lbaRangeLbas = nvmeConfig->targets[t].lbaRangeLbas;
+    targetIoParams[t].nsid = nvmeConfig->targets[t].nsid;
+  }
 
   // ---- Validate batch buffer sizing ----
   {
@@ -1598,14 +1688,33 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     dynShmemBytes = effBatch * sizeof(unsigned long long int);
   }
 
-  // ---- Per-queue state vectors ----
-  if (nvmeConfig->queueId < numQueues) {
-    ROCXIO_LOG_ERROR("queueId %u too low for "
-                     "%u queues (need queueId >= numQueues)\n",
-                     nvmeConfig->queueId, numQueues);
-    return hipErrorInvalidValue;
+  // ---- Lane table ----
+  // Target-major: lanes [t*numQueues .. t*numQueues+numQueues) belong to
+  // target t, with queue IDs counting up to that target's top queue.
+  struct Lane {
+    size_t target;
+    uint16_t queueId;
+  };
+  std::vector<Lane> lanes;
+  lanes.reserve(numLanes);
+  for (size_t t = 0; t < numTargets; t++) {
+    nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
+    if (target.topQueueId < numQueues) {
+      ROCXIO_LOG_ERROR("%s: queueId %u too low for %u queues "
+                       "(need queueId >= numQueues)\n",
+                       target.controller.c_str(), target.topQueueId,
+                       numQueues);
+      return hipErrorInvalidValue;
+    }
+    uint16_t base = target.topQueueId - (numQueues - 1);
+    target.queueIds.clear();
+    target.queueInfos.clear();
+    target.queueIds.reserve(numQueues);
+    target.queueInfos.reserve(numQueues);
+    for (uint16_t q = 0; q < numQueues; q++) {
+      lanes.push_back(Lane{t, (uint16_t)(base + q)});
+    }
   }
-  uint16_t baseQueueId = nvmeConfig->queueId - (numQueues - 1);
 
   nvmeConfig->queueIds.clear();
   nvmeConfig->queueInfos.clear();
@@ -1613,17 +1722,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   nvmeConfig->queueInfos.reserve(numQueues);
 
   hipError_t result = hipSuccess;
-  uint16_t launchedQueues = 0;
-  std::vector<struct xioBufferInfo> readBufs(numQueues);
-  std::vector<struct xioBufferInfo> writeBufs(numQueues);
-  std::vector<hipStream_t> streams(numQueues, nullptr);
-  std::vector<XioTimingStats*> perQueueStats(numQueues, nullptr);
+  size_t launchedLanes = 0;
+  std::vector<struct xioBufferInfo> readBufs(numLanes);
+  std::vector<struct xioBufferInfo> writeBufs(numLanes);
+  std::vector<hipStream_t> streams(numLanes, nullptr);
+  std::vector<XioTimingStats*> perQueueStats(numLanes, nullptr);
 
   // Block-layer quiesce state: see the comment near the
-  // QUIESCE_NS call below for the rationale.
-  std::string quiesce_ns_path;
+  // QUIESCE_NS call below for the rationale. Each entry pairs the namespace
+  // whose hctx was stopped with the queue ID, since a run can span several
+  // controllers and each has its own namespace path.
   int quiesce_kmod_fd = -1;
-  std::vector<uint32_t> quiesced_qids;
+  std::vector<std::pair<std::string, uint32_t>> quiesced_qids;
 
   uint64_t xfer_size = (uint64_t)nvmeConfig->ioParams.lbasPerIo *
                        nvmeConfig->ioParams.lbaSize;
@@ -1666,26 +1776,26 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     size_t size = 0;
     bool hipAllocated = false;
   };
-  std::vector<PrpPool> prpPools(numQueues);
+  std::vector<PrpPool> prpPools(numLanes);
 
   // Kernel arguments staged during setup and consumed by the launch loop.
-  std::vector<nvme_ep::nvmeDoorbellParams> pendingDoorbell(numQueues);
-  std::vector<nvme_ep::nvmeBufferParams> pendingBufParams(numQueues);
-  std::vector<XioEndpointConfig> pendingKernelConfig(numQueues);
+  std::vector<nvme_ep::nvmeDoorbellParams> pendingDoorbell(numLanes);
+  std::vector<nvme_ep::nvmeBufferParams> pendingBufParams(numLanes);
+  std::vector<XioEndpointConfig> pendingKernelConfig(numLanes);
 
   // Allocate per-queue timing stats when forcing
   // less-timing or when the caller already set up
   // less-timing mode (timingStats != null).
   bool useLessTiming = forcedLessTiming || config->timingStats != nullptr;
   if (useLessTiming) {
-    for (uint16_t q = 0; q < numQueues; q++) {
+    for (size_t q = 0; q < numLanes; q++) {
       hipError_t ts_err = xio::allocHostMemory(sizeof(XioTimingStats),
                                                (void**)&perQueueStats[q],
                                                "NVMe queue stats",
                                                XIO_HOST_MEM_MAPPED);
       if (ts_err != hipSuccess || !perQueueStats[q]) {
         ROCXIO_LOG_ERROR("Failed to allocate timing "
-                         "stats for queue %u\n",
+                         "stats for lane %zu\n",
                          q);
         result = hipErrorMemoryAllocation;
         goto cleanup;
@@ -1746,35 +1856,40 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // rocm-xio has reclaimed, the two tail pointers diverge and
   // cause NVMe I/O timeouts or a panic. QUIESCE_NS stops only the
   // matching hctx so other queues keep serving kernel I/O.
-  {
-    NvmeDevicePath nvme_path;
-    int path_ret = xio::resolveNvmeDevicePath(nvmeConfig->controller.c_str(),
-                                              nvmeConfig->ioParams.nsid,
-                                              &nvme_path);
-    if (path_ret == 0 && !nvme_path.namespacePath.empty()) {
-      quiesce_ns_path = nvme_path.namespacePath;
-    } else {
-      ROCXIO_LOG_WARN("Could not resolve namespace path for %s "
-                      "(ret=%d); skipping block-layer quiesce.\n",
-                      nvmeConfig->controller.c_str(), path_ret);
-    }
-  }
+  //
+  // Each target is isolated against its own namespace: the hctx set belongs to
+  // the namespace, so quiescing only the first controller would leave every
+  // other controller's kernel dispatcher running against queues this process
+  // has already reclaimed.
+  quiesce_kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+  if (quiesce_kmod_fd < 0) {
+    ROCXIO_LOG_WARN("Could not open %s for namespace quiesce: %s; "
+                    "continuing without block-layer quiesce.\n",
+                    ROCM_XIO_DEVICE_PATH, strerror(errno));
+  } else {
+    bool kmod_too_old = false;
+    bool any_isolated = false;
+    for (size_t t = 0; t < numTargets && !kmod_too_old; t++) {
+      nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
 
-  if (!quiesce_ns_path.empty()) {
-    quiesce_kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR | O_CLOEXEC);
-    if (quiesce_kmod_fd < 0) {
-      ROCXIO_LOG_WARN("Could not open %s for namespace quiesce: %s; "
-                      "continuing without block-layer quiesce.\n",
-                      ROCM_XIO_DEVICE_PATH, strerror(errno));
-    } else {
-      bool kmod_too_old = false;
-      bool any_isolated = false;
+      NvmeDevicePath nvme_path;
+      int path_ret = xio::resolveNvmeDevicePath(target.controller.c_str(),
+                                                target.nsid, &nvme_path);
+      if (path_ret != 0 || nvme_path.namespacePath.empty()) {
+        ROCXIO_LOG_WARN("Could not resolve namespace path for %s "
+                        "(ret=%d); skipping block-layer quiesce on this "
+                        "target.\n",
+                        target.controller.c_str(), path_ret);
+        continue;
+      }
+      const std::string& ns = nvme_path.namespacePath;
+
+      uint16_t base = target.topQueueId - (numQueues - 1);
       for (uint16_t q = 0; q < numQueues; q++) {
-        uint32_t qid = static_cast<uint32_t>(baseQueueId + q);
-        int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd,
-                                           quiesce_ns_path.c_str(), qid);
+        uint32_t qid = static_cast<uint32_t>(base + q);
+        int qret = xioQuiesceNvmeNamespace(quiesce_kmod_fd, ns.c_str(), qid);
         if (qret == 0) {
-          quiesced_qids.push_back(qid);
+          quiesced_qids.emplace_back(ns, qid);
           any_isolated = true;
         } else if (qret == -ENOTTY) {
           kmod_too_old = true;
@@ -1782,14 +1897,14 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         } else {
           ROCXIO_LOG_WARN("Failed to isolate namespace %s qid %u (%s); "
                           "continuing anyway.\n",
-                          quiesce_ns_path.c_str(), qid, strerror(-qret));
+                          ns.c_str(), qid, strerror(-qret));
         }
       }
-      if (kmod_too_old && !any_isolated) {
-        ROCXIO_LOG_INFO(
-          "kernel module lacks per-hctx QUIESCE_NS; running without "
-          "block-layer isolation.\n");
-      }
+    }
+    if (kmod_too_old && !any_isolated) {
+      ROCXIO_LOG_INFO(
+        "kernel module lacks per-hctx QUIESCE_NS; running without "
+        "block-layer isolation.\n");
     }
   }
 
@@ -1799,31 +1914,33 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // implicitly synchronize the device; launching inside the setup loop
   // therefore blocks on the previously launched kernel running to
   // completion, serializing every queue and making --num-queues a no-op.
-  for (uint16_t q = 0; q < numQueues; q++) {
-    uint16_t qid = baseQueueId + q;
+  for (size_t q = 0; q < numLanes; q++) {
+    nvme_ep::NvmeTarget& target = nvmeConfig->targets[lanes[q].target];
+    const uint16_t qid = lanes[q].queueId;
 
     struct nvme_queue_info queueInfo = {};
-    int ret = createQueue(nvmeConfig->controller.c_str(), ROCM_XIO_DEVICE_PATH,
-                          qid, queue_size,
-                          nvmeConfig->doorbellParams.nvmeTargetBdf,
-                          config->memoryMode, &queueInfo);
+    int ret = createQueue(target.controller.c_str(), ROCM_XIO_DEVICE_PATH, qid,
+                          queue_size, target.nvmeTargetBdf, config->memoryMode,
+                          &queueInfo);
 
     if (ret < 0) {
       ROCXIO_LOG_ERROR("Failed to create NVMe "
-                       "queue %u: %s\n",
-                       qid, strerror(-ret));
+                       "queue %u on %s: %s\n",
+                       qid, target.controller.c_str(), strerror(-ret));
       result = hipErrorInvalidValue;
       goto cleanup;
     }
 
-    nvmeConfig->queueIds.push_back(qid);
-    nvmeConfig->queueInfos.push_back(queueInfo);
+    target.queueIds.push_back(qid);
+    target.queueInfos.push_back(queueInfo);
+    target.queuesCreated = true;
     nvmeConfig->queuesCreated = true;
-    struct nvme_queue_info& qi = nvmeConfig->queueInfos.back();
+    struct nvme_queue_info& qi = target.queueInfos.back();
 
-    ROCXIO_LOG_INFO("Queue %u created: SQ=0x%llx, "
+    ROCXIO_LOG_INFO("%s queue %u created: SQ=0x%llx, "
                     "CQ=0x%llx\n",
-                    qid, (unsigned long long)qi.sq_phys,
+                    target.controller.c_str(), qid,
+                    (unsigned long long)qi.sq_phys,
                     (unsigned long long)qi.cq_phys);
 
     void* sq_ptr = qi.sq_gpu ? qi.sq_gpu : qi.sq_virt;
@@ -1848,8 +1965,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (nvmeConfig->ioParams.readIo != 0) {
       hipError_t buf_err = allocateGpuAccessibleBuffer(
         nvmeConfig->bufferParams.bufferSize, config->memoryMode,
-        nvmeConfig->doorbellParams.nvmeTargetBdf,
-        nvmeConfig->controller.c_str(), &readBufs[q]);
+        target.nvmeTargetBdf, target.controller.c_str(), &readBufs[q]);
       if (buf_err != hipSuccess) {
         ROCXIO_LOG_ERROR("Failed to allocate read "
                          "buffer for queue %u: %s\n",
@@ -1861,8 +1977,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (nvmeConfig->ioParams.writeIo != 0) {
       hipError_t buf_err = allocateGpuAccessibleBuffer(
         nvmeConfig->bufferParams.bufferSize, config->memoryMode,
-        nvmeConfig->doorbellParams.nvmeTargetBdf,
-        nvmeConfig->controller.c_str(), &writeBufs[q]);
+        target.nvmeTargetBdf, target.controller.c_str(), &writeBufs[q]);
       if (buf_err != hipSuccess) {
         ROCXIO_LOG_ERROR("Failed to allocate write "
                          "buffer for queue %u: %s\n",
@@ -1958,8 +2073,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                       prpPoolBytes, prpEntriesPerCmd);
     }
 
-    // Create HIP stream for this queue
-    if (numQueues > 1) {
+    // Create HIP stream for this lane
+    if (numLanes > 1) {
       hipError_t s_err = hipStreamCreate(&streams[q]);
       if (s_err != hipSuccess) {
         ROCXIO_LOG_ERROR("Failed to create HIP "
@@ -1976,9 +2091,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
     nvme_ep::nvmeDoorbellParams qDoorbellParams;
     qDoorbellParams.doorbellOffset = qDoorbell;
-    qDoorbellParams.nvmeTargetBdf = nvmeConfig->doorbellParams.nvmeTargetBdf;
+    qDoorbellParams.nvmeTargetBdf = target.nvmeTargetBdf;
     qDoorbellParams.shadowBufferVirt = shadowBufferVirt;
-    qDoorbellParams.nvmeBar0Gpu = nvmeBar0Gpu;
+    qDoorbellParams.nvmeBar0Gpu = target.bar0Gpu;
     qDoorbellParams.usePciMmioBridge = usePciMmioBridge;
 
     nvme_ep::nvmeBufferParams qBufParams = {};
@@ -2081,10 +2196,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                                nvmeConfig->ioParams.readIo != 0,
                                nvmeConfig->ioParams.writeIo != 0);
 
-    // Keep backward compat: update nvmeConfig
-    // with the first queue's info for single-queue
+    // Keep backward compat: mirror target 0's queues into the legacy scalars
+    // and vectors so single-controller callers see what they always did.
+    // queueInfos is deliberately not mirrored: it owns the queue PRP list
+    // allocations, and a second copy would be double-freed on cleanup.
+    if (lanes[q].target == 0) {
+      nvmeConfig->queueIds.push_back(qid);
+    }
     if (q == 0) {
-      nvmeConfig->queueInfo = nvmeConfig->queueInfos[0];
+      nvmeConfig->queueInfo = queueInfo;
       nvmeConfig->sqBaseAddr = qi.sq_phys;
       nvmeConfig->cqBaseAddr = qi.cq_phys;
       nvmeConfig->sqSize = qi.sq_size;
@@ -2099,19 +2219,21 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
   // All allocation is done; no further implicit device sync can occur between
-  // launches, so the queues now actually run concurrently.
-  for (uint16_t q = 0; q < numQueues; q++) {
-    uint16_t qid = baseQueueId + q;
+  // launches, so the lanes now actually run concurrently.
+  for (size_t q = 0; q < numLanes; q++) {
+    const uint16_t qid = lanes[q].queueId;
 
-    ROCXIO_LOG_INFO("Launching kernel for queue %u "
+    ROCXIO_LOG_INFO("Launching kernel for %s queue %u "
                     "(stream %p)\n",
+                    nvmeConfig->targets[lanes[q].target].controller.c_str(),
                     qid, (void*)streams[q]);
 
     (void)xio::clearHipLaunchError("nvme-ep", "gpuKernel", qid);
 
     hipLaunchKernelGGL(nvme_ep::gpuKernel, dim3(1), dim3(kernelThreads),
                        dynShmemBytes, streams[q], pendingKernelConfig[q],
-                       ioParams, pendingDoorbell[q], pendingBufParams[q]);
+                       targetIoParams[lanes[q].target], pendingDoorbell[q],
+                       pendingBufParams[q]);
 
     hipError_t launchErr = xio::checkHipLaunchError("nvme-ep", "gpuKernel", qid,
                                                     1, kernelThreads,
@@ -2120,20 +2242,19 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       result = launchErr;
       goto cleanup;
     }
-    launchedQueues = static_cast<uint16_t>(q + 1);
+    launchedLanes = q + 1;
   }
 
-  ROCXIO_LOG_INFO("%u kernel%s launched.\n", numQueues,
-                  numQueues > 1 ? "s" : "");
+  ROCXIO_LOG_INFO("%zu kernel%s launched across %zu controller%s.\n", numLanes,
+                  numLanes > 1 ? "s" : "", numTargets,
+                  numTargets > 1 ? "s" : "");
 
   // Wait for all GPU kernels to complete.  Stream-specific sync gives a
   // precise queue id in multi-queue mode while preserving default-stream
   // behavior for the single-queue path.
-  for (uint16_t q = 0; q < numQueues; q++) {
-    uint16_t qid = q < nvmeConfig->queueIds.size()
-                     ? nvmeConfig->queueIds[q]
-                     : (uint16_t)(baseQueueId + q);
-    result = xio::syncHipKernel("nvme-ep", "gpuKernel", qid, streams[q]);
+  for (size_t q = 0; q < numLanes; q++) {
+    result = xio::syncHipKernel("nvme-ep", "gpuKernel", lanes[q].queueId,
+                                streams[q]);
     if (result != hipSuccess) {
       goto cleanup;
     }
@@ -2156,7 +2277,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (verifyBytes > nvmeConfig->bufferParams.bufferSize)
       verifyBytes = nvmeConfig->bufferParams.bufferSize;
 
-    for (uint16_t q = 0; q < numQueues; q++) {
+    for (size_t q = 0; q < numLanes; q++) {
       uint8_t* rbuf = readBufs[q].gpuPtr
                         ? static_cast<uint8_t*>(readBufs[q].gpuPtr)
                         : static_cast<uint8_t*>(readBufs[q].hostPtr);
@@ -2183,14 +2304,36 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
   }
 
+  // ---- Per-controller summary ----
+  // config->timingStats stays the global aggregate the tester reports; this
+  // just breaks the completed-command count down per controller so a slow or
+  // stalled drive in a multi-target run is visible.
+  if (useLessTiming && numTargets > 1) {
+    for (size_t t = 0; t < numTargets; t++) {
+      unsigned long long tCompleted = 0;
+      unsigned long long tSum = 0;
+      for (size_t q = 0; q < numLanes; q++) {
+        if (lanes[q].target != t || !perQueueStats[q])
+          continue;
+        tCompleted += perQueueStats[q]->count;
+        tSum += perQueueStats[q]->sumDuration;
+      }
+      ROCXIO_LOG_INFO("%s: %u queue%s, %llu I/O completed, "
+                      "mean %llu ns/op\n",
+                      nvmeConfig->targets[t].controller.c_str(), numQueues,
+                      numQueues > 1 ? "s" : "", tCompleted,
+                      tCompleted ? tSum / tCompleted : 0ULL);
+    }
+  }
+
   // ---- Aggregate per-queue timing stats ----
-  if (useLessTiming && numQueues > 1 && config->timingStats != nullptr) {
+  if (useLessTiming && numLanes > 1 && config->timingStats != nullptr) {
     XioTimingStats* agg = config->timingStats;
     agg->minDuration = ULLONG_MAX;
     agg->maxDuration = 0;
     agg->sumDuration = 0;
     agg->count = 0;
-    for (uint16_t q = 0; q < numQueues; q++) {
+    for (size_t q = 0; q < numLanes; q++) {
       if (!perQueueStats[q])
         continue;
       if (perQueueStats[q]->minDuration < agg->minDuration) {
@@ -2202,13 +2345,13 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       agg->sumDuration += perQueueStats[q]->sumDuration;
       agg->count += perQueueStats[q]->count;
     }
-    ROCXIO_LOG_INFO("Aggregated timing across %u queues: "
+    ROCXIO_LOG_INFO("Aggregated timing across %zu lanes: "
                     "%llu ops\n",
-                    numQueues, (unsigned long long)agg->count);
-  } else if (useLessTiming && numQueues == 1 &&
+                    numLanes, (unsigned long long)agg->count);
+  } else if (useLessTiming && numLanes == 1 &&
              config->timingStats != nullptr && perQueueStats[0] != nullptr) {
     *config->timingStats = *perQueueStats[0];
-  } else if (useLessTiming && numQueues == 1 &&
+  } else if (useLessTiming && numLanes == 1 &&
              config->timingStats == nullptr && perQueueStats[0] != nullptr) {
     config->timingStats = perQueueStats[0];
     perQueueStats[0] = nullptr;
@@ -2222,12 +2365,12 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // endTimes instead and leaves count at zero.
   if (result == hipSuccess && forcedLessTiming &&
       !nvmeConfig->ioParams.infiniteMode) {
-    unsigned long long expected = static_cast<unsigned long long>(numQueues) *
+    unsigned long long expected = static_cast<unsigned long long>(numLanes) *
                                   static_cast<unsigned long long>(
                                     nvmeConfig->ioParams.readIo +
                                     nvmeConfig->ioParams.writeIo);
     unsigned long long completed = 0;
-    for (uint16_t q = 0; q < numQueues; q++) {
+    for (size_t q = 0; q < numLanes; q++) {
       if (perQueueStats[q])
         completed += perQueueStats[q]->count;
     }
@@ -2241,17 +2384,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   }
 
 cleanup:
-  if (result != hipSuccess && launchedQueues > 0) {
-    ROCXIO_LOG_WARN("nvme-ep: error after launching %u queue kernel%s; "
+  if (result != hipSuccess && launchedLanes > 0) {
+    ROCXIO_LOG_WARN("nvme-ep: error after launching %zu lane kernel%s; "
                     "requesting stop before cleanup\n",
-                    launchedQueues, launchedQueues > 1 ? "s" : "");
+                    launchedLanes, launchedLanes > 1 ? "s" : "");
     if (config->stopRequested != nullptr) {
       *config->stopRequested = true;
     }
-    for (uint16_t q = 0; q < launchedQueues; q++) {
-      uint16_t qid = q < nvmeConfig->queueIds.size()
-                       ? nvmeConfig->queueIds[q]
-                       : (uint16_t)(baseQueueId + q);
+    for (size_t q = 0; q < launchedLanes; q++) {
+      uint16_t qid = lanes[q].queueId;
       hipError_t sync_err = xio::syncHipKernel("nvme-ep", "gpuKernel", qid,
                                                streams[q]);
       if (sync_err != hipSuccess) {
@@ -2263,23 +2404,36 @@ cleanup:
   }
 
   // ---- Cleanup: delete successfully created NVMe queues ----
-  if (nvmeConfig->queuesCreated) {
-    uint16_t nCreated = (uint16_t)nvmeConfig->queueIds.size();
-    ROCXIO_LOG_INFO("\nCleaning up %u NVMe queue%s...\n", nCreated,
-                    nCreated > 1 ? "s" : "");
-    int cleanup_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
+  // Every target is attempted even if an earlier one fails: a controller left
+  // with queues deleted from the kernel driver but not recreated is how this
+  // takes a host down.
+  for (size_t t = 0; t < numTargets; t++) {
+    nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
+    if (!target.queuesCreated || target.queueIds.empty())
+      continue;
+    ROCXIO_LOG_INFO("\nCleaning up %zu NVMe queue%s on %s...\n",
+                    target.queueIds.size(),
+                    target.queueIds.size() > 1 ? "s" : "",
+                    target.controller.c_str());
+    int cleanup_fd = openDeviceWithRetry(target.controller.c_str(), O_RDWR,
                                          "NVMe device", 3, 50);
     if (cleanup_fd >= 0) {
-      for (uint16_t q = 0; q < nCreated; q++) {
-        deleteQueue(cleanup_fd, nvmeConfig->queueIds[q]);
+      for (size_t q = 0; q < target.queueIds.size(); q++) {
+        deleteQueue(cleanup_fd, target.queueIds[q]);
       }
       close(cleanup_fd);
-      nvmeConfig->queuesCreated = false;
+      target.queuesCreated = false;
     } else {
-      ROCXIO_LOG_WARN("Could not reopen NVMe "
-                      "device for queue cleanup: %s\n",
-                      strerror(errno));
+      ROCXIO_LOG_WARN("Could not reopen %s "
+                      "for queue cleanup: %s\n",
+                      target.controller.c_str(), strerror(errno));
     }
+  }
+  {
+    bool anyLeft = false;
+    for (size_t t = 0; t < numTargets; t++)
+      anyLeft = anyLeft || nvmeConfig->targets[t].queuesCreated;
+    nvmeConfig->queuesCreated = anyLeft;
   }
 
   // ---- Restart each isolated hctx now that the NVMe queues
@@ -2287,14 +2441,14 @@ cleanup:
   // ---- queues were created). The kernel module's fd-close
   // ---- auto-restart is a belt-and-braces fallback.
   if (quiesce_kmod_fd >= 0) {
-    for (uint32_t qid : quiesced_qids) {
+    for (const auto& entry : quiesced_qids) {
       int uret = xioUnquiesceNvmeNamespace(quiesce_kmod_fd,
-                                           quiesce_ns_path.c_str(), qid);
+                                           entry.first.c_str(), entry.second);
       if (uret != 0 && uret != -ENOTTY) {
         ROCXIO_LOG_WARN("Failed to restart namespace %s qid %u (%s); "
                         "the kernel module will auto-restart on fd "
                         "close.\n",
-                        quiesce_ns_path.c_str(), qid, strerror(-uret));
+                        entry.first.c_str(), entry.second, strerror(-uret));
       }
     }
     quiesced_qids.clear();
@@ -2302,8 +2456,8 @@ cleanup:
     quiesce_kmod_fd = -1;
   }
 
-  // Free per-queue PRP list pools
-  for (uint16_t q = 0; q < numQueues; q++) {
+  // Free per-lane PRP list pools
+  for (size_t q = 0; q < numLanes; q++) {
     if (prpPools[q].pageDmas) {
       (void)hipHostFree(prpPools[q].pageDmas);
     }
@@ -2312,20 +2466,20 @@ cleanup:
     }
   }
 
-  // Free per-queue data buffers
-  for (uint16_t q = 0; q < numQueues; q++) {
+  // Free per-lane data buffers
+  for (size_t q = 0; q < numLanes; q++) {
     freeGpuAccessibleBuffer(&readBufs[q]);
     freeGpuAccessibleBuffer(&writeBufs[q]);
   }
 
   // Destroy non-default HIP streams
-  for (uint16_t q = 0; q < numQueues; q++) {
+  for (size_t q = 0; q < numLanes; q++) {
     if (streams[q] != nullptr) {
       (void)hipStreamDestroy(streams[q]);
     }
   }
 
-  for (uint16_t q = 0; q < numQueues; q++) {
+  for (size_t q = 0; q < numLanes; q++) {
     if (perQueueStats[q] != nullptr)
       xio::freeHostMemory(perQueueStats[q], XIO_HOST_MEM_MAPPED);
   }
@@ -3246,46 +3400,71 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
   if (!nvmeConfig->queuesCreated) {
     return 0;
   }
-  if (nvmeConfig->controller.empty()) {
-    return -EINVAL;
-  }
 
-  int nvme_fd = openDeviceWithRetry(nvmeConfig->controller.c_str(), O_RDWR,
-                                    "NVMe device", 3, 50);
-  if (nvme_fd < 0) {
-    ROCXIO_LOG_WARN("Failed to reopen NVMe "
-                    "device for queue cleanup: %s\n",
-                    strerror(errno));
-    return -errno;
-  }
-
+  // Delete queues on every target. A failure on one controller must not stop
+  // the others: queues deleted from the kernel driver but never recreated are
+  // what takes a host down.
   int ret = 0;
-  if (!nvmeConfig->queueIds.empty()) {
-    ROCXIO_LOG_INFO("\nSIGINT received: Deleting %zu "
-                    "NVMe queue%s...\n",
-                    nvmeConfig->queueIds.size(),
-                    nvmeConfig->queueIds.size() > 1 ? "s" : "");
-    for (size_t q = 0; q < nvmeConfig->queueIds.size(); q++) {
-      int r = deleteQueue(nvme_fd, nvmeConfig->queueIds[q]);
-      if (r != 0)
+  bool anyLeft = false;
+
+  auto deleteTargetQueues = [&](const char* controller,
+                                const std::vector<uint16_t>& queueIds,
+                                uint16_t fallbackQid) -> int {
+    int fd = openDeviceWithRetry(controller, O_RDWR, "NVMe device", 3, 50);
+    if (fd < 0) {
+      ROCXIO_LOG_WARN("Failed to reopen %s for queue cleanup: %s\n",
+                      controller, strerror(errno));
+      return -errno;
+    }
+    int r = 0;
+    if (!queueIds.empty()) {
+      ROCXIO_LOG_INFO("\nSIGINT received: Deleting %zu NVMe queue%s on %s...\n",
+                      queueIds.size(), queueIds.size() > 1 ? "s" : "",
+                      controller);
+      for (size_t q = 0; q < queueIds.size(); q++) {
+        int one = deleteQueue(fd, queueIds[q]);
+        if (one != 0)
+          r = one;
+      }
+    } else {
+      ROCXIO_LOG_INFO("\nSIGINT received: Deleting NVMe queue %u on %s...\n",
+                      fallbackQid, controller);
+      r = deleteQueue(fd, fallbackQid);
+    }
+    close(fd);
+    return r;
+  };
+
+  if (!nvmeConfig->targets.empty()) {
+    for (auto& target : nvmeConfig->targets) {
+      if (!target.queuesCreated)
+        continue;
+      int r = deleteTargetQueues(target.controller.c_str(), target.queueIds,
+                                 target.topQueueId);
+      if (r != 0) {
         ret = r;
+        anyLeft = true;
+      } else {
+        target.queuesCreated = false;
+      }
     }
   } else {
-    ROCXIO_LOG_INFO("\nSIGINT received: Deleting NVMe "
-                    "queue %u...\n",
-                    nvmeConfig->queueId);
-    ret = deleteQueue(nvme_fd, nvmeConfig->queueId);
+    if (nvmeConfig->controller.empty()) {
+      return -EINVAL;
+    }
+    ret = deleteTargetQueues(nvmeConfig->controller.c_str(),
+                             nvmeConfig->queueIds, nvmeConfig->queueId);
+    anyLeft = (ret != 0);
   }
-  close(nvme_fd);
 
   if (ret == 0) {
     ROCXIO_LOG_INFO("NVMe queues deleted successfully.\n");
-    nvmeConfig->queuesCreated = false;
   } else {
     ROCXIO_LOG_WARN("Failed to delete NVMe "
                     "queues: %s\n",
                     strerror(-ret));
   }
+  nvmeConfig->queuesCreated = anyLeft;
 
 #ifndef __HIP_DEVICE_COMPILE__
   {
@@ -3337,7 +3516,15 @@ extern "C" __host__ int nvme_ep_cleanup_queues(void* endpointConfig) {
       }
     };
 
-    if (!nvmeConfig->queueInfos.empty()) {
+    // targets own the queue allocations; nvmeConfig->queueInfo/queueInfos are
+    // non-owning mirrors of target 0, so free through targets when present.
+    if (!nvmeConfig->targets.empty()) {
+      for (auto& target : nvmeConfig->targets) {
+        for (auto& qi : target.queueInfos) {
+          cleanupQinfo(&qi);
+        }
+      }
+    } else if (!nvmeConfig->queueInfos.empty()) {
       for (auto& qi : nvmeConfig->queueInfos) {
         cleanupQinfo(&qi);
       }

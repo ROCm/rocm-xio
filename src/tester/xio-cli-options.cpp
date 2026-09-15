@@ -91,9 +91,11 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
   app
-    .add_option("--controller", cfg->controller,
-                "NVMe controller or namespace device path (required).")
+    .add_option("--controller", cfg->controllers,
+                "NVMe controller or namespace device path (required). "
+                "Repeat to drive several controllers from one process.")
     ->required()
+    ->allow_extra_args(false)
     ->group(nvme_group);
   app
     .add_option("--base-lba", cfg->ioParams.baseLba,
