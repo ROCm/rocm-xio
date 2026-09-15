@@ -3,6 +3,14 @@ obj-m += rocm-xio.o
 # Shared ioctl definitions with userspace (src/include/rocm-xio-uapi.h)
 ccflags-y += -I$(src)/../../src/include
 
+# Detect whether request_queue uses hctx_table (xarray, upstream ~6.14+) or
+# queue_hw_ctx (array, older kernels and some distro trees).
+HCTX_TABLE_EXISTS := $(shell grep -c "hctx_table" \
+  /lib/modules/$(shell uname -r)/build/include/linux/blkdev.h 2>/dev/null)
+ifeq ($(HCTX_TABLE_EXISTS),0)
+ccflags-y += -DROCM_XIO_NO_HCTX_TABLE
+endif
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 

@@ -48,7 +48,6 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
 #include <linux/xarray.h>
 
 #define DEVICE_NAME ROCM_XIO_DEVICE_NAME
@@ -82,9 +81,10 @@ struct queue_addr_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
-  __u8 queue_type; /* 0=SQ, 1=CQ */
-  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
-  __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
+  __u8 queue_type;    /* 0=SQ, 1=CQ */
+  __u16 nvme_bdf;     /* NVMe device BDF (0xBBDD format) */
+  __u64 prp2;         /* PRP2 for PC=0 queues (0=none) */
+  struct file* owner; /* fd that registered this entry */
   struct list_head list;
 };
 
@@ -93,6 +93,7 @@ struct vram_buffer_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
+  struct file* owner; /* fd that registered this entry */
   struct list_head list;
   // For passthrough NVMe - keep attachment alive for P2PDMA
   struct dma_buf* dmabuf;
@@ -178,20 +179,21 @@ static struct block_device* rocm_xio_file_to_bdev(struct file* bdev_file) {
 }
 
 /*
- * Look up a hardware context by index on a request_queue. The
- * underlying storage changed during the 6.x kernel cycle: older
- * kernels embed an array (@queue_hw_ctx) while newer kernels use
- * an xarray (@hctx_table). The 6.5 merge window is the
- * transition point.
+ * Look up a hardware context by index on a request_queue.
+ *
+ * Upstream kernels switched request_queue from an array (@queue_hw_ctx)
+ * to an xarray (@hctx_table) around v6.14. Distro kernels may not follow
+ * the same boundary, so we detect the field at build time via the Makefile
+ * rather than relying on LINUX_VERSION_CODE.
  */
 static struct blk_mq_hw_ctx* rocm_xio_hctx_at(struct request_queue* q,
                                               unsigned int idx) {
   if (!q || idx >= q->nr_hw_queues)
     return NULL;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-  return xa_load(&q->hctx_table, idx);
-#else
+#ifdef ROCM_XIO_NO_HCTX_TABLE
   return q->queue_hw_ctx[idx];
+#else
+  return xa_load(&q->hctx_table, idx);
 #endif
 }
 
@@ -1043,6 +1045,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->queue_type = req.queue_type;
       entry->nvme_bdf = req.nvme_bdf;
       entry->prp2 = req.prp2;
+      entry->owner = file;
 
       spin_lock(&queue_addrs_lock);
       list_add(&entry->list, &queue_addrs);
@@ -1184,6 +1187,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->phys_addr = phys_addr;
       entry->size = req.size;
       entry->is_passthrough = !is_emulated;
+      entry->owner = file;
 
       /* Store attachment info for passthrough (keep alive) */
       if (!is_emulated) {
@@ -1812,10 +1816,45 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
 }
 
 static int rocm_xio_release(struct inode* inode, struct file* file) {
+  struct queue_addr_entry *qentry, *qtmp;
+  struct vram_buffer_entry *bentry, *btmp;
   struct contig_alloc_entry *ca, *tmp;
   struct quiesced_ns_entry *qn, *qn_tmp;
   LIST_HEAD(to_release);
   LIST_HEAD(quiesce_release);
+
+  spin_lock(&queue_addrs_lock);
+  list_for_each_entry_safe(qentry, qtmp, &queue_addrs, list) {
+    if (qentry->owner == file) {
+      list_del(&qentry->list);
+      pr_info("rocm-axiio: release: unregistering queue addr "
+              "virt=0x%016llx\n",
+              (unsigned long long)qentry->virt_addr);
+      kfree(qentry);
+    }
+  }
+  spin_unlock(&queue_addrs_lock);
+
+  spin_lock(&vram_buffers_lock);
+  list_for_each_entry_safe(bentry, btmp, &vram_buffers, list) {
+    if (bentry->owner == file) {
+      list_del(&bentry->list);
+      pr_info("rocm-axiio: release: unregistering buffer "
+              "virt=0x%016llx\n",
+              (unsigned long long)bentry->virt_addr);
+      if (bentry->is_passthrough && bentry->sgt && bentry->attach &&
+          bentry->dmabuf) {
+        dma_buf_unmap_attachment(bentry->attach, bentry->sgt,
+                                 DMA_BIDIRECTIONAL);
+        dma_buf_detach(bentry->dmabuf, bentry->attach);
+        dma_buf_put(bentry->dmabuf);
+        if (bentry->nvme_pdev)
+          pci_dev_put(bentry->nvme_pdev);
+      }
+      kfree(bentry);
+    }
+  }
+  spin_unlock(&vram_buffers_lock);
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
