@@ -2187,9 +2187,32 @@ __host__ int mapPciBar(uint32_t pci_bdf, uint8_t bar, void** bar_cpu,
 
     status = hsa_amd_memory_lock(mapped, bar_size, &gpu_agent, 1, &gpu_ptr);
     if (status != HSA_STATUS_SUCCESS) {
-      ROCXIO_LOG_ERROR("hsa_amd_memory_lock failed for "
-                       "BAR%u: %d\n",
-                       bar, status);
+      /*
+       * Both hipHostRegister(IoMemory) and hsa_amd_memory_lock failed for
+       * this PCI BAR mmap.  This is a known limitation on some GPU
+       * architectures (e.g. gfx1100/RX 7000 series, Instinct MI2xx/MI3xx)
+       * where the HIP/HSA stack ultimately calls get_user_pages() on the
+       * sysfs resource mmap, which fails because PCI BAR pages are
+       * non-paged I/O PFNs (VMA_REMAP_FLAGS) that cannot be pinned that
+       * way.  See GitHub issue #167 for details and workarounds.
+       *
+       * Workarounds (in order of preference):
+       *   1. Use the PCI MMIO bridge path (--pci-mmio-bridge) if a
+       *      rocm-xio QEMU PCI device is available (emulated/vfio setup).
+       *   2. Upgrade to a GPU architecture where hipHostRegisterIoMemory
+       *      succeeds (gfx1201 / RX 9070 XT and later are known to work).
+       *   3. Contribute a kernel-module DMA-BUF export path for the BAR
+       *      combined with an HSA interop change (see issue #167 for the
+       *      prototype approach).
+       */
+      ROCXIO_LOG_ERROR("hsa_amd_memory_lock failed for BAR%u: HSA status "
+                       "0x%x.\n"
+                       "  PCI BAR sysfs mmaps use non-paged I/O PFNs that "
+                       "neither hipHostRegister(IoMemory) nor "
+                       "hsa_amd_memory_lock can pin on this GPU.\n"
+                       "  See https://github.com/ROCm/rocm-xio/issues/167 "
+                       "for workarounds.\n",
+                       bar, (unsigned)status);
       munmap(mapped, bar_size);
       close(bar_fd);
       return -EIO;
