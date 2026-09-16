@@ -1,0 +1,317 @@
+---
+name: spdk-kv-nvme-vm
+description: >-
+  Boot a QEMU guest attached to a rocjitsu emulated AMD GPU over vfio-user,
+  plus an SPDK NVMe controller (KV + LBA namespaces) also presented over
+  vfio-user, with the pci-mmio-bridge device so GPU code can ring NVMe
+  doorbells directly. Waits for the guest to accept SSH and exports the
+  NSID assignments reported by the SPDK server.
+
+# Modelled after .github/actions/rocjitsu-nvme-vm but adds the SPDK service
+# and removes the --nvme N emulated-disk count (SPDK provides the controller).
+# The vfu-sockets volume is mounted at /run/vfu in every container; SPDK is
+# told to put its socket there via VFIO_USER_SOCKET_DIR.
+
+inputs:
+  spdk-image:
+    description: >-
+      Pinned tag for the SPDK vfio-user NVMe server image. Built from
+      mmgaggle/spdk@rados-nkv; upstream spdk/spdk has no target-side kvdev.
+    required: true
+  qemu-image:
+    description: >-
+      Pinned tag for the QEMU toolchain image. Must be the -sbates-fork
+      repository; pci-mmio-bridge does not exist upstream.
+    required: true
+  rocjitsu-image:
+    description: Pinned tag for the rocjitsu vfio-user GPU server image.
+    required: true
+  qcow2-image:
+    description: >-
+      Pinned tag for the ubuntu-qcow2-gen payload image carrying the guest
+      disk, its SSH keypair and vm-info.json under /output.
+    required: true
+  nvme-namespaces:
+    description: >-
+      NVME_NAMESPACES value passed to the SPDK container. Controls which
+      namespaces and in what NSID order they appear. See the SPDK image
+      documentation for the grammar (kind:backing[:args]).
+    required: false
+    default: "kv:mem"
+  rocjitsu-config:
+    description: rocjitsu config filename under /usr/local/share/rocjitsu/configs.
+    required: false
+    default: gfx1250_mi455x.json
+  images-dir:
+    description: Host directory the guest disk is extracted into.
+    required: false
+    default: /var/lib/qemu-tool/images
+  vcpus:
+    description: Guest vCPU count.
+    required: false
+    default: "4"
+  vmem:
+    description: Guest memory in MiB.
+    required: false
+    default: "8192"
+  shm-size:
+    description: >-
+      /dev/shm size for the qemu container. Must be >= vmem MiB; both
+      the vfio-user GPU server and the SPDK NVMe server reach guest RAM
+      through a shared memfd.
+    required: false
+    default: 12g
+  ssh-port:
+    description: Host port forwarded to the guest's sshd.
+    required: false
+    default: "2222"
+  boot-timeout:
+    description: Seconds to wait for the guest to accept SSH.
+    required: false
+    default: "300"
+
+outputs:
+  ssh-port:
+    description: Host port the guest's sshd is reachable on.
+    value: ${{ inputs.ssh-port }}
+  ssh-user:
+    description: Guest username, read from the payload's vm-info.json.
+    value: ${{ steps.payload.outputs.username }}
+  ssh-key:
+    description: Path to the private key that authenticates as ssh-user.
+    value: ${{ steps.payload.outputs.key-path }}
+  vm-name:
+    description: Guest VM name, read from the payload's vm-info.json.
+    value: ${{ steps.payload.outputs.vm-name }}
+  kv-nsid:
+    description: >-
+      Integer NSID of the KV namespace on the SPDK controller, parsed
+      from the server's nsid map log line (e.g. "1" when nsid map is
+      1=kv). KV namespaces are not attached as block devices by the Linux
+      NVMe driver, so there is no /dev/nvme0nX path; use this NSID with
+      --namespace against the NVMe controller device (/dev/nvme0).
+    value: ${{ steps.spdk-nsid.outputs.kv-nsid }}
+  lba-nsid:
+    description: >-
+      Integer NSID of the first LBA namespace, or empty if no LBA
+      namespace was configured.
+    value: ${{ steps.spdk-nsid.outputs.lba-nsid }}
+  compose-dir:
+    description: Directory the compose stack was brought up from.
+    value: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM for the runner user
+      shell: bash
+      run: |
+        set -uo pipefail
+        if [ ! -c /dev/kvm ]; then
+          echo "::error::/dev/kvm is not present on this runner; the guest cannot be accelerated"
+          lsmod | grep -i kvm || echo "no kvm module loaded"
+          exit 1
+        fi
+
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+        [ -w /dev/kvm ] || sudo chmod 0666 /dev/kvm
+        ls -l /dev/kvm
+        test -w /dev/kvm
+
+    - name: Pull pinned images
+      shell: bash
+      run: |
+        docker pull "${{ inputs.spdk-image }}"
+        docker pull "${{ inputs.qemu-image }}"
+        docker pull "${{ inputs.rocjitsu-image }}"
+        docker pull "${{ inputs.qcow2-image }}"
+
+    - name: Extract guest disk payload
+      id: payload
+      shell: bash
+      env:
+        IMAGES_DIR: ${{ inputs.images-dir }}
+      run: |
+        set -euo pipefail
+        sudo mkdir -p "$IMAGES_DIR"
+        sudo chmod 777 "$IMAGES_DIR"
+
+        cid=$(docker create "${{ inputs.qcow2-image }}")
+        trap 'docker rm -f "$cid" > /dev/null 2>&1 || true' EXIT
+        docker cp "$cid:/output/." "$IMAGES_DIR"
+
+        info="$IMAGES_DIR/vm-info.json"
+        test -f "$info" || { echo "::error::no vm-info.json in payload"; exit 1; }
+
+        vm_name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["vm_name"])' "$info")
+        username=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["username"])' "$info")
+        key="$IMAGES_DIR/id_rsa"
+        chmod 600 "$key"
+
+        {
+          echo "vm-name=$vm_name"
+          echo "username=$username"
+          echo "key-path=$key"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Guest: $vm_name (user $username)"
+        python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("release:", d["release"], "kernel:", d["kernel_release"])' "$info"
+
+    # Written to disk so every subsequent docker compose invocation (logs, down,
+    # ps) picks up the same pins without the caller repeating them.
+    - name: Write compose .env
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      run: |
+        cat > .env <<EOF
+        SPDK_IMAGE=${{ inputs.spdk-image }}
+        NVME_NAMESPACES=${{ inputs.nvme-namespaces }}
+        QEMU_IMAGE=${{ inputs.qemu-image }}
+        ROCJITSU_IMAGE=${{ inputs.rocjitsu-image }}
+        ROCJITSU_CONFIG=${{ inputs.rocjitsu-config }}
+        VM_IMAGES_DIR=${{ inputs.images-dir }}
+        VM_NAME=${{ steps.payload.outputs.vm-name }}
+        VM_VCPUS=${{ inputs.vcpus }}
+        VM_VMEM=${{ inputs.vmem }}
+        VM_SHM_SIZE=${{ inputs.shm-size }}
+        VM_SSH_PORT=${{ inputs.ssh-port }}
+        EOF
+        cat .env
+
+    - name: Bring up SPDK + rocjitsu + QEMU stack
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      run: docker compose up --detach
+
+    - name: Wait for the rocjitsu GPU server to be healthy
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      run: |
+        set -uo pipefail
+        for _ in $(seq 1 30); do
+          health=$(docker compose ps --format json rocjitsu \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Health",""))' \
+            2>/dev/null || true)
+          [ "$health" = "healthy" ] && { echo "rocjitsu healthy"; exit 0; }
+          sleep 2
+        done
+        echo "::error::rocjitsu did not become healthy"
+        docker compose logs --no-color rocjitsu
+        exit 1
+
+    - name: Wait for SPDK to be healthy and parse NSID map
+      id: spdk-nsid
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      run: |
+        set -euo pipefail
+
+        # The SPDK healthcheck is socket existence. Wait for the container to
+        # report healthy (compose polls the same test -S the service defines).
+        for _ in $(seq 1 60); do
+          health=$(docker compose ps --format json spdk-nvme \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Health",""))' \
+            2>/dev/null || true)
+          [ "$health" = "healthy" ] && break
+          sleep 2
+        done
+        if [ "$health" != "healthy" ]; then
+          echo "::error::SPDK did not become healthy"
+          docker compose logs --no-color spdk-nvme
+          exit 1
+        fi
+        echo "SPDK healthy"
+
+        # Parse "nsid map: 1=kv,2=lba" from the server log. This is the
+        # authoritative source of NSID assignments; do not hardcode them.
+        # KV Store/Retrieve share opcodes 0x01/0x02 with block Write/Read -- a
+        # KV command sent to an LBA namespace silently corrupts data rather than
+        # returning an error, so using the wrong NSID is a latent integrity bug.
+        nsid_map=$(docker compose logs spdk-nvme 2>&1 \
+          | grep -oP 'nsid map:\s*\K[^\s]+' | tail -1 || true)
+
+        if [ -z "$nsid_map" ]; then
+          echo "::error::SPDK log has no 'nsid map:' line"
+          docker compose logs --no-color spdk-nvme
+          exit 1
+        fi
+        echo "NSID map from server: $nsid_map"
+
+        # nsid_map is e.g. "1=kv,2=lba" or "1=kv"
+        kv_nsid=""
+        lba_nsid=""
+        IFS=',' read -ra entries <<< "$nsid_map"
+        for entry in "${entries[@]}"; do
+          nsid="${entry%%=*}"
+          kind="${entry##*=}"
+          case "$kind" in
+            kv)  [ -z "$kv_nsid"  ] && kv_nsid="${nsid}"  ;;
+            lba) [ -z "$lba_nsid" ] && lba_nsid="${nsid}" ;;
+          esac
+        done
+
+        if [ -z "$kv_nsid" ]; then
+          echo "::error::NVME_NAMESPACES contains no KV namespace"
+          exit 1
+        fi
+
+        echo "kv-nsid=$kv_nsid"   >> "$GITHUB_OUTPUT"
+        echo "lba-nsid=$lba_nsid" >> "$GITHUB_OUTPUT"
+        echo "KV namespace device: $kv_nsid"
+        echo "LBA namespace device: ${lba_nsid:-(none)}"
+
+    - name: Wait for guest SSH
+      shell: bash
+      env:
+        SSH_PORT: ${{ inputs.ssh-port }}
+        SSH_USER: ${{ steps.payload.outputs.username }}
+        SSH_KEY: ${{ steps.payload.outputs.key-path }}
+        TIMEOUT: ${{ inputs.boot-timeout }}
+      run: |
+        set -uo pipefail
+        elapsed=0
+        while [ "$elapsed" -lt "$TIMEOUT" ]; do
+          if ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+                 -o ConnectTimeout=2 \
+                 -o BatchMode=yes \
+                 -o NoHostAuthenticationForLocalhost=yes \
+                 -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null \
+                 "$SSH_USER@localhost" true 2>/dev/null; then
+            echo "Guest ready after ${elapsed}s"
+            exit 0
+          fi
+          sleep 5
+          elapsed=$((elapsed + 5))
+        done
+        echo "::error::guest did not accept SSH within ${TIMEOUT}s"
+        exit 1
+
+    # A missing NVMe controller or vfio-user GPU here means the stack came up
+    # wrong. Failing now beats a confusing failure deep into provisioning.
+    - name: Verify emulated devices are present in the guest
+      shell: bash
+      env:
+        SSH_PORT: ${{ inputs.ssh-port }}
+        SSH_USER: ${{ steps.payload.outputs.username }}
+        SSH_KEY: ${{ steps.payload.outputs.key-path }}
+      run: |
+        set -euo pipefail
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+            -o BatchMode=yes \
+            -o NoHostAuthenticationForLocalhost=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "$SSH_USER@localhost" 'bash -s' <<'GUEST'
+        set -euo pipefail
+        echo "--- lspci ---"
+        lspci -nn
+        echo "--- NVMe (SPDK vfio-user controller) ---"
+        lspci -d ::0108 | grep -q . || { echo "no NVMe controller in guest"; exit 1; }
+        echo "--- display/processing accelerator (rocjitsu) ---"
+        lspci -d 1002: | grep -q . || { echo "no AMD vfio-user device in guest"; exit 1; }
+        GUEST
