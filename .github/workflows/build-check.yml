@@ -1,4 +1,4 @@
-name: build-check
+name: rocm-xio - build-check
 
 permissions:
   contents: read

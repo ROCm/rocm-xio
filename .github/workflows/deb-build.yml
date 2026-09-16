@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-name: deb-build
+name: rocm-xio - deb-build
 
 on:
   push:

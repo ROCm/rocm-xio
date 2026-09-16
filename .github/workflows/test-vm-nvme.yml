@@ -4,20 +4,22 @@
 # pci-mmio-bridge. This is the only CI path that exercises nvme-ep end to
 # end without physical hardware.
 #
-# Not run on pull requests: a full ROCm + DKMS provision plus emulated-GPU
-# execution takes the better part of an hour, and the rocjitsu pin tracks a
-# stacked review branch that is force-pushed regularly. Scheduled weekly and
-# available on demand.
+# Runs on every pull request into main, plus weekly and on demand. This is an
+# expensive gate: a full ROCm + DKMS provision plus emulated-GPU execution takes
+# the better part of an hour, so pushes to an open PR cancel the in-flight run
+# rather than queueing behind it.
 #
 # Every image is pinned to a dated tag. Bump these deliberately; do not
 # switch them to :latest.
 
-name: test-vm-nvme
+name: rocm-xio - test-vm-nvme
 
 permissions:
   contents: read
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ctest-label:
@@ -31,6 +33,12 @@ on:
   schedule:
     # Weekly, off the hour so this does not pile onto every other cron job.
     - cron: '17 5 * * 1'
+
+# A ~1h job on every push would otherwise pile up several runs deep on an
+# actively worked PR. Only the tip of a branch is worth testing.
+concurrency:
+  group: test-vm-nvme-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.

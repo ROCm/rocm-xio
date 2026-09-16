@@ -8,7 +8,7 @@
 # separate -LE hardware -LE system would still run hardware-only and system-only
 # tests. See tests/CMakeLists.txt for the label convention.
 
-name: ctest-no-hardware
+name: rocm-xio - ctest-no-hardware
 
 permissions:
   contents: read

@@ -1,4 +1,4 @@
-name: docs-check
+name: rocm-xio - docs-check
 
 on:
   workflow_dispatch:

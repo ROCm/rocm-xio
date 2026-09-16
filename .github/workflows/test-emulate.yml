@@ -1,4 +1,4 @@
-name: test-emulate
+name: rocm-xio - test-emulate
 
 on:
   workflow_dispatch:

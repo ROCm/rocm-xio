@@ -1,4 +1,4 @@
-name: spell-check
+name: rocm-xio - spell-check
 
 on:
   workflow_dispatch:

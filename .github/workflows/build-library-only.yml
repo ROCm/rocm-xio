@@ -6,7 +6,7 @@
 # without libcli11-dev.  This ensures CLI11 is not a
 # transitive dependency for downstream consumers.
 
-name: build-library-only
+name: rocm-xio - build-library-only
 
 on:
   workflow_dispatch:
