@@ -58,12 +58,16 @@ jobs:
       - name: Check out code.
         uses: actions/checkout@v5.0.0
 
+      # python3-jmespath is a controller-side dependency, not a guest one: the
+      # rocm_setup role's platform check runs community.general.json_query,
+      # which fails at task-argument resolution without it.
       - name: Install host tooling
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ansible-core \
             cloud-image-utils \
+            python3-jmespath \
             qemu-utils \
             rsync
 
