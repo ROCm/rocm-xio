@@ -1,0 +1,26 @@
+; rocm-xio fio job — random 4K reads from WD_BLACK SN850X (nvme1)
+;
+; Target: /dev/nvme1 (WD_BLACK SN850X 2000GB, unmounted)
+; Queue ID 0 = auto-detect.
+
+[global]
+ioengine=external:/usr/local/lib/fio/rocm-xio.so
+iodepth=1
+direct=1
+group_reporting=1
+
+gpu_id=0
+queue_id=0
+queue_depth=64
+memory_mode=0
+
+[nvme1-rand-read-4k]
+description=GPU-initiated 4K random reads from WD_BLACK (nvme1)
+filename=/dev/nvme1
+rw=randread
+bs=4k
+size=10g
+numjobs=1
+runtime=30
+time_based=1
+name=nvme1-rand-read-4k

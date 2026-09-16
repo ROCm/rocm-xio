@@ -1,0 +1,188 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# docker/Dockerfile.fio
+#
+# Multi-stage image that builds:
+#   1. librocm-xio.so  from source (rocm-xio stage)
+#   2. fio from upstream HEAD with the rocm-xio engine patch (fio stage)
+#   3. A slim runtime image with both (final stage)
+#
+# Build from the repo root:
+#
+#   docker build \
+#     -f docker/Dockerfile.fio \
+#     -t rocm-xio-fio:latest \
+#     .
+#
+# Run (requires /dev/rocm-xio and NVMe devices passed through):
+#
+#   docker run --rm --privileged \
+#     --device /dev/rocm-xio \
+#     --device /dev/nvme1 \
+#     --device /dev/nvme2 \
+#     --device /dev/kfd \
+#     --device /dev/dri \
+#     rocm-xio-fio:latest \
+#     fio /opt/rocm-xio-fio/jobs/nvme2-read.fio
+#
+# The image is built for the gfx1201 target (AMD Radeon RX 9070 XT /
+# MI300X family).  Change ROCM_ARCH to target a different GPU.
+
+ARG ROCM_VERSION=6.4
+ARG ROCM_ARCH=gfx1201
+
+# ────────────────────────────────────────────────────────────────────
+# Stage 1: build librocm-xio.so
+# ────────────────────────────────────────────────────────────────────
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS rocm-xio-build
+
+ARG ROCM_ARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        pkg-config \
+        libhsa-runtime-dev \
+        libelf-dev \
+        libnuma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/rocm-xio
+
+# Copy the entire rocm-xio source tree into the image.
+# (The .dockerignore in the repo root should exclude build/ and .git
+# for a leaner context, but correctness does not depend on it.)
+COPY . .
+
+# Build a shared library; nvme-ep only, no RDMA providers needed for fio.
+RUN cmake -S . -B /build/rocm-xio \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DGDA_BNXT=OFF \
+        -DGDA_MLX5=OFF \
+        -DGDA_IONIC=OFF \
+        -DGDA_ERNIC=OFF \
+        -DBUILD_TESTING=OFF \
+        -DGPU_TARGETS="${ROCM_ARCH}" \
+        -DROCM_PATH=/opt/rocm \
+    && cmake --build /build/rocm-xio -j "$(nproc)" \
+    && cmake --install /build/rocm-xio
+
+# ────────────────────────────────────────────────────────────────────
+# Stage 2: build fio + rocm-xio engine
+# ────────────────────────────────────────────────────────────────────
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS fio-build
+
+ARG ROCM_ARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        pkg-config \
+        zlib1g-dev \
+        libaio-dev \
+        libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the installed rocm-xio headers and shared library from stage 1.
+COPY --from=rocm-xio-build /usr/local/include /usr/local/include
+COPY --from=rocm-xio-build /usr/local/lib     /usr/local/lib
+
+# Clone fio at upstream HEAD.
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/axboe/fio.git fio
+
+# Copy the rocm-xio engine files into the fio engines directory.
+COPY docker/rocm-xio-engine/rocm-xio.c        /src/fio/engines/rocm-xio.c
+COPY docker/rocm-xio-engine/rocm-xio-hip.hip  /src/fio/engines/rocm-xio-hip.hip
+COPY docker/rocm-xio-engine/rocm-xio-hip.h    /src/fio/engines/rocm-xio-hip.h
+COPY docker/rocm-xio-engine/0001-rocm-xio-engine.patch \
+     /src/fio/0001-rocm-xio-engine.patch
+
+WORKDIR /src/fio
+RUN git apply 0001-rocm-xio-engine.patch
+
+# Build fio at upstream HEAD.  The rocm-xio engine is built as an
+# external .so (not compiled into fio itself), so we only need the
+# fio headers — not a special configure option.
+RUN CFLAGS="-I/opt/rocm/include" \
+    ./configure --prefix=/usr/local \
+    && make -j "$(nproc)" \
+    && make install
+
+# Build the rocm-xio fio engine as a standalone shared object.
+#
+# Step 1: compile the HIP shim (rocm-xio-hip.hip) to a relocatable object.
+#         The NVME_EP_H guard trick defers including nvme-ep.h until after
+#         xio.h has completed, avoiding the circular-include ordering issue.
+RUN /opt/rocm/bin/hipcc \
+        --offload-arch="${ROCM_ARCH}" \
+        -fPIC \
+        -DAXIIO_ENDPOINT_NVME \
+        -I/usr/local/include/rocm-xio \
+        -I/opt/rocm/include \
+        -I/src/fio \
+        -c engines/rocm-xio-hip.hip \
+        -o /tmp/rocm-xio-hip.o
+
+# Step 2: compile the C engine wrapper to a relocatable object.
+RUN gcc -std=gnu99 -fPIC \
+        -I/src/fio \
+        -I/opt/rocm/include \
+        -c engines/rocm-xio.c \
+        -o /tmp/rocm-xio-c.o
+
+# Step 3: link both objects into a single engine .so, resolved against
+#         the installed librocm-xio.so.
+RUN mkdir -p /usr/local/lib/fio && \
+    /opt/rocm/bin/hipcc \
+        --offload-arch="${ROCM_ARCH}" \
+        -fPIC -shared \
+        -o /usr/local/lib/fio/rocm-xio.so \
+        /tmp/rocm-xio-hip.o \
+        /tmp/rocm-xio-c.o \
+        -L/usr/local/lib \
+        -lrocm-xio \
+        -Wl,-rpath,/usr/local/lib \
+        -L/opt/rocm/lib \
+        -Wl,-rpath,/opt/rocm/lib \
+        -lamdhip64
+
+# ────────────────────────────────────────────────────────────────────
+# Stage 3: runtime image
+# ────────────────────────────────────────────────────────────────────
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS final
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nvme-cli \
+        libaio1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# fio binary
+COPY --from=fio-build /usr/local/bin/fio /usr/local/bin/fio
+
+# rocm-xio shared library
+COPY --from=fio-build /usr/local/lib/librocm-xio.so \
+                      /usr/local/lib/librocm-xio.so
+RUN ldconfig
+
+# rocm-xio fio engine shared object
+COPY --from=fio-build /usr/local/lib/fio/rocm-xio.so \
+                      /usr/local/lib/fio/rocm-xio.so
+
+# Job files
+COPY docker/jobs/ /opt/rocm-xio-fio/jobs/
+
+# Convenience wrapper that sets LD_LIBRARY_PATH before running fio.
+RUN printf '#!/bin/sh\n\
+export LD_LIBRARY_PATH=/usr/local/lib:/opt/rocm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n\
+exec /usr/local/bin/fio "$@"\n' > /usr/local/bin/rxio-fio \
+    && chmod +x /usr/local/bin/rxio-fio
+
+ENTRYPOINT ["/usr/local/bin/rxio-fio"]
+CMD ["--help"]

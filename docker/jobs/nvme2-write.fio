@@ -1,0 +1,28 @@
+; rocm-xio fio job — sequential write to MTR_SLC (nvme2)
+;
+; WARNING: This writes to /dev/nvme2 (MTR_SLC_16GB_0400000E3CBC).
+; Confirm this drive is not mounted before running.
+;
+; Queue ID 32 is the known-good value for this controller (queue_count=33).
+
+[global]
+ioengine=external:/usr/local/lib/fio/rocm-xio.so
+iodepth=1
+direct=1
+group_reporting=1
+
+gpu_id=0
+queue_id=32
+queue_depth=64
+memory_mode=0
+
+[nvme2-seq-write-4k]
+description=GPU-initiated 4K sequential writes to MTR_SLC (nvme2)
+filename=/dev/nvme2
+rw=write
+bs=4k
+size=512m
+numjobs=1
+runtime=30
+time_based=1
+name=nvme2-seq-write-4k
