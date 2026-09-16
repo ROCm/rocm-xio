@@ -9,16 +9,17 @@
 # emulated GPU and an emulated NVMe controller.
 #
 # This is the rocjitsu/NVMe sibling of scripts/test/setup-vm: same
-# shape (install the Galaxy collection, synthesise an inventory,
-# run a playbook against the live VM) but it drives the checked-in
-# playbook at scripts/test/ansible/vm-rocjitsu-nvme.yml and
-# authenticates with the keypair that shipped alongside the guest
-# disk rather than with a password.
+# shape (synthesise an inventory, run a playbook against the live VM)
+# but it drives the checked-in playbook at
+# scripts/test/ansible/vm-rocjitsu-nvme.yml and authenticates with the
+# keypair that shipped alongside the guest disk rather than with a
+# password. No Galaxy collection is installed: the guest image now
+# carries ROCm, so the playbook uses no roles.
 #
 # Prerequisites:
 #   - VM already booted and accepting SSH
 #     (.github/actions/rocjitsu-nvme-vm does this)
-#   - ansible-playbook and ansible-galaxy in PATH
+#   - ansible-playbook in PATH
 #   - docker on the local host: the playbook shells out to the
 #     rocjitsu image to generate ip_discovery.bin and the gfx1250
 #     firmware stubs
@@ -33,7 +34,6 @@
 #   ROCJITSU_IMAGE    Pinned rocjitsu image (required; used for
 #                     rj-ip-discovery and to serve the device)
 #   ANSIBLE_PLAYBOOK  Path to ansible-playbook
-#   ANSIBLE_GALAXY    Path to ansible-galaxy
 #
 # Any extra arguments are passed through to ansible-playbook, so a
 # caller can add -e/--tags without this script knowing about them.
@@ -47,9 +47,7 @@ ROCJITSU_IMAGE="${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be a pinned tag}"
 ROCJITSU_FIRMWARE_IMAGE="${ROCJITSU_FIRMWARE_IMAGE:-${ROCJITSU_IMAGE}}"
 
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
-ANSIBLE_GALAXY="${ANSIBLE_GALAXY:-ansible-galaxy}"
 
-COLLECTION="sbates130272.batesste"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLAYBOOK="${SCRIPT_DIR}/ansible/vm-rocjitsu-nvme.yml"
 
@@ -63,9 +61,6 @@ fi
 # jmespath have to live in whichever interpreter this resolves to. Print it, so
 # a missing-dependency failure later says which environment to look in.
 "${ANSIBLE_PLAYBOOK}" --version
-
-echo "Installing Ansible Galaxy collection ${COLLECTION}..."
-"${ANSIBLE_GALAXY}" collection install "${COLLECTION}"
 
 TMPDIR_PROV="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR_PROV}"' EXIT

@@ -51,7 +51,10 @@ env:
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
   ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen:20260915-vm.resolute-basic-qm.5d68689
+  # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace, the
+  # HWE kernel whose in-tree amdgpu knows GC 12.1.0, amdgpu-dkms and rocm-xio's
+  # build dependencies, which is most of what provisioning used to do by hand.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916-vm.noble-rocjitsu-qm.5d68689
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
 
@@ -70,14 +73,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # ansible-core and jmespath must land in the *same* interpreter. Installed
-      # from apt they do not: the runner image already ships an ansible ahead of
-      # /usr/bin on PATH, in an environment that cannot see dist-packages, so
-      # apt's python3-jmespath is invisible to the ansible that actually runs
-      # and json_query fails at task-argument resolution. setup-python plus pip
-      # is the pattern rocm-ernic uses for the same reason.
-      - name: Install ansible and its controller-side dependencies
-        run: python3 -m pip install ansible-core jmespath
+      # jmespath is no longer needed: json_query came from the rocm_setup role,
+      # and the guest image now carries ROCm, so the playbook uses no roles.
+      - name: Install ansible
+        run: python3 -m pip install ansible-core
 
       - name: Install host tooling
         run: |
