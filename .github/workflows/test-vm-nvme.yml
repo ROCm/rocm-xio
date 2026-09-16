@@ -41,15 +41,26 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Tags are <date>.g<ci-commit>-<component-commits>. The leading date alone was
+  # not unique: the same date+component tag was re-pushed pointing at a new
+  # digest, so a pin silently changed meaning under us. The .g<ci-commit> field
+  # makes every rebuild a distinct tag. Never drop it, and never use :latest.
+  #
   # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
-  # The suffix is qemu-commit.libvfio-user-commit. Earlier tags named the qemu
-  # *branch* instead, so two rebuilds could share a suffix and differ in source;
-  # prefer commit-suffixed tags.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916-qemu.98eca1a-vfu.8039244
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.909c17f
+  # The component suffix is qemu-commit.libvfio-user-commit. Earlier tags named
+  # the qemu *branch* instead, so two rebuilds could share a suffix and differ
+  # in source; prefer commit-suffixed tags.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.gab2a19a-qemu.98eca1a-vfu.8039244
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.gab2a19a-rocjitsu.909c17f
   # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
+  #
+  # Still on the old <date>-<component> scheme: rocjitsu.730bc62 was never
+  # rebuilt under the .g<ci-commit> scheme, so no such tag exists to move to.
+  # This pin therefore still carries the re-push risk described above. Ask for
+  # a .g<ci-commit> rebuild of 730bc62, or for vfio_guest_firmware.py to come
+  # back to the current image so this second pin can be dropped entirely.
   ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
   # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace,
   # amdgpu-dkms and rocm-xio's build dependencies, which is most of what
@@ -63,7 +74,11 @@ env:
   # device with "Failed to add vcn/jpeg ip block(UVD_HWIP:0x0)" because rocjitsu
   # does not model VCN/JPEG. Resolute gets the 26.04 package, which builds
   # against 7.0, loads, and brings up a KFD node.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916-vm.resolute-rocjitsu-qm.5d68689
+  #
+  # The unsuffixed tag, not the "-qcow2" one: this is the variant whose /output
+  # holds batesste-ci-vm.qcow2, id_rsa and vm-info.json, which is what
+  # run-vm-nvme.sh copies out.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
 
