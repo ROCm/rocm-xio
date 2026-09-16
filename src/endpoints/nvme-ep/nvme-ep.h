@@ -84,7 +84,8 @@ struct nvmeIoParams {
   uint32_t kvKey[4];   /**< KV key bytes, packed little-endian (16 B). */
   uint32_t kvOpId;     /**< KV Exec operation ID (SQE CDW13). */
   uint32_t kvInputLen; /**< KV Exec input length in bytes. */
-  uint32_t stageSettleCycles; /**< Settle-spin ticks after Store stage. 0=off. */
+  uint32_t stageSettleCycles;   /**< Settle-spin ticks after Store stage. 0=off.
+                                 */
   const uint32_t* kvKeysPacked; /**< Device ptr to packed key array, or null. */
   uint32_t kvNumKeys; /**< Number of keys in kvKeysPacked (0 = none). */
 };
@@ -766,8 +767,8 @@ __host__ __device__ static inline void calculatePrps(
   uint32_t prpListPageCount) {
   // For now delegate to the base overload; chaining is implemented when
   // prpListPagePhys is non-null and prpListPageCount > 1.
-  calculatePrps(bufferAddr, bufferSize, sqe, prpList, prpListDma,
-                pagePhysAddrs, bufPageOffset);
+  calculatePrps(bufferAddr, bufferSize, sqe, prpList, prpListDma, pagePhysAddrs,
+                bufPageOffset);
   // Multi-page chaining: link PRP list pages together
   if (prpListPagePhys && prpListPageCount > 1 && prpList && prpListDma) {
     constexpr uint32_t entries = NVME_PAGE_SIZE / sizeof(uint64_t);
@@ -963,11 +964,12 @@ struct nvmeEpConfig {
     std::string kvOp = "";   /**< "store", "retrieve", "exec", or "" (block). */
     std::string kvKey = "";  /**< KV key string (up to 16 bytes). */
     uint32_t kvValueLen = 0; /**< KV value size; 0 => --data-buffer-size. */
-    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest (wavefront). */
-    uint32_t kvOpId = 0;            /**< KV Exec operation ID. */
-    uint32_t kvInputLen = 0;        /**< KV Exec input length. */
-    uint32_t stageSettleCycles = 0; /**< Settle spin after Store stage. */
-  } ioParams;                  /**< I/O operation parameters. */
+    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest (wavefront).
+                                           */
+    uint32_t kvOpId = 0;                  /**< KV Exec operation ID. */
+    uint32_t kvInputLen = 0;              /**< KV Exec input length. */
+    uint32_t stageSettleCycles = 0;       /**< Settle spin after Store stage. */
+  } ioParams;                             /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
 
@@ -1036,13 +1038,3 @@ __host__ hipError_t run(XioEndpointConfig* config);
 } // namespace xio::nvme_ep
 
 #endif // NVME_EP_H
-
-/** Work item for gpuKernelPersistent's CPU→GPU ring. */
-struct nvmeWorkItem {
-  volatile uint64_t lba;
-  volatile uint32_t lbas;
-  volatile uint32_t slot;
-  volatile uint32_t is_write;
-  volatile uint32_t _pad;
-  volatile uint32_t seq;  /* odd=pending, even=done */
-};

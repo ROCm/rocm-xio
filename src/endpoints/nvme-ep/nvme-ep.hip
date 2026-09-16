@@ -2395,7 +2395,8 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
     }
     // Override per-target lbaSize with the nominal value for KV namespaces.
     for (auto& target : config->targets)
-      if (target.lbaSize == 0) target.lbaSize = 512;
+      if (target.lbaSize == 0)
+        target.lbaSize = 512;
   }
 
   // Detect PCI MMIO bridge BDF if --pci-mmio-bridge is set
@@ -2756,8 +2757,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     for (size_t t = 0; t < numTargets; t++) {
       nvme_ep::NvmeTarget& target = nvmeConfig->targets[t];
       uint64_t namespace_capacity = 0;
-      int cap_ret = queryNamespaceCapacity(target.controller.c_str(), target.nsid,
-                                           &namespace_capacity);
+      int cap_ret = queryNamespaceCapacity(target.controller.c_str(),
+                                           target.nsid, &namespace_capacity);
       if (cap_ret != 0 || namespace_capacity == 0) {
         ROCXIO_LOG_ERROR("Failed to query namespace capacity on %s\n",
                          target.controller.c_str());
@@ -3061,55 +3062,57 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         return hipErrorNotSupported;
       }
     }
-  // ---- Wavefront/batched KV: upload the key manifest to the device ----
-  // Only the cooperative path consumes kvKeysPacked; the serial path uses the
-  // inline kvKey[] packed above. Pack each key as NVME_KV_PACKED_WORDS_PER_KEY
-  // uint32 (16-byte LE image + length) and copy the array to device memory.
-  if (kvMode && nvmeConfig->ioParams.batchSize > 1) {
-    std::vector<uint32_t> packed((size_t)kvNumKeys *
-                                   NVME_KV_PACKED_WORDS_PER_KEY,
-                                 0);
-    auto packKey = [&](unsigned i, const std::string& k) {
-      uint32_t klen = (uint32_t)k.size();
-      if (klen > NVME_KV_KEY_MAX_LEN)
-        klen = NVME_KV_KEY_MAX_LEN;
-      uint8_t kb[NVME_KV_KEY_MAX_LEN] = {0};
-      memcpy(kb, k.data(), klen);
-      uint32_t* slot = packed.data() + (size_t)i * NVME_KV_PACKED_WORDS_PER_KEY;
-      memcpy(slot, kb, NVME_KV_KEY_MAX_LEN); // words 0..3 = LE key image
-      slot[4] = klen;                        // word 4 = key length
-    };
-    if (nvmeConfig->ioParams.kvKeys.empty()) {
-      packKey(0, nvmeConfig->ioParams.kvKey);
-    } else {
-      for (unsigned i = 0; i < kvNumKeys; i++) {
-        packKey(i, nvmeConfig->ioParams.kvKeys[i]);
+    // ---- Wavefront/batched KV: upload the key manifest to the device ----
+    // Only the cooperative path consumes kvKeysPacked; the serial path uses the
+    // inline kvKey[] packed above. Pack each key as
+    // NVME_KV_PACKED_WORDS_PER_KEY uint32 (16-byte LE image + length) and copy
+    // the array to device memory.
+    if (kvMode && nvmeConfig->ioParams.batchSize > 1) {
+      std::vector<uint32_t> packed((size_t)kvNumKeys *
+                                     NVME_KV_PACKED_WORDS_PER_KEY,
+                                   0);
+      auto packKey = [&](unsigned i, const std::string& k) {
+        uint32_t klen = (uint32_t)k.size();
+        if (klen > NVME_KV_KEY_MAX_LEN)
+          klen = NVME_KV_KEY_MAX_LEN;
+        uint8_t kb[NVME_KV_KEY_MAX_LEN] = {0};
+        memcpy(kb, k.data(), klen);
+        uint32_t* slot = packed.data() +
+                         (size_t)i * NVME_KV_PACKED_WORDS_PER_KEY;
+        memcpy(slot, kb, NVME_KV_KEY_MAX_LEN); // words 0..3 = LE key image
+        slot[4] = klen;                        // word 4 = key length
+      };
+      if (nvmeConfig->ioParams.kvKeys.empty()) {
+        packKey(0, nvmeConfig->ioParams.kvKey);
+      } else {
+        for (unsigned i = 0; i < kvNumKeys; i++) {
+          packKey(i, nvmeConfig->ioParams.kvKeys[i]);
+        }
       }
+      size_t kvBytes = packed.size() * sizeof(uint32_t);
+      hipError_t kvErr = hipMalloc((void**)&kvKeysDev, kvBytes);
+      if (kvErr != hipSuccess || kvKeysDev == nullptr) {
+        ROCXIO_LOG_ERROR("Failed to allocate device KV key buffer "
+                         "(%zu bytes): %s\n",
+                         kvBytes, hipGetErrorString(kvErr));
+        result = hipErrorMemoryAllocation;
+        goto cleanup;
+      }
+      kvErr = hipMemcpy(kvKeysDev, packed.data(), kvBytes,
+                        hipMemcpyHostToDevice);
+      if (kvErr != hipSuccess) {
+        ROCXIO_LOG_ERROR("Failed to copy KV key manifest to device: %s\n",
+                         hipGetErrorString(kvErr));
+        result = kvErr;
+        goto cleanup;
+      }
+      ioParams.kvKeysPacked = kvKeysDev;
+      ioParams.kvNumKeys = kvNumKeys;
+      ROCXIO_LOG_INFO("Wavefront KV: %u key%s uploaded, value_len=%u, "
+                      "batch=%u\n",
+                      kvNumKeys, kvNumKeys > 1 ? "s" : "", ioParams.kvValueLen,
+                      effBatch);
     }
-    size_t kvBytes = packed.size() * sizeof(uint32_t);
-    hipError_t kvErr = hipMalloc((void**)&kvKeysDev, kvBytes);
-    if (kvErr != hipSuccess || kvKeysDev == nullptr) {
-      ROCXIO_LOG_ERROR("Failed to allocate device KV key buffer "
-                       "(%zu bytes): %s\n",
-                       kvBytes, hipGetErrorString(kvErr));
-      result = hipErrorMemoryAllocation;
-      goto cleanup;
-    }
-    kvErr = hipMemcpy(kvKeysDev, packed.data(), kvBytes, hipMemcpyHostToDevice);
-    if (kvErr != hipSuccess) {
-      ROCXIO_LOG_ERROR("Failed to copy KV key manifest to device: %s\n",
-                       hipGetErrorString(kvErr));
-      result = kvErr;
-      goto cleanup;
-    }
-    ioParams.kvKeysPacked = kvKeysDev;
-    ioParams.kvNumKeys = kvNumKeys;
-    ROCXIO_LOG_INFO("Wavefront KV: %u key%s uploaded, value_len=%u, "
-                    "batch=%u\n",
-                    kvNumKeys, kvNumKeys > 1 ? "s" : "", ioParams.kvValueLen,
-                    effBatch);
-  }
-
   }
 
   // ---- Isolate the rocm-xio-owned NVMe queue IDs from the
@@ -3617,11 +3620,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       if (perQueueStats[q]->minDuration < agg->minDuration) {
         agg->minDuration = perQueueStats[q]->minDuration;
       }
-  // Free the device-side KV key manifest (wavefront KV only)
-  if (kvKeysDev != nullptr) {
-    (void)hipFree(kvKeysDev);
-    kvKeysDev = nullptr;
-  }
+      // Free the device-side KV key manifest (wavefront KV only)
+      if (kvKeysDev != nullptr) {
+        (void)hipFree(kvKeysDev);
+        kvKeysDev = nullptr;
+      }
 
       if (perQueueStats[q]->maxDuration > agg->maxDuration) {
         agg->maxDuration = perQueueStats[q]->maxDuration;
