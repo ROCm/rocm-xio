@@ -1,0 +1,13 @@
+{
+  "run_date": "2026-09-16 (seed — first automated run pending)",
+  "results": {
+    "nvme2_d1_j1_read":  {"iops": 17200,  "bw": 67.1,  "rw": "read"},
+    "nvme2_d8_j1_read":  {"iops": 69100,  "bw": 270.0, "rw": "read"},
+    "nvme2_d8_j2_read":  {"iops": 161000, "bw": 631.0, "rw": "read"},
+    "nvme2_d8_j4_read":  {"iops": 190000, "bw": 743.0, "rw": "read"},
+    "nvme2_d8_j8_read":  {"iops": 190000, "bw": 743.0, "rw": "read"},
+    "nvme2_peak_write":  {"iops": 180000, "bw": 703.0, "rw": "write"},
+    "nvme1_peak_read":   {"iops": 150000, "bw": 586.0, "rw": "read"},
+    "cpu_baseline":      {"iops": 381385, "bw": 1490.0, "rw": "read"}
+  }
+}

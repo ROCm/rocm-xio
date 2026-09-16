@@ -27,6 +27,7 @@ IO operations to hardware devices without CPU intervention.
 
     * :doc:`Run tests <how-to/testing>`
     * :doc:`Run VM-isolated tests <how-to/vm-testing>`
+    * :doc:`Use the fio engine <how-to/fio-engine>`
 
   .. grid-item-card:: Conceptual
 
@@ -37,6 +38,7 @@ IO operations to hardware devices without CPU intervention.
 
     * :doc:`Examples <reference/examples>`
     * :doc:`Performance measurements <reference/performance>`
+    * :doc:`fio engine benchmark results <reference/fio-engine-results>`
     * :doc:`Endpoints <reference/endpoints>`
     * :doc:`Environment variables <reference/environment-variables>`
     * :doc:`API reference <reference/api>`

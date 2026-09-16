@@ -1,0 +1,42 @@
+; rocm-xio fio job — sequential reads from WD_BLACK SN850X (nvme2)
+;
+; Target: /dev/nvme2 (WD_BLACK SN850X 2000GB, unmounted)
+; Queue ID 32 = known-good value (controller has queue_count=33 for nvme1).
+; Use queue_id=0 (auto-detect) for nvme2's top queue instead.
+;
+; Run:
+;   sudo LD_LIBRARY_PATH=/path/to/librocm-xio.so:/opt/rocm/lib \
+;     fio docker/jobs/nvme2-read.fio
+
+[global]
+ioengine=external:/usr/local/lib/fio/rocm-xio.so
+iodepth=1
+direct=1
+group_reporting=1
+
+; rocm-xio engine options
+gpu_id=0
+queue_id=0
+queue_depth=64
+memory_mode=0
+size=1g
+
+[nvme2-seq-read-4k]
+description=GPU-initiated 4K sequential reads from WD_BLACK SN850X (nvme2)
+filename=/dev/nvme2
+rw=read
+bs=4k
+numjobs=1
+runtime=30
+time_based=1
+name=nvme2-seq-read-4k
+
+[nvme2-seq-read-128k]
+description=GPU-initiated 128K sequential reads from WD_BLACK SN850X (nvme2)
+filename=/dev/nvme2
+rw=read
+bs=128k
+numjobs=1
+runtime=30
+time_based=1
+name=nvme2-seq-read-128k

@@ -892,6 +892,308 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
   driveEndpoint(config, ioParams, doorbellParams, bufferParams);
 }
 
+/**
+ * Stateful multi-op kernel — submit N NVMe commands per call, preserving
+ * queue state across calls.
+ *
+ * N = ioParams.readIo (for reads) or ioParams.writeIo (for writes).
+ * All N ops share the same LBA stride (sequential), block count, and
+ * buffer layout.  Per-slot buffer offset = slot * transfer_size.
+ *
+ * State encoding in state[2]:
+ *   state[0] = sq_tail (bits 15:0) | cq_head (bits 31:16)
+ *   state[1] = expected_phase (0 or 1)
+ * Initialise to zero before the first call on a fresh queue; pass the
+ * same pointer unchanged to every subsequent call.
+ *
+ * PRP handling supports both single-page (≤4KB) and multi-page transfers:
+ * for slot b, PRP list slot = prpListPool + b * prpEntriesPerCmd, and the
+ * corresponding DMA base = prpListPoolDma + b * NVME_PAGE_SIZE.
+ */
+__global__ void gpuKernelStateful(XioEndpointConfig config,
+                                  nvmeIoParams ioParams,
+                                  nvmeDoorbellParams doorbellParams,
+                                  nvmeBufferParams bufferParams,
+                                  volatile uint32_t* state) {
+  config.endpointConfig = nullptr;
+
+  uint32_t w0 = state[0];
+  uint16_t sq_tail = (uint16_t)(w0 & 0xFFFFu);
+  uint16_t cq_head = (uint16_t)(w0 >> 16);
+  uint8_t expected_phase = (uint8_t)(state[1] & 0x1u);
+
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+
+  const bool is_read_op = (ioParams.readIo > 0);
+  const unsigned n_ops = is_read_op ? (unsigned)ioParams.readIo
+                                    : (unsigned)ioParams.writeIo;
+  const uint32_t blocks = ioParams.lbasPerIo;
+  const size_t transfer_size = (size_t)blocks * ioParams.lbaSize;
+  const uint64_t base_lba = ioParams.baseLba;
+  const uint8_t opcode = is_read_op ? nvme_cmd_read : nvme_cmd_write;
+
+  const bool has_buf = is_read_op ? (bufferParams.readBuffer &&
+                                     bufferParams.bufferSize > 0)
+                                  : (bufferParams.writeBuffer &&
+                                     bufferParams.bufferSize > 0);
+
+  /* ── Phase 1: submit all N SQEs ─────────────────────────────── */
+  for (unsigned b = 0; b < n_ops; b++) {
+    sqeType sqeLocal = {};
+    sqeLocal.opcode = opcode;
+    sqeLocal.command_id = (uint16_t)((sq_tail % 65535) + 1);
+    sqeLocal.nsid = ioParams.nsid;
+
+    if (has_buf) {
+      size_t buf_off = (size_t)b * transfer_size;
+
+      /* Base DMA address for this slot */
+      uint64_t addr;
+      if (is_read_op) {
+        addr = bufferParams.readPagePhysAddrs
+                 ? bufferParams.readPagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+               : bufferParams.readBufferDma
+                 ? (bufferParams.readBufferDma + buf_off)
+                 : (uint64_t)(bufferParams.readBuffer + buf_off);
+      } else {
+        addr = bufferParams.writePagePhysAddrs
+                 ? bufferParams.writePagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+               : bufferParams.writeBufferDma
+                 ? (bufferParams.writeBufferDma + buf_off)
+                 : (uint64_t)(bufferParams.writeBuffer + buf_off);
+      }
+
+      /* Per-slot PRP list entry and DMA address */
+      uint64_t* prpSlot = nullptr;
+      uint64_t prpDma = 0;
+      if (bufferParams.prpListPool && bufferParams.prpEntriesPerCmd > 0) {
+        uint32_t prp_per = bufferParams.prpEntriesPerCmd;
+        prpSlot = bufferParams.prpListPool + (size_t)b * prp_per;
+        prpDma = bufferParams.prpListPoolDma + (uint64_t)b * NVME_PAGE_SIZE;
+      }
+
+      uint64_t* physAddrs = is_read_op ? bufferParams.readPagePhysAddrs
+                                       : bufferParams.writePagePhysAddrs;
+      uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+      calculatePrps(addr, transfer_size, &sqeLocal, prpSlot, prpDma, physAddrs,
+                    pageOff);
+    }
+
+    sqeSetup(&sqeLocal, base_lba + (uint64_t)b * blocks, blocks);
+    nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+    sq_tail = (sq_tail + 1) % ioParams.queueSize;
+  }
+
+  /* ── Phase 2: ring SQ doorbell once ──────────────────────────── */
+  nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+
+  /* ── Phase 3: poll N CQEs ────────────────────────────────────── */
+  for (unsigned b = 0; b < n_ops; b++) {
+    volatile cqeType* cqe_entry = &cqeAddr[cq_head];
+    unsigned poll_count = 0;
+    while (true) {
+      cqeType cqe_new = nvme_ep::cqeRead(cqe_entry);
+      if (NVME_CQE_STATUS_PHASE(cqe_new.status) == expected_phase)
+        break;
+      if (++poll_count >= NVME_EP_MAX_POLLS) {
+        printf("gpuKernelStateful: CQ timeout b=%u sq_tail=%u cq_head=%u\n", b,
+               (unsigned)sq_tail, (unsigned)cq_head);
+        __builtin_trap();
+      }
+    }
+    cq_head = (cq_head + 1) % ioParams.queueSize;
+    if (cq_head == 0)
+      expected_phase ^= 1;
+  }
+
+  /* ── Phase 4: ring CQ doorbell, write back state ─────────────── */
+  nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                        doorbellParams.doorbellOffset +
+                          nvme_ep::doorBellStride);
+
+  state[0] = ((uint32_t)cq_head << 16) | (uint32_t)sq_tail;
+  state[1] = (uint32_t)expected_phase;
+}
+
+/**
+ * Persistent NVMe GPU kernel — runs for the lifetime of a fio job.
+ *
+ * The kernel spins on work_ring[head % depth].seq waiting for the CPU to
+ * post new work items (odd seq).  For each item it:
+ *   1. Reads lba/lbas/slot/is_write from the work item.
+ *   2. Submits one NVMe SQE, rings the SQ doorbell, polls the CQE.
+ *   3. Writes back updated queue state to *state.
+ *   4. Increments seq to even (signals CPU completion).
+ *   5. Loops; exits when *stop_flag becomes non-zero.
+ *
+ * This eliminates GPU kernel dispatch overhead (~16 µs) from every op.
+ * The cost is paid once at kernel launch; all subsequent ops incur only
+ * NVMe round-trip latency (~14 µs).
+ *
+ * @param config        Endpoint config (SQ/CQ GPU pointers).
+ * @param ioParams      Template I/O params (nsid, lbaSize, queueSize, …).
+ * @param doorbellParams  Doorbell routing.
+ * @param bufParams     Buffer layout (readBuffer/writeBuffer base pointers).
+ * @param state         Persistent queue state (same encoding as
+ *                      gpuKernelStateful: state[0]=sq_tail|cq_head,
+ *                      state[1]=expected_phase).
+ * @param work_ring     CPU→GPU work item array (depth = ring_depth).
+ * @param ring_depth    Number of slots in the work ring.
+ * @param stop_flag     CPU writes non-zero to request clean exit.
+ */
+__global__ void gpuKernelPersistent(
+  XioEndpointConfig config, nvmeIoParams ioParams,
+  nvmeDoorbellParams doorbellParams, nvmeBufferParams bufParams,
+  volatile uint32_t* state, volatile nvmeWorkItem* work_ring,
+  uint32_t ring_depth, volatile uint32_t* stop_flag) {
+  config.endpointConfig = nullptr;
+
+  uint32_t w0 = state[0];
+  uint16_t sq_tail = (uint16_t)(w0 & 0xFFFFu);
+  uint16_t cq_head = (uint16_t)(w0 >> 16);
+  uint8_t expected_phase = (uint8_t)(state[1] & 0x1u);
+
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+
+  const uint32_t blocks = ioParams.lbasPerIo;
+  const size_t xfer_size = (size_t)blocks * ioParams.lbaSize;
+
+  uint32_t index = 0; /* monotonic counter across all ops */
+
+  while (true) {
+    /* ── Check stop flag ─────────────────────────────── */
+    if (*stop_flag)
+      break;
+
+    /* ── Wait for next work item ──────────────────────── */
+    volatile nvmeWorkItem* item = &work_ring[index % ring_depth];
+    uint32_t expected_seq = index * 2 + 1;
+    unsigned spin = 0;
+    while (item->seq != expected_seq) {
+      if (*stop_flag)
+        goto done;
+      /* Brief backoff to avoid saturating PCIe with reads */
+      if (++spin > NVME_EP_MAX_POLLS_BEFORE_BACKOFF) {
+        __builtin_amdgcn_s_sleep(1);
+        spin = 0;
+      }
+    }
+
+    /* ── Read work item ───────────────────────────────── */
+    uint64_t lba = item->lba;
+    uint32_t lbas_op = item->lbas ? item->lbas : blocks;
+    uint32_t slot = item->slot;
+    bool is_write = (item->is_write != 0);
+    size_t buf_off = (size_t)slot * xfer_size;
+    uint8_t opcode = is_write ? nvme_cmd_write : nvme_cmd_read;
+
+    /* ── Build SQE ────────────────────────────────────── */
+    sqeType sqeLocal = {};
+    sqeLocal.opcode = opcode;
+    sqeLocal.command_id = (uint16_t)((sq_tail % 65535) + 1);
+    sqeLocal.nsid = ioParams.nsid;
+
+    /* DMA address for this slot */
+    bool has_buf = is_write
+                     ? (bufParams.writeBuffer && bufParams.bufferSize > 0)
+                     : (bufParams.readBuffer && bufParams.bufferSize > 0);
+
+    if (has_buf) {
+      uint64_t base_addr;
+      uint64_t* phys_addrs;
+      if (is_write) {
+        base_addr = bufParams.writePagePhysAddrs
+                      ? bufParams.writePagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+                    : bufParams.writeBufferDma
+                      ? (bufParams.writeBufferDma + buf_off)
+                      : (uint64_t)(bufParams.writeBuffer + buf_off);
+        phys_addrs = bufParams.writePagePhysAddrs;
+      } else {
+        base_addr = bufParams.readPagePhysAddrs
+                      ? bufParams.readPagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+                    : bufParams.readBufferDma
+                      ? (bufParams.readBufferDma + buf_off)
+                      : (uint64_t)(bufParams.readBuffer + buf_off);
+        phys_addrs = bufParams.readPagePhysAddrs;
+      }
+
+      uint64_t* prpSlot = nullptr;
+      uint64_t prpDma = 0;
+      if (bufParams.prpListPool && bufParams.prpEntriesPerCmd > 0) {
+        prpSlot = bufParams.prpListPool +
+                  (size_t)slot * bufParams.prpEntriesPerCmd;
+        prpDma = bufParams.prpListPoolDma + (uint64_t)slot * NVME_PAGE_SIZE;
+      }
+      uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+      calculatePrps(base_addr, (size_t)lbas_op * ioParams.lbaSize, &sqeLocal,
+                    prpSlot, prpDma, phys_addrs, pageOff);
+    }
+
+    sqeSetup(&sqeLocal, lba, lbas_op);
+    nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+    sq_tail = (sq_tail + 1) % ioParams.queueSize;
+
+    /* ── SQ doorbell ──────────────────────────────────── */
+    nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+
+    /* ── Poll CQE ─────────────────────────────────────── */
+    /* Checks stop_flag periodically so teardown never deadlocks,
+     * and gracefully survives the one-time NVMe controller timeout
+     * that follows a queue recreation after an unclean teardown.   */
+    volatile cqeType* cqe_entry = &cqeAddr[cq_head];
+    unsigned poll_count = 0;
+    bool cq_ok = false;
+    while (true) {
+      if (poll_count % 4096 == 0 && *stop_flag)
+        goto done;
+      cqeType cqe = nvme_ep::cqeRead(cqe_entry);
+      if (NVME_CQE_STATUS_PHASE(cqe.status) == expected_phase) {
+        cq_ok = true;
+        break;
+      }
+      /* No hard timeout limit — poll indefinitely with backoff.
+       * stop_flag check (every 4096 polls) is the only exit path
+       * other than CQE arrival.  This survives the one-time NVMe
+       * controller reset (~4 s) that follows the first command on a
+       * freshly-created queue after an unclean prior teardown. */
+      poll_count++;
+      if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0)
+        __builtin_amdgcn_s_sleep(1);
+    }
+    if (!cq_ok) {
+      index++;
+      goto next_item;
+    }
+    cq_head = (cq_head + 1) % ioParams.queueSize;
+    if (cq_head == 0)
+      expected_phase ^= 1;
+
+    /* ── CQ doorbell ──────────────────────────────────── */
+    nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                          doorbellParams.doorbellOffset +
+                            nvme_ep::doorBellStride);
+
+    /* ── Signal completion to CPU ─────────────────────── */
+    item->seq = expected_seq + 1; /* even: done */
+
+    /* ── Write back queue state ───────────────────────── */
+    state[0] = ((uint32_t)cq_head << 16) | (uint32_t)sq_tail;
+    state[1] = (uint32_t)expected_phase;
+
+    index++;
+    continue;
+
+  next_item:; /* jumped here after timeout or stop — state already written */
+  }
+
+done:
+  /* Final state write-back before exit */
+  state[0] = ((uint32_t)cq_head << 16) | (uint32_t)sq_tail;
+  state[1] = (uint32_t)expected_phase;
+}
+
 } // namespace xio::nvme_ep
 
 #ifndef __HIP_DEVICE_COMPILE__

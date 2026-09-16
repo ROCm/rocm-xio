@@ -13,6 +13,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include "xio-export.h"
 #include "xio.h"
 /*
  * NVMe Definitions for rocm-xio nvme-ep Endpoint
@@ -238,8 +239,8 @@ __device__ void driveEndpoint(const XioEndpointConfig& config,
  * @param lba_size Output parameter for LBA size in bytes
  * @return 0 on success, negative error code on failure
  */
-__host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
-                          unsigned* lba_size);
+XIO_API __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
+                                  unsigned* lba_size);
 
 /**
  * Query namespace capacity in LBAs from NVMe controller
@@ -254,8 +255,9 @@ __host__ int queryLbaSize(const char* nvme_device, uint32_t nsid,
  * @return 0 on success, negative error code on failure
  */
 
-__host__ int queryNamespaceCapacity(const char* nvme_device, uint32_t nsid,
-                                    uint64_t* capacity_lbas);
+XIO_API __host__ int queryNamespaceCapacity(const char* nvme_device,
+                                            uint32_t nsid,
+                                            uint64_t* capacity_lbas);
 
 /**
  * Check if NVMe device is the root filesystem
@@ -298,7 +300,8 @@ __host__ int readSmartLog(const char* nvme_device,
  * @note Returns the last I/O queue ID (max_queue_id). Queue 0 is admin,
  *       queues 1-N are I/O queues, so if queue_count=33, max_queue_id=32.
  */
-__host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id);
+XIO_API __host__ int queryMaxQueueId(const char* nvme_device,
+                                     uint16_t* max_queue_id);
 
 /**
  * Create NVMe IO queue pair via IOCTL interface using kernel module
@@ -321,10 +324,11 @@ __host__ int queryMaxQueueId(const char* nvme_device, uint16_t* max_queue_id);
  * @param info Output structure to hold queue information
  * @return 0 on success, negative error code on failure
  */
-__host__ int createQueue(const char* nvme_device,
-                         const char* kernel_module_device, uint16_t queue_id,
-                         uint16_t queue_size, uint32_t nvme_bdf,
-                         unsigned memory_mode, struct nvme_queue_info* info);
+XIO_API __host__ int createQueue(const char* nvme_device,
+                                 const char* kernel_module_device,
+                                 uint16_t queue_id, uint16_t queue_size,
+                                 uint32_t nvme_bdf, unsigned memory_mode,
+                                 struct nvme_queue_info* info);
 
 /**
  * Delete NVMe queues (SQ and CQ) for a given queue ID
@@ -347,7 +351,7 @@ __host__ int createQueue(const char* nvme_device,
  *       as the queues may not exist. Only fatal errors (e.g., invalid file
  *       descriptor) will cause a non-zero return value.
  */
-__host__ int deleteQueue(int nvme_fd, uint16_t queue_id);
+XIO_API __host__ int deleteQueue(int nvme_fd, uint16_t queue_id);
 
 /**
  * Cleanup NVMe queues from signal handler
@@ -771,9 +775,52 @@ __host__ __device__ void ringDoorbell(uint16_t value,
  * @param doorbellParams Doorbell configuration parameters struct
  * @param bufferParams Data buffer parameters struct
  */
-__global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
-                          nvmeDoorbellParams doorbellParams,
-                          nvmeBufferParams bufferParams);
+XIO_API __global__ void gpuKernel(XioEndpointConfig config,
+                                  nvmeIoParams ioParams,
+                                  nvmeDoorbellParams doorbellParams,
+                                  nvmeBufferParams bufferParams);
+
+/**
+ * Stateful single-op GPU kernel — preserves NVMe queue state across calls.
+ *
+ * Submit one NVMe command (readIo=1 or writeIo=1 in ioParams), using and
+ * updating persistent queue state held in GPU-accessible pinned host memory.
+ *
+ * @param state  Two consecutive uint32_t values in GPU-accessible memory:
+ *               state[0] = sq_tail (bits 15:0) | cq_head (bits 31:16)
+ *               state[1] = expected_phase (0 or 1)
+ *               Initialise to zero before the first call on a fresh queue.
+ *               Pass the same pointer unchanged to every subsequent call.
+ *
+ * This allows the fio engine to batch N ops by launching N kernels on the
+ * same HIP stream against the same queue without resetting queue state.
+ */
+/** Work item for gpuKernelPersistent's CPU→GPU ring. */
+struct nvmeWorkItem {
+  volatile uint64_t lba;
+  volatile uint32_t lbas;
+  volatile uint32_t slot;
+  volatile uint32_t is_write;
+  volatile uint32_t _pad;
+  volatile uint32_t seq; /* odd=pending, even=done */
+};
+
+/**
+ * Persistent kernel: runs for the lifetime of a fio job, processing work
+ * items from a CPU-written ring without per-op kernel re-launch overhead.
+ * See nvme-ep.hip for full documentation.
+ */
+XIO_API __global__ void gpuKernelPersistent(
+  XioEndpointConfig config, nvmeIoParams ioParams,
+  nvmeDoorbellParams doorbellParams, nvmeBufferParams bufParams,
+  volatile uint32_t* state, volatile nvmeWorkItem* work_ring,
+  uint32_t ring_depth, volatile uint32_t* stop_flag);
+
+XIO_API __global__ void gpuKernelStateful(XioEndpointConfig config,
+                                          nvmeIoParams ioParams,
+                                          nvmeDoorbellParams doorbellParams,
+                                          nvmeBufferParams bufferParams,
+                                          volatile uint32_t* state);
 
 /**
  * NVMe Endpoint Configuration Structure
