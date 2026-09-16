@@ -8,14 +8,14 @@
 # pci-mmio-bridge.
 #
 # Derived from qemu-minimal's ansible/playbooks/vm-rocjitsu.yml, with two
-# deliberate differences:
+# additions:
 #
-#   * No firmware synthesis. That playbook still calls vfio_guest_firmware.py,
-#     which the gfx1250-vfio-compute stack removed -- the emulator now wants
-#     real firmware from the driver release matching the guest's amdgpu.ko.
-#     We install the firmware packages and then *assert* the inventory, so a
-#     missing blob fails here with a list of what is missing rather than
-#     hanging the guest in gfx_v12_1_hw_init.
+#   * The firmware inventory is *asserted* after it is generated, so a missing
+#     blob fails here with a list of what is missing rather than hanging the
+#     guest in gfx_v12_1_hw_init. The synthesis itself is the same
+#     vfio_guest_firmware.py call qemu-minimal makes, because there is no
+#     packaged alternative: no amdgpu release up to 31.50 ships gc_12_1_0 or
+#     sdma_7_1_0, and neither does upstream linux-firmware.
 #   * rocm-xio build dependencies are installed, since the point of the VM is
 #     to build and test rocm-xio inside it.
 #
@@ -28,6 +28,12 @@
   vars:
     username: "{{ vm_username | default('batesste') }}"
     rocjitsu_image: "{{ lookup('env', 'ROCJITSU_IMAGE') }}"
+    rocjitsu_firmware_image: >-
+      {{ lookup('env', 'ROCJITSU_FIRMWARE_IMAGE')
+         | default(rocjitsu_image, true) }}
+    # Set false to provision the guest without demanding gfx1250 firmware,
+    # which lets the NVMe half of the test run on its own.
+    assert_gpu_firmware: true
     user_setup_motd: false
     user_setup_install_amd_ca: false
     user_setup_dotfiles_enable: false
@@ -93,23 +99,44 @@
         mode: '0644'
 
     # ---------------------------------------------------------------------
-    # IP discovery table
+    # Guest firmware: IP discovery table and gfx1250 stubs
     # ---------------------------------------------------------------------
-    # The emulated device cannot produce this for itself. Without it amdgpu
-    # polls BAR registers for a completion bit rocjitsu never sets and spins
-    # at 99% CPU in gfx_v12_1_hw_init.
-    - name: Create controller-side temp dir for ip_discovery.bin
+    # The emulated device cannot produce the IP discovery table for itself.
+    # Without it amdgpu polls BAR registers for a completion bit rocjitsu
+    # never sets and spins at 99% CPU in gfx_v12_1_hw_init.
+    #
+    # The gfx1250 firmware blobs cannot come from a package: no amdgpu
+    # release up to 31.50 ships gc_12_1_0 or sdma_7_1_0, and neither does
+    # upstream linux-firmware. amdgpu-dkms-firmware, which amdgpu-dkms pulls
+    # in, stops at gc_12_0_1. So the stubs rocjitsu generates are the only
+    # source, which is what qemu-minimal's vm-rocjitsu.yml does too.
+    #
+    # Both generators live in the rocjitsu image, but not in every tag:
+    # vfio_guest_firmware.py was dropped after rocjitsu.730bc62, so
+    # rocjitsu_firmware_image is pinned separately from the image that
+    # serves the device.
+    - name: Create controller-side temp dir for generated firmware
       ansible.builtin.tempfile:
         state: directory
-        prefix: rj_ipd_
-      register: rj_ipd_tmp
+        prefix: rj_fw_
+      register: rj_fw_tmp
       delegate_to: localhost
       become: false
+
+    - name: Generate gfx1250 firmware stubs via the rocjitsu image
+      ansible.builtin.command:
+        cmd: >-
+          docker run --rm -v {{ rj_fw_tmp.path }}:/out
+          {{ rocjitsu_firmware_image }}
+          python3 /usr/local/bin/vfio_guest_firmware.py --output /out
+      delegate_to: localhost
+      become: false
+      changed_when: true
 
     - name: Generate ip_discovery.bin via the pinned rocjitsu image
       ansible.builtin.command:
         cmd: >-
-          docker run --rm -v {{ rj_ipd_tmp.path }}:/out
+          docker run --rm -v {{ rj_fw_tmp.path }}:/out
           {{ rocjitsu_image }}
           rj-ip-discovery gfx1250 /out/ip_discovery.bin
       delegate_to: localhost
@@ -122,18 +149,37 @@
         state: directory
         mode: '0755'
 
-    - name: Install ip_discovery.bin into the guest
+    - name: Install the generated firmware into the guest
       ansible.builtin.copy:
-        src: "{{ rj_ipd_tmp.path }}/ip_discovery.bin"
-        dest: /lib/firmware/amdgpu/ip_discovery.bin
+        src: "{{ rj_fw_tmp.path }}/"
+        dest: /lib/firmware/amdgpu/
         mode: '0644'
 
     - name: Clean up controller-side temp dir
       ansible.builtin.file:
-        path: "{{ rj_ipd_tmp.path }}"
+        path: "{{ rj_fw_tmp.path }}"
         state: absent
       delegate_to: localhost
       become: false
+
+    # The gfx12.1 driver path asks for gc_12_1_0_mes.bin and _mes1.bin, which
+    # the generator does not emit; the uni_mes stub stands in for both. Not
+    # every rocjitsu tag emits uni_mes either, hence the stat guard.
+    - name: Check whether the uni_mes stub was generated
+      ansible.builtin.stat:
+        path: /lib/firmware/amdgpu/gc_12_1_0_uni_mes.bin
+      register: uni_mes_stat
+
+    - name: Stand in for the older MES firmware paths with the uni_mes stub
+      ansible.builtin.copy:
+        src: /lib/firmware/amdgpu/gc_12_1_0_uni_mes.bin
+        dest: /lib/firmware/amdgpu/{{ item }}
+        remote_src: true
+        mode: '0644'
+      loop:
+        - gc_12_1_0_mes.bin
+        - gc_12_1_0_mes1.bin
+      when: uni_mes_stat.stat.exists
 
     # ---------------------------------------------------------------------
     # KFD atomics
@@ -182,9 +228,17 @@
     # ---------------------------------------------------------------------
     # Firmware inventory assertion
     # ---------------------------------------------------------------------
-    # Nothing in the rocjitsu image can stand in for real firmware any more.
     # Ask the built module what it wants and check every blob is present, so
-    # the failure names the missing files instead of hanging the guest.
+    # the failure names the missing files instead of hanging the guest in
+    # gfx_v12_1_hw_init with nothing to go on.
+    #
+    # Two things this check has to get right, both learned the hard way:
+    #   * amdgpu-dkms-firmware installs under /lib/firmware/updates/amdgpu,
+    #     not /lib/firmware/amdgpu, so searching only the latter reports
+    #     blobs missing that are in fact present and loadable.
+    #   * modinfo lists the firmware for every ASIC the module supports, so
+    #     matching on "mes" alone demands MES blobs for a dozen unrelated
+    #     GPUs that are never loaded for this device. Match gfx1250 only.
     - name: Locate the built amdgpu.ko
       ansible.builtin.shell:
         executable: /bin/bash
@@ -206,12 +260,17 @@
           missing=()
           while read -r fw; do
             [ -n "$fw" ] || continue
-            [ -e "/lib/firmware/$fw" ] || [ -e "/lib/firmware/$fw.xz" ] \
-              || missing+=("$fw")
+            found=
+            for d in /lib/firmware/updates /lib/firmware; do
+              [ -e "$d/$fw" ] || [ -e "$d/$fw.xz" ] || continue
+              found=1
+              break
+            done
+            [ -n "$found" ] || missing+=("$fw")
           done < <(modinfo -F firmware "$AMDGPU_KO" \
-                   | grep -E 'gc_12_1_0|sdma_7_1_0|mes')
+                   | grep -E 'gc_12_1_0|sdma_7_1_0')
           if [ ${#missing[@]} -gt 0 ]; then
-            echo "missing gfx1250 firmware blobs under /lib/firmware:"
+            echo "missing gfx1250 firmware blobs under /lib/firmware[/updates]:"
             printf '  %s\n' "${missing[@]}"
             exit 1
           fi
@@ -221,10 +280,12 @@
         AMDGPU_KO: "{{ amdgpu_ko.stdout }}"
       register: fw_check
       changed_when: false
+      when: assert_gpu_firmware | bool
 
     - name: Show the firmware inventory result
       ansible.builtin.debug:
         var: fw_check.stdout_lines
+      when: assert_gpu_firmware | bool
 
     # ---------------------------------------------------------------------
     # rocm-xio build dependencies

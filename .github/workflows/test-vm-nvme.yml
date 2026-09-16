@@ -44,6 +44,10 @@ env:
   # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
   QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260915-qemu.pci-mmio-bridge-submit-vfu.8039244
   ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.909c17f
+  # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
+  # gfx1250 firmware blobs, was dropped from the image after this tag. Used
+  # solely to synthesise firmware, never to serve the device.
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
   QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen:20260915-vm.resolute-basic-qm.5d68689
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
@@ -100,6 +104,7 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
           ROCJITSU_IMAGE: ${{ env.ROCJITSU_IMAGE }}
+          ROCJITSU_FIRMWARE_IMAGE: ${{ env.ROCJITSU_FIRMWARE_IMAGE }}
           ANSIBLE_HOST_KEY_CHECKING: "False"
         run: ./scripts/test/vm-provision.sh
 

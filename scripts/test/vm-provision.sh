@@ -20,16 +20,23 @@
 #     (.github/actions/rocjitsu-nvme-vm does this)
 #   - ansible-playbook and ansible-galaxy in PATH
 #   - docker on the local host: the playbook shells out to the
-#     rocjitsu image to generate ip_discovery.bin
+#     rocjitsu image to generate ip_discovery.bin and the gfx1250
+#     firmware stubs
 #
 # Environment variables:
 #   SSH_PORT          Guest SSH port (default: 2222)
 #   SSH_USER          Guest username (default: batesste)
 #   SSH_KEY           Private key authenticating as SSH_USER
+#   ROCJITSU_FIRMWARE_IMAGE
+#                     Pinned rocjitsu image used only to synthesise the
+#                     gfx1250 firmware stubs (default: ROCJITSU_IMAGE)
 #   ROCJITSU_IMAGE    Pinned rocjitsu image (required; used for
-#                     rj-ip-discovery)
+#                     rj-ip-discovery and to serve the device)
 #   ANSIBLE_PLAYBOOK  Path to ansible-playbook
 #   ANSIBLE_GALAXY    Path to ansible-galaxy
+#
+# Any extra arguments are passed through to ansible-playbook, so a
+# caller can add -e/--tags without this script knowing about them.
 
 set -euo pipefail
 
@@ -37,6 +44,7 @@ SSH_PORT="${SSH_PORT:-2222}"
 SSH_USER="${SSH_USER:-batesste}"
 SSH_KEY="${SSH_KEY:?SSH_KEY must point at the guest private key}"
 ROCJITSU_IMAGE="${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be a pinned tag}"
+ROCJITSU_FIRMWARE_IMAGE="${ROCJITSU_FIRMWARE_IMAGE:-${ROCJITSU_IMAGE}}"
 
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 ANSIBLE_GALAXY="${ANSIBLE_GALAXY:-ansible-galaxy}"
@@ -75,13 +83,15 @@ echo "Provisioning VM..."
 echo "  SSH port: ${SSH_PORT}"
 echo "  User:     ${SSH_USER}"
 echo "  rocjitsu: ${ROCJITSU_IMAGE}"
+echo "  firmware: ${ROCJITSU_FIRMWARE_IMAGE}"
 echo ""
 
 # Exported rather than passed with -e so the playbook can read it via
 # lookup('env', ...) on the controller, where the docker run happens.
 export ROCJITSU_IMAGE
+export ROCJITSU_FIRMWARE_IMAGE
 
 exec "${ANSIBLE_PLAYBOOK}" \
     -i "${TMPDIR_PROV}/inventory.ini" \
     -e "vm_username=${SSH_USER}" \
-    "${PLAYBOOK}"
+    "${PLAYBOOK}" "$@"
