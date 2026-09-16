@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/build/gh-fetch-lib.sh
+. "${SCRIPT_DIR}/gh-fetch-lib.sh"
+
 # Pinned rather than tracking master. extract-nvme-defines.sh greps for
 # specific anchors (enum nvme_opcode, NVME_IDENTIFY_DATA_SIZE,
 # struct nvme_common_command, ...) and renames some of them on the way into
@@ -15,7 +19,7 @@ set -euo pipefail
 #
 # Override for a one-off check against a newer kernel; do not leave it set.
 KERNEL_REF="${KERNEL_REF:-v6.18}"
-KERNEL_REPO="https://raw.githubusercontent.com/torvalds/linux/${KERNEL_REF}"
+KERNEL_REPO_SLUG="torvalds/linux"
 OUTPUT_DIR="${1:-}"
 
 if [ -z "$OUTPUT_DIR" ]; then
@@ -23,46 +27,24 @@ if [ -z "$OUTPUT_DIR" ]; then
     exit 1
 fi
 
-# Fetch to a temporary file and only publish it once it looks like the header
-# we asked for. Without this a 404 page, a proxy error or a truncated body is
-# written straight to the output path and the failure surfaces much later as
-# empty enums in the generated header.
-fetch_header() {
-    local path="$1" dest="$2" anchor="$3"
-    local tmp="${dest}.tmp"
-
-    echo "  - Downloading ${path}..."
-    if ! curl -sS --fail --location --retry 3 --retry-delay 2 \
-              "${KERNEL_REPO}/${path}" -o "${tmp}"; then
-        rm -f "${tmp}"
-        echo "ERROR: failed to download ${path} from ${KERNEL_REPO}" >&2
-        exit 1
-    fi
-
-    if ! grep -q "${anchor}" "${tmp}"; then
-        rm -f "${tmp}"
-        echo "ERROR: ${path} from ${KERNEL_REF} does not contain '${anchor}'." >&2
-        echo "       Either the download is corrupt or upstream renamed it;" >&2
-        echo "       scripts/build/extract-nvme-defines.sh needs that symbol." >&2
-        exit 1
-    fi
-
-    mv "${tmp}" "${dest}"
-}
-
 mkdir -p "$OUTPUT_DIR"
 
 echo "Fetching NVMe headers from Linux kernel ${KERNEL_REF}..."
 
-# Download the main NVMe header with all structure definitions
-fetch_header "include/linux/nvme.h" \
-             "${OUTPUT_DIR}/linux-nvme.h" \
-             "^struct nvme_common_command {"
+# The anchors below are exactly what extract-nvme-defines.sh keys off. If a
+# download does not carry them there is no point running the extractor: it
+# would emit empty enums and the failure would land in nvme-ep.h instead.
+echo "  - Downloading include/linux/nvme.h..."
+gh_fetch "${KERNEL_REPO_SLUG}" "${KERNEL_REF}" \
+         "include/linux/nvme.h" \
+         "${OUTPUT_DIR}/linux-nvme.h" \
+         "^struct nvme_common_command {"
 
-# Download the UAPI header with ioctl structures
-fetch_header "include/uapi/linux/nvme_ioctl.h" \
-             "${OUTPUT_DIR}/linux-nvme_ioctl.h" \
-             "^struct nvme_passthru_cmd {"
+echo "  - Downloading include/uapi/linux/nvme_ioctl.h..."
+gh_fetch "${KERNEL_REPO_SLUG}" "${KERNEL_REF}" \
+         "include/uapi/linux/nvme_ioctl.h" \
+         "${OUTPUT_DIR}/linux-nvme_ioctl.h" \
+         "^struct nvme_passthru_cmd {"
 
 echo "Successfully downloaded NVMe headers to ${OUTPUT_DIR}/"
 echo ""

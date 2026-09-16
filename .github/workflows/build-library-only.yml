@@ -25,6 +25,13 @@ on:
       - 'cmake/**'
       - 'examples/**'
 
+env:
+  # Build-time header downloads go through the API on this token
+  # rather than raw.githubusercontent.com, which rate-limits the
+  # shared runner egress IP with HTTP 429 when several jobs start
+  # at once. See scripts/build/gh-fetch-lib.sh.
+  GITHUB_TOKEN: ${{ github.token }}
+
 jobs:
   library-no-cli11:
     name: library without libcli11-dev

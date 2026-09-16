@@ -192,17 +192,23 @@
       register: amdgpu_ko
       changed_when: false
 
+    # The whole body is {% raw %} because bash's array-length syntax
+    # ${#missing[@]} opens with "{#", which Jinja reads as a comment tag and
+    # then fails to find the end of -- the task dies during argument
+    # finalization, before anything runs. The module path arrives through the
+    # environment rather than being templated in, so nothing here needs Jinja.
     - name: Assert every firmware blob amdgpu requests is present
       ansible.builtin.shell:
         executable: /bin/bash
         cmd: |
+          {% raw %}
           set -uo pipefail
           missing=()
           while read -r fw; do
             [ -n "$fw" ] || continue
             [ -e "/lib/firmware/$fw" ] || [ -e "/lib/firmware/$fw.xz" ] \
               || missing+=("$fw")
-          done < <(modinfo -F firmware "{{ amdgpu_ko.stdout }}" \
+          done < <(modinfo -F firmware "$AMDGPU_KO" \
                    | grep -E 'gc_12_1_0|sdma_7_1_0|mes')
           if [ ${#missing[@]} -gt 0 ]; then
             echo "missing gfx1250 firmware blobs under /lib/firmware:"
@@ -210,6 +216,9 @@
             exit 1
           fi
           echo "all requested gfx1250 firmware blobs present"
+          {% endraw %}
+      environment:
+        AMDGPU_KO: "{{ amdgpu_ko.stdout }}"
       register: fw_check
       changed_when: false
 
