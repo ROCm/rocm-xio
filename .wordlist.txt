@@ -1243,3 +1243,23 @@ pipelining
 randwrite
 rpath
 vtable
+# ===== Emulated-GPU VM testing (AGENTS.md) =====
+OOM
+Slurm
+backtrace
+cpus
+ctest's
+ctests
+cx
+dbcs
+hipDeviceSynchronize
+ioeventfd
+retag
+rocjitsu
+smc
+sqid
+strg
+syncHipKernel
+therock
+vcpus
+workdir
