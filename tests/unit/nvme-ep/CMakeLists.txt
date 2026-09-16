@@ -22,6 +22,16 @@ xio_add_test(
     ${CMAKE_SOURCE_DIR}/src/common
 )
 
+xio_add_test(
+  NAME test-nvme-kv-helpers
+  SOURCE test-nvme-kv-helpers.hip
+  LABELS unit nvme kv
+  TIMEOUT 30
+  INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/src/endpoints/nvme-ep
+    ${CMAKE_SOURCE_DIR}/src/include
+)
+
 # Hardware integration tests (require real NVMe device)
 xio_add_test(
   NAME test-nvme-hardware
