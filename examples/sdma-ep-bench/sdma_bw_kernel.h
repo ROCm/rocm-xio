@@ -17,7 +17,7 @@ __global__ void multiQueueSDMATransferQueueMapWG(
   size_t numCopyCommands, int numOfDestinations, int numOfQueues,
   int numOfWGPerQueue, xio::sdma_ep::SdmaQueueHandle** deviceHandle,
   uint64_t* signals, uint64_t expectedSignal, int64_t* start_clock_count,
-  int64_t* end_clock_count);
+  int64_t* end_clock_count, bool useQueueState);
 
 __global__ void triggerMultiQueueSDMATransfer(uint32_t* trigger,
                                               size_t totalNumWarps,

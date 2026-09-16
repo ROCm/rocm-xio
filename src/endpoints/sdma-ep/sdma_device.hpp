@@ -98,6 +98,20 @@ CreateAtomicIncPacket(uint64_t* addr) {
   return pkt.value;
 }
 
+/** Build an SDMA timestamp packet that writes the engine counter to addr. */
+__device__ __forceinline__ SDMA_PKT_TIMESTAMP
+CreateTimestampPacket(uint64_t* addr) {
+  anvil::packets::TimestampPacket pkt(addr);
+  return pkt.value;
+}
+
+/** Build an immediately satisfiable SDMA POLL_REGMEM packet. */
+__device__ __forceinline__ SDMA_PKT_POLL_REGMEM
+CreatePollPacket(uint32_t* addr, uint32_t expected = 1) {
+  anvil::packets::PollRegmemPacket<uint32_t> pkt(addr, expected);
+  return pkt.value;
+}
+
 /**
  * @brief Build an SDMA fence packet.
  *

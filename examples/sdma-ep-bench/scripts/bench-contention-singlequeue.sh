@@ -10,12 +10,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=benchmark-common.sh
 source "${script_dir}/benchmark-common.sh"
 
-MIN_COPY_SIZE="${MIN_COPY_SIZE:-$((1 << 10))}"
+MIN_COPY_SIZE="${MIN_COPY_SIZE:-$((1 << 14))}"
 MAX_COPY_SIZE="${MAX_COPY_SIZE:-$((1 << 20))}"
 NUM_COPY_COMMANDS="${NUM_COPY_COMMANDS:-100}"
 NUM_DESTINATIONS="${NUM_DESTINATIONS:-1}"
 WARPS_PER_WORKGROUP="${WARPS_PER_WORKGROUP:-1}"
-WORKGROUP_COUNTS="${WORKGROUP_COUNTS:-1 2 4 8 16 32 64 128 256 304}"
+WORKGROUP_COUNTS="${WORKGROUP_COUNTS:-16 32 64 128 256 304}"
 
 read -r -a workgroup_counts <<<"${WORKGROUP_COUNTS}"
 

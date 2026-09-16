@@ -100,8 +100,8 @@ The example fills a 4 KiB source buffer on GPU 0 with
 ``0xAB``, transfers it to GPU 1 via SDMA, and verifies the
 destination buffer contents.
 
-``sdma-ep-bw``
-^^^^^^^^^^^^^^
+``sdma-ep-bench``
+^^^^^^^^^^^^^^^^^
 
 Multi-GPU shader-initiated SDMA bandwidth benchmark derived
 from the ``shader_sdma`` bandwidth prototype. One source GPU
@@ -119,7 +119,7 @@ GPU wall-clock and CPU-observed latency and aggregate bandwidth.
 
 .. code-block:: bash
 
-   sudo /tmp/sdma-ep-bw-build/sdma-ep-bw \
+   sudo /tmp/sdma-ep-bench-build/sdma-ep-bw \
      --srcGpu 0 \
      --numDestinations 1 \
      --minCopySize 1024 \
@@ -132,6 +132,9 @@ wavefronts share SDMA queues. Verification is enabled by default;
 use ``--skip-verification`` only when measuring a known-good setup.
 Aggregate results are written to
 ``MultiQueueGPU2GPU_Performance.csv`` by default.
+Bandwidth runs use the cached device-local ``SdmaQueueState`` path by default
+for queue read-pointer checks. Pass ``--no-queue-state`` to measure the
+uncached queue-management path.
 
 Device-triggered mode
 ~~~~~~~~~~~~~~~~~~~~~
@@ -141,7 +144,7 @@ the CPU and release each batch from a GPU kernel:
 
 .. code-block:: bash
 
-   sudo /tmp/sdma-ep-bw-build/sdma-ep-bw \
+    sudo /tmp/sdma-ep-bench-build/sdma-ep-bw \
      --srcGpu 0 --numDestinations 1 \
      --minCopySize 4096 --maxCopySize 4096 \
      --iterations 50 --device-triggered
@@ -166,6 +169,55 @@ plotting instructions.
 
 Multi-wavefront workgroups may require the GPU power-management
 and lockup-timeout settings described in :doc:`../how-to/testing`.
+
+Packet-rate benchmark (``sdma-ep-rate``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The packet-rate benchmark measures how quickly GPU code can construct and
+submit SDMA packets. Each warp owns one SDMA queue, places a configurable
+number of linear-copy packets followed by a completion signal, and rings the
+queue doorbell once for the batch. The result reports packet rate in MPPS in
+addition to latency and bandwidth.
+
+.. code-block:: bash
+
+   sudo /tmp/sdma-ep-bench-build/sdma-ep-rate \
+     --srcGpu 0 --dstGpu 1 --numOfQueues 1 \
+     --minCopySize 64 --maxCopySize 64 \
+     --numCopyCommands 10000 --iterations 10
+
+The ``scripts/bench-packet-rate.sh`` driver sweeps one through eight queues
+and writes one CSV per queue count. Unlike ``--device-triggered`` bandwidth
+runs, this benchmark intentionally submits packets from device code because
+packet construction and doorbell submission are the quantities being measured.
+Pass ``--device-triggered`` to instead preprogram one immediately satisfied
+``POLL_REGMEM`` packet before every copy packet. The GPU releases the batch by
+setting the poll flag, allowing the added SDMA poll parsing/execution overhead
+to be measured. The CSV reports both copy-packet rate and total SDMA packet
+rate.
+Use ``--poll-only`` to measure immediately satisfied ``POLL_REGMEM`` packets
+without copies, or ``--atomic-only --atomic-memory local|remote`` to measure
+SDMA atomic-add processing against local or peer GPU memory. These modes are
+mutually exclusive with the copy and triggered modes.
+The ``--copy-atomic --atomic-memory local|remote`` mode performs the copy batch
+followed by one local or remote completion atomic; it does not alternate an
+atomic after every copy packet.
+Use ``--device-triggered-copy-only`` for a control variant that has one
+immediately satisfied poll at the beginning of the batch, followed by copy
+packets without per-copy polls. This helps separate host-backed queue overhead
+from the cost of repeated poll packets.
+Combining ``--device-initiated-poll`` with ``--copy-atomic`` measures the
+alternating ``POLL_REGMEM + COPY + ATOMIC`` sequence. Use
+``--atomic-memory local|remote`` to select the atomic target.
+The optional ``--sdma-timestamps`` flag brackets host-triggered batches with
+SDMA timestamp packets. The begin timestamp is placed after the initial poll
+and the end timestamp immediately before the completion atomic, so the result
+measures the SDMA batch itself rather than GPU trigger and completion polling.
+
+The ``sdma-ep-latency`` executable measures GPU-side queue reservation, packet
+construction, submission, and SDMA completion latency for a single queue. Use
+``--fine-grained`` for the queue-management breakdown and
+``scripts/bench-latency.sh`` for a copy-size sweep.
 
 ``sdma-ep-allgather``
 ^^^^^^^^^^^^^^^^^^^^^

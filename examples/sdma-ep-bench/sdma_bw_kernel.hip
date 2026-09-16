@@ -10,7 +10,7 @@ __global__ void multiQueueSDMATransferQueueMapWG(
   size_t numCopyCommands, int numOfDestinations, int numOfQueues,
   int numOfWGPerQueue, xio::sdma_ep::SdmaQueueHandle** deviceHandle,
   uint64_t* signals, uint64_t expectedSignal, int64_t* start_clock_count,
-  int64_t* end_clock_count) {
+  int64_t* end_clock_count, bool useQueueState) {
   const int warpId = threadIdx.x / warpSize;
   const int laneId = threadIdx.x % warpSize;
   const int nWarps = blockDim.x / warpSize;
@@ -26,6 +26,9 @@ __global__ void multiQueueSDMATransferQueueMapWG(
   const size_t offset = ((blockIdWithInDst * nWarps) + warpId) * total_size;
 
   xio::sdma_ep::SdmaQueueHandle handle = *deviceHandle[queueIdx];
+  xio::sdma_ep::SdmaQueueState state;
+  if (useQueueState)
+    state.init(handle);
 
   char* srcPtr = reinterpret_cast<char*>(srcBuf) + offset;
   char* dstPtr = reinterpret_cast<char*>(dstBufs[dstIdx]) + offset;
@@ -33,26 +36,26 @@ __global__ void multiQueueSDMATransferQueueMapWG(
   const int signalIdx = blockIdx.x * nWarps + warpId;
   uint64_t* signal = signals + signalIdx;
 
-  if (laneId == 0) {
-    start_clock_count[signalIdx] = wall_clock64();
+  if (laneId != 0) {
+    return;
   }
 
-  for (size_t c = 0; c < numCopyCommands; ++c) {
-    if (laneId == 0) {
-      xio::sdma_ep::put(handle, dstPtr, srcPtr, copy_size);
-    }
+  start_clock_count[signalIdx] = wall_clock64();
+
+  for (size_t c = 0; c < (numCopyCommands - 1); ++c) {
+    xio::sdma_ep::put(handle, dstPtr, srcPtr, copy_size,
+                      useQueueState ? &state : nullptr);
     srcPtr += copy_size;
     dstPtr += copy_size;
   }
 
-  if (laneId == 0) {
-    xio::sdma_ep::signal(handle, signal);
-  }
+  // Combine last put with signal
+  xio::sdma_ep::putSignal(handle, dstPtr, srcPtr, copy_size, signal,
+                          useQueueState ? &state : nullptr);
 
-  if (laneId == 0) {
-    xio::sdma_ep::waitSignal(signal, expectedSignal);
-    end_clock_count[signalIdx] = wall_clock64();
-  }
+  // Wait for completion
+  xio::sdma_ep::waitSignal(signal, expectedSignal);
+  end_clock_count[signalIdx] = wall_clock64();
 
   return;
 }

@@ -43,6 +43,17 @@ xio_add_install_test(
     ${CMAKE_SOURCE_DIR}/examples/sdma-ep-p2p
 )
 
+# Compile-only: SDMA bandwidth and packet-rate benchmarks
+# (needs CLI11 and P2P GPUs to run).
+find_package(CLI11 QUIET)
+if(CLI11_FOUND)
+  xio_add_install_test(
+    NAME sdma-ep-bench
+    SOURCE_DIR
+      ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench
+  )
+endif()
+
 # Compile-only: NVMe controller info (needs NVMe device
 # and root access to run).
 xio_add_install_test(

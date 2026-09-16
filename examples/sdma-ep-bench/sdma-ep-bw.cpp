@@ -45,6 +45,7 @@ struct ExperimentParams {
   std::string resultFileName;
   bool verbose;
   bool deviceTriggered;
+  bool useQueueState;
 };
 
 #define CHECK_HIP_ERROR(cmd)                                                   \
@@ -373,7 +374,8 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
                            params.numCopyCommands, params.numDestinations,
                            params.numOfQueues, params.numOfWGPerQueue,
                            deviceHandles_d, signalPtrs, expectedSignal,
-                           start_clock_count_d, end_clock_count_d);
+                           start_clock_count_d, end_clock_count_d,
+                           params.useQueueState);
       }
       CHECK_HIP_ERROR(hipDeviceSynchronize());
       expectedSignal++;
@@ -401,7 +403,8 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
                            params.numCopyCommands, params.numDestinations,
                            params.numOfQueues, params.numOfWGPerQueue,
                            deviceHandles_d, signalPtrs, expectedSignal,
-                           start_clock_count_d, end_clock_count_d);
+                           start_clock_count_d, end_clock_count_d,
+                           params.useQueueState);
       }
       expectedSignal++;
     }
@@ -437,7 +440,8 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
                               params.numCopyCommands, params.numDestinations,
                               params.numOfQueues, params.numOfWGPerQueue,
                               deviceHandles_d, signalPtrs, expectedSignal,
-                              startTimestampPtr, endTimestampPtr);
+                              startTimestampPtr, endTimestampPtr,
+                              params.useQueueState);
       }
       startTimestampPtr += totalNumWarps;
       endTimestampPtr += totalNumWarps;
@@ -580,6 +584,9 @@ int main(int argc, char** argv) {
 
   bool verbose{false};
   app.add_flag("-v, --verbose", verbose, "verbose output");
+  bool noQueueState{false};
+  app.add_flag("--no-queue-state", noQueueState,
+               "Disable cached queue read-pointer state");
 
   bool deviceTriggered{false};
   app.add_flag("--device-triggered", deviceTriggered,
@@ -605,6 +612,7 @@ int main(int argc, char** argv) {
     .resultFileName = resultFileName,
     .verbose = verbose,
     .deviceTriggered = deviceTriggered,
+    .useQueueState = !noQueueState,
   };
 
   runExperiment(srcGpuId, params);

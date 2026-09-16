@@ -81,3 +81,33 @@ xio_add_bash_syntax_test(
 xio_add_bash_syntax_test(
   test-script-dkms-common
   ${CMAKE_SOURCE_DIR}/kernel/dkms-common.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-bw-common
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/benchmark-common.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-bw-single
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-bandwidth-single.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-bw-multiproducer
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-bandwidth-multiproducer.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-bw-contention-singlequeue
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-contention-singlequeue.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-bw-contention-multiqueue
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-contention-multiqueue.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-rate
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-rate-compare
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-compare.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-latency
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-latency.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-rate-all-modes
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-all-modes.sh)
+xio_add_bash_syntax_test(
+  test-script-sdma-rate-isolated
+  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-isolated.sh)
