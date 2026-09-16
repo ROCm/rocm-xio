@@ -98,7 +98,8 @@ int test_kvSqeSetup_short_key() {
 int test_kvSqeSetup_max_key() {
   /* 16-byte key: bytes 0-7 in CDW2/3, bytes 8-15 in CDW14/15. */
   uint8_t raw[16];
-  for (int i = 0; i < 16; i++) raw[i] = (uint8_t)(i + 1);
+  for (int i = 0; i < 16; i++)
+    raw[i] = (uint8_t)(i + 1);
   uint32_t key[4] = {};
   memcpy(key, raw, 16);
 
@@ -119,7 +120,8 @@ int test_kvSqeSetup_max_key() {
 }
 
 int test_kvSqeSetup_retrieve_value_len() {
-  /* For Retrieve, CDW10 is the HOST BUFFER SIZE (cap), not the stored length. */
+  /* For Retrieve, CDW10 is the HOST BUFFER SIZE (cap), not the stored length.
+   */
   uint32_t key[4] = {0x11223344u, 0, 0, 0};
   struct nvme_sqe sqe = {};
   sqe.opcode = (uint8_t)nvme_kv_cmd_retrieve;
