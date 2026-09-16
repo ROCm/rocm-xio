@@ -60,11 +60,21 @@ if [ "${SKIP_GPU}" != "1" ]; then
         exit 1
     fi
 
-    banner "rocminfo"
-    rocminfo | grep -E 'Name:|gfx' || {
-        echo "ERROR: rocminfo did not report an agent" >&2
-        exit 1
-    }
+    # rocminfo is not in the guest image: it is outside the minimal ROCm set
+    # the image installs and the therock runtime package does not carry it.
+    # The KFD topology above is the authoritative check anyway -- rocminfo
+    # reads the same sysfs nodes -- so report from sysfs and use rocminfo only
+    # to add detail when a consumer happens to have it.
+    banner "KFD agent"
+    for node in /sys/class/kfd/kfd/topology/nodes/[1-9]*; do
+        [ -r "${node}/properties" ] || continue
+        echo "${node}:"
+        grep -E '^(gfx_target_version|simd_count|vendor_id|device_id) ' \
+            "${node}/properties" || true
+    done
+    if command -v rocminfo > /dev/null; then
+        rocminfo | grep -E 'Name:|gfx' || true
+    fi
 fi
 
 # --------------------------------------------------------------
@@ -91,10 +101,90 @@ sudo nvme id-ctrl "${NVME_CTRL}" | head -20
 # Build rocm-xio
 # --------------------------------------------------------------
 banner "Configuring rocm-xio"
+# The guest installs ROCm from the therock stream, whose layout is
+# /opt/rocm/<component>-<version> rather than a single versioned root with a
+# /opt/rocm symlink over it. A hardcoded /opt/rocm therefore fails
+# CMakeDetermineHIPCompiler with "Failed to find ROCm root directory" before
+# any of our CMakeLists runs -- and that message reads like a path problem even
+# when the real cause is a toolchain the minimal package set never installed.
+#
+# So locate the root by the thing CMake actually needs, the hip-lang package,
+# and fall back to hipcc. Searching beats globbing here because the component
+# directory name is not ours to predict.
+# Collect the roots that exist before searching them. An unmatched /opt/rocm-*
+# glob stays literal, and find then fails on it -- which under "set -e" with
+# pipefail kills the script inside the command substitution, with no output at
+# all. Every search below is also "|| true": a search finding nothing is an
+# answer, not an error, and must reach the diagnostic at the bottom.
+roots=()
+for d in /opt/rocm /opt/rocm-*; do
+    [ -d "${d}" ] && roots+=("${d}")
+done
+if [ "${#roots[@]}" -eq 0 ]; then
+    echo "ERROR: no /opt/rocm* directory in the guest at all." >&2
+    exit 1
+fi
+
+if [ -z "${ROCM_PATH:-}" ]; then
+    hip_lang=$(find "${roots[@]}" -maxdepth 5 \
+                   -type d -name hip-lang -path '*/cmake/*' 2>/dev/null |
+                   head -1 || true)
+    if [ -n "${hip_lang}" ]; then
+        # <root>/lib/cmake/hip-lang -> <root>
+        ROCM_PATH=$(dirname "$(dirname "$(dirname "${hip_lang}")")")
+    else
+        hipcc=$(find "${roots[@]}" -maxdepth 4 \
+                    -type f \( -name hipcc -o -name amdclang++ \) 2>/dev/null |
+                    head -1 || true)
+        if [ -n "${hipcc}" ]; then
+            ROCM_PATH=$(dirname "$(dirname "${hipcc}")")
+        fi
+    fi
+fi
+if [ -z "${ROCM_PATH:-}" ]; then
+    echo "ERROR: no HIP toolchain under ${roots[*]}." >&2
+    echo "The guest installs a minimal ROCm set (amdrocm-runtime-dev," >&2
+    echo "amdrocm-blas-dev); CMake's HIP language needs a compiler too." >&2
+    echo "Tree:" >&2
+    find "${roots[@]}" -maxdepth 3 2>/dev/null | head -40 >&2
+    exit 1
+fi
+echo "Using ROCM_PATH=${ROCM_PATH}"
+export ROCM_PATH
+
+# CMakeDetermineHIPCompiler establishes the ROCm root in one of two ways: a
+# HIP-capable clang whose "-v -print-targets" prints "Found HIP installation:",
+# or "hipconfig --rocmpath". Both have to be reachable, and nothing puts the
+# therock bin directory on PATH -- the image only adds its libraries to
+# ld.so.conf. Without this, CMake reports "Failed to find ROCm root directory"
+# no matter what -DROCM_PATH says, because it never consults that variable.
+export PATH="${ROCM_PATH}/bin:${PATH}"
+
+echo "HIP toolchain:"
+ls "${ROCM_PATH}/bin" 2>/dev/null | head -30 || echo "  (no bin directory)"
+echo "CMake packages:"
+ls "${ROCM_PATH}/lib/cmake" 2>/dev/null | head -30 || echo "  (no lib/cmake)"
+
+# Point CMake straight at the compiler when one is present, rather than
+# relying on it to guess: the therock trees ship amdclang++ and may not ship
+# the hipcc wrapper at all.
+HIP_CXX=""
+for c in "${ROCM_PATH}/bin/amdclang++" "${ROCM_PATH}/bin/hipcc" \
+         "${ROCM_PATH}/llvm/bin/clang++"; do
+    [ -x "${c}" ] && HIP_CXX="${c}" && break
+done
+if [ -n "${HIP_CXX}" ]; then
+    echo "Using HIP compiler: ${HIP_CXX}"
+else
+    echo "WARNING: no amdclang++/hipcc found under ${ROCM_PATH}" >&2
+fi
+
 cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
+    ${HIP_CXX:+-DCMAKE_HIP_COMPILER="${HIP_CXX}"} \
     -DCMAKE_BUILD_TYPE=Debug \
     -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
-    -DROCM_PATH=/opt/rocm \
+    -DROCM_PATH="${ROCM_PATH}" \
+    -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
     -DBUILD_TESTING=ON
 
 banner "Building rocm-xio"
@@ -124,8 +214,15 @@ lsmod | grep -q rocm_xio || {
 # --------------------------------------------------------------
 banner "Running nvme-ep system tests"
 cd "${BUILD_DIR}"
+# XIO_FORCE_PCI_MMIO_BRIDGE is not optional in here. The emulated NVMe
+# controller never sees a doorbell written directly by the GPU; it only sees
+# MMIO replayed through the pci-mmio-bridge device QEMU exposes at 1b36:0015.
+# The nvme-ep ctests pin USE_PCI_MMIO_BRIDGE=0 for hardware, so without this
+# every device-touching test submits I/O and then waits for completions that
+# can never arrive -- 14 consecutive ctest timeouts, no failures.
 sudo env \
     ROCXIO_NVME_DEVICE="${NVME_CTRL}" \
+    XIO_FORCE_PCI_MMIO_BRIDGE=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \

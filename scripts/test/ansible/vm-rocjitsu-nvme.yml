@@ -26,13 +26,17 @@
 #     belong to the consumer, not the disk.
 #   * Passwordless sudo for the test user.
 #
-# Note the driver that loads is the guest's *in-tree* amdgpu, not amdgpu-dkms:
-# the image ships a patched DKMS tree built against 6.8, which cannot compile
-# against the 7.0 kernel it boots and is therefore inert. So there is no DKMS
-# rebuild here, and no KFD atomics patch -- patching that tree would change
-# nothing about what modprobe loads. If KFD's PCIe-atomics gate turns out to
-# fire against the emulated device, the fix has to move into the in-tree
-# driver.
+# The driver that loads is amdgpu-dkms, already built and installed for the
+# booted kernel by the image, with the KFD atomics patch applied to its source
+# before the build. So there is no DKMS rebuild here and no patching: both
+# happened at image build time.
+#
+# This only holds for the *resolute* build of the flavour. On noble the DKMS
+# module is built for 6.8 and cannot load on the 7.0 kernel the image boots, so
+# the in-tree driver loads instead and rejects the device outright -- rocjitsu
+# does not model VCN/JPEG, and amdgpu_discovery_set_mm_ip_blocks() returns
+# -EINVAL from its default case. See the QCOW2_IMAGE note in
+# .github/workflows/test-vm-nvme.yml.
 #
 # Driven by scripts/test/vm-provision.sh, which supplies the inventory.
 
@@ -226,6 +230,18 @@
       ansible.builtin.debug:
         var: fw_check.stdout_lines
       when: assert_gpu_firmware | bool
+
+    # The guest image carries rocm-xio's build dependencies -- build-essential,
+    # cmake, ninja-build, libcli11-dev, libdrm-dev, nvme-cli, pciutils,
+    # python3-dev, rsync -- with one exception. hsakmt's CMake config does
+    # find_dependency(NUMA), and cmake/FindNUMA.cmake answers that by locating
+    # numa.h and libnuma, neither of which is in the image's package manifest.
+    # Install it here; drop this task once packages/rocjitsu.txt carries it.
+    - name: Install the one build dependency the guest image omits
+      ansible.builtin.package:
+        name: libnuma-dev
+        state: present
+        update_cache: true
 
     # Matches the modprobe line qemu-minimal's amdgpu-probe uses; kept here so
     # the guest can be brought up by hand the same way CI does it.

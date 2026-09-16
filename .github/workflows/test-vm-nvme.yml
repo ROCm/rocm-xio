@@ -51,10 +51,19 @@ env:
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
   ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
-  # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace, the
-  # HWE kernel whose in-tree amdgpu knows GC 12.1.0, amdgpu-dkms and rocm-xio's
-  # build dependencies, which is most of what provisioning used to do by hand.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916-vm.noble-rocjitsu-qm.5d68689
+  # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace,
+  # amdgpu-dkms and rocm-xio's build dependencies, which is most of what
+  # provisioning used to do by hand.
+  #
+  # MUST be the resolute build, not noble. Both boot the same kernel,
+  # 7.0.0-31-generic, but repo.radeon.com keys its apt suite off the release
+  # codename: noble gets the ~24.04 amdgpu-dkms, whose kcl layer does not build
+  # against 7.0, so that image ships a module built for 6.8 that can never load
+  # and the in-tree driver loads instead -- and the in-tree driver rejects this
+  # device with "Failed to add vcn/jpeg ip block(UVD_HWIP:0x0)" because rocjitsu
+  # does not model VCN/JPEG. Resolute gets the 26.04 package, which builds
+  # against 7.0, loads, and brings up a KFD node.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916-vm.resolute-rocjitsu-qm.5d68689
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
 
@@ -116,8 +125,10 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
         run: |
+          # Anchored excludes: an unanchored "build" also drops scripts/build/,
+          # which the guest build needs. See the same note in run-vm-nvme.sh.
           rsync -az --delete \
-            --exclude build --exclude build-alola --exclude .venv \
+            --exclude /build --exclude /build-alola --exclude /.venv \
             -e "ssh -i $SSH_KEY -p $SSH_PORT \
                 -o BatchMode=yes \
                 -o NoHostAuthenticationForLocalhost=yes \

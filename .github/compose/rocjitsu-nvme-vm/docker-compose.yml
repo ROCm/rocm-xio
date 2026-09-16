@@ -82,6 +82,27 @@ services:
       - --nvme
       - "${VM_NVME_COUNT:-1}"
       - --pci-mmio-bridge
+      # --pci-mmio-bridge already turns on "enable=pci_mmio_*" by itself; this
+      # adds the controller side so the two can be read against each other.
+      # The bridge polls an 8 KiB shadow window in guest RAM rather than
+      # snooping the NVMe BAR, so a doorbell that never reaches the controller
+      # could have been lost before the bridge saw it (no pci_mmio_bridge_*
+      # events at all), when the bridge tried to replay it
+      # (pci_mmio_bridge_write_failed), or after (a bridge write with no
+      # matching pci_nvme_mmio_doorbell_sq). Only the two sets together
+      # separate those.
+      #
+      # Deliberately no --nvme-trace-file: this QEMU is not built with the
+      # simple trace backend, so "-trace file=" is accepted and silently does
+      # nothing -- the file never appears and you conclude tracing is off. The
+      # events go to the container's stderr, so run-vm-nvme.sh collects
+      # "docker compose logs qemu" instead.
+      #
+      # "doorbell" is the cheap default; VM_NVME_TRACE=all widens it to every
+      # pci_nvme* event, which is fine for one hand-driven I/O and far too much
+      # for a full ctest pass.
+      - --nvme-trace
+      - "${VM_NVME_TRACE:-doorbell}"
 
 volumes:
   vfu-sockets:

@@ -154,6 +154,11 @@ else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
 
+# The therock ROCm build exports hsakmt::hsakmt with its own build machine's
+# libc path in the link interface. A no-op against ROCm packages that do not.
+include(XIOSanitizeImportedTargets)
+xio_sanitize_imported_target(hsakmt::hsakmt)
+
 # kpack multi-arch packaging support (optional)
 option(XIO_USE_KPACK
   "Enable kpack multi-arch packaging (requires BUILD_SHARED_LIBS)" OFF)

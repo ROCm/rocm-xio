@@ -90,6 +90,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Last word, deliberately: the ctest definitions pin USE_PCI_MMIO_BRIDGE=0 in
+# their ENVIRONMENT property, which beats anything inherited. Under the
+# rocjitsu VM the bridge is not optional -- without it the GPU's doorbell
+# writes never reach the emulated controller, so every device-touching test
+# hangs until ctest times it out. ctest adds to the inherited environment
+# rather than replacing it, so a separate variable is the one lever that can
+# reach these tests without editing all thirty definitions.
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    USE_PCI_MMIO_BRIDGE="1"
+fi
+
 mkdir -p "$TEMP_DIR"
 TEST_LOG="$TEMP_DIR/test.log"
 

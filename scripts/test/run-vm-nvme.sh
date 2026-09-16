@@ -32,6 +32,10 @@
 #   --workdir DIR     Scratch directory (default: mktemp under /tmp)
 #   --ssh-port PORT   Host port for the guest (default: a free one)
 #   --ctest-label RE  ctest label regex in the guest (default: nvme)
+#   --trace EVENTS    QEMU trace events (default: doorbell; "all" for every
+#                     pci_nvme* event, or a literal event name or glob). The
+#                     pci_mmio_bridge_* events are always on. Collected to
+#                     <workdir>/qemu-trace.log with the other diagnostics.
 #   --skip-gpu        Build-only smoke run
 #   --vcpus N         Guest vCPUs (default 16; CI uses 4)
 #   --vmem MiB        Guest memory in MiB (default 32768; CI uses 8192)
@@ -67,6 +71,11 @@ RUN_TEST=1
 VM_VCPUS=16
 VM_VMEM=32768
 
+# QEMU trace events to enable, passed to qemu-tool --nvme-trace. Despite the
+# name it takes any event name or glob, not just the nvme ones, and the bridge
+# events are enabled unconditionally alongside whatever this selects.
+VM_NVME_TRACE="${VM_NVME_TRACE:-doorbell}"
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --workdir) WORKDIR="$2"; shift 2 ;;
@@ -74,6 +83,7 @@ while [ $# -gt 0 ]; do
         --vcpus) VM_VCPUS="$2"; shift 2 ;;
         --vmem) VM_VMEM="$2"; shift 2 ;;
         --ctest-label) CTEST_LABEL="$2"; shift 2 ;;
+        --trace) VM_NVME_TRACE="$2"; shift 2 ;;
         --skip-gpu) SKIP_GPU="1"; shift ;;
         --keep) KEEP=1; shift ;;
         --no-test) RUN_TEST=0; shift ;;
@@ -224,6 +234,7 @@ VM_VMEM=${VM_VMEM}
 VM_SHM_SIZE=${VM_SHM}
 VM_NVME_COUNT=1
 VM_SSH_PORT=${SSH_PORT}
+VM_NVME_TRACE=${VM_NVME_TRACE}
 EOF
 
 say "Bringing up rocjitsu + QEMU"
@@ -290,8 +301,12 @@ ANSIBLE_GALAXY="${VENV}/bin/ansible-galaxy" \
 # Build and test in the guest
 # ----------------------------------------------------------------------
 say "Copying the checkout into the guest"
+# Anchor every exclude with a leading slash. An unanchored "build" matches any
+# path component of that name, so it silently drops scripts/build/ too -- and
+# the guest then fails the build with "No rule to make target
+# .../scripts/build/fetch-nvme-headers.sh", which reads like a CMake bug.
 rsync -az --delete \
-    --exclude build --exclude build-alola --exclude .venv --exclude .git \
+    --exclude /build --exclude /build-alola --exclude /.venv --exclude /.git \
     -e "ssh -i $SSH_KEY -p $SSH_PORT ${SSH_OPTS[*]}" \
     "${REPO_ROOT}/" "$VM_USER@localhost:rocm-xio/"
 
@@ -313,6 +328,30 @@ ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
 ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
     'cat rocm-xio/build/Testing/Temporary/LastTest.log' \
     > "${WORKDIR}/ctest-last.log" 2>&1 || true
+# QEMU's trace events land on the qemu container's stderr, which is the only
+# record of what the emulated devices actually saw -- and it dies with the
+# stack, so it has to be copied out before the trap fires.
+TRACE="${WORKDIR}/qemu-trace.log"
+dc logs --no-color qemu > "$TRACE" 2>&1 || true
+
+# Summarise rather than leaving a large file for someone to grep. Break the
+# doorbells out by queue id: the guest's own nvme driver rings its per-CPU
+# queues constantly, so a large total says nothing. Only a doorbell on the
+# queue the tester is driving does. Likewise the bridge always logs init,
+# realize and reset; anything beyond those three is it doing actual work.
+if [ -s "$TRACE" ]; then
+    echo "qemu trace: ${TRACE} ($(wc -l < "$TRACE") lines)"
+    echo "event histogram:"
+    grep -oE '^(pci_nvme|pci_mmio)[a-z_]*' "$TRACE" |
+        sort | uniq -c | sort -rn | head -25
+    echo "doorbells by queue id (the tester's queue is the one that matters):"
+    grep -oE 'doorbell_sq sqid [0-9]+' "$TRACE" |
+        sort | uniq -c | sort -rn | head -20
+    echo "bridge activity beyond the startup three:"
+    grep -cE 'pci_mmio_bridge_(poll_processed|write|read)' "$TRACE" || true
+else
+    echo "qemu trace: nothing captured from the qemu container"
+fi
 echo "diagnostics in ${WORKDIR}"
 
 say "Result: $([ $test_rc -eq 0 ] && echo PASS || echo "FAIL (rc=${test_rc})")"
