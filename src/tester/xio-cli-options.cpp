@@ -91,9 +91,11 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
     ->check(CLI::PositiveNumber)
     ->group(nvme_group);
   app
-    .add_option("--controller", cfg->controller,
-                "NVMe controller or namespace device path (required).")
+    .add_option("--controller", cfg->controllers,
+                "NVMe controller or namespace device path (required). "
+                "Repeat to drive several controllers from one process.")
     ->required()
+    ->allow_extra_args(false)
     ->group(nvme_group);
   app
     .add_option("--base-lba", cfg->ioParams.baseLba,
@@ -148,6 +150,13 @@ void registerNvmeEpCliOptions(CLI::App& app, xio::nvme_ep::nvmeEpConfig* cfg) {
                 "Default: 1.")
     ->default_val(1)
     ->check(CLI::PositiveNumber)
+    ->group(nvme_group);
+  app
+    .add_flag("--force-queue-hijack", cfg->forceQueueHijack,
+              "Allow --num-queues to take more than half "
+              "of the controller's I/O queues away from "
+              "the kernel NVMe driver. This can crash "
+              "the host; use on dedicated drives only.")
     ->group(nvme_group);
   app
     .add_option("--namespace", cfg->ioParams.nsid,
