@@ -320,7 +320,17 @@
           #!/bin/bash
           # Probe amdgpu against the rocjitsu emulated gfx1250 device.
           # Run only once the vfio-user server is serving.
-          exec modprobe amdgpu \
+          set -e
+
+          # The guest autoloads amdgpu at boot, before this playbook has
+          # blacklisted it or installed the gfx1250 firmware, so by the time we
+          # get here the module is already resident with a failed probe and the
+          # wrong parameters. modprobe would then succeed silently without
+          # rebinding anything, and the only symptom is a missing KFD node.
+          # Unload first so the parameters below actually take effect.
+          modprobe -r amdgpu || true
+
+          modprobe amdgpu \
             emu_mode=1 \
             fw_load_type=0 \
             discovery=2 \
@@ -328,6 +338,14 @@
             vm_update_mode=3 \
             gpu_recovery=0 \
             vramlimit=256
+
+          # modprobe returns 0 when the module loads but its PCI probe fails, so
+          # check that the driver actually took the device.
+          if ! compgen -G '/sys/bus/pci/drivers/amdgpu/[0-9a-f]*:*' >/dev/null; then
+            echo "ERROR: amdgpu did not bind the emulated device" >&2
+            dmesg | grep -i amdgpu | tail -40 >&2
+            exit 1
+          fi
 
     - name: Allow the test user passwordless sudo
       ansible.builtin.copy:

@@ -42,7 +42,10 @@ concurrency:
 
 env:
   # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260915-qemu.pci-mmio-bridge-submit-vfu.8039244
+  # The suffix is qemu-commit.libvfio-user-commit. Earlier tags named the qemu
+  # *branch* instead, so two rebuilds could share a suffix and differ in source;
+  # prefer commit-suffixed tags.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916-qemu.98eca1a-vfu.8039244
   ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.909c17f
   # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
