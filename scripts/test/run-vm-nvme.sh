@@ -38,6 +38,11 @@
 #   --keep            Leave the stack up and the workdir behind on exit
 #   --no-test         Bring up and provision, but stop before the guest test
 #
+# Image pins are read from the workflow so the two cannot drift, but any of
+# QEMU_IMAGE, ROCJITSU_IMAGE, ROCJITSU_FIRMWARE_IMAGE and QCOW2_IMAGE can be
+# set in the environment to override one for a single run:
+#   QCOW2_IMAGE=...-qcow2-gen:...-basic-... scripts/test/run-vm-nvme.sh
+#
 # Under Slurm, ask for enough of the node to hold the guest:
 #   srun -M cluster -p storage -w ctr-smc-strg-cx68-3 -N1 -n1 \
 #        --cpus-per-task=20 --mem=48G -t 120 scripts/test/run-vm-nvme.sh
@@ -131,15 +136,19 @@ pin() {
     printf '%s' "$val"
 }
 
-QEMU_IMAGE="$(pin QEMU_IMAGE)"
-ROCJITSU_IMAGE="$(pin ROCJITSU_IMAGE)"
-ROCJITSU_FIRMWARE_IMAGE="$(pin ROCJITSU_FIRMWARE_IMAGE)"
-QCOW2_IMAGE="$(pin QCOW2_IMAGE)"
+# Default to the workflow's pins so local runs and CI cannot drift, but let the
+# environment win, which is how one image is swapped for another to find out
+# whether a failure belongs to the image or to the code under test.
+QEMU_IMAGE="${QEMU_IMAGE:-$(pin QEMU_IMAGE)}"
+ROCJITSU_IMAGE="${ROCJITSU_IMAGE:-$(pin ROCJITSU_IMAGE)}"
+ROCJITSU_FIRMWARE_IMAGE="${ROCJITSU_FIRMWARE_IMAGE:-$(pin ROCJITSU_FIRMWARE_IMAGE)}"
+QCOW2_IMAGE="${QCOW2_IMAGE:-$(pin QCOW2_IMAGE)}"
 
-echo "qemu:     ${QEMU_IMAGE}"
-echo "rocjitsu: ${ROCJITSU_IMAGE}"
-echo "firmware: ${ROCJITSU_FIRMWARE_IMAGE}"
-echo "qcow2:    ${QCOW2_IMAGE}"
+note() { [ "$2" = "$(pin "$1")" ] || printf ' (overridden)'; }
+echo "qemu:     ${QEMU_IMAGE}$(note QEMU_IMAGE "$QEMU_IMAGE")"
+echo "rocjitsu: ${ROCJITSU_IMAGE}$(note ROCJITSU_IMAGE "$ROCJITSU_IMAGE")"
+echo "firmware: ${ROCJITSU_FIRMWARE_IMAGE}$(note ROCJITSU_FIRMWARE_IMAGE "$ROCJITSU_FIRMWARE_IMAGE")"
+echo "qcow2:    ${QCOW2_IMAGE}$(note QCOW2_IMAGE "$QCOW2_IMAGE")"
 
 if [ -z "$WORKDIR" ]; then
     WORKDIR="$(mktemp -d "/tmp/rocm-xio-vm-${USER}-XXXXXX")"
