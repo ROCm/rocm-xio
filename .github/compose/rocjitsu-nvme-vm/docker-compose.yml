@@ -1,0 +1,86 @@
+---
+# rocjitsu GPU + emulated NVMe VM stack for rocm-xio testing.
+#
+# Brings up a rocjitsu vfio-user GPU server alongside a qemu-system VM that
+# attaches to it, and gives the guest an emulated NVMe controller behind the
+# pci-mmio-bridge so nvme-ep can drive doorbells from __device__ code.
+#
+# The QEMU image MUST be the sbates-fork variant: pci-mmio-bridge only exists
+# on dev/stephen/pci-mmio-bridge-submit, and qemu-tool hard-fails if the
+# binary does not advertise the device.
+#
+# Every image is pinned to a dated tag. Do not use :latest here -- a silent
+# retag upstream turns a green run red with no diff to point at.
+#
+# Usage (normally driven by .github/actions/rocjitsu-nvme-vm):
+#   cp env.example .env && $EDITOR .env
+#   docker compose up --detach
+
+services:
+  rocjitsu:
+    image: "${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be set to a pinned tag}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    # gfx1250 is the only target with an IP discovery profile upstream, so it
+    # is the only config rocjitsu can serve over vfio-user; anything else
+    # logs "no IP discovery profile" and exits 1.
+    command:
+      - rocjitsu
+      - --config
+      - "/usr/local/share/rocjitsu/configs/${ROCJITSU_CONFIG:-gfx1250_mi455x.json}"
+      - --vfio-socket
+      - /run/vfu/rocjitsu.sock
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/rocjitsu.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  qemu:
+    image: "${QEMU_IMAGE:?QEMU_IMAGE must be set to a pinned sbates-fork tag}"
+    depends_on:
+      rocjitsu:
+        condition: service_healthy
+    volumes:
+      - vfu-sockets:/run/vfu:ro
+      - "${VM_IMAGES_DIR:?VM_IMAGES_DIR must be set}:${VM_IMAGES_DIR}"
+    devices:
+      - /dev/kvm
+    # The vfio-user server reaches guest RAM through a shared memfd, so the
+    # container's /dev/shm has to be at least as large as the guest.
+    shm_size: "${VM_SHM_SIZE:-12g}"
+    ports:
+      - "${VM_SSH_PORT:-2222}:2222"
+    # The image's own entrypoint.sh builds a fixed qemu-system command line and
+    # ignores "$@", so it has to be replaced rather than passed arguments. Going
+    # through qemu-tool is what gives us --nvme and --pci-mmio-bridge.
+    entrypoint:
+      - qemu-tool
+      - run-vm
+    command:
+      - --images
+      - "${VM_IMAGES_DIR}"
+      - --vm-name
+      - "${VM_NAME:-batesste-ci-vm}"
+      - --vcpus
+      - "${VM_VCPUS:-4}"
+      - --vmem
+      - "${VM_VMEM:-8192}"
+      - --ssh-port
+      - "2222"
+      - --vfio-userdev
+      - /run/vfu/rocjitsu.sock
+      # Positive integer = create that many backing qcow2 files and attach
+      # them as emulated NVMe controllers.
+      - --nvme
+      - "${VM_NVME_COUNT:-1}"
+      - --pci-mmio-bridge
+
+volumes:
+  vfu-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

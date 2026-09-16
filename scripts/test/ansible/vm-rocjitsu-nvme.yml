@@ -1,0 +1,267 @@
+---
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Provision a booted rocm-xio test VM that is attached to a rocjitsu emulated
+# GPU over vfio-user and has an emulated NVMe controller behind the QEMU
+# pci-mmio-bridge.
+#
+# Derived from qemu-minimal's ansible/playbooks/vm-rocjitsu.yml, with two
+# deliberate differences:
+#
+#   * No firmware synthesis. That playbook still calls vfio_guest_firmware.py,
+#     which the gfx1250-vfio-compute stack removed -- the emulator now wants
+#     real firmware from the driver release matching the guest's amdgpu.ko.
+#     We install the firmware packages and then *assert* the inventory, so a
+#     missing blob fails here with a list of what is missing rather than
+#     hanging the guest in gfx_v12_1_hw_init.
+#   * rocm-xio build dependencies are installed, since the point of the VM is
+#     to build and test rocm-xio inside it.
+#
+# Driven by scripts/test/vm-provision.sh, which supplies the inventory.
+
+- name: Provision a rocjitsu + NVMe rocm-xio test VM
+  hosts: testvm
+  become: true
+  gather_facts: true
+  vars:
+    username: "{{ vm_username | default('batesste') }}"
+    rocjitsu_image: "{{ lookup('env', 'ROCJITSU_IMAGE') }}"
+    user_setup_motd: false
+    user_setup_install_amd_ca: false
+    user_setup_dotfiles_enable: false
+    rocm_setup_user: "{{ username }}"
+    rocm_setup_repo_stream: therock
+    rocm_setup_minimal: true
+    rocm_setup_minimal_packages:
+      - libstdc++-14-dev
+      - amdrocm-runtime-dev
+    rocm_setup_skip_reboot: false
+    rocm_setup_run_checks: true
+    # The GPU is not attached until amdgpu is modprobed by hand against the
+    # vfio-user device, so role-level GPU checks cannot pass here.
+    rocm_setup_run_gpu_checks: false
+    rocm_setup_install_metrics_exporter: false
+
+  pre_tasks:
+    # ROCm's own packages and Ubuntu universe ship colliding names; without
+    # this the universe copies win and the ROCm runtime is subtly broken.
+    - name: Pin ROCm-conflicting Ubuntu universe packages to never-install
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/rocm-no-distro-packages
+        mode: '0644'
+        content: |
+          Package: rocminfo hipcc rocm-smi-lib libhsakmt1
+          Pin: release o=Ubuntu
+          Pin-Priority: -1
+
+          Package: libhsa-runtime64-1 libhsa-runtime-dev libamdhip64-*
+          Pin: release o=Ubuntu
+          Pin-Priority: -1
+
+    - name: Remove stale ROCm GPG keyrings and sources
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/keyrings/rocm.gpg
+        - /etc/apt/keyrings/amdrocm.gpg
+        - /etc/apt/sources.list.d/rocm.sources
+
+  roles:
+    - role: sbates130272.batesste.rocm_setup
+      tags: [rocm_setup]
+
+  tasks:
+    - name: Purge stale distro ROCm runtime packages
+      ansible.builtin.package:
+        name:
+          - libhsakmt1
+          - libhsa-runtime64-1
+          - libhsa-runtime-dev
+        state: absent
+        purge: true
+      failed_when: false
+
+    # amdgpu must not autoload: it has to be loaded by hand with the emulation
+    # parameters once the vfio-user device is live.
+    - name: Blacklist amdgpu autoload
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/amdgpu-blacklist.conf
+        content: "blacklist amdgpu\n"
+        mode: '0644'
+
+    # ---------------------------------------------------------------------
+    # IP discovery table
+    # ---------------------------------------------------------------------
+    # The emulated device cannot produce this for itself. Without it amdgpu
+    # polls BAR registers for a completion bit rocjitsu never sets and spins
+    # at 99% CPU in gfx_v12_1_hw_init.
+    - name: Create controller-side temp dir for ip_discovery.bin
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: rj_ipd_
+      register: rj_ipd_tmp
+      delegate_to: localhost
+      become: false
+
+    - name: Generate ip_discovery.bin via the pinned rocjitsu image
+      ansible.builtin.command:
+        cmd: >-
+          docker run --rm -v {{ rj_ipd_tmp.path }}:/out
+          {{ rocjitsu_image }}
+          rj-ip-discovery gfx1250 /out/ip_discovery.bin
+      delegate_to: localhost
+      become: false
+      changed_when: true
+
+    - name: Ensure guest firmware directory exists
+      ansible.builtin.file:
+        path: /lib/firmware/amdgpu
+        state: directory
+        mode: '0755'
+
+    - name: Install ip_discovery.bin into the guest
+      ansible.builtin.copy:
+        src: "{{ rj_ipd_tmp.path }}/ip_discovery.bin"
+        dest: /lib/firmware/amdgpu/ip_discovery.bin
+        mode: '0644'
+
+    - name: Clean up controller-side temp dir
+      ansible.builtin.file:
+        path: "{{ rj_ipd_tmp.path }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+    # ---------------------------------------------------------------------
+    # KFD atomics
+    # ---------------------------------------------------------------------
+    # The emulated device cannot advertise PCIe atomics through the vfio-user
+    # PCI capability, but KFD refuses a device without them. Assume support
+    # when amdgpu_emu_mode is active.
+    - name: Patch the KFD atomics check for emu_mode in the DKMS source
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          python3 - <<'PYEOF'
+          import glob, sys
+          srcs = sorted(glob.glob('/usr/src/amdgpu-*'))
+          if not srcs:
+              sys.exit('no amdgpu DKMS source found')
+          path = srcs[-1] + '/amd/amdkfd/kfd_device.c'
+          old = ('kfd->pci_atomic_requested = '
+                 'amdgpu_amdkfd_have_atomics_support(kfd->adev);')
+          new = ('kfd->pci_atomic_requested = '
+                 'amdgpu_amdkfd_have_atomics_support(kfd->adev) || '
+                 '(amdgpu_emu_mode == 1);')
+          content = open(path).read()
+          if new in content:
+              print('already patched')
+              sys.exit(0)
+          if old not in content:
+              sys.exit(f'target string not found in {path}')
+          open(path, 'w').write(content.replace(old, new, 1))
+          print(f'patched {path}')
+          PYEOF
+      register: atomics_patch
+      changed_when: "'patched /' in atomics_patch.stdout"
+
+    - name: Rebuild the amdgpu DKMS module after the atomics patch
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          VER=$(dkms status amdgpu | awk -F'[,/]' 'NR==1{gsub(/ /,"",$2); print $2}')
+          dkms build amdgpu/"$VER" -k "$(uname -r)" --force
+          dkms install amdgpu/"$VER" -k "$(uname -r)" --force
+      when: atomics_patch.changed
+      changed_when: true
+
+    # ---------------------------------------------------------------------
+    # Firmware inventory assertion
+    # ---------------------------------------------------------------------
+    # Nothing in the rocjitsu image can stand in for real firmware any more.
+    # Ask the built module what it wants and check every blob is present, so
+    # the failure names the missing files instead of hanging the guest.
+    - name: Locate the built amdgpu.ko
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: modinfo -n amdgpu
+      register: amdgpu_ko
+      changed_when: false
+
+    - name: Assert every firmware blob amdgpu requests is present
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -uo pipefail
+          missing=()
+          while read -r fw; do
+            [ -n "$fw" ] || continue
+            [ -e "/lib/firmware/$fw" ] || [ -e "/lib/firmware/$fw.xz" ] \
+              || missing+=("$fw")
+          done < <(modinfo -F firmware "{{ amdgpu_ko.stdout }}" \
+                   | grep -E 'gc_12_1_0|sdma_7_1_0|mes')
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "missing gfx1250 firmware blobs under /lib/firmware:"
+            printf '  %s\n' "${missing[@]}"
+            exit 1
+          fi
+          echo "all requested gfx1250 firmware blobs present"
+      register: fw_check
+      changed_when: false
+
+    - name: Show the firmware inventory result
+      ansible.builtin.debug:
+        var: fw_check.stdout_lines
+
+    # ---------------------------------------------------------------------
+    # rocm-xio build dependencies
+    # ---------------------------------------------------------------------
+    - name: Install rocm-xio build and test dependencies
+      ansible.builtin.package:
+        name:
+          - build-essential
+          - cmake
+          - git
+          - libcli11-dev
+          - libdrm-dev
+          - nvme-cli
+          - pciutils
+          - python3-dev
+          - rsync
+        state: present
+        update_cache: true
+
+    - name: Install the ROCm BLAS dev package rocm-xio links against
+      ansible.builtin.package:
+        name: amdrocm-blas-dev
+        state: present
+
+    # Matches the modprobe line qemu-minimal's amdgpu-probe uses; kept here so
+    # the guest can be brought up by hand the same way CI does it.
+    - name: Install the amdgpu-probe helper
+      ansible.builtin.copy:
+        dest: /usr/local/bin/amdgpu-probe
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Probe amdgpu against the rocjitsu emulated gfx1250 device.
+          # Run only once the vfio-user server is serving.
+          exec modprobe amdgpu \
+            emu_mode=1 \
+            fw_load_type=0 \
+            discovery=2 \
+            ip_block_mask=0x3f \
+            vm_update_mode=3 \
+            gpu_recovery=0 \
+            vramlimit=256
+
+    - name: Allow the test user passwordless sudo
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/90-rocm-xio-ci
+        mode: '0440'
+        validate: visudo -cf %s
+        content: "{{ username }} ALL=(ALL) NOPASSWD:ALL\n"

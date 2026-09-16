@@ -1,0 +1,231 @@
+---
+name: rocjitsu-nvme-vm
+description: >-
+  Boot a QEMU guest attached to a rocjitsu emulated AMD GPU over vfio-user,
+  with an emulated NVMe controller behind the pci-mmio-bridge, and wait for
+  it to accept SSH.
+
+# This is deliberately a composite action rather than inline workflow steps:
+# the same bring-up is wanted by rocm-ernic, rocm-aic and anything else that
+# needs a GPU it does not have hardware for. Once it has proven itself here it
+# should move to sbates130272/qemu-minimal alongside qemu-tool and the other
+# compose stacks, at which point consumers switch to
+#   uses: sbates130272/qemu-minimal/.github/actions/vfio-user-vm@<tag>
+# and this directory goes away. Keep it free of rocm-xio specifics so that
+# move stays a file move.
+
+inputs:
+  qemu-image:
+    description: >-
+      Pinned tag for the QEMU toolchain image. Must be the -sbates-fork
+      repository; pci-mmio-bridge does not exist upstream.
+    required: true
+  rocjitsu-image:
+    description: Pinned tag for the rocjitsu vfio-user GPU server image.
+    required: true
+  qcow2-image:
+    description: >-
+      Pinned tag for the ubuntu-qcow2-gen payload image carrying the guest
+      disk, its SSH keypair and vm-info.json under /output.
+    required: true
+  rocjitsu-config:
+    description: rocjitsu config filename under /usr/local/share/rocjitsu/configs.
+    required: false
+    default: gfx1250_mi455x.json
+  images-dir:
+    description: Host directory the guest disk is extracted into.
+    required: false
+    default: /var/lib/qemu-tool/images
+  vcpus:
+    description: Guest vCPU count.
+    required: false
+    default: "4"
+  vmem:
+    description: Guest memory in MiB.
+    required: false
+    default: "8192"
+  shm-size:
+    description: >-
+      /dev/shm size for the qemu container. Must be >= vmem MiB; the vfio-user
+      server reaches guest RAM through a shared memfd.
+    required: false
+    default: 12g
+  nvme-count:
+    description: Number of emulated NVMe controllers to attach.
+    required: false
+    default: "1"
+  ssh-port:
+    description: Host port forwarded to the guest's sshd.
+    required: false
+    default: "2222"
+  boot-timeout:
+    description: Seconds to wait for the guest to accept SSH.
+    required: false
+    default: "300"
+
+outputs:
+  ssh-port:
+    description: Host port the guest's sshd is reachable on.
+    value: ${{ inputs.ssh-port }}
+  ssh-user:
+    description: Guest username, read from the payload's vm-info.json.
+    value: ${{ steps.payload.outputs.username }}
+  ssh-key:
+    description: Path to the private key that authenticates as ssh-user.
+    value: ${{ steps.payload.outputs.key-path }}
+  vm-name:
+    description: Guest VM name, read from the payload's vm-info.json.
+    value: ${{ steps.payload.outputs.vm-name }}
+  compose-dir:
+    description: Directory the compose stack was brought up from.
+    value: ${{ github.action_path }}/../../compose/rocjitsu-nvme-vm
+
+runs:
+  using: composite
+  steps:
+    # GitHub-hosted Ubuntu runners expose /dev/kvm but leave it root-only.
+    - name: Enable KVM for the runner user
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        test -w /dev/kvm
+
+    - name: Pull pinned images
+      shell: bash
+      run: |
+        docker pull "${{ inputs.qemu-image }}"
+        docker pull "${{ inputs.rocjitsu-image }}"
+        docker pull "${{ inputs.qcow2-image }}"
+
+    # ubuntu-qcow2-gen publishes FROM scratch with nothing but /output, so
+    # there is nothing to run -- create a container purely to copy out of.
+    - name: Extract guest disk payload
+      id: payload
+      shell: bash
+      env:
+        IMAGES_DIR: ${{ inputs.images-dir }}
+      run: |
+        set -euo pipefail
+        sudo mkdir -p "$IMAGES_DIR"
+        sudo chmod 777 "$IMAGES_DIR"
+
+        cid=$(docker create "${{ inputs.qcow2-image }}")
+        trap 'docker rm -f "$cid" > /dev/null 2>&1 || true' EXIT
+        docker cp "$cid:/output/." "$IMAGES_DIR"
+
+        info="$IMAGES_DIR/vm-info.json"
+        test -f "$info" || { echo "::error::no vm-info.json in payload"; exit 1; }
+
+        vm_name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["vm_name"])' "$info")
+        username=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["username"])' "$info")
+        key="$IMAGES_DIR/id_rsa"
+        chmod 600 "$key"
+
+        {
+          echo "vm-name=$vm_name"
+          echo "username=$username"
+          echo "key-path=$key"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "Guest: $vm_name (user $username)"
+        python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("release:", d["release"], "kernel:", d["kernel_release"])' "$info"
+
+    # Written to disk rather than exported per-step: the compose file uses
+    # "${VAR:?}" guards, so every later `docker compose` call -- logs, down,
+    # ps -- would otherwise need the whole environment repeated, and a caller
+    # who forgets loses their teardown. docker compose reads .env from the
+    # project directory automatically.
+    - name: Write compose .env
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/rocjitsu-nvme-vm
+      run: |
+        cat > .env <<EOF
+        QEMU_IMAGE=${{ inputs.qemu-image }}
+        ROCJITSU_IMAGE=${{ inputs.rocjitsu-image }}
+        ROCJITSU_CONFIG=${{ inputs.rocjitsu-config }}
+        VM_IMAGES_DIR=${{ inputs.images-dir }}
+        VM_NAME=${{ steps.payload.outputs.vm-name }}
+        VM_VCPUS=${{ inputs.vcpus }}
+        VM_VMEM=${{ inputs.vmem }}
+        VM_SHM_SIZE=${{ inputs.shm-size }}
+        VM_NVME_COUNT=${{ inputs.nvme-count }}
+        VM_SSH_PORT=${{ inputs.ssh-port }}
+        EOF
+        cat .env
+
+    - name: Bring up rocjitsu + QEMU stack
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/rocjitsu-nvme-vm
+      run: docker compose up --detach
+
+    - name: Wait for the rocjitsu GPU server to be healthy
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/rocjitsu-nvme-vm
+      run: |
+        set -uo pipefail
+        for _ in $(seq 1 30); do
+          health=$(docker compose ps --format json rocjitsu \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Health",""))' \
+            2>/dev/null || true)
+          [ "$health" = "healthy" ] && { echo "rocjitsu healthy"; exit 0; }
+          sleep 2
+        done
+        echo "::error::rocjitsu did not become healthy"
+        docker compose logs --no-color rocjitsu
+        exit 1
+
+    - name: Wait for guest SSH
+      shell: bash
+      env:
+        SSH_PORT: ${{ inputs.ssh-port }}
+        SSH_USER: ${{ steps.payload.outputs.username }}
+        SSH_KEY: ${{ steps.payload.outputs.key-path }}
+        TIMEOUT: ${{ inputs.boot-timeout }}
+      run: |
+        set -uo pipefail
+        elapsed=0
+        while [ "$elapsed" -lt "$TIMEOUT" ]; do
+          if ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+                 -o ConnectTimeout=2 \
+                 -o BatchMode=yes \
+                 -o NoHostAuthenticationForLocalhost=yes \
+                 -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null \
+                 "$SSH_USER@localhost" true 2>/dev/null; then
+            echo "Guest ready after ${elapsed}s"
+            exit 0
+          fi
+          sleep 5
+          elapsed=$((elapsed + 5))
+        done
+        echo "::error::guest did not accept SSH within ${TIMEOUT}s"
+        exit 1
+
+    # A missing NVMe controller or vfio-user GPU here means the stack came up
+    # wrong; failing now beats a confusing failure thirty minutes into ROCm
+    # provisioning.
+    - name: Verify emulated devices are present
+      shell: bash
+      env:
+        SSH_PORT: ${{ inputs.ssh-port }}
+        SSH_USER: ${{ steps.payload.outputs.username }}
+        SSH_KEY: ${{ steps.payload.outputs.key-path }}
+      run: |
+        set -euo pipefail
+        ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+            -o BatchMode=yes \
+            -o NoHostAuthenticationForLocalhost=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "$SSH_USER@localhost" 'bash -s' <<'GUEST'
+        set -euo pipefail
+        echo "--- lspci ---"
+        lspci -nn
+        echo "--- NVMe ---"
+        lspci -d ::0108 | grep -q . || { echo "no NVMe controller in guest"; exit 1; }
+        echo "--- display/processing accelerator (rocjitsu) ---"
+        lspci -d 1002: | grep -q . || { echo "no AMD vfio-user device in guest"; exit 1; }
+        GUEST

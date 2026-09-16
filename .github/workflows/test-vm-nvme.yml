@@ -1,0 +1,162 @@
+---
+# Build and test rocm-xio inside a VM that has a rocjitsu emulated AMD GPU
+# attached over vfio-user and an emulated NVMe SSD behind the QEMU
+# pci-mmio-bridge. This is the only CI path that exercises nvme-ep end to
+# end without physical hardware.
+#
+# Not run on pull requests: a full ROCm + DKMS provision plus emulated-GPU
+# execution takes the better part of an hour, and the rocjitsu pin tracks a
+# stacked review branch that is force-pushed regularly. Scheduled weekly and
+# available on demand.
+#
+# Every image is pinned to a dated tag. Bump these deliberately; do not
+# switch them to :latest.
+
+name: test-vm-nvme
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      ctest-label:
+        description: ctest label regex to run inside the guest
+        required: false
+        default: nvme
+      skip-gpu:
+        description: Skip GPU bring-up (build-only smoke run)
+        required: false
+        default: "0"
+  schedule:
+    # Weekly, off the hour so this does not pile onto every other cron job.
+    - cron: '17 5 * * 1'
+
+env:
+  # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260915-qemu.pci-mmio-bridge-submit-vfu.8039244
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.909c17f
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen:20260915-vm.resolute-basic-qm.5d68689
+  VM_IMAGES_DIR: /var/lib/qemu-tool/images
+  SSH_PORT: "2222"
+
+jobs:
+  test-vm-nvme:
+    name: nvme-ep against an emulated NVMe SSD
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out code.
+        uses: actions/checkout@v5.0.0
+
+      - name: Install host tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ansible-core \
+            cloud-image-utils \
+            qemu-utils \
+            rsync
+
+      - name: Boot the rocjitsu + NVMe VM
+        id: vm
+        uses: ./.github/actions/rocjitsu-nvme-vm
+        with:
+          qemu-image: ${{ env.QEMU_IMAGE }}
+          rocjitsu-image: ${{ env.ROCJITSU_IMAGE }}
+          qcow2-image: ${{ env.QCOW2_IMAGE }}
+          images-dir: ${{ env.VM_IMAGES_DIR }}
+          ssh-port: ${{ env.SSH_PORT }}
+          vcpus: "4"
+          vmem: "8192"
+          shm-size: 12g
+          nvme-count: "1"
+
+      - name: Provision ROCm, amdgpu and firmware in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          ROCJITSU_IMAGE: ${{ env.ROCJITSU_IMAGE }}
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: ./scripts/test/vm-provision.sh
+
+      - name: Copy the rocm-xio checkout into the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          rsync -az --delete \
+            --exclude build --exclude build-alola --exclude .venv \
+            -e "ssh -i $SSH_KEY -p $SSH_PORT \
+                -o BatchMode=yes \
+                -o NoHostAuthenticationForLocalhost=yes \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null" \
+            ./ "$SSH_USER@localhost:rocm-xio/"
+
+      - name: Build and run nvme-ep tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'nvme' }}
+          SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+               ./rocm-xio/scripts/test/vm-guest-test.sh"
+
+      - name: Collect guest diagnostics
+        if: always()
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          mkdir -p artifacts
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'sudo dmesg' > artifacts/guest-dmesg.txt 2>&1 || true
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'cat rocm-xio/build/Testing/Temporary/LastTest.log' \
+              > artifacts/ctest-last.log 2>&1 || true
+
+      # The action left a .env in this directory, so compose resolves without
+      # the image pins being repeated here.
+      - name: Collect compose logs
+        if: always()
+        working-directory: .github/compose/rocjitsu-nvme-vm
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          docker compose logs --no-color \
+            > "$GITHUB_WORKSPACE/artifacts/compose.log" 2>&1 || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-vm-nvme-diagnostics
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: .github/compose/rocjitsu-nvme-vm
+        run: docker compose down --volumes --timeout 10 || true
