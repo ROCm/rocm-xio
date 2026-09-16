@@ -70,6 +70,11 @@ services:
       - "${VM_VMEM:-8192}"
       - --ssh-port
       - "2222"
+      # Stated rather than left to the default: acceleration is not optional
+      # here. qemu-tool has no TCG fallback, so QEMU fails loudly if /dev/kvm
+      # is not usable inside the container, which is what we want -- an
+      # emulated ROCm provision under TCG would run for hours.
+      - --kvm
       - --vfio-userdev
       - /run/vfu/rocjitsu.sock
       # Positive integer = create that many backing qcow2 files and attach
