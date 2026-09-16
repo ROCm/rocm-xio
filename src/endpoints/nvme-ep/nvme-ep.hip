@@ -1627,7 +1627,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                                8192);
       if (ret_bar0 < 0) {
         ROCXIO_LOG_WARN("Failed to map NVMe BAR0 for direct doorbell "
-                        "on %s: %s\n",
+                        "on %s: %s\n"
+                        "  GPU-direct doorbell access requires that the GPU "
+                        "can access the NVMe controller BAR0 (MMIO) directly.\n"
+                        "  This is known to fail on some GPU architectures.\n"
+                        "  See https://github.com/ROCm/rocm-xio/issues/167\n",
                         target.controller.c_str(), strerror(-ret_bar0));
         return hipErrorInvalidValue;
       }
