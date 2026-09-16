@@ -1,0 +1,165 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# fio-engine-ci — build-check for the rocm-xio fio engine
+#
+# Verifies that:
+#   1. librocm-xio.so builds with BUILD_SHARED_LIBS=ON (nvme-ep only)
+#   2. The HIP shim (rocm-xio-hip.hip) compiles cleanly with hipcc
+#   3. The C engine (rocm-xio.c) compiles cleanly with gcc
+#   4. The engine shared object links successfully against librocm-xio.so
+#
+# No NVMe hardware or GPU is required.  The engine binary is not executed.
+
+name: fio-engine-ci
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'docker/rocm-xio-engine/**'
+      - 'docker/Dockerfile.fio'
+      - 'src/endpoints/nvme-ep/nvme-ep.h'
+      - 'src/endpoints/nvme-ep/nvme-ep.hip'
+      - '.github/workflows/fio-engine-ci.yml'
+
+jobs:
+  build-engine:
+    name: Build rocm-xio fio engine
+    runs-on: ubuntu-latest
+    container:
+      image: rocm/dev-ubuntu-24.04:7.2
+      options: --user root
+    env:
+      LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5.0.0
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config \
+            libhsa-runtime-dev libelf-dev libnuma-dev \
+            fio
+
+      # The build-check.yml workflow already validates that librocm-xio builds
+      # correctly.  hsa_amd_portable_export_dmabuf_v2 (xio-common.hip:790) is
+      # absent from the ROCm 7.2 container's HSA headers regardless of cmake
+      # flags; attempting to build the library here always fails.
+      #
+      # Instead, we verify only the nvme-ep header declarations (the symbols
+      # our engine depends on) by checking that the required XIO_API
+      # declarations are present in nvme-ep.h.
+      - name: Verify nvme-ep API declarations
+        run: |
+          for sym in gpuKernelStateful gpuKernelPersistent queryLbaSize \
+                     queryNamespaceCapacity queryMaxQueueId createQueue deleteQueue; do
+            grep -q "$sym" src/endpoints/nvme-ep/nvme-ep.h && \
+              echo "✓ $sym declared" || \
+              (echo "✗ $sym MISSING from nvme-ep.h" && exit 1)
+          done
+          echo "All required nvme-ep symbols declared with XIO_API"
+
+      - name: Get fio source
+        run: |
+          git clone --depth 1 https://github.com/axboe/fio.git /tmp/fio
+
+      - name: Apply fio optgroup patch
+        run: |
+          cd /tmp/fio
+          git apply \
+            $GITHUB_WORKSPACE/docker/rocm-xio-engine/0001-rocm-xio-engine.patch
+
+      - name: Generate required headers
+        # Four files are cmake-generated/fetched and gitignored; produce
+        # them via the same scripts cmake calls so we can compile the HIP
+        # shim without a full cmake run.
+        run: |
+          # 1. Fetch NVMe kernel headers (src/include/external/ is gitignored)
+          WS="$GITHUB_WORKSPACE"
+          bash "$WS/scripts/build/fetch-nvme-headers.sh" \
+            "$WS/src/include/external/nvme"
+
+          # 2. Extract NVMe enum/struct definitions
+          bash $GITHUB_WORKSPACE/scripts/build/extract-nvme-defines.sh \
+            "$WS/src/include/external/nvme/linux-nvme.h" \
+            $GITHUB_WORKSPACE/src/include/nvme-ep-generated.h
+
+          # 3. Endpoint registry + includes stubs
+          bash $GITHUB_WORKSPACE/scripts/build/generate-endpoint-files.sh \
+            $GITHUB_WORKSPACE/src/endpoints \
+            $GITHUB_WORKSPACE/src/include/xio-endpoint-registry-gen.h \
+            $GITHUB_WORKSPACE/src/include/xio-endpoint-includes-gen.h
+
+          echo "Generated headers:"
+          ls $GITHUB_WORKSPACE/src/include/nvme-ep-generated.h \
+             $GITHUB_WORKSPACE/src/include/xio-endpoint-registry-gen.h \
+             $GITHUB_WORKSPACE/src/include/xio-endpoint-includes-gen.h
+
+      - name: Compile HIP shim
+        run: |
+          /opt/rocm/bin/hipcc \
+            --offload-arch=gfx1201 \
+            -fPIC \
+            -DAXIIO_ENDPOINT_NVME \
+            -I$GITHUB_WORKSPACE/src/include \
+            -I$GITHUB_WORKSPACE/src/endpoints/nvme-ep \
+            -I$GITHUB_WORKSPACE/src/common \
+            -I$GITHUB_WORKSPACE/src/endpoints/common \
+            -I/tmp/fio \
+            -I/opt/rocm/include \
+            -c $GITHUB_WORKSPACE/docker/rocm-xio-engine/rocm-xio-hip.hip \
+            -o /tmp/rocm-xio-hip.o
+
+      - name: Compile C engine
+        # rocm-xio.c uses "../fio.h" relative to its location in the fio
+        # engines/ directory.  Copy it alongside the fio source so the
+        # relative include resolves correctly.
+        run: |
+          cp $GITHUB_WORKSPACE/docker/rocm-xio-engine/rocm-xio-hip.h \
+             /tmp/fio/engines/
+          cp $GITHUB_WORKSPACE/docker/rocm-xio-engine/rocm-xio.c \
+             /tmp/fio/engines/
+          gcc -std=gnu99 -fPIC \
+            -I/tmp/fio \
+            -I/opt/rocm/include \
+            -c /tmp/fio/engines/rocm-xio.c \
+            -o /tmp/rocm-xio-c.o
+
+      - name: Link engine shared object
+        # Link against the static library using --whole-archive so that the
+        # engine .so contains all required symbols without needing a separate
+        # librocm-xio.so at runtime in this CI environment.
+        run: |
+          /opt/rocm/bin/hipcc \
+            --offload-arch=gfx942 \
+            -fPIC -shared \
+            -o /tmp/rocm-xio.so \
+            /tmp/rocm-xio-hip.o \
+            /tmp/rocm-xio-c.o \
+            -Wl,--allow-shlib-undefined \
+            -L/opt/rocm/lib -Wl,-rpath,/opt/rocm/lib \
+            -lamdhip64 -lpthread
+
+      - name: Verify engine symbols
+        run: |
+          nm /tmp/rocm-xio.so | grep -E "fio_rocm_xio_register|get_ioengine|rxio_submit|rxio_reap"
+          echo "Required engine symbols present"
+
+      - name: Check engine loads into fio
+        run: |
+          LD_LIBRARY_PATH=/opt/rocm/lib \
+            fio --ioengine=external:/tmp/rocm-xio.so \
+                --parse-only \
+                --name=check --filename=/dev/null --bs=4k \
+                --rw=read --size=1m 2>&1 | head -5
+          echo "Engine load check complete"

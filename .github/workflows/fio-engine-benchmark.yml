@@ -1,0 +1,320 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# fio-engine-benchmark — weekly scheduled benchmark on self-hosted runner
+#
+# Runs the rocm-xio fio engine against the reference NVMe drives, parses
+# fio JSON output, generates an RST results table, and commits it to the
+# repository so that the Sphinx docs build (docs-check workflow) picks it
+# up and publishes updated benchmark numbers to GitHub Pages.
+#
+# Prerequisites on the self-hosted runner:
+#   - ROCm installed at /opt/rocm
+#   - rocm-xio kernel module loaded (/dev/rocm-xio present)
+#   - /dev/nvme1 (MTR_SLC_16GB) and /dev/nvme2 (WD_BLACK SN850X) unmounted
+#   - fio source checkout at ~/fio (for the engine .so)
+#   - librocm-xio.so pre-built at ~/rocm-xio-shared/
+#
+# Outputs:
+#   - docs/reference/_fio-benchmark-data.json  (raw fio JSON, git-tracked)
+#   - docs/reference/_fio-benchmark-results.rst (generated RST include)
+
+name: fio-engine-benchmark
+
+on:
+  schedule:
+    # Runs every Monday at 03:00 UTC (off-peak for the test node)
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      runtime_s:
+        description: 'fio runtime in seconds per job (default 20)'
+        required: false
+        default: '20'
+
+permissions:
+  contents: write    # needed to commit result files
+  pages: write       # needed to deploy to GitHub Pages
+  id-token: write    # needed for OIDC Pages deployment
+
+jobs:
+  benchmark:
+    name: Run fio engine benchmarks
+    runs-on: [self-hosted, gpu, nvme]   # label set on the reference runner
+
+    env:
+      ENGINE: ${{ github.workspace }}/build/fio-engine/rocm-xio.so
+      LIBPATH: ${{ github.workspace }}/build/fio-engine/lib
+      FIO: ${{ github.workspace }}/build/fio/fio
+      RUNTIME: ${{ github.event.inputs.runtime_s || '20' }}
+      RESULTS_JSON: docs/reference/_fio-benchmark-data.json
+      RESULTS_RST:  docs/reference/_fio-benchmark-results.rst
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build librocm-xio.so ───────────────────────────────────────────
+      - name: Build librocm-xio.so
+        run: |
+          cmake -S . -B build/rocm-xio-shared \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGDA_BNXT=OFF -DGDA_MLX5=OFF -DGDA_IONIC=OFF -DGDA_ERNIC=OFF \
+            -DBUILD_TESTING=OFF \
+            -DROCM_PATH=/opt/rocm
+          cmake --build build/rocm-xio-shared --target rocm-xio -j "$(nproc)"
+          mkdir -p build/fio-engine/lib
+          cp build/rocm-xio-shared/librocm-xio.so* build/fio-engine/lib/
+
+      # ── Build fio + engine ─────────────────────────────────────────────
+      - name: Clone fio
+        run: |
+          git clone --depth 1 https://github.com/axboe/fio.git build/fio-src
+          cd build/fio-src
+          git apply $GITHUB_WORKSPACE/docker/rocm-xio-engine/0001-rocm-xio-engine.patch
+          ./configure --prefix=$GITHUB_WORKSPACE/build/fio
+          make -j "$(nproc)"
+          make install
+
+      - name: Build engine .so
+        run: |
+          ROCM=/opt/rocm
+          /opt/rocm/bin/hipcc --offload-arch=gfx1201 -fPIC \
+            -DAXIIO_ENDPOINT_NVME \
+            -I$GITHUB_WORKSPACE/src/include \
+            -I$GITHUB_WORKSPACE/src/endpoints/nvme-ep \
+            -I$GITHUB_WORKSPACE/src/common \
+            -I$GITHUB_WORKSPACE/src/endpoints/common \
+            -I$GITHUB_WORKSPACE/build/fio-src \
+            -I$ROCM/include \
+            -c docker/rocm-xio-engine/rocm-xio-hip.hip \
+            -o build/fio-engine/rocm-xio-hip.o
+
+          gcc -std=gnu99 -fPIC \
+            -I$GITHUB_WORKSPACE/build/fio-src \
+            -I$ROCM/include \
+            -c docker/rocm-xio-engine/rocm-xio.c \
+            -o build/fio-engine/rocm-xio-c.o
+
+          /opt/rocm/bin/hipcc --offload-arch=gfx1201 -fPIC -shared \
+            -o $ENGINE \
+            build/fio-engine/rocm-xio-hip.o \
+            build/fio-engine/rocm-xio-c.o \
+            -Lbuild/fio-engine/lib -lrocm-xio \
+            -Wl,-rpath,$GITHUB_WORKSPACE/build/fio-engine/lib \
+            -L$ROCM/lib -Wl,-rpath,$ROCM/lib \
+            -lamdhip64 -lpthread
+
+      # ── Run benchmarks ─────────────────────────────────────────────────
+      - name: Run fio benchmarks
+        run: |
+          set -euo pipefail
+          mkdir -p build/bench-results
+
+          run_job() {
+            local tag="$1"; shift
+            sudo LD_LIBRARY_PATH=$LIBPATH:/opt/rocm/lib \
+              $FIO \
+              --ioengine=external:$ENGINE \
+              --output-format=json \
+              --output=build/bench-results/${tag}.json \
+              "$@" 2>/dev/null || true
+          }
+
+          BASE="--direct=1 --gpu_id=0 --queue_depth=64
+                --time_based=1 --runtime=$RUNTIME
+                --group_reporting=1"
+
+          # Peak IOPS — WD_BLACK (nvme2)
+          run_job nvme2_peak_read $BASE \
+            --iodepth=8 --size=2g \
+            --name=peak --filename=/dev/nvme2 \
+            --rw=read --bs=4k --numjobs=4 --thread \
+            --queue_id=0 --memory_mode=8
+
+          # iodepth sweep — nvme2
+          for d in 1 4 8 16; do
+            run_job nvme2_d${d}_j1_read $BASE \
+              --iodepth=$d --size=2g \
+              --name=d${d}_j1 --filename=/dev/nvme2 \
+              --rw=read --bs=4k --numjobs=1 \
+              --queue_id=0 --memory_mode=8
+          done
+
+          # numjobs sweep — nvme2, iodepth=8
+          for j in 1 2 4 8; do
+            run_job nvme2_d8_j${j}_read $BASE \
+              --iodepth=8 --size=2g \
+              --name=d8_j${j} --filename=/dev/nvme2 \
+              --rw=read --bs=4k --numjobs=$j --thread \
+              --queue_id=0 --memory_mode=8
+          done
+
+          # Blocksize sweep — nvme2, j=4, iodepth=8
+          for bs in 4k 16k 64k 128k 512k; do
+            run_job nvme2_${bs}_j4_read $BASE \
+              --iodepth=8 --size=2g \
+              --name=${bs}_j4 --filename=/dev/nvme2 \
+              --rw=read --bs=$bs --numjobs=4 --thread \
+              --queue_id=0 --memory_mode=8
+          done
+
+          # Write — nvme2
+          run_job nvme2_peak_write $BASE \
+            --iodepth=8 --size=2g \
+            --name=write_peak --filename=/dev/nvme2 \
+            --rw=write --bs=4k --numjobs=4 --thread \
+            --queue_id=0 --memory_mode=8
+
+          # nvme1 (MTR SLC)
+          run_job nvme1_peak_read $BASE \
+            --iodepth=8 --size=512m \
+            --name=nvme1_peak --filename=/dev/nvme1 \
+            --rw=read --bs=4k --numjobs=4 --thread \
+            --queue_id=0 --memory_mode=8
+
+          # CPU baseline
+          sudo $FIO \
+            --ioengine=io_uring --iodepth=32 --direct=1 \
+            --runtime=$RUNTIME --time_based=1 \
+            --name=cpu_baseline --filename=/dev/nvme2n1 \
+            --rw=randread --bs=4k --numjobs=1 \
+            --output-format=json \
+            --output=build/bench-results/cpu_baseline.json 2>/dev/null || true
+
+      # ── Parse results and generate RST ─────────────────────────────────
+      - name: Parse and generate RST
+        run: |
+          python3 - << 'PYEOF'
+          import json, glob, os, datetime
+
+          def iops(path):
+              try:
+                  with open(path) as f: d = json.load(f)
+                  jobs = d.get("jobs", [])
+                  if not jobs: return None
+                  r = sum(j["read"]["total_ios"] for j in jobs)
+                  w = sum(j["write"]["total_ios"] for j in jobs)
+                  if r:
+                      return dict(
+                          iops=sum(j["read"]["iops"] for j in jobs),
+                          bw=sum(j["read"]["bw"] for j in jobs)/1024,
+                          rw="read")
+                  elif w:
+                      return dict(
+                          iops=sum(j["write"]["iops"] for j in jobs),
+                          bw=sum(j["write"]["bw"] for j in jobs)/1024,
+                          rw="write")
+              except Exception:
+                  return None
+
+          base = "build/bench-results"
+          run_date = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+          # Collect all results into a summary dict
+          summary = {}
+          for path in sorted(glob.glob(f"{base}/*.json")):
+              tag = os.path.basename(path).replace(".json", "")
+              m = iops(path)
+              if m: summary[tag] = m
+
+          # Write raw JSON for archiving
+          with open("docs/reference/_fio-benchmark-data.json", "w") as f:
+              json.dump({"run_date": run_date, "results": summary}, f, indent=2)
+
+          # Generate RST include fragment
+          lines = [
+              f".. Generated by fio-engine-benchmark workflow on {run_date}",
+              "",
+              f"*Last updated: {run_date}*",
+              "",
+          ]
+
+          def row(tag, label):
+              m = summary.get(tag)
+              if m:
+                  return f"   * - {label}\n     - {m['iops']:>10,.0f}\n     - {m['bw']:>8.0f}"
+              return f"   * - {label}\n     - N/A\n     - N/A"
+
+          lines += [
+              ".. list-table:: Peak IOPS — nvme2 WD_BLACK SN850X, 4K read, mm=8",
+              "   :header-rows: 1",
+              "   :widths: 40 20 20",
+              "",
+              "   * - Configuration",
+              "     - IOPS",
+              "     - BW (MB/s)",
+              row("nvme2_d1_j1_read",   "iodepth=1, numjobs=1"),
+              row("nvme2_d8_j1_read",   "iodepth=8, numjobs=1"),
+              row("nvme2_d8_j2_read",   "iodepth=8, numjobs=2"),
+              row("nvme2_d8_j4_read",   "iodepth=8, numjobs=4 **(peak)**"),
+              row("nvme2_d8_j8_read",   "iodepth=8, numjobs=8"),
+              row("nvme2_peak_write",   "4K write, iodepth=8, numjobs=4"),
+              row("nvme1_peak_read",    "nvme1 MTR_SLC, 4K read, j=4"),
+              row("cpu_baseline",       "CPU io_uring QD32 (reference)"),
+              "",
+          ]
+
+          with open("docs/reference/_fio-benchmark-results.rst", "w") as f:
+              f.write("\n".join(lines) + "\n")
+
+          print("Generated RST with", len(summary), "results")
+          PYEOF
+
+      # ── Commit results ─────────────────────────────────────────────────
+      - name: Commit benchmark results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/reference/_fio-benchmark-data.json \
+                  docs/reference/_fio-benchmark-results.rst
+          if git diff --cached --quiet; then
+            echo "No result changes — skipping commit"
+          else
+            git commit \
+              -m "chore(bench): update fio engine benchmark results $(date -u +%Y-%m-%d)" \
+              --no-gpg-sign
+            git push
+          fi
+
+  # ── Rebuild and deploy GitHub Pages ──────────────────────────────────────
+  pages:
+    name: Deploy docs to GitHub Pages
+    needs: benchmark
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out code (with result commit)
+        uses: actions/checkout@v5.0.0
+        with:
+          ref: main   # pick up the result commit just pushed
+
+      - name: Install Sphinx dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake doxygen python3-venv
+          python3 -m venv .venv
+          .venv/bin/pip install -r docs/sphinx/requirements.txt
+
+      - name: Build Sphinx HTML
+        run: |
+          source .venv/bin/activate
+          cmake -S . -B build-docs \
+            -DXIO_DOCS_ONLY=ON -DXIO_BUILD_DOCS=ON
+          cmake --build build-docs --target sphinx-html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build-docs/docs/html
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
