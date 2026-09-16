@@ -50,6 +50,12 @@ if [ ! -f "${PLAYBOOK}" ]; then
     exit 1
 fi
 
+# Several ansible installs can be on PATH at once -- a distro one, a runner
+# image one, a pip one -- and controller-side filter dependencies such as
+# jmespath have to live in whichever interpreter this resolves to. Print it, so
+# a missing-dependency failure later says which environment to look in.
+"${ANSIBLE_PLAYBOOK}" --version
+
 echo "Installing Ansible Galaxy collection ${COLLECTION}..."
 "${ANSIBLE_GALAXY}" collection install "${COLLECTION}"
 

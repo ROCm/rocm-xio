@@ -58,16 +58,25 @@ jobs:
       - name: Check out code.
         uses: actions/checkout@v5.0.0
 
-      # python3-jmespath is a controller-side dependency, not a guest one: the
-      # rocm_setup role's platform check runs community.general.json_query,
-      # which fails at task-argument resolution without it.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # ansible-core and jmespath must land in the *same* interpreter. Installed
+      # from apt they do not: the runner image already ships an ansible ahead of
+      # /usr/bin on PATH, in an environment that cannot see dist-packages, so
+      # apt's python3-jmespath is invisible to the ansible that actually runs
+      # and json_query fails at task-argument resolution. setup-python plus pip
+      # is the pattern rocm-ernic uses for the same reason.
+      - name: Install ansible and its controller-side dependencies
+        run: python3 -m pip install ansible-core jmespath
+
       - name: Install host tooling
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            ansible-core \
             cloud-image-utils \
-            python3-jmespath \
             qemu-utils \
             rsync
 
