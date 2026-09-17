@@ -179,9 +179,18 @@ else
     echo "WARNING: no amdclang++/hipcc found under ${ROCM_PATH}" >&2
 fi
 
+# RelWithDebInfo rather than Debug, and it is not a preference. Debug gives the
+# HIP compiler "-g -g" with no -O, so device code is built at -O0, and an -O0
+# code object never completes a dispatch on the emulated gfx1250 rocJITsu
+# serves: hipDeviceSynchronize() spins forever in BusyWaitSignal::WaitAcquire
+# waiting on a completion signal that never arrives, even for an empty kernel.
+# That is what turned most of this suite into ctest timeouts. -O1 and above are
+# fine. Note this only bites because we select amdclang++ above -- the hipcc
+# wrapper quietly adds -O3 of its own, which is why hand-built reproducers
+# outside CMake never showed it.
 cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     ${HIP_CXX:+-DCMAKE_HIP_COMPILER="${HIP_CXX}"} \
-    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
     -DROCM_PATH="${ROCM_PATH}" \
     -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
