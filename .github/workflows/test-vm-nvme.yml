@@ -46,12 +46,20 @@ env:
   # digest, so a pin silently changed meaning under us. The .g<ci-commit> field
   # makes every rebuild a distinct tag. Never drop it, and never use :latest.
   #
+  # The registry also carries variant-only tags (qemu.<commit>-vfu.<commit>) and
+  # :latest. Both move. Only the fully specified form below is stable.
+  #
+  # The component suffix names the *source* commits, not the build: a cmake
+  # option change (RJ_LOG_GROUPS, say) produces a different binary under an
+  # unchanged suffix. Compare digests, not suffixes, when a rebuild is meant
+  # to change behaviour.
+  #
   # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
   # The component suffix is qemu-commit.libvfio-user-commit. Earlier tags named
   # the qemu *branch* instead, so two rebuilds could share a suffix and differ
   # in source; prefer commit-suffixed tags.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.gab2a19a-qemu.98eca1a-vfu.8039244
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.gab2a19a-rocjitsu.909c17f
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.g2cc8e79-rocjitsu.909c17f
   # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
