@@ -880,6 +880,17 @@ XIO_API __global__ void gpuKernelPersistent(
   volatile uint32_t* state, volatile nvmeWorkItem* work_ring,
   uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth);
 
+/**
+ * Multi-queue persistent kernel: launch with dim3(n_queues) blocks.
+ * blockIdx.x selects the queue; each block drives one independent NVMe queue.
+ * See nvme-ep.hip for full documentation.
+ */
+XIO_API __global__ void gpuKernelMultiQueuePersistent(
+  const XioEndpointConfig* configs, const nvmeIoParams* io_params,
+  const nvmeDoorbellParams* doorbell_params, const nvmeBufferParams* buf_params,
+  volatile uint32_t* queue_states, volatile nvmeWorkItem* work_ring,
+  uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth);
+
 XIO_API __global__ void gpuKernelStateful(XioEndpointConfig config,
                                           nvmeIoParams ioParams,
                                           nvmeDoorbellParams doorbellParams,

@@ -1923,6 +1923,185 @@ done:
   state[1] = (uint32_t)expected_phase;
 }
 
+/**
+ * Multi-queue persistent kernel — drives N independent NVMe queues in one
+ * kernel launch.
+ *
+ * Launch with dim3(n_queues) blocks, dim3(1) threads.  blockIdx.x selects
+ * the queue; each block is entirely independent (no cross-block sync).
+ * This increases GPU occupancy proportional to n_queues while still
+ * requiring only one HIP stream and one kernel dispatch.
+ *
+ * Queues may span multiple NVMe controllers (e.g. nvme1 queue 32 as block 0,
+ * nvme2 queue 32 as block 1).  The caller sets up per-queue arrays.
+ *
+ * @param configs         Device pointer to n_queues XioEndpointConfig structs.
+ * @param io_params       Device pointer to n_queues nvmeIoParams structs.
+ * @param doorbell_params Device pointer to n_queues nvmeDoorbellParams structs.
+ * @param buf_params      Device pointer to n_queues nvmeBufferParams structs.
+ * @param queue_states    Pinned host memory: n_queues × 2 uint32_t words
+ *                        (state[qid*2+0]=sq_tail|cq_head,
+ * state[qid*2+1]=phase).
+ * @param work_ring       Pinned host memory: n_queues × ring_depth items.
+ *                        Block qid uses work_ring + qid * ring_depth.
+ * @param ring_depth      Slots per queue in the work ring.
+ * @param stop_flag       CPU writes non-zero to stop all queues.
+ * @param batch_depth     Max in-flight ops per queue iteration (≤ ring_depth).
+ */
+__global__ void gpuKernelMultiQueuePersistent(
+  const XioEndpointConfig* configs, const nvmeIoParams* io_params,
+  const nvmeDoorbellParams* doorbell_params, const nvmeBufferParams* buf_params,
+  volatile uint32_t* queue_states, volatile nvmeWorkItem* work_ring,
+  uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth) {
+  const uint32_t qid = (uint32_t)blockIdx.x;
+
+  XioEndpointConfig config = configs[qid];
+  config.endpointConfig = nullptr;
+  nvmeIoParams ioParams = io_params[qid];
+  nvmeDoorbellParams doorbellParams = doorbell_params[qid];
+  nvmeBufferParams bufParams = buf_params[qid];
+
+  volatile uint32_t* state = queue_states + qid * 2;
+  volatile nvmeWorkItem* my_ring = work_ring + (uint64_t)qid * ring_depth;
+
+  uint32_t w0 = state[0];
+  uint16_t sq_tail = (uint16_t)(w0 & 0xFFFFu);
+  uint16_t cq_head = (uint16_t)(w0 >> 16);
+  uint8_t expected_phase = (uint8_t)(state[1] & 0x1u);
+
+  sqeType* sqeAddr = static_cast<sqeType*>(config.submissionQueue);
+  cqeType* cqeAddr = static_cast<cqeType*>(config.completionQueue);
+
+  const uint32_t blocks = ioParams.lbasPerIo;
+  const size_t xfer_size = (size_t)blocks * ioParams.lbaSize;
+
+  if (batch_depth < 1)
+    batch_depth = 1;
+  if (batch_depth > ring_depth)
+    batch_depth = ring_depth;
+
+  uint32_t index = 0;
+
+  while (true) {
+    if (*stop_flag)
+      break;
+
+    volatile nvmeWorkItem* first_item = &my_ring[index % ring_depth];
+    uint32_t first_seq = index * 2 + 1;
+    {
+      unsigned spin = 0;
+      while (first_item->seq != first_seq) {
+        if (*stop_flag)
+          goto done;
+        if (++spin > NVME_EP_MAX_POLLS_BEFORE_BACKOFF) {
+          __builtin_amdgcn_s_sleep(1);
+          spin = 0;
+        }
+      }
+    }
+
+    uint32_t n = 1;
+    while (n < batch_depth) {
+      uint32_t next_idx = index + n;
+      if (my_ring[next_idx % ring_depth].seq != next_idx * 2 + 1)
+        break;
+      n++;
+    }
+    uint32_t batch_base = index;
+    index += n;
+
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t bi = batch_base + i;
+      volatile nvmeWorkItem* item = &my_ring[bi % ring_depth];
+      uint64_t lba = item->lba;
+      uint32_t lbas_op = item->lbas ? item->lbas : blocks;
+      uint32_t slot = item->slot;
+      bool is_write = (item->is_write != 0);
+      size_t buf_off = (size_t)slot * xfer_size;
+      uint8_t opcode = is_write ? nvme_cmd_write : nvme_cmd_read;
+
+      sqeType sqeLocal = {};
+      sqeLocal.opcode = opcode;
+      sqeLocal.command_id = (uint16_t)((sq_tail % 65535) + 1);
+      sqeLocal.nsid = ioParams.nsid;
+
+      bool has_buf = is_write
+                       ? (bufParams.writeBuffer && bufParams.bufferSize > 0)
+                       : (bufParams.readBuffer && bufParams.bufferSize > 0);
+
+      if (has_buf) {
+        uint64_t base_addr;
+        uint64_t* phys_addrs;
+        if (is_write) {
+          base_addr = bufParams.writePagePhysAddrs
+                        ? bufParams.writePagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+                      : bufParams.writeBufferDma
+                        ? (bufParams.writeBufferDma + buf_off)
+                        : (uint64_t)(bufParams.writeBuffer + buf_off);
+          phys_addrs = bufParams.writePagePhysAddrs;
+        } else {
+          base_addr = bufParams.readPagePhysAddrs
+                        ? bufParams.readPagePhysAddrs[buf_off / NVME_PAGE_SIZE]
+                      : bufParams.readBufferDma
+                        ? (bufParams.readBufferDma + buf_off)
+                        : (uint64_t)(bufParams.readBuffer + buf_off);
+          phys_addrs = bufParams.readPagePhysAddrs;
+        }
+        uint64_t* prpSlot = nullptr;
+        uint64_t prpDma = 0;
+        if (bufParams.prpListPool && bufParams.prpEntriesPerCmd > 0) {
+          prpSlot = bufParams.prpListPool +
+                    (size_t)slot * bufParams.prpEntriesPerCmd;
+          prpDma = bufParams.prpListPoolDma + (uint64_t)slot * NVME_PAGE_SIZE;
+        }
+        uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
+        calculatePrps(base_addr, (size_t)lbas_op * ioParams.lbaSize, &sqeLocal,
+                      prpSlot, prpDma, phys_addrs, pageOff);
+      }
+
+      sqeSetup(&sqeLocal, lba, lbas_op);
+      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+      sq_tail = (sq_tail + 1) % ioParams.queueSize;
+    }
+
+    nvme_ep::ringDoorbell(sq_tail, doorbellParams);
+
+    for (uint32_t i = 0; i < n; i++) {
+      volatile cqeType* cqe_entry = &cqeAddr[cq_head];
+      unsigned poll_count = 0;
+      while (true) {
+        if (poll_count % 4096 == 0 && *stop_flag)
+          goto done;
+        cqeType cqe = nvme_ep::cqeRead(cqe_entry);
+        if (NVME_CQE_STATUS_PHASE(cqe.status) == expected_phase)
+          break;
+        poll_count++;
+        if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0)
+          __builtin_amdgcn_s_sleep(1);
+      }
+      cq_head = (cq_head + 1) % ioParams.queueSize;
+      if (cq_head == 0)
+        expected_phase ^= 1;
+    }
+
+    nvme_ep::ringDoorbell(cq_head, doorbellParams,
+                          doorbellParams.doorbellOffset +
+                            nvme_ep::doorBellStride);
+
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t bi = batch_base + i;
+      my_ring[bi % ring_depth].seq = bi * 2 + 2;
+    }
+
+    state[0] = ((uint32_t)cq_head << 16) | (uint32_t)sq_tail;
+    state[1] = (uint32_t)expected_phase;
+  }
+
+done:
+  state[0] = ((uint32_t)cq_head << 16) | (uint32_t)sq_tail;
+  state[1] = (uint32_t)expected_phase;
+}
+
 } // namespace xio::nvme_ep
 
 #ifndef __HIP_DEVICE_COMPILE__
