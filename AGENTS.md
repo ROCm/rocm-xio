@@ -301,22 +301,85 @@ shadow buffer", and without the bridge it fails to create an I/O queue at all.
   Do not use `:latest`: a silent retag upstream turns a green run red with no
   diff to point at.
 
-### Known-bad state
+### rocJITsu does not emulate GPU scratch, and `-O0` always uses it
 
-Device-touching `nvme-ep` tests currently hang under the VM rather than fail.
-A backtrace of a hung `xio-tester` shows the host parked in
-`hipDeviceSynchronize()` from `xio::syncHipKernel()` at
-`src/common/xio-common.hip:168`: the GPU kernel launches and never completes,
-so host-side queue setup, the shadow-buffer mapping and buffer allocation have
-all succeeded by that point. Given a 600 second budget it makes no progress at
-all, so it is stuck rather than merely slow under emulation. No doorbell on the
-tester's queue ever reaches QEMU and the bridge logs nothing past its three
-startup events, with or without `--pci-mmio-bridge`. Because
-`hipDeviceSynchronize()` has no timeout,
-ctest reports these as timeouts rather than failures — a wall of consecutive
-timeouts with zero failures is this bug, not a flaky runner. Note also that the
-default `-m 0` reports `Doorbell: host`, so a run left at the default may not
-be exercising the GPU doorbell path at all.
+The emulated gfx1250 does not correctly execute any kernel whose
+`.amdhsa_private_segment_fixed_size` is greater than zero — any kernel that
+touches scratch, the private segment. Such a kernel either hangs forever in
+`hipDeviceSynchronize()`, spinning in `rocr::core::BusyWaitSignal::WaitAcquire`
+on a completion signal that never arrives, or returns `hipSuccess` having had
+no effect whatsoever. Kernels with a private segment size of zero run fine.
+
+This is what the old wall of `nvme-ep` ctest timeouts actually was. It had
+nothing to do with doorbell coherence, the pci-mmio-bridge or the emulated
+NVMe controller: `test-doorbell-coherence` was failing on the very first store
+in its kernel, before any doorbell was rung, because the kernel had never run.
+
+The trap is that `-O0` device code always uses scratch — it spills the
+kernel's own arguments before doing anything else. A one-line
+`__global__ void plain(unsigned* o) { *o = 0xC0FFEE; }` compiles to 683 scratch
+instructions at `-O0` and hangs, and to zero at `-O3` and works. So
+`CMAKE_BUILD_TYPE=Debug`, which hands the HIP compiler `-g -g` and no `-O` at
+all, breaks every GPU test in the guest. That is why `vm-guest-test.sh`
+configures `RelWithDebInfo`. Never configure the guest build as `Debug`.
+
+Moving off `Debug` took the `nvme` label from 11/43 to 23/43 reported passing,
+but read that number with care — see the false-green warning below. What it
+really bought is that the suite now completes in about 12 minutes instead of
+timing out, so failures are legible.
+
+It stayed hidden this long because it takes CMake to provoke. The guest build
+selects `amdclang++` over `hipcc`, and the `hipcc` wrapper quietly adds an
+`-O3` of its own — so every reproducer built by hand with `hipcc` passed at
+4096 iterations while the CMake build of the same source hung.
+
+`-O2` is a mitigation, not a fix. Any kernel that spills registers or indexes
+a local array dynamically still gets a non-zero private segment and still
+fails, silently. Check a suspect kernel before blaming the device:
+
+```bash
+amdclang++ --cuda-device-only -S -O2 --offload-arch=gfx1250 -x hip f.hip -o f.s
+grep -B20 private_segment_fixed_size f.s | grep -E 'amdhsa_kernel|private_segment_fixed_size'
+```
+
+Anything other than `0` will not run correctly under rocJITsu. A kernel that
+returns `hipSuccess` while its output buffer stays untouched is this bug, not
+a coherence problem — check the private segment size before reaching for the
+QEMU trace. Measured on the emulated gfx1250, every non-zero size fails
+identically: 272, 1040 and 10256 bytes all return `hipSuccess` with the output
+buffer still zero, while the same kernel at size 0 returns the right answer.
+It is not a threshold effect.
+
+### The `nvme-ep` GPU path cannot work under rocJITsu yet
+
+`xio::nvme_ep::gpuKernel` at [nvme-ep.hip:885](src/endpoints/nvme-ep/nvme-ep.hip)
+has `private_segment_fixed_size = 10320` as the VM builds it, because
+`driveEndpointSingle` holds `batchStartTimes[256]` and four `uint64_t[256]` PRP
+arrays as locals. Every GPU-using `nvme-ep` test dispatches that one kernel, so
+until rocJITsu emulates scratch, the whole endpoint silently does nothing under
+the VM and `-O2` does not rescue it. Shrinking those arrays is the obvious lever
+if someone needs the path working before the emulator is fixed.
+
+### Do not trust a green `nvme` run in the VM
+
+`xio-tester` exits 0 even when every verification failed, so ctest records the
+run as passing. Under the VM today, all three `nvme-verify-inline-*` tests that
+report `Passed` actually report zero verifications passed:
+
+```text
+Verify Passed:    0000000000
+Verify Failed:    0000000016
+Test completed successfully!
+1/1 Test #93: nvme-verify-inline-host-mem ......   Passed
+```
+
+Across the whole `verify` label, not one nvme verification has ever succeeded
+in the VM. Always confirm a pass by reading the `Verify Passed` counter with
+`ctest -V`, never by the ctest status alone. Some tests are vacuous for a
+second reason: they run without `XIO_FORCE_PCI_MMIO_BRIDGE`, so their doorbells
+cannot reach the emulated controller at all, and `Memory Mode: 0` reports
+`Doorbell: host`, meaning the GPU doorbell path is not exercised even when the
+kernel does run.
 
 ## Cursor Cloud specific instructions
 
