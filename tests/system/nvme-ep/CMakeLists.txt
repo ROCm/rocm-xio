@@ -606,3 +606,98 @@ xio_add_script_test(
     "STRESS_HALF_WRAPS=3"
     "XIO_TESTER=${CMAKE_BINARY_DIR}/xio-tester"
 )
+
+# --- NVMe KV command set system tests -------------------
+# Require a KV-capable namespace identified by $ROCXIO_NVME_KV_NSID (a
+# namespace device path such as /dev/nvme0n2). The wrapper exits 77
+# (CTest skip) when the variable is unset, the namespace is absent, or
+# the namespace does not advertise CSI=2, so these tests are silent on
+# LBA-only hardware and explicit on a KV target (SPDK or real hardware).
+#
+# Label convention additions:
+#   kv  - exercises the NVMe Key-Value command set
+#   gpu - requires a working KFD agent (XIO_FORCE_PCI_MMIO_BRIDGE path)
+#
+# Value size is capped at 65536 bytes by the wrapper, well below the
+# 131072-byte vfio-user transport ceiling, to leave headroom for PRP
+# list overhead in the SPDK iovec mapping layer.
+
+set(_kv_wrapper
+  ${CMAKE_CURRENT_SOURCE_DIR}/run-nvme-kv-test.sh)
+
+# Smoke: store then retrieve, host buffer (mode 0). No GPU doorbell.
+xio_add_script_test(
+  NAME nvme-kv-store-mode0
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv smoke
+  TIMEOUT 60
+  ARGS --kv-op store --memory-mode 0 --write-io 4 --batch-size 1
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
+
+xio_add_script_test(
+  NAME nvme-kv-retrieve-mode0
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv smoke
+  TIMEOUT 60
+  ARGS --kv-op retrieve --memory-mode 0 --read-io 4 --batch-size 1
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
+
+# Smoke: store then retrieve, VRAM buffer (mode 8). GPU doorbell via
+# pci-mmio-bridge; requires a KFD agent.
+xio_add_script_test(
+  NAME nvme-kv-store-mode8
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv smoke gpu
+  TIMEOUT 60
+  ARGS --kv-op store --memory-mode 8 --write-io 4 --batch-size 1
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
+
+xio_add_script_test(
+  NAME nvme-kv-retrieve-mode8
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv smoke gpu
+  TIMEOUT 60
+  ARGS --kv-op retrieve --memory-mode 8 --read-io 4 --batch-size 1
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
+
+# Verify: batched store + retrieve roundtrip, host buffer.
+xio_add_script_test(
+  NAME nvme-kv-roundtrip-batch-mode0
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv verify
+  TIMEOUT 120
+  ARGS --kv-op store --memory-mode 0 --write-io 16 --batch-size 4
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
+
+# Verify: batched store + retrieve roundtrip, VRAM buffer.
+xio_add_script_test(
+  NAME nvme-kv-roundtrip-batch-mode8
+  SCRIPT ${_kv_wrapper}
+  LABELS hardware nvme kv verify gpu
+  TIMEOUT 120
+  ARGS --kv-op store --memory-mode 8 --write-io 16 --batch-size 4
+  ENVIRONMENT
+    "XIO_TESTER=${_xio_tester}"
+    "ROCXIO_NVME_KV_CTRL=$ENV{ROCXIO_NVME_KV_CTRL}"
+    "ROCXIO_NVME_KV_NSID=$ENV{ROCXIO_NVME_KV_NSID}"
+)
