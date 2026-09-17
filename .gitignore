@@ -70,3 +70,4 @@ __pycache__/
 
 # LLVM profiling data
 default.profraw
+overnight-*/

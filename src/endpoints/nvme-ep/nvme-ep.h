@@ -878,7 +878,7 @@ XIO_API __global__ void gpuKernelPersistent(
   XioEndpointConfig config, nvmeIoParams ioParams,
   nvmeDoorbellParams doorbellParams, nvmeBufferParams bufParams,
   volatile uint32_t* state, volatile nvmeWorkItem* work_ring,
-  uint32_t ring_depth, volatile uint32_t* stop_flag);
+  uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth);
 
 XIO_API __global__ void gpuKernelStateful(XioEndpointConfig config,
                                           nvmeIoParams ioParams,
