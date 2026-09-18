@@ -1,25 +1,11 @@
-# SDMA bandwidth scripts
+# SDMA Benchmark Scripts
 
-These scripts are adapted from the bandwidth drivers in the
-`shader_sdma` prototype. They run the installed or standalone
-`sdma-ep-bw` and `sdma-ep-rate` executables and collect timestamped CSV result
-sets.
+These scripts run the SDMA benchmark executables from the example `build/`
+directory and collect timestamped CSV result sets.
 
-Set `BENCHMARK` when the executable is not in the example's default
-`build/` directory:
+## Bandwidth Benchmark
 
-```bash
-export BENCHMARK=/tmp/sdma-ep-bench-build/sdma-ep-bw
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-```
-
-Run the scripts with the privileges required to access `/dev/kfd`.
-For example:
-
-```bash
-sudo --preserve-env=BENCHMARK,HSA_FORCE_FINE_GRAIN_PCIE \
-  scripts/bench-bandwidth-single.sh
-```
+The bandwidth executable is `build/sdma-ep-bw`.
 
 Available sweeps:
 
@@ -28,84 +14,85 @@ Available sweeps:
   device-triggered SDMA queues.
 - `bench-bandwidth-multiproducer.sh`: vary queues and workgroups.
 - `bench-contention-singlequeue.sh`: vary producers sharing one queue.
-- `bench-contention-multiqueue.sh`: distribute a fixed workgroup count
-  across multiple queues.
-- `bench-latency.sh`: sweep GPU-initiated SDMA latency and optional fine-grained
-  queue-management timing.
-- `bench-packet-rate.sh`: measure one packet-rate mode while varying queues.
-- `bench-packet-rate-isolated.sh`: run all six packet-rate modes with one
-  queue, including local and remote atomic targets.
+- `bench-contention-multiqueue.sh`: distribute a fixed workgroup count across
+  multiple queues.
 
-The bandwidth benchmark now enables cached `SdmaQueueState` by default for
-queue read-pointer checks. Pass `--no-queue-state` to `sdma-ep-bw` to reproduce
-the uncached/original path.
+The bandwidth benchmark uses cached `SdmaQueueState` by default for queue
+read-pointer checks. Pass `--no-queue-state` to `sdma-ep-bw` to reproduce the
+uncached path.
 
-The packet-rate script uses `RATE_BENCHMARK` instead of `BENCHMARK` and
-accepts `SRC_GPU`, `DST_GPU`, `MIN_COPY_SIZE`, `MAX_COPY_SIZE`,
-`NUM_COPY_COMMANDS`, `MIN_QUEUES`, `MAX_QUEUES`, `WARMUP`, `ITERATIONS`,
-`MODE`, and `OUTPUT_ROOT` overrides.
-The rate executable selects one device-generated packet sequence with `--mode`:
+Each bandwidth run creates a timestamped directory containing CSV results and
+the benchmark log. The defaults are intentionally large and may allocate
+several gigabytes per GPU. Override copy sizes, destination counts, or
+producer counts for short smoke runs.
 
-```bash
-sdma-ep-rate --mode copy
-sdma-ep-rate --mode poll-copy
-sdma-ep-rate --mode copy-atomic --atomic-memory local
-sdma-ep-rate --mode poll-copy-atomic --atomic-memory remote
-sdma-ep-rate --mode poll-only
-sdma-ep-rate --mode atomic-only --atomic-memory local
-```
+## Latency Benchmark
 
-These measure poll packets and local/remote atomic-add packets without copy
-traffic.
-For a queue sweep, select the mode with `MODE`:
+The latency executable is `build/sdma-ep-latency`.
+
+Run a copy-size sweep:
 
 ```bash
-MODE=poll-copy scripts/bench-packet-rate.sh
+scripts/bench-latency.sh
 ```
 
-For a one-queue run covering every mode:
+Queue-state caching is enabled by default. Pass `--no-queue-state` to measure
+the uncached queue-management path.
+
+Use `FINE_GRAINED=1` to collect queue reservation, packet construction,
+submission, fence, and transfer timing:
 
 ```bash
-scripts/bench-packet-rate-isolated.sh
+FINE_GRAINED=1 scripts/bench-latency.sh
 ```
 
-Common environment variables include `SRC_GPU`, `WARMUP`, `ITERATIONS`,
-`OUTPUT_ROOT`, and `BENCHMARK`. Each driver also exposes its sweep values
-as uppercase environment variables near the top of the script.
-
-Each run creates a timestamped directory containing:
-
-- One CSV file for each tested configuration.
-- `summary.tsv`, containing command MPPS, time per command, and device latency
-  for every isolated mode.
-- `summary.md`, containing the same results as a Markdown table.
-- `benchmark.log`, containing commands and console output.
-
-The queue-sweep script additionally writes `summary.csv` containing all queue
-configurations.
-
-To plot one CSV or every individual CSV in a result directory:
+The fine-grained results can be plotted as a stacked PNG:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r scripts/requirements.txt
-python scripts/plot-bandwidth.py results_bandwidth_single_2026-07-29_12h00m00s
+python3 scripts/plot-latency-breakdown.py \
+  results_latency_YYYY-MM-DD_HHhMMmSSs/summary.csv
 ```
 
-To compare regular and device-triggered bandwidth for one queue and one
-destination:
+The latency script accepts `SRC_GPU`, `DST_GPU`, `MIN_COPY_SIZE`,
+`MAX_COPY_SIZE`, `NUM_COPY_COMMANDS`, `WARMUP`, `ITERATIONS`, `FINE_GRAINED`,
+and `OUTPUT_ROOT` overrides.
+
+## Packet-Rate Benchmark
+
+The packet-rate executable is `build/sdma-ep-rate`.
+
+Select one device-generated packet sequence with `--mode`:
 
 ```bash
-python scripts/plot-bandwidth-comparison.py \
-  results_bandwidth_single_2026-07-29_17h49m50s/bandwidth_1dst.csv \
-  /tmp/results_bandwidth_single_device_triggered_2026-07-31_01h09m42s/bandwidth_1dst.csv \
-  --output bandwidth_single_queue_single_destination_comparison.png
+build/sdma-ep-rate --mode copy
+build/sdma-ep-rate --mode poll-copy
+build/sdma-ep-rate --mode copy-atomic --atomic-memory local
+build/sdma-ep-rate --mode poll-copy-atomic --atomic-memory remote
+build/sdma-ep-rate --mode poll-only
+build/sdma-ep-rate --mode atomic-only --atomic-memory local
 ```
 
-The comparison plot uses the common copy-size range and has separate panels
-for GPU wall-clock bandwidth and CPU-observed bandwidth.
+The packet-rate sweep runs one mode while varying queue counts. Select the mode
+with `MODE`:
 
-The original defaults are intentionally large and may allocate several
-gigabytes per GPU. Override copy sizes, destination counts, or producer
-counts for short smoke runs.
+```bash
+MODE=poll-copy scripts/bench-packet-rate.sh
+```
+
+The isolated runner executes all six modes with one queue, including local and
+remote atomic targets:
+
+```bash
+scripts/bench-packet-rate-isolated.sh
+```
+
+The isolated runner creates one CSV per mode, `summary.tsv`, `summary.md`, and
+`benchmark.log`. The queue sweep additionally writes `summary.csv` containing
+all queue configurations.
+
+The packet-rate scripts accept `SRC_GPU`, `DST_GPU`, `MIN_COPY_SIZE`,
+`MAX_COPY_SIZE`, `NUM_COPY_COMMANDS`, `MIN_QUEUES`, `MAX_QUEUES`, `WARMUP`,
+`ITERATIONS`, `MODE`, and `OUTPUT_ROOT` overrides.
