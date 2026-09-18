@@ -29,7 +29,7 @@ set -euo pipefail
 SRC_DIR="${SRC_DIR:-${HOME}/rocm-xio}"
 BUILD_DIR="${BUILD_DIR:-${SRC_DIR}/build}"
 OFFLOAD_ARCH="${OFFLOAD_ARCH:-gfx1250}"
-CTEST_LABEL="${CTEST_LABEL:-nvme kv}"
+CTEST_LABEL="${CTEST_LABEL:-kv}"
 SKIP_GPU="${SKIP_GPU:-0}"
 # KV_NSID is the integer namespace ID reported by the SPDK server's nsid map
 # (e.g. "1"). Linux does not expose KV namespaces as block devices, so there

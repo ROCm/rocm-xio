@@ -2431,15 +2431,20 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
                       target.topQueueId);
     }
 
-    // Detect LBA size from controller/namespace
-    unsigned detected_lba_size = 0;
-    int lba_ret = queryLbaSize(target.controller.c_str(), target.nsid,
-                               &detected_lba_size);
-    if (lba_ret != 0) {
-      return "Failed to obtain LBA size from " + target.controller + ": " +
-             std::string(strerror(-lba_ret));
+    // Detect LBA size from controller/namespace. Skip for KV ops: the
+    // namespace has no LBA format, queryLbaSize would I/O-error against a
+    // KV-only controller, and the nominal value (512) is filled in by the
+    // KV validation block below.
+    if (config->ioParams.kvOp.empty()) {
+      unsigned detected_lba_size = 0;
+      int lba_ret = queryLbaSize(target.controller.c_str(), target.nsid,
+                                 &detected_lba_size);
+      if (lba_ret != 0) {
+        return "Failed to obtain LBA size from " + target.controller + ": " +
+               std::string(strerror(-lba_ret));
+      }
+      target.lbaSize = detected_lba_size;
     }
-    target.lbaSize = detected_lba_size;
 
     // Transfer size, PRP list geometry and data buffer sizing are computed
     // once and shared by every lane, so a mixed-format set of controllers
@@ -2513,22 +2518,32 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
 
   // Validate --verify constraints
   if (config->verify) {
-    if (config->ioParams.writeIo == 0)
-      return "--verify requires --write-io (reads cannot be "
-             "verified without a preceding write phase)";
-    if (config->ioParams.readIo == 0)
-      return "--verify requires --read-io (nothing to verify "
-             "without a read phase)";
-    if (config->ioParams.readIo > config->ioParams.writeIo)
-      return "--verify requires --read-io <= --write-io "
-             "(reads beyond the written range hit LBAs "
-             "that were never seeded with the LFSR pattern)";
+    const bool verifyKvMode = !config->ioParams.kvOp.empty();
+    if (!verifyKvMode) {
+      // LBA mode: write-then-read in one pass
+      if (config->ioParams.writeIo == 0)
+        return "--verify requires --write-io (reads cannot be "
+               "verified without a preceding write phase)";
+      if (config->ioParams.readIo == 0)
+        return "--verify requires --read-io (nothing to verify "
+               "without a read phase)";
+      if (config->ioParams.readIo > config->ioParams.writeIo)
+        return "--verify requires --read-io <= --write-io "
+               "(reads beyond the written range hit LBAs "
+               "that were never seeded with the LFSR pattern)";
+      if (config->ioParams.batchSize > 1)
+        return "--verify requires --batch-size 1 (wavefront "
+               "batching intermixes write and read ops, "
+               "preventing correct read-back verification)";
+    } else {
+      // KV mode: retrieve-only pass; the store was a preceding invocation.
+      // The LFSR seed must match what the store used.
+      if (config->ioParams.kvOp != "retrieve")
+        return "--verify in KV mode requires --kv-op retrieve "
+               "(run a store first with the same --lfsr-seed)";
+    }
     if (config->ioParams.infiniteMode)
       return "--verify is incompatible with --infinite";
-    if (config->ioParams.batchSize > 1)
-      return "--verify requires --batch-size 1 (wavefront "
-             "batching intermixes write and read ops, "
-             "preventing correct read-back verification)";
   }
 
   // ---- KV mode validation ----
@@ -3737,8 +3752,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // beyond that region were never populated by NVMe and would
   // produce false mismatches.
   if (result == hipSuccess && nvmeConfig->verify &&
-      nvmeConfig->ioParams.readIo > 0 && nvmeConfig->ioParams.writeIo > 0) {
-    uint64_t xfer = (uint64_t)ioParams.lbasPerIo * ioParams.lbaSize;
+      (kvMode ? nvmeConfig->ioParams.kvOp == "retrieve"
+              : (nvmeConfig->ioParams.readIo > 0 &&
+                 nvmeConfig->ioParams.writeIo > 0))) {
+    uint64_t xfer = kvMode ? (uint64_t)ioParams.kvValueLen
+                           : (uint64_t)ioParams.lbasPerIo * ioParams.lbaSize;
     size_t verifyBytes = (size_t)(effBatch * xfer);
     if (verifyBytes > nvmeConfig->bufferParams.bufferSize)
       verifyBytes = nvmeConfig->bufferParams.bufferSize;

@@ -25,7 +25,7 @@ on:
       ctest-label:
         description: ctest label regex to run inside the guest
         required: false
-        default: "nvme kv"
+        default: "kv"
       skip-gpu:
         description: Skip GPU bring-up (build-only smoke run)
         required: false
@@ -65,7 +65,12 @@ env:
   # The "rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
   # rocm-xio's build dependencies. MUST be the resolute build (see
   # test-vm-nvme.yml for the full explanation of why noble breaks here).
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260917.g857483b-vm.resolute-rocjitsu-qm.5d68689-qcow2
+  #
+  # MUST be the container-image format (no -qcow2 suffix): the action
+  # extracts the guest disk via `docker create` + `docker cp /output/.`,
+  # which requires a runnable container image. The -qcow2-suffixed tags
+  # are OCI artifacts (schema_version 4) that docker create cannot run.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
 
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
@@ -140,7 +145,7 @@ jobs:
           SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
-          CTEST_LABEL: ${{ inputs.ctest-label || 'nvme kv' }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'kv' }}
           SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
           # kv-nsid is the integer NSID from the SPDK nsid map (e.g. "1");
           # the guest script discovers the controller device itself.
@@ -155,6 +160,18 @@ jobs:
               "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
                KV_NSID='$KV_NSID' \
                ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
+
+      - name: Cross-check SPDK stored the KV keys (host-side)
+        working-directory: .github/compose/spdk-kv-nvme-vm
+        env:
+          SPDK_CONTAINER: spdk-kv-nvme-vm-spdk-nvme-1
+        run: |
+          # The guest has no Docker; run kvdev_mem_get_entry from the runner
+          # where the SPDK container is directly accessible. This step
+          # confirms the KV commands actually reached SPDK rather than
+          # producing false-positive completions on the guest side.
+          SPDK_CONTAINER="$SPDK_CONTAINER" \
+            ./../../scripts/test/spdk-kv-check.sh
 
       - name: Collect guest diagnostics
         if: always()
