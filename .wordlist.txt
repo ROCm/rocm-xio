@@ -1267,3 +1267,13 @@ XIO_CTEST_TIMEOUT_SCALE
 XIO_NVME_MAX_BATCH_DEPTH
 TIMEOUT_SCALE
 BATCH_DEPTH
+BusyWaitSignal
+FFEE
+RelWithDebInfo
+WaitAcquire
+amdhsa
+batchStartTimes
+cuda
+driveEndpointSingle
+rocJITsu
+verifications
