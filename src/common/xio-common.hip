@@ -1722,7 +1722,35 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   hipError_t alloc_err = hipSuccess;
   bool hip_registered = false;
 
-  // Step 1: Allocate queue memory
+  // Step 1: Allocate queue memory.
+  // For rocjitsu (emulated GPU, wall clock rate = 0 KHz) use plain malloc
+  // rather than hipHostMallocMapped: HMM-backed hipHostMallocMapped memory
+  // does not appear in /proc/self/pagemap (page-not-present), so getPhysAddr()
+  // falls back to returning the virtual address.  The kprobe then injects a
+  // virtual address as PRP1 into SPDK's CREATE_SQ/CQ, which SPDK cannot use
+  // as a GPA.  Plain malloc memory IS present in pagemap and getPhysAddr()
+  // returns the correct GPA.  On rocjitsu the GPU kernel runs as host CPU
+  // code, so any CPU-accessible pointer is also GPU-accessible.
+  {
+    int _wclk = 0;
+    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
+    if (!is_device && _wclk == 0) {
+      void* plain = nullptr;
+      hipError_t perr = allocHostMemory(size, &plain, queue_name,
+                                        XIO_HOST_MEM_PLAIN);
+      if (perr == hipSuccess && plain) {
+        memset(plain, 0, size);
+        setup->virt = plain;
+        setup->gpu = plain;
+        setup->phys = getPhysAddr(plain);
+        if (setup->phys == 0)
+          setup->phys = reinterpret_cast<uint64_t>(plain);
+        ROCXIO_LOG_INFO("%s (rocjitsu plain): virt=%p phys=0x%llx\n",
+                        queue_name, plain, (unsigned long long)setup->phys);
+        return 0;
+      }
+    }
+  }
   alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
   if (alloc_err != hipSuccess) {
     ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
@@ -1746,17 +1774,30 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
   // this path is not taken and coherent reallocation is unchanged.
   if (!is_device) {
-    int gpu_clock_khz = 0;
-    (void)hipDeviceGetAttribute(&gpu_clock_khz, hipDeviceAttributeClockRate, 0);
-    if (gpu_clock_khz > 0) {
+    // hipDeviceAttributeWallClockRate is the GPU's hardware real-time clock.
+    // On rocjitsu (emulated GPU) this returns 0 regardless of rocjitsu version;
+    // on real AMD GPU hardware it is always > 0.  When wall clock = 0 the
+    // coherent memory path is skipped because rocjitsu's hipHostMallocCoherent
+    // maps to a physical address domain that does not match /proc/self/pagemap,
+    // causing the kprobe to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
+    int gpu_wall_clock_khz = 0;
+    (void)hipDeviceGetAttribute(&gpu_wall_clock_khz,
+                                hipDeviceAttributeWallClockRate, 0);
+    if (gpu_wall_clock_khz > 0) {
       setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
     }
   }
 
-  // Step 3: Register with HIP (skip if coherent or device memory)
+  // Step 3: Register with HIP (skip if coherent or device memory).
+  // hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
+  // GPU access, so hipHostRegister may return
+  // hipErrorHostMemoryAlreadyRegistered when reallocateQueue was skipped. Treat
+  // that as success.
   if (!setup->uses_coherent && !is_device) {
     hipError_t hip_err = hipHostRegister(setup->virt, size,
                                          hipHostRegisterMapped);
+    if (hip_err == hipErrorHostMemoryAlreadyRegistered)
+      hip_err = hipSuccess;
     if (hip_err != hipSuccess) {
       ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
                       hipGetErrorString(hip_err));
@@ -2840,21 +2881,50 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     // so GPU writes are not reliably visible to the host controller's DMA ->
     // bulk Store content lands as a partial prefix. Fine-grained coherence
     // makes GPU writes globally visible.
-    hipError_t buf_err = allocHostMemory(size, &bufferInfo->hostPtr,
-                                         "GPU accessible buffer host",
-                                         XIO_HOST_MEM_MAPPED |
-                                           XIO_HOST_MEM_COHERENT);
-    if (buf_err != hipSuccess)
-      return buf_err;
+    //
+    // Exception for rocjitsu (wall clock = 0 KHz): both hipHostMallocMapped
+    // and hipHostMallocCoherent use HMM-backed memory whose pages do not
+    // appear in /proc/self/pagemap, so getPhysAddr() cannot return the correct
+    // GPA.  On rocjitsu the GPU kernel runs as host CPU code, so plain malloc
+    // IS accessible and its pagemap GPA IS where the CPU writes land.
+    int _wclk = 0;
+    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
+    bool rocjitsu_plain = (_wclk == 0);
 
-    bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
-    if (!bufferInfo->dmaAddr) {
-      ROCXIO_LOG_ERROR("Failed to get buffer physical address\n");
-      (void)hipHostFree(bufferInfo->hostPtr);
-      bufferInfo->hostPtr = nullptr;
-      return hipErrorInvalidValue;
+    if (rocjitsu_plain) {
+      hipError_t perr = allocHostMemory(size, &bufferInfo->hostPtr,
+                                        "GPU accessible buffer (rocjitsu)",
+                                        XIO_HOST_MEM_PLAIN);
+      if (perr != hipSuccess || !bufferInfo->hostPtr)
+        return perr ? perr : hipErrorMemoryAllocation;
+      // Touch all pages to fault them in before pagemap lookup.
+      memset(bufferInfo->hostPtr, 0, size);
+      bufferInfo->gpuPtr = bufferInfo->hostPtr;
+      bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
+      if (!bufferInfo->dmaAddr)
+        bufferInfo->dmaAddr = reinterpret_cast<uint64_t>(bufferInfo->hostPtr);
+      ROCXIO_LOG_INFO(
+        "  Data buffer (rocjitsu plain): virt=%p phys=0x%016llx\n",
+        bufferInfo->hostPtr, (unsigned long long)bufferInfo->dmaAddr);
+    } else {
+      hipError_t buf_err = allocHostMemory(size, &bufferInfo->hostPtr,
+                                           "GPU accessible buffer host",
+                                           XIO_HOST_MEM_MAPPED |
+                                             XIO_HOST_MEM_COHERENT);
+      if (buf_err != hipSuccess)
+        return buf_err;
+
+      bufferInfo->dmaAddr = getPhysAddr(bufferInfo->hostPtr);
+      if (!bufferInfo->dmaAddr) {
+        ROCXIO_LOG_ERROR("Failed to get buffer physical address\n");
+        (void)hipHostFree(bufferInfo->hostPtr);
+        bufferInfo->hostPtr = nullptr;
+        return hipErrorInvalidValue;
+      }
     }
 
+    // Per-page physical address resolution (works for both plain malloc and
+    // hipHostMallocCoherent when pages appear in pagemap).
     {
       constexpr size_t nvme_page = 4096;
       long ps = sysconf(_SC_PAGESIZE);
@@ -2867,17 +2937,13 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
                                         hipHostMallocMapped);
       if (pa_err == hipSuccess && pa) {
         memset(pa, 0, pa_bytes);
-        /* Heap-allocate the per-system-page scratch table: a stack array would
-         * cap the buffer at 1024 pages (4 MiB at 4 KiB pages); large KV values
-         * (up to 64 MiB) need one entry per page (16384). */
         uint64_t* sys_addrs = (uint64_t*)malloc((size_t)sys_np *
                                                 sizeof(uint64_t));
         int ret = sys_addrs ? getPagePhysAddrs(bufferInfo->hostPtr, size,
                                                sys_addrs, sys_np)
                             : -ENOMEM;
         if (ret < 0) {
-          ROCXIO_LOG_WARN("Failed to resolve per-page "
-                          "phys addrs: %s\n",
+          ROCXIO_LOG_WARN("Failed to resolve per-page phys addrs: %s\n",
                           strerror(-ret));
           (void)hipHostFree(pa);
         } else {
@@ -2892,8 +2958,8 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
           }
           bufferInfo->pagePhysAddrs = pa;
           bufferInfo->numPages = nvme_np;
-          ROCXIO_LOG_INFO("  Resolved %u NVMe-page phys "
-                          "addrs for host buffer\n",
+          ROCXIO_LOG_INFO("  Resolved %u NVMe-page phys addrs for "
+                          "host buffer\n",
                           nvme_np);
         }
         free(sys_addrs);
@@ -2906,26 +2972,26 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     ROCXIO_LOG_INFO("  GPU can write directly to this buffer\n");
     ROCXIO_LOG_INFO("  NVMe can DMA from this buffer\n");
 
-    // Verify buffer is GPU-accessible and get GPU pointer
-    hipPointerAttribute_t attr;
-    hipError_t attr_err = hipPointerGetAttributes(&attr, bufferInfo->hostPtr);
-    if (attr_err != hipSuccess) {
-      ROCXIO_LOG_WARN("Buffer may not be GPU-accessible: %s\n",
-                      hipGetErrorString(attr_err));
-      bufferInfo->gpuPtr = bufferInfo->hostPtr; // Fallback to host pointer
-    } else {
-      // Get explicit GPU pointer (may be same as host pointer for mapped
-      // memory)
-      void* gpu_ptr = nullptr;
-      hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr,
-                                                       bufferInfo->hostPtr, 0);
-      if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
-        bufferInfo->gpuPtr = gpu_ptr;
-        ROCXIO_LOG_INFO("Buffer GPU pointer: %p (host: %p)\n",
-                        bufferInfo->gpuPtr, bufferInfo->hostPtr);
-      } else {
-        // Fallback: use host pointer (should work for hipHostMallocMapped)
+    // GPU pointer: already set for rocjitsu plain path.
+    if (!rocjitsu_plain) {
+      hipPointerAttribute_t attr;
+      hipError_t attr_err = hipPointerGetAttributes(&attr, bufferInfo->hostPtr);
+      if (attr_err != hipSuccess) {
+        ROCXIO_LOG_WARN("Buffer may not be GPU-accessible: %s\n",
+                        hipGetErrorString(attr_err));
         bufferInfo->gpuPtr = bufferInfo->hostPtr;
+      } else {
+        void* gpu_ptr = nullptr;
+        hipError_t gpu_ptr_err = hipHostGetDevicePointer(&gpu_ptr,
+                                                         bufferInfo->hostPtr,
+                                                         0);
+        if (gpu_ptr_err == hipSuccess && gpu_ptr != nullptr) {
+          bufferInfo->gpuPtr = gpu_ptr;
+          ROCXIO_LOG_INFO("Buffer GPU pointer: %p (host: %p)\n",
+                          bufferInfo->gpuPtr, bufferInfo->hostPtr);
+        } else {
+          bufferInfo->gpuPtr = bufferInfo->hostPtr;
+        }
       }
     }
     bufferInfo->isDeviceMemory = false;
@@ -2947,7 +3013,11 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   if (bufferInfo->isDeviceMemory) {
     freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
   } else {
-    freeHostMemory(bufferInfo->hostPtr, XIO_HOST_MEM_MAPPED);
+    // Try hipHostFree first; fall back to free() for plain-malloc allocations
+    // (rocjitsu path) where hipHostFree would return an error.
+    hipError_t ferr = hipHostFree(bufferInfo->hostPtr);
+    if (ferr != hipSuccess)
+      free(bufferInfo->hostPtr);
   }
 
   if (bufferInfo->pagePhysAddrs) {

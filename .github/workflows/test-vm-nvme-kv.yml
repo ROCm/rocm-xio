@@ -55,12 +55,12 @@ env:
   QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.g2cc8e79-rocjitsu.909c17f
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
 
   # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
 
   # The "rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
   # rocm-xio's build dependencies. MUST be the resolute build (see
@@ -70,7 +70,7 @@ env:
   # extracts the guest disk via `docker create` + `docker cp /output/.`,
   # which requires a runnable container image. The -qcow2-suffixed tags
   # are OCI artifacts (schema_version 4) that docker create cannot run.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689
 
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
