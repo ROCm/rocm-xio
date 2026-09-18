@@ -682,9 +682,13 @@ hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
   }
 
   if (flags & XIO_HOST_MEM_PLAIN) {
-    *ptr = malloc(size);
-    if (!*ptr) {
-      std::cerr << "Error: (" << label << "): malloc failed" << std::endl;
+    // Page-align: NVMe PRP entries require page-aligned addresses so that
+    // getPhysAddr() returns a GPA with zero page offset for correct PRP list
+    // construction and SPDK DMA access.
+    int rc = posix_memalign(ptr, 4096, size);
+    if (rc != 0 || !*ptr) {
+      std::cerr << "Error: (" << label << "): posix_memalign failed"
+                << std::endl;
       return hipErrorMemoryAllocation;
     }
     memset(*ptr, 0, size);

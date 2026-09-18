@@ -2932,6 +2932,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                          target.controller.c_str());
         return hipErrorInvalidValue;
       }
+      // When the GPU VA for MMIO (bar0_gpu) differs from the CPU VA
+      // (bar0_cpu), the GPU kernel's doorbell writes go to the GPU VA which
+      // is not the address that QEMU intercepts for vfio-user forwarding to
+      // SPDK.  Use the CPU VA instead — on any target where GPU=CPU (e.g.
+      // rocjitsu emulated GPU), the CPU VA IS the QEMU-interceptable address.
+      if (bar0_cpu != bar0_gpu) {
+        ROCXIO_LOG_INFO(
+          "%s: GPU/CPU BAR0 VA mismatch, using CPU VA for doorbell "
+          "(cpu=%p gpu=%p)\n",
+          target.controller.c_str(), bar0_cpu, bar0_gpu);
+        bar0_gpu = bar0_cpu;
+      }
       ROCXIO_LOG_INFO("%s: NVMe BAR0 mapped for direct doorbell access "
                       "at %p.\n",
                       target.controller.c_str(), bar0_gpu);
