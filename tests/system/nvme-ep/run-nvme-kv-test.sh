@@ -64,9 +64,21 @@ fi
 # the last occurrence of a flag.
 KV_MAX_VALUE=65536
 
+# Add --pci-mmio-bridge when the rocjitsu/vfio-user CI environment sets
+# XIO_FORCE_PCI_MMIO_BRIDGE=1 (or USE_PCI_MMIO_BRIDGE=1). On rocjitsu,
+# doorbell writes from the GPU kernel cannot reliably reach the SPDK
+# vfio-user controller via direct BAR0 mmap; the pci-mmio-bridge shadow
+# buffer path is the supported alternative.
+PCI_MMIO_BRIDGE_ARG=""
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
+   [ "${USE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
+fi
+
 exec "$XIO_TESTER" nvme-ep \
     --controller "$KV_CTRL" \
     --namespace  "$KV_NSID" \
     --value-size "$KV_MAX_VALUE" \
     --data-buffer-size "$KV_MAX_VALUE" \
+    ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
     "$@"
