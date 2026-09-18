@@ -156,13 +156,17 @@ pin() {
 # whether a failure belongs to the image or to the code under test.
 QEMU_IMAGE="${QEMU_IMAGE:-$(pin QEMU_IMAGE)}"
 ROCJITSU_IMAGE="${ROCJITSU_IMAGE:-$(pin ROCJITSU_IMAGE)}"
-ROCJITSU_FIRMWARE_IMAGE="${ROCJITSU_FIRMWARE_IMAGE:-$(pin ROCJITSU_FIRMWARE_IMAGE)}"
+# No pin of its own: the rocjitsu image carries vfio_guest_firmware.py again.
+# Still overridable, which is how a firmware regression is bisected against a
+# tag that serves the device correctly.
+ROCJITSU_FIRMWARE_IMAGE="${ROCJITSU_FIRMWARE_IMAGE:-${ROCJITSU_IMAGE}}"
 QCOW2_IMAGE="${QCOW2_IMAGE:-$(pin QCOW2_IMAGE)}"
 
 note() { [ "$2" = "$(pin "$1")" ] || printf ' (overridden)'; }
 echo "qemu:     ${QEMU_IMAGE}$(note QEMU_IMAGE "$QEMU_IMAGE")"
 echo "rocjitsu: ${ROCJITSU_IMAGE}$(note ROCJITSU_IMAGE "$ROCJITSU_IMAGE")"
-echo "firmware: ${ROCJITSU_FIRMWARE_IMAGE}$(note ROCJITSU_FIRMWARE_IMAGE "$ROCJITSU_FIRMWARE_IMAGE")"
+[ "$ROCJITSU_FIRMWARE_IMAGE" = "$ROCJITSU_IMAGE" ] \
+    || echo "firmware: ${ROCJITSU_FIRMWARE_IMAGE} (overridden)"
 echo "qcow2:    ${QCOW2_IMAGE}$(note QCOW2_IMAGE "$QCOW2_IMAGE")"
 
 if [ -z "$WORKDIR" ]; then
@@ -221,7 +225,7 @@ fetch() {
 }
 fetch "$QEMU_IMAGE"
 fetch "$ROCJITSU_IMAGE"
-fetch "$ROCJITSU_FIRMWARE_IMAGE"
+[ "$ROCJITSU_FIRMWARE_IMAGE" = "$ROCJITSU_IMAGE" ] || fetch "$ROCJITSU_FIRMWARE_IMAGE"
 fetch "$QCOW2_IMAGE"
 
 say "Extracting guest disk payload"

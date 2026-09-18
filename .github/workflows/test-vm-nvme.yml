@@ -67,26 +67,22 @@ env:
   # the qemu *branch* instead, so two rebuilds could share a suffix and differ
   # in source; prefer commit-suffixed tags.
   QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
-  # A different lineage from the other pins here: built from the vfio-rocjitsu
-  # tree, not from ci-images, because stock rocJITsu cannot run this suite.
-  # Five local patches are needed before the guest gets past bring-up, and the
-  # last of them is what makes GPU tests run at all -- without it the CP never
-  # asks a gfx12 runtime for scratch, and every dispatch that needs scratch
-  # hangs forever. The suffix names the upstream commit and a sha256 over the
-  # patch series, since the patches are not the branch. NotesForRocjitsu.md in
-  # that tree documents each one for the rocJITsu maintainers; when they land
-  # upstream this pin should move back to a plain ci-images tag.
-  ROCJITSU_IMAGE: docker.io/sbates130272/vfio-rocjitsu:20260918-rocjitsu.20d4ce1c-patches.8e26335c
-  # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
-  # gfx1250 firmware blobs, was dropped from the image after this tag. Used
-  # solely to synthesise firmware, never to serve the device.
+  # Stock rocJITsu cannot run this suite: five local patches are needed before
+  # the guest gets past bring-up, and the last of them is what makes GPU tests
+  # run at all -- without it the CP never asks a gfx12 runtime for scratch, and
+  # every dispatch that needs scratch hangs forever. This image carries all
+  # five; ci-images builds it from the vfio-rocjitsu patch series, so the
+  # binaries are identical to a local vfio-rocjitsu build of the same commit
+  # (verified by digest). NotesForRocjitsu.md in that tree documents each patch
+  # for the rocJITsu maintainers.
   #
-  # Still on the old <date>-<component> scheme: rocjitsu.730bc62 was never
-  # rebuilt under the .g<ci-commit> scheme, so no such tag exists to move to.
-  # This pin therefore still carries the re-push risk described above. Ask for
-  # a .g<ci-commit> rebuild of 730bc62, or for vfio_guest_firmware.py to come
-  # back to the current image so this second pin can be dropped entirely.
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
+  # This also serves the gfx1250 firmware stubs. vfio_guest_firmware.py was
+  # absent from the image for several tags, which forced a second pin held back
+  # at rocjitsu.730bc62 purely to synthesise firmware; the generator is back, so
+  # ROCJITSU_FIRMWARE_IMAGE now defaults to this image and the second pin is
+  # gone. The generator it carries emits a superset of the old one: the same
+  # header fixtures plus the two MES names, ip_discovery.bin and a manifest.
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
   # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace,
   # amdgpu-dkms and rocm-xio's build dependencies, which is most of what
   # provisioning used to do by hand.
@@ -158,7 +154,6 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
           ROCJITSU_IMAGE: ${{ env.ROCJITSU_IMAGE }}
-          ROCJITSU_FIRMWARE_IMAGE: ${{ env.ROCJITSU_FIRMWARE_IMAGE }}
           ANSIBLE_HOST_KEY_CHECKING: "False"
         run: ./scripts/test/vm-provision.sh
 

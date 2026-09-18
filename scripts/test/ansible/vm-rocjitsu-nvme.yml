@@ -133,10 +133,10 @@
     # in, stops at gc_12_0_1. So the stubs rocjitsu generates are the only
     # source, which is what qemu-minimal's vm-rocjitsu.yml does too.
     #
-    # Both generators live in the rocjitsu image, but not in every tag:
-    # vfio_guest_firmware.py was dropped after rocjitsu.730bc62, so
-    # rocjitsu_firmware_image is pinned separately from the image that
-    # serves the device.
+    # Both generators live in the rocjitsu image, but vfio_guest_firmware.py
+    # was absent from it for several tags, so rocjitsu_firmware_image can still
+    # be pointed at a different tag from the one that serves the device. It
+    # defaults to the same image, which is what the current pin wants.
     - name: Create controller-side temp dir for generated firmware
       ansible.builtin.tempfile:
         state: directory
