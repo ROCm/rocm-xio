@@ -4684,25 +4684,15 @@ __host__ int createQueue(const char* nvme_device,
   ROCXIO_LOG_INFO("NVMe device %s detected as: %s.\n", nvme_device,
                   is_emulated ? "EMULATED" : "REAL");
 
-  // For vfio-user SPDK NVMe (is_emulated=true, VID=0x4e58): coherent host
-  // memory obtained via hipHostMallocCoherent is not visible in /proc/pagemap,
-  // so getPhysAddr() falls back to returning the virtual address.  The kprobe
-  // then injects a virtual address into SPDK's CREATE_SQ/CQ PRP1, which SPDK
-  // cannot translate — it reads zeros from the SQ and no I/O is processed.
-  // Force sq/cq into VRAM; exportRegVramBuf correctly exports a DMA-visible
-  // GPA via DMA-BUF even for this class of device.
-  if (is_emulated) {
-    if (!sq_is_device) {
-      sq_is_device = true;
-      ROCXIO_LOG_INFO("vfio-user NVMe: forcing SQ into VRAM for correct "
-                      "DMA address export\n");
-    }
-    if (!cq_is_device) {
-      cq_is_device = true;
-      ROCXIO_LOG_INFO("vfio-user NVMe: forcing CQ into VRAM for correct "
-                      "DMA address export\n");
-    }
-  }
+  // For vfio-user SPDK NVMe (is_emulated=true, VID=0x4e58) the contig DMA
+  // path (setupContigQueueForGpu -> dma_alloc_coherent + mmap) produces memory
+  // whose GPU pointer does not share physical pages with the host virtual
+  // address: the GPU writes SQEs to the wrong location and SPDK reads zeros.
+  // exportRegVramBuf (the VRAM/DMA-BUF path) fails for this BDF class.
+  // Instead, keep sq/cq in host memory (sq_is_device/cq_is_device remain
+  // false) and bypass the contig path — hipHostMalloc-backed memory obtained
+  // via setupQueueForGpu IS visible in pagemap and getPhysAddr() returns a
+  // correct GPA that the kprobe can inject into SPDK's CREATE_SQ/CQ PRP1.
 
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
