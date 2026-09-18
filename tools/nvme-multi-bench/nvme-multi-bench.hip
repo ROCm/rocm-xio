@@ -9,7 +9,8 @@
  *   sudo ./nvme-multi-bench [options] /dev/nvme1 /dev/nvme2 ...
  *
  * Options:
- *   --queue-id  Q   NVMe I/O queue ID to create on each controller (default: 32)
+ *   --queue-id  Q   NVMe I/O queue ID to create on each controller
+ *               (default: 32)
  *   --depth     D   iodepth / batch_depth per queue (default: 8)
  *   --runtime   S   measurement duration in seconds (default: 30)
  *   --gpu       G   GPU device index (default: 0)
@@ -87,10 +88,10 @@ struct QueueCtx {
 #define HIP_CHECK(call)                                                        \
   do {                                                                         \
     hipError_t _e = (call);                                                    \
-    if (_e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,            \
-              hipGetErrorString(_e));                                           \
-      return -1;                                                                \
+    if (_e != hipSuccess) {                                                    \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
+              hipGetErrorString(_e));                                          \
+      return -1;                                                               \
     }                                                                          \
   } while (0)
 
@@ -103,7 +104,7 @@ static int setup_queue(QueueCtx& q, int queue_id, size_t bs,
   if (queryLbaSize(q.controller.c_str(), q.nsid, &q.lba_size) < 0)
     return -1;
   if (queryNamespaceCapacity(q.controller.c_str(), q.nsid,
-                              &q.ns_capacity_lbas) < 0)
+                             &q.ns_capacity_lbas) < 0)
     return -1;
 
   q.kmod_fd = open(ROCM_XIO_DEVICE_PATH, O_RDWR | O_CLOEXEC);
@@ -118,8 +119,8 @@ static int setup_queue(QueueCtx& q, int queue_id, size_t bs,
   q.bar0_cpu = bar0_cpu;
   q.bar0_gpu = bar0_gpu;
 
-  if (createQueue(q.controller.c_str(), ROCM_XIO_DEVICE_PATH, q.queue_id,
-                  1024, q.nvme_bdf, memory_mode, &q.qi) < 0)
+  if (createQueue(q.controller.c_str(), ROCM_XIO_DEVICE_PATH, q.queue_id, 1024,
+                  q.nvme_bdf, memory_mode, &q.qi) < 0)
     return -1;
 
   q.nvme_fd = open(q.controller.c_str(), O_RDWR | O_CLOEXEC);
@@ -136,16 +137,15 @@ static int setup_queue(QueueCtx& q, int queue_id, size_t bs,
 
   q.buf_size = bs;
   HIP_CHECK(xio::allocateGpuAccessibleBuffer(bs, memory_mode, q.nvme_bdf,
-                                              q.controller.c_str(),
-                                              &q.data_buf));
+                                             q.controller.c_str(),
+                                             &q.data_buf));
 
   /* Doorbell */
   q.doorbell = {};
   q.doorbell.usePciMmioBridge = false;
   q.doorbell.nvmeBar0Gpu = q.bar0_gpu;
   q.doorbell.nvmeTargetBdf = q.nvme_bdf;
-  q.doorbell.doorbellOffset =
-    doorbellBase + (q.queue_id * 2) * doorBellStride;
+  q.doorbell.doorbellOffset = doorbellBase + (q.queue_id * 2) * doorBellStride;
 
   /* Buffer params */
   q.buf_params = {};
@@ -245,8 +245,7 @@ int main(int argc, char** argv) {
 
   hipError_t herr = hipSetDevice(gpu_id);
   if (herr != hipSuccess) {
-    fprintf(stderr, "hipSetDevice(%d): %s\n", gpu_id,
-            hipGetErrorString(herr));
+    fprintf(stderr, "hipSetDevice(%d): %s\n", gpu_id, hipGetErrorString(herr));
     return 1;
   }
 
@@ -295,8 +294,7 @@ int main(int argc, char** argv) {
 
   hipMemcpy(d_configs, h_configs.data(), n * sizeof(XioEndpointConfig),
             hipMemcpyHostToDevice);
-  hipMemcpy(d_io, h_io.data(), n * sizeof(nvmeIoParams),
-            hipMemcpyHostToDevice);
+  hipMemcpy(d_io, h_io.data(), n * sizeof(nvmeIoParams), hipMemcpyHostToDevice);
   hipMemcpy(d_door, h_door.data(), n * sizeof(nvmeDoorbellParams),
             hipMemcpyHostToDevice);
   hipMemcpy(d_buf, h_buf.data(), n * sizeof(nvmeBufferParams),
