@@ -1,0 +1,350 @@
+---
+# Build and test rocm-xio inside a VM that has a rocjitsu emulated AMD GPU
+# attached over vfio-user and an emulated NVMe SSD behind the QEMU
+# pci-mmio-bridge. This is the only CI path that exercises nvme-ep end to
+# end without physical hardware.
+#
+# Runs on every pull request into main, plus weekly and on demand. This is an
+# expensive gate: a full ROCm + DKMS provision plus emulated-GPU execution takes
+# the better part of an hour, so pushes to an open PR cancel the in-flight run
+# rather than queueing behind it.
+#
+# Every image is pinned to a dated tag. Bump these deliberately; do not
+# switch them to :latest.
+
+name: rocm-xio - test-vm-nvme
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ctest-label:
+        description: ctest label regex to run inside the guest
+        required: false
+        default: nvme
+      skip-gpu:
+        description: Skip GPU bring-up (build-only smoke run)
+        required: false
+        default: "0"
+      timeout-scale:
+        description: >-
+          CTest timeout multiplier in the guest. The GPU is emulated, so
+          every dispatch is interpreted and the stock budgets do not fit.
+          Empty leaves the guest script's default of 4. Raising this eats
+          into the job's timeout-minutes ceiling.
+        required: false
+        default: ""
+      ctest-exclude-label:
+        description: >-
+          ctest label regex to exclude. Empty runs everything the label
+          selects. Pull requests default to excluding stress; this input
+          only applies to manual runs.
+        required: false
+        default: ""
+      batch-depth:
+        description: >-
+          nvme-ep per-batch private array bound. Each entry costs 40 B/thread
+          and the emulated device backs only ~1300 B/thread of scratch, so
+          this is the knob that decides whether a dispatch fits. Empty leaves
+          the guest script's default of 16. Raise it to sweep the ceiling;
+          expect code 701 above it.
+        required: false
+        default: ""
+  schedule:
+    # Weekly, off the hour so this does not pile onto every other cron job.
+    - cron: '17 5 * * 1'
+
+# A ~1h job on every push would otherwise pile up several runs deep on an
+# actively worked PR. Only the tip of a branch is worth testing.
+concurrency:
+  group: test-vm-nvme-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tags are <date>.g<ci-commit>-<component-commits>. The leading date alone was
+  # not unique: the same date+component tag was re-pushed pointing at a new
+  # digest, so a pin silently changed meaning under us. The .g<ci-commit> field
+  # makes every rebuild a distinct tag. Never drop it, and never use :latest.
+  #
+  # The registry also carries variant-only tags (qemu.<commit>-vfu.<commit>) and
+  # :latest. Both move. Only the fully specified form below is stable.
+  #
+  # The component suffix names the *source* commits, not the build: a cmake
+  # option change (RJ_LOG_GROUPS, say) produces a different binary under an
+  # unchanged suffix. Compare digests, not suffixes, when a rebuild is meant
+  # to change behaviour.
+  #
+  # MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
+  # The component suffix is qemu-commit.libvfio-user-commit. Earlier tags named
+  # the qemu *branch* instead, so two rebuilds could share a suffix and differ
+  # in source; prefer commit-suffixed tags.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
+  # Stock rocJITsu cannot run this suite: five local patches are needed before
+  # the guest gets past bring-up, and the last of them is what makes GPU tests
+  # run at all -- without it the CP never asks a gfx12 runtime for scratch, and
+  # every dispatch that needs scratch hangs forever. This image carries all
+  # five; ci-images builds it from the vfio-rocjitsu patch series, so the
+  # binaries are identical to a local vfio-rocjitsu build of the same commit
+  # (verified by digest). NotesForRocjitsu.md in that tree documents each patch
+  # for the rocJITsu maintainers.
+  #
+  # This also serves the gfx1250 firmware stubs. vfio_guest_firmware.py was
+  # absent from the image for several tags, which forced a second pin held back
+  # at rocjitsu.730bc62 purely to synthesise firmware; the generator is back, so
+  # ROCJITSU_FIRMWARE_IMAGE now defaults to this image and the second pin is
+  # gone. The generator it carries emits a superset of the old one: the same
+  # header fixtures plus the two MES names, ip_discovery.bin and a manifest.
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
+  # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace,
+  # amdgpu-dkms and rocm-xio's build dependencies, which is most of what
+  # provisioning used to do by hand.
+  #
+  # MUST be the resolute build, not noble. Both boot the same kernel,
+  # 7.0.0-31-generic, but repo.radeon.com keys its apt suite off the release
+  # codename: noble gets the ~24.04 amdgpu-dkms, whose kcl layer does not build
+  # against 7.0, so that image ships a module built for 6.8 that can never load
+  # and the in-tree driver loads instead -- and the in-tree driver rejects this
+  # device with "Failed to add vcn/jpeg ip block(UVD_HWIP:0x0)" because rocjitsu
+  # does not model VCN/JPEG. Resolute gets the 26.04 package, which builds
+  # against 7.0, loads, and brings up a KFD node.
+  #
+  # The unsuffixed tag, not the "-qcow2" one: this is the variant whose /output
+  # holds batesste-ci-vm.qcow2, id_rsa and vm-info.json, which is what
+  # run-vm-nvme.sh copies out.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
+  VM_IMAGES_DIR: /var/lib/qemu-tool/images
+  SSH_PORT: "2222"
+
+jobs:
+  test-vm-nvme:
+    name: nvme-ep against an emulated NVMe SSD
+    # Pinned, not ubuntu-latest: the runner image is as much a build input as
+    # the container tags below, and "latest" moves under us the same way a
+    # retagged image does. rocm-ernic's VM lanes pin theirs for this reason.
+    runs-on: ubuntu-24.04
+    # The guest scales every ctest budget by 4 because the GPU is emulated,
+    # and the nvme label includes entries with 600 s and 900 s budgets. A run
+    # where those actually time out needs more than the old 120.
+    timeout-minutes: 240
+
+    steps:
+      - name: Check out code.
+        uses: actions/checkout@v5.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # jmespath is no longer needed: json_query came from the rocm_setup role,
+      # and the guest image now carries ROCm, so the playbook uses no roles.
+      - name: Install ansible
+        run: python3 -m pip install ansible-core
+
+      - name: Install host tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            cloud-image-utils \
+            qemu-utils \
+            rsync
+
+      # Size the guest from the runner rather than pinning 4 vCPU / 8 GiB,
+      # following the same shape as rocm-ernic's system-tests lanes: derive
+      # from the host, then floor at whatever the emulated device actually
+      # needs. A larger runner class then benefits without another edit here.
+      #
+      # Eight is a hard floor, not a preference. The guest's NVMe I/O queue
+      # count is min(num_online_cpus, max_ioqpairs), so vCPUs are queues:
+      # a 4-vCPU guest gets "nvme0: 4/0/0 default/read/poll queues" and the
+      # qid stress tests, which default to STRESS_CPU=7 and therefore QID 8,
+      # fail every iteration with
+      #   QUIESCE_NS: qid 8 out of range (nvme0n1 has 4 hw queues)
+      # surfacing as a bare ERANGE. Four more tests die on the hijack guard,
+      # which refuses --num-queues 4 when the controller has only 4 queues to
+      # give. Oversubscribing the runner's cores is the cheaper mistake:
+      # rocjitsu interprets every dispatch anyway, so the guest is not
+      # CPU-bound on the host in the way the vCPU count suggests.
+      - name: Size the guest from the runner
+        id: size
+        run: |
+          set -euo pipefail
+          HOST_CPUS=$(nproc)
+          HOST_MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+
+          # One core stays with the host: rocjitsu, the qemu process and the
+          # runner agent share it.
+          VM_VCPUS=$(( HOST_CPUS - 1 ))
+          [ "$VM_VCPUS" -lt 8 ] && VM_VCPUS=8
+
+          VM_VMEM=$(( HOST_MEM_MB * 3 / 4 ))
+          [ "$VM_VMEM" -gt 8192 ] && VM_VMEM=8192
+          [ "$VM_VMEM" -lt 2048 ] && VM_VMEM=2048
+
+          # The vfio-user server reaches guest RAM through a shared memfd, so
+          # /dev/shm must be at least the guest's size; round up and add slack.
+          SHM_GB=$(( VM_VMEM / 1024 + 4 ))
+
+          echo "host: ${HOST_CPUS} cpu / ${HOST_MEM_MB} MiB"
+          echo "guest: ${VM_VCPUS} vcpu / ${VM_VMEM} MiB / ${SHM_GB}g shm"
+          {
+            echo "vcpus=${VM_VCPUS}"
+            echo "vmem=${VM_VMEM}"
+            echo "shm-size=${SHM_GB}g"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Boot the rocjitsu + NVMe VM
+        id: vm
+        uses: ./.github/actions/rocjitsu-nvme-vm
+        with:
+          qemu-image: ${{ env.QEMU_IMAGE }}
+          rocjitsu-image: ${{ env.ROCJITSU_IMAGE }}
+          qcow2-image: ${{ env.QCOW2_IMAGE }}
+          images-dir: ${{ env.VM_IMAGES_DIR }}
+          ssh-port: ${{ env.SSH_PORT }}
+          vcpus: ${{ steps.size.outputs.vcpus }}
+          vmem: ${{ steps.size.outputs.vmem }}
+          shm-size: ${{ steps.size.outputs.shm-size }}
+          nvme-count: "1"
+
+      - name: Provision ROCm, amdgpu and firmware in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          ROCJITSU_IMAGE: ${{ env.ROCJITSU_IMAGE }}
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: ./scripts/test/vm-provision.sh
+
+      - name: Copy the rocm-xio checkout into the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          # Anchored excludes: an unanchored "build" also drops scripts/build/,
+          # which the guest build needs. See the same note in run-vm-nvme.sh.
+          rsync -az --delete \
+            --exclude /build --exclude /build-alola --exclude /.venv \
+            -e "ssh -i $SSH_KEY -p $SSH_PORT \
+                -o BatchMode=yes \
+                -o NoHostAuthenticationForLocalhost=yes \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null" \
+            ./ "$SSH_USER@localhost:rocm-xio/"
+
+      - name: Build and run nvme-ep tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'nvme' }}
+          # The stress label is three tests and a quarter of the suite's wall
+          # clock -- nvme-qid-recreate-gpu-stress alone was 866 s of a 3845 s
+          # ctest, 23% for one test. They are also the slowest per unit of
+          # information: the qid tests spend ~40 s per iteration on controller
+          # resets and warm-up reads around an operation that resolves in
+          # 0.11 s. Worth running, not worth running on every push, so the
+          # weekly schedule and manual runs still get them.
+          CTEST_EXCLUDE_LABEL: ${{ github.event_name == 'pull_request' && 'stress' || inputs.ctest-exclude-label || '' }}
+          SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
+          TIMEOUT_SCALE: ${{ inputs.timeout-scale || '' }}
+          BATCH_DEPTH: ${{ inputs.batch-depth || '' }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+               ${CTEST_EXCLUDE_LABEL:+CTEST_EXCLUDE_LABEL='$CTEST_EXCLUDE_LABEL'} \
+               ${TIMEOUT_SCALE:+TIMEOUT_SCALE='$TIMEOUT_SCALE'} \
+               ${BATCH_DEPTH:+BATCH_DEPTH='$BATCH_DEPTH'} \
+               ./rocm-xio/scripts/test/vm-guest-test.sh"
+
+      - name: Collect guest diagnostics
+        if: always()
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          mkdir -p artifacts
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'sudo dmesg' > artifacts/guest-dmesg.txt 2>&1 || true
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'cat rocm-xio/build/Testing/Temporary/LastTest.log' \
+              > artifacts/ctest-last.log 2>&1 || true
+
+      # Head and tail, never the whole stream. rocjitsu is built with
+      # RJ_LOG_GROUPS=CP and util/log.h reads that into a constexpr, so there
+      # is no runtime gate: it narrates every command-processor poll for the
+      # life of the container. The unbounded form of this step wrote a 19.3 GB
+      # artifact and took 14m53s on run 35368507895, and on the longer run
+      # before it it was still going after 74 minutes when the runner was
+      # declared lost -- taking the upload, and any explanation of the test
+      # failure, with it. rocm-ernic's VM lanes never stream a live log into
+      # an artifact for the same reason: they tail a bounded file instead.
+      #
+      # head runs before the filter on purpose. Either order is fast when
+      # non-CP lines are dense near the start, but head-first is bounded by
+      # construction -- it reads 5000 lines and SIGPIPEs the reader -- whereas
+      # filter-first is bounded only by how far apart the interesting lines
+      # happen to fall, and a CP-only stretch walks the whole file. --tail
+      # seeks, so the tail side is cheap either way.
+      #
+      # The action left a .env in this directory, so compose resolves without
+      # the image pins being repeated here.
+      - name: Collect compose logs
+        if: always()
+        working-directory: .github/compose/rocjitsu-nvme-vm
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          # Bring-up: the vfu/pci warnings that explain a device which never
+          # served are in the first few hundred lines.
+          timeout 120 docker compose logs --no-color 2>&1 \
+            | head -5000 \
+            | grep -v '\[rj log CP\]' \
+            > "$GITHUB_WORKSPACE/artifacts/compose-head.log" || true
+          # What the stack was doing when the tests gave up.
+          timeout 120 docker compose logs --no-color --tail 20000 2>&1 \
+            | grep -v '\[rj log CP\]' \
+            > "$GITHUB_WORKSPACE/artifacts/compose-tail.log" || true
+          ls -lh "$GITHUB_WORKSPACE/artifacts/"
+
+      # Named files rather than the whole directory, the way rocm-ernic's
+      # lanes enumerate theirs: a directory upload takes whatever a step
+      # happened to leave behind, which is how a 19.3 GB compose log ended up
+      # costing 1m42s of upload on top of the 14m53s that produced it.
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-vm-nvme-diagnostics
+          path: |
+            artifacts/guest-dmesg.txt
+            artifacts/ctest-last.log
+            artifacts/compose-head.log
+            artifacts/compose-tail.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: .github/compose/rocjitsu-nvme-vm
+        run: docker compose down --volumes --timeout 10 || true

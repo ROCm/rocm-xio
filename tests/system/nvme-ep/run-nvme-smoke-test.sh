@@ -68,6 +68,11 @@ EXTRA_ARGS=("$@")
 if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
     EXTRA_ARGS+=(--queue-id "$ROCXIO_NVME_QUEUE_ID")
 fi
+# Required under the rocjitsu VM: without the bridge the GPU's doorbell writes
+# never reach the emulated controller and every smoke test hangs to timeout.
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    EXTRA_ARGS+=(--pci-mmio-bridge)
+fi
 
 if [ "${EXPECT_FAIL:-0}" = "1" ]; then
     if "$XIO_TESTER" nvme-ep \

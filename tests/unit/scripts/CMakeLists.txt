@@ -7,17 +7,19 @@
 function(xio_add_bash_syntax_test name script)
   add_test(NAME ${name}
     COMMAND bash -n ${script})
+  _xio_scaled_timeout(30 _timeout)
   set_tests_properties(${name} PROPERTIES
     LABELS "unit;scripts"
-    TIMEOUT 30)
+    TIMEOUT ${_timeout})
 endfunction()
 
 function(xio_add_bash_unit_test name script)
   add_test(NAME ${name}
     COMMAND bash ${script})
+  _xio_scaled_timeout(30 _timeout)
   set_tests_properties(${name} PROPERTIES
     LABELS "unit;scripts"
-    TIMEOUT 30)
+    TIMEOUT ${_timeout})
 endfunction()
 
 xio_add_bash_syntax_test(

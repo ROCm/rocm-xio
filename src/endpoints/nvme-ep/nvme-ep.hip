@@ -269,14 +269,14 @@ __device__ static void driveEndpointSingle(
   uint8_t expected_phase = 1;
   uint16_t sq_tail = 0;
 
-  constexpr unsigned kMaxTimedBatch = 256;
+  constexpr unsigned kMaxTimedBatch = XIO_NVME_MAX_BATCH_DEPTH;
   unsigned long long int batchStartTimes[kMaxTimedBatch];
   const bool useBatchTiming = (config.timingStats != nullptr);
   if (useBatchTiming && batch_size > kMaxTimedBatch) {
     batch_size = kMaxTimedBatch;
   }
 
-  constexpr unsigned kMaxPrecomputedPrps = 256;
+  constexpr unsigned kMaxPrecomputedPrps = XIO_NVME_MAX_BATCH_DEPTH;
   uint64_t readPrp1[kMaxPrecomputedPrps];
   uint64_t readPrp2[kMaxPrecomputedPrps];
   uint64_t writePrp1[kMaxPrecomputedPrps];

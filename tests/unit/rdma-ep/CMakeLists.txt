@@ -65,10 +65,11 @@ if(GDA_BNXT OR GDA_IONIC OR GDA_ERNIC)
   add_test(NAME rdma-hw-setup
     COMMAND sudo
       ${CMAKE_SOURCE_DIR}/scripts/test/setup-rdma-loopback.sh)
+  _xio_scaled_timeout(60 _timeout)
   set_tests_properties(rdma-hw-setup PROPERTIES
     FIXTURES_SETUP RDMA_HW
     LABELS "hardware;fixture"
-    TIMEOUT 60
+    TIMEOUT ${_timeout}
     SKIP_RETURN_CODE 77)
 endif()
 
@@ -97,11 +98,12 @@ if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC)
       NAME test-rdma-loopback-seed${seed}
       COMMAND test-rdma-loopback
         --seed ${seed} --size 256)
+    _xio_scaled_timeout(300 _timeout)
     set_tests_properties(
       test-rdma-loopback-seed${seed}
       PROPERTIES
         LABELS "hardware;rdma;sweep"
-        TIMEOUT 300
+        TIMEOUT ${_timeout}
         RESOURCE_GROUPS "gpus:1"
         SKIP_RETURN_CODE 77
         FIXTURES_REQUIRED RDMA_HW)

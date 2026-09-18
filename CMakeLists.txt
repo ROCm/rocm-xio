@@ -154,6 +154,11 @@ else()
     message(FATAL_ERROR "find_package did NOT find hsakmt")
 endif()
 
+# The therock ROCm build exports hsakmt::hsakmt with its own build machine's
+# libc path in the link interface. A no-op against ROCm packages that do not.
+include(XIOSanitizeImportedTargets)
+xio_sanitize_imported_target(hsakmt::hsakmt)
+
 # kpack multi-arch packaging support (optional)
 option(XIO_USE_KPACK
   "Enable kpack multi-arch packaging (requires BUILD_SHARED_LIBS)" OFF)
@@ -265,6 +270,18 @@ setup_code_generation(
 # __threadfence_system() path.
 option(XIO_DOORBELL_FENCE_AGGRESSIVE
   "Use aggressive ISA fencing for doorbell writes" OFF)
+
+# Per-batch private arrays in the nvme-ep kernel. 256 entries cost
+# 10 KB/thread of private segment, and a gfx12 runtime provisions scratch for
+# full occupancy however small the grid is. Emulated GPUs cannot back that;
+# 32 fits inside their scratch ceiling at the cost of submission batch depth.
+set(XIO_NVME_MAX_BATCH_DEPTH "256" CACHE STRING
+  "Max nvme-ep per-batch private array entries (lower for emulated GPUs)")
+if(NOT XIO_NVME_MAX_BATCH_DEPTH MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+    "XIO_NVME_MAX_BATCH_DEPTH must be a positive integer, got "
+    "'${XIO_NVME_MAX_BATCH_DEPTH}'")
+endif()
 
 # GDA provider options for RDMA endpoint
 option(GDA_BNXT "Build BNXT (Broadcom Thor 2) RDMA provider" ON)
@@ -465,6 +482,9 @@ if(XIO_DOORBELL_FENCE_AGGRESSIVE)
   target_compile_definitions(rocm-xio PUBLIC
     XIO_DOORBELL_FENCE_AGGRESSIVE)
 endif()
+
+target_compile_definitions(rocm-xio PUBLIC
+  XIO_NVME_MAX_BATCH_DEPTH=${XIO_NVME_MAX_BATCH_DEPTH}U)
 
 # Pass the custom rdma-core lib dir so DV backends
 # can try it as a dlopen path before system fallback

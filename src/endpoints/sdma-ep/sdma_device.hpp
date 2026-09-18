@@ -26,6 +26,31 @@ struct XioEndpointConfig;
 
 namespace sdma_ep {
 
+/**
+ * @brief Drain all outstanding memory operations for this wave.
+ *
+ * gfx12 replaced the single s_waitcnt counter with separate load, store and
+ * km counters, so llvm.amdgcn.s.waitcnt has no encoding there and
+ * __builtin_amdgcn_s_waitcnt(0) fails instruction selection outright:
+ * "LLVM ERROR: Cannot select: intrinsic %llvm.amdgcn.s.waitcnt". The wait
+ * sequence below mirrors the one ringDoorbellFenced() already uses for gfx12
+ * in src/include/xio.h.
+ *
+ * __GFX12__ covers the whole family so a new gfx12 part does not silently fall
+ * back to the unselectable builtin; the individual macros are kept for any
+ * compiler that predefines only those.
+ */
+__device__ __forceinline__ void waitcntAll() {
+#if __GFX12__ || __gfx1200__ || __gfx1201__ || __gfx1250__
+  asm volatile("s_wait_kmcnt 0x0 \n"
+               "s_wait_loadcnt 0x0 \n"
+               "s_wait_storecnt 0x0 \n" ::
+                 : "memory");
+#else
+  __builtin_amdgcn_s_waitcnt(0);
+#endif
+}
+
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;
 
@@ -421,17 +446,17 @@ struct SdmaQueueHandle {
         }
       }
     }
-    __builtin_amdgcn_s_waitcnt(0);
+    waitcntAll();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(wptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    __builtin_amdgcn_s_waitcnt(0);
+    waitcntAll();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(doorbell, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_SYSTEM);
-    __builtin_amdgcn_s_waitcnt(0);
+    waitcntAll();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(committedWptr, pendingWptr, __ATOMIC_RELAXED,
@@ -549,7 +574,7 @@ struct SdmaQueueSingleProducerHandle : SdmaQueueHandle {
   __device__ __forceinline__ void submitPacket(uint64_t base,
                                                uint64_t pendingWptr) const {
     *wptr = pendingWptr;
-    __builtin_amdgcn_s_waitcnt(0);
+    waitcntAll();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     *doorbell = pendingWptr;
