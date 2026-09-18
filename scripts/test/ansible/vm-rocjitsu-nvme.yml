@@ -93,15 +93,17 @@
 
     # Assert rather than assume. This is the condition the whole deferred-probe
     # design rests on, and it is cheap to check and confusing to debug.
+    #
+    # Read the guest's /proc/cmdline through a fact, not through lookup('file'):
+    # lookups are evaluated on the controller, so that form checks the CI
+    # runner's kernel command line and tells you nothing about the VM.
     - name: Require the boot-time blacklist to be in force
       ansible.builtin.assert:
-        that: "'modprobe.blacklist=amdgpu' in ansible_cmdline_raw"
+        that: "ansible_cmdline.get('modprobe.blacklist', '') == 'amdgpu'"
         fail_msg: >-
-          amdgpu is not blacklisted on the running kernel command line
-          ({{ ansible_cmdline_raw }}). grub has been updated, but the running
-          boot predates it -- reboot the guest and re-run this playbook.
-      vars:
-        ansible_cmdline_raw: "{{ lookup('file', '/proc/cmdline') }}"
+          amdgpu is not blacklisted on the guest's running kernel command line
+          ({{ ansible_cmdline }}). grub has been updated, but the running boot
+          predates it -- reboot the guest and re-run this playbook.
 
     # If this fails the guest booted with the driver already bound, so the probe
     # below would be a silent no-op.
