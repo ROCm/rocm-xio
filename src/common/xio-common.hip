@@ -1736,9 +1736,21 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
     memset(setup->virt, 0, size);
   }
 
-  // Step 2: Reallocate with coherent memory if host memory
+  // Step 2: Reallocate with coherent memory if host memory.
+  // Skip when the GPU is rocjitsu (emulated GPU, clock rate = 0 KHz): on
+  // rocjitsu hipHostMallocCoherent uses a physical address domain that differs
+  // from what /proc/self/pagemap reports, so the kprobe injects the wrong GPA
+  // into SPDK's CREATE_SQ/CQ and SPDK reads zeros from the SQ.  Plain
+  // hipHostMallocMapped pagemap-derived GPA IS correct for rocjitsu because
+  // the GPU kernel runs as host CPU code and writes to the same physical pages
+  // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
+  // this path is not taken and coherent reallocation is unchanged.
   if (!is_device) {
-    setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
+    int gpu_clock_khz = 0;
+    (void)hipDeviceGetAttribute(&gpu_clock_khz, hipDeviceAttributeClockRate, 0);
+    if (gpu_clock_khz > 0) {
+      setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
+    }
   }
 
   // Step 3: Register with HIP (skip if coherent or device memory)
