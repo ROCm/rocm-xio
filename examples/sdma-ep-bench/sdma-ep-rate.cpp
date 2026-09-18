@@ -22,6 +22,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "csv_writer.hpp"
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "endpoints/sdma-ep/sdma-host-queue.h"
 #include "sdma_rate_kernel.h"
@@ -250,13 +251,26 @@ void run(const Params& params) {
                               hipMemcpyHostToDevice));
   }
 
-  std::ofstream output(params.outputFile);
-  output << "Mode,Src,#Destinations,#Queues,GridDim,BlockDim,Copy Size [B],"
-            "#Copy Commands,Device Latency [us],Host Latency [us],"
-            "Device Bandwidth [GB/s],Host Bandwidth [GB/s],"
-            "Command Rate [MPPS],SDMA Packet Rate [MPPS],"
-            "Host Command Rate [MPPS],Command Time [ns/command],"
-            "SDMA Time [ns/packet]\n";
+  CsvWriter output(params.outputFile);
+  output.writeHeader({
+    "Mode",
+    "Src",
+    "#Destinations",
+    "#Queues",
+    "GridDim",
+    "BlockDim",
+    "Copy Size [B]",
+    "#Commands",
+    "Device Latency [us] (Mean)",
+    "Host Latency [us] (Mean)",
+    "Device Bandwidth [GB/s]",
+    "Host Bandwidth [GB/s]",
+    "Command Rate [MPPS]",
+    "SDMA Packet Rate [MPPS]",
+    "Host Command Rate [MPPS]",
+    "Command Time [ns/command]",
+    "SDMA Time [ns/packet]",
+  });
   std::cout
     << "CopySize  Queues  Device(us)  Host(us)  Device(MPPS)  Host(MPPS)\n";
 
@@ -366,11 +380,10 @@ void run(const Params& params) {
               << std::setw(14) << hostMpps << std::setw(16) << copyTimeNs
               << std::setw(16) << sdmaTimeNs << std::endl;
     const char* modeName = rateModeName(rateMode);
-    output << modeName << "," << params.srcGpu << ",1," << params.numQueues
-           << ",1," << block.x << "," << copySize << "," << params.numCommands
-           << "," << deviceMean << "," << hostMean << "," << deviceGbps << ","
-           << hostGbps << "," << copyMpps << "," << sdmaMpps << "," << hostMpps
-           << "," << copyTimeNs << "," << sdmaTimeNs << "\n";
+    output.writeRow(modeName, params.srcGpu, 1, params.numQueues, 1, block.x,
+                    copySize, params.numCommands, deviceMean, hostMean,
+                    deviceGbps, hostGbps, copyMpps, sdmaMpps, hostMpps,
+                    copyTimeNs, sdmaTimeNs);
   }
 
   CHECK_HIP_ERROR(hipFree(startDevice));

@@ -22,6 +22,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "csv_writer.hpp"
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "endpoints/sdma-ep/sdma-host-queue.h"
 #include "sdma_bw_kernel.h"
@@ -328,11 +329,23 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
   printHeader(std::cout);
   std::cout << std::endl;
 
-  std::ofstream csvFile(params.resultFileName);
-  csvFile << "Src,#Destinations,#Queues,GridDim,BlockDim,Total Transfer Size "
-             "[B],Copy Size [B],#Copies,Device Latency [us] (Mean),Device "
-             "Latency [us] (Std),Bandwidth [GB/s] (Device),Host Latency [us] "
-             "(Mean),Host Latency [us] (Std),Bandwidth [GB/s] (Host)\n";
+  CsvWriter csvFile(params.resultFileName);
+  csvFile.writeHeader({
+    "Src",
+    "#Destinations",
+    "#Queues",
+    "GridDim",
+    "BlockDim",
+    "Total Transfer Size [B]",
+    "Copy Size [B]",
+    "#Commands",
+    "Device Latency [us] (Mean)",
+    "Device Latency [us] (Std)",
+    "Device Bandwidth [GB/s]",
+    "Host Latency [us] (Mean)",
+    "Host Latency [us] (Std)",
+    "Host Bandwidth [GB/s]",
+  });
 
   for (size_t copySize = params.minCopySize; copySize <= params.maxCopySize;
        copySize *= 2) {
@@ -502,20 +515,17 @@ void runExperiment(int srcDeviceId, const ExperimentParams& params) {
               << latency_host_std << std::setw(12) << hostBandwidth_gbs
               << std::endl;
 
-    csvFile << srcDeviceId << "," << dstDeviceIds.size() << ","
-            << params.numOfQueues << "," << numWgs << "," << wgSize << ","
-            << totalTransferSize << "," << copySize << ","
-            << params.numCopyCommands << "," << latency_device_mean * 1000
-            << "," << latency_device_std << "," << deviceBandwidth_gbs << ","
-            << latency_host_mean * 1000 << "," << latency_host_std << ","
-            << hostBandwidth_gbs << "\n";
+    csvFile.writeRow(srcDeviceId, dstDeviceIds.size(), params.numOfQueues,
+                     numWgs, wgSize, totalTransferSize, copySize,
+                     params.numCopyCommands, latency_device_mean * 1000,
+                     latency_device_std, deviceBandwidth_gbs,
+                     latency_host_mean * 1000, latency_host_std,
+                     hostBandwidth_gbs);
 
     for (size_t iter = 0; iter < params.numIterations * 2; iter++) {
       CHECK_HIP_ERROR(hipEventDestroy(timestamps_events[iter]));
     }
   }
-
-  csvFile.close();
 
   // Resource Cleanup
   CHECK_HIP_ERROR(hipFreeHost(start_clock_count));

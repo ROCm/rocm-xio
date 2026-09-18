@@ -19,6 +19,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "csv_writer.hpp"
 #include "endpoints/sdma-ep/sdma-ep.h"
 #include "sdma_latency_kernel.h"
 #include "xio.h"
@@ -122,12 +123,23 @@ void run(const Params& p) {
   HIP_CHECK(hipMemcpy(breakdownDevice, &breakdown, sizeof(breakdown),
                       hipMemcpyHostToDevice));
 
-  std::ofstream csv(p.output);
-  csv << "Copy Size [B],#Copy Commands,Device Latency [us] (Mean),"
-         "Device Latency [us] (Std),Host Latency [us] (Mean),"
-         "Host Latency [us] (Std),Device Bandwidth [GB/s],"
-         "Reserve [us],Build [us],Submit [us],Atomic Reserve [us],"
-         "Atomic Build [us],Atomic Submit [us],Transfer [us]\n";
+  CsvWriter csv(p.output);
+  csv.writeHeader({
+    "Copy Size [B]",
+    "#Commands",
+    "Device Latency [us] (Mean)",
+    "Device Latency [us] (Std)",
+    "Host Latency [us] (Mean)",
+    "Host Latency [us] (Std)",
+    "Device Bandwidth [GB/s]",
+    "Reserve [us]",
+    "Build [us]",
+    "Submit [us]",
+    "Atomic Reserve [us]",
+    "Atomic Build [us]",
+    "Atomic Submit [us]",
+    "Transfer [us]",
+  });
   std::cout << "CopySize  Device(us)  Host(us)  DeviceBW(GB/s)\n";
 
   dim3 grid(1), block(warp);
@@ -242,13 +254,11 @@ void run(const Params& p) {
     std::cout << std::setw(8) << size << std::setw(13) << deviceMean
               << std::setw(10) << hostMean << std::setw(16) << bandwidth
               << '\n';
-    csv << size << ',' << p.commands << ',' << deviceMean << ',' << deviceStd
-        << ',' << hostMean << ',' << hostStd << ',' << bandwidth << ','
-        << reserve << ',' << build << ',' << submit << ','
-        << (atomicReserveEnd[0] - atomicReserveStart[0]) / 100.0 << ','
-        << (atomicBuildEnd[0] - atomicBuildStart[0]) / 100.0 << ','
-        << (atomicSubmitEnd[0] - atomicSubmitStart[0]) / 100.0 << ','
-        << transfer << '\n';
+    csv.writeRow(size, p.commands, deviceMean, deviceStd, hostMean, hostStd,
+                 bandwidth, reserve, build, submit,
+                 (atomicReserveEnd[0] - atomicReserveStart[0]) / 100.0,
+                 (atomicBuildEnd[0] - atomicBuildStart[0]) / 100.0,
+                 (atomicSubmitEnd[0] - atomicSubmitStart[0]) / 100.0, transfer);
   }
   HIP_CHECK(hipFree(breakdown.reserveStart));
   HIP_CHECK(hipFree(breakdown.reserveEnd));
