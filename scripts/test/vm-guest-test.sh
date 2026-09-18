@@ -23,9 +23,11 @@
 #   OFFLOAD_ARCH  GPU arch to compile for (default: gfx1250)
 #   NVME_CTRL     NVMe controller (default: first /dev/nvme[0-9]+)
 #   CTEST_LABEL   ctest label regex (default: nvme)
+#   CTEST_EXCLUDE_LABEL
+#                 ctest label regex to exclude (default: none)
 #   SKIP_GPU      Set to 1 to skip GPU bring-up and GPU tests
 #   TIMEOUT_SCALE CTest timeout multiplier (default: 4)
-#   BATCH_DEPTH   nvme-ep per-batch private array bound (default: 32)
+#   BATCH_DEPTH   nvme-ep per-batch private array bound (default: 16)
 #
 # The last two exist because the GPU here is emulated, not real. rocJITsu
 # interprets every dispatch in software, so a test that takes seconds on
@@ -37,6 +39,16 @@
 # exactly why this script, the one thing that only ever runs inside the
 # rocJITsu guest, is where they are set. Same reasoning as
 # XIO_FORCE_PCI_MMIO_BRIDGE below.
+#
+# 16, not 32, because 32 does not actually fit. Each entry costs 40 B/thread,
+# so depth 32 pins 1280 B of the ~1300 B/thread the emulated device can back
+# -- the whole budget, before the kernel's own locals and spills. Single-queue
+# tests squeaked under it; --num-queues 4 did not, because ROCr provisions
+# scratch for full occupancy per queue, and the multi-queue tests failed with
+# HSA_STATUS_ERROR_OUT_OF_RESOURCES and "too many resources requested for
+# launch (code: 701)". Depth 16 is 640 B/thread and leaves room for the rest
+# of the kernel. This bounds submission batch depth, not I/O count, so
+# nvme-smoke-batch-128 still issues 128 I/Os -- in more, smaller batches.
 
 set -euo pipefail
 
@@ -44,9 +56,10 @@ SRC_DIR="${SRC_DIR:-${HOME}/rocm-xio}"
 BUILD_DIR="${BUILD_DIR:-${SRC_DIR}/build}"
 OFFLOAD_ARCH="${OFFLOAD_ARCH:-gfx1250}"
 CTEST_LABEL="${CTEST_LABEL:-nvme}"
+CTEST_EXCLUDE_LABEL="${CTEST_EXCLUDE_LABEL:-}"
 SKIP_GPU="${SKIP_GPU:-0}"
 TIMEOUT_SCALE="${TIMEOUT_SCALE:-4}"
-BATCH_DEPTH="${BATCH_DEPTH:-32}"
+BATCH_DEPTH="${BATCH_DEPTH:-16}"
 
 banner() {
     echo ""
@@ -116,6 +129,11 @@ sudo nvme id-ctrl "${NVME_CTRL}" | head -20
 # Build rocm-xio
 # --------------------------------------------------------------
 banner "Configuring rocm-xio"
+# Both knobs are emulation workarounds whose value explains test outcomes, so
+# put them in the job log rather than leaving a reader to infer the defaults.
+echo "timeout scale: ${TIMEOUT_SCALE}"
+echo "ctest labels:  ${CTEST_LABEL}${CTEST_EXCLUDE_LABEL:+ minus ${CTEST_EXCLUDE_LABEL}}"
+echo "batch depth:   ${BATCH_DEPTH} ($(( BATCH_DEPTH * 40 )) B/thread private)"
 # The guest installs ROCm from the therock stream, whose layout is
 # /opt/rocm/<component>-<version> rather than a single versioned root with a
 # /opt/rocm symlink over it. A hardcoded /opt/rocm therefore fails
@@ -251,6 +269,7 @@ sudo env \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
+          ${CTEST_EXCLUDE_LABEL:+--label-exclude "${CTEST_EXCLUDE_LABEL}"} \
           --output-on-failure \
           --no-tests=error
 

@@ -38,6 +38,22 @@ on:
           into the job's timeout-minutes ceiling.
         required: false
         default: ""
+      ctest-exclude-label:
+        description: >-
+          ctest label regex to exclude. Empty runs everything the label
+          selects. Pull requests default to excluding stress; this input
+          only applies to manual runs.
+        required: false
+        default: ""
+      batch-depth:
+        description: >-
+          nvme-ep per-batch private array bound. Each entry costs 40 B/thread
+          and the emulated device backs only ~1300 B/thread of scratch, so
+          this is the knob that decides whether a dispatch fits. Empty leaves
+          the guest script's default of 16. Raise it to sweep the ceiling;
+          expect code 701 above it.
+        required: false
+        default: ""
   schedule:
     # Weekly, off the hour so this does not pile onto every other cron job.
     - cron: '17 5 * * 1'
@@ -227,8 +243,17 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
           CTEST_LABEL: ${{ inputs.ctest-label || 'nvme' }}
+          # The stress label is three tests and a quarter of the suite's wall
+          # clock -- nvme-qid-recreate-gpu-stress alone was 866 s of a 3845 s
+          # ctest, 23% for one test. They are also the slowest per unit of
+          # information: the qid tests spend ~40 s per iteration on controller
+          # resets and warm-up reads around an operation that resolves in
+          # 0.11 s. Worth running, not worth running on every push, so the
+          # weekly schedule and manual runs still get them.
+          CTEST_EXCLUDE_LABEL: ${{ github.event_name == 'pull_request' && 'stress' || inputs.ctest-exclude-label || '' }}
           SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
           TIMEOUT_SCALE: ${{ inputs.timeout-scale || '' }}
+          BATCH_DEPTH: ${{ inputs.batch-depth || '' }}
         run: |
           ssh -i "$SSH_KEY" -p "$SSH_PORT" \
               -o BatchMode=yes \
@@ -237,7 +262,9 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               "$SSH_USER@localhost" \
               "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+               ${CTEST_EXCLUDE_LABEL:+CTEST_EXCLUDE_LABEL='$CTEST_EXCLUDE_LABEL'} \
                ${TIMEOUT_SCALE:+TIMEOUT_SCALE='$TIMEOUT_SCALE'} \
+               ${BATCH_DEPTH:+BATCH_DEPTH='$BATCH_DEPTH'} \
                ./rocm-xio/scripts/test/vm-guest-test.sh"
 
       - name: Collect guest diagnostics
