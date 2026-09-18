@@ -1755,50 +1755,66 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
       return 0;
     }
   }
-}
-alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
-if (alloc_err != hipSuccess) {
-  ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
-                  hipGetErrorString(alloc_err));
-  return -ENOMEM;
-}
+  alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
+  if (alloc_err != hipSuccess) {
+    ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
+                    hipGetErrorString(alloc_err));
+    return -ENOMEM;
+  }
 
-// Zero-initialize host queues; device memory is already
-// zeroed by hipMemset inside allocateQueue().
-if (!is_device) {
-  memset(setup->virt, 0, size);
-}
+  // Zero-initialize host queues; device memory is already
+  // zeroed by hipMemset inside allocateQueue().
+  if (!is_device) {
+    memset(setup->virt, 0, size);
+  }
 
-// Step 2: Reallocate with coherent memory if host memory.
-// Skip when the GPU is rocjitsu (emulated GPU, clock rate = 0 KHz): on
-// rocjitsu hipHostMallocCoherent uses a physical address domain that differs
-// from what /proc/self/pagemap reports, so the kprobe injects the wrong GPA
-// into SPDK's CREATE_SQ/CQ and SPDK reads zeros from the SQ.  Plain
-// hipHostMallocMapped pagemap-derived GPA IS correct for rocjitsu because
-// the GPU kernel runs as host CPU code and writes to the same physical pages
-// the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
-// this path is not taken and coherent reallocation is unchanged.
-// Step 2: coherent reallocation intentionally skipped.
-// posix_memalign (XIO_HOST_MEM_PLAIN, Step 1) gives correct pagemap GPAs on
-// all targets.  HMM-backed hipHostMallocCoherent/Mapped uses a physical
-// address domain that diverges from /proc/self/pagemap, causing the kprobe
-// to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
-(void)is_device; // suppress unused-variable warning if Step 3 is also skipped
+  // Step 2: Reallocate with coherent memory if host memory.
+  // Skip when the GPU is rocjitsu (emulated GPU, clock rate = 0 KHz): on
+  // rocjitsu hipHostMallocCoherent uses a physical address domain that differs
+  // from what /proc/self/pagemap reports, so the kprobe injects the wrong GPA
+  // into SPDK's CREATE_SQ/CQ and SPDK reads zeros from the SQ.  Plain
+  // hipHostMallocMapped pagemap-derived GPA IS correct for rocjitsu because
+  // the GPU kernel runs as host CPU code and writes to the same physical pages
+  // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
+  // this path is not taken and coherent reallocation is unchanged.
+  // Step 2: coherent reallocation intentionally skipped.
+  // posix_memalign (XIO_HOST_MEM_PLAIN, Step 1) gives correct pagemap GPAs on
+  // all targets.  HMM-backed hipHostMallocCoherent/Mapped uses a physical
+  // address domain that diverges from /proc/self/pagemap, causing the kprobe
+  // to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
 
-// Step 3: Register with HIP (skip if coherent or device memory).
-// hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
-// GPU access, so hipHostRegister may return
-// hipErrorHostMemoryAlreadyRegistered when reallocateQueue was skipped. Treat
-// that as success.
-if (!setup->uses_coherent && !is_device) {
-  hipError_t hip_err = hipHostRegister(setup->virt, size,
-                                       hipHostRegisterMapped);
-  if (hip_err == hipErrorHostMemoryAlreadyRegistered)
-    hip_err = hipSuccess;
-  if (hip_err != hipSuccess) {
-    ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
-                    hipGetErrorString(hip_err));
+  // Step 3: Register with HIP (skip if coherent or device memory).
+  // hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
+  // GPU access, so hipHostRegister may return
+  // hipErrorHostMemoryAlreadyRegistered when reallocateQueue was skipped. Treat
+  // that as success.
+  if (!setup->uses_coherent && !is_device) {
+    hipError_t hip_err = hipHostRegister(setup->virt, size,
+                                         hipHostRegisterMapped);
+    if (hip_err == hipErrorHostMemoryAlreadyRegistered)
+      hip_err = hipSuccess;
+    if (hip_err != hipSuccess) {
+      ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
+                      hipGetErrorString(hip_err));
+      // Cleanup
+      if (setup->uses_coherent) {
+        (void)hipHostFree(setup->virt);
+      } else {
+        freeQueue(setup->virt, is_device, queue_name);
+      }
+      setup->virt = nullptr;
+      return -EIO;
+    }
+    hip_registered = true;
+  }
+
+  // Step 4: Get GPU pointer
+  setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
+  if (!setup->gpu) {
     // Cleanup
+    if (hip_registered) {
+      (void)hipHostUnregister(setup->virt);
+    }
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
@@ -1807,69 +1823,52 @@ if (!setup->uses_coherent && !is_device) {
     setup->virt = nullptr;
     return -EIO;
   }
-  hip_registered = true;
-}
 
-// Step 4: Get GPU pointer
-setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
-if (!setup->gpu) {
-  // Cleanup
-  if (hip_registered) {
-    (void)hipHostUnregister(setup->virt);
+  // Step 5: Get physical address
+  if (!kernel_module_device) {
+    ROCXIO_LOG_ERROR("kernel_module_device required for %s\n", queue_name);
+    // Cleanup
+    if (hip_registered) {
+      (void)hipHostUnregister(setup->virt);
+    }
+    if (setup->uses_coherent) {
+      (void)hipHostFree(setup->virt);
+    } else {
+      freeQueue(setup->virt, is_device, queue_name);
+    }
+    setup->virt = nullptr;
+    setup->gpu = nullptr;
+    return -EINVAL;
   }
-  if (setup->uses_coherent) {
-    (void)hipHostFree(setup->virt);
-  } else {
-    freeQueue(setup->virt, is_device, queue_name);
-  }
-  setup->virt = nullptr;
-  return -EIO;
-}
 
-// Step 5: Get physical address
-if (!kernel_module_device) {
-  ROCXIO_LOG_ERROR("kernel_module_device required for %s\n", queue_name);
-  // Cleanup
-  if (hip_registered) {
-    (void)hipHostUnregister(setup->virt);
+  setup->phys = getPhysAddr(setup->virt, size, is_device, nvme_bdf,
+                            kernel_module_device, is_emulated, queue_name);
+  if (setup->phys == 0 && is_device) {
+    // Device memory requires physical address
+    ROCXIO_LOG_ERROR("Failed to get physical address for %s device "
+                     "memory\n",
+                     queue_name);
+    // Cleanup
+    if (hip_registered) {
+      (void)hipHostUnregister(setup->virt);
+    }
+    if (setup->uses_coherent) {
+      (void)hipHostFree(setup->virt);
+    } else {
+      freeQueue(setup->virt, is_device, queue_name);
+    }
+    setup->virt = nullptr;
+    setup->gpu = nullptr;
+    return -ENOTSUP;
   }
-  if (setup->uses_coherent) {
-    (void)hipHostFree(setup->virt);
-  } else {
-    freeQueue(setup->virt, is_device, queue_name);
-  }
-  setup->virt = nullptr;
-  setup->gpu = nullptr;
-  return -EINVAL;
-}
 
-setup->phys = getPhysAddr(setup->virt, size, is_device, nvme_bdf,
-                          kernel_module_device, is_emulated, queue_name);
-if (setup->phys == 0 && is_device) {
-  // Device memory requires physical address
-  ROCXIO_LOG_ERROR("Failed to get physical address for %s device "
-                   "memory\n",
-                   queue_name);
-  // Cleanup
-  if (hip_registered) {
-    (void)hipHostUnregister(setup->virt);
-  }
-  if (setup->uses_coherent) {
-    (void)hipHostFree(setup->virt);
-  } else {
-    freeQueue(setup->virt, is_device, queue_name);
-  }
-  setup->virt = nullptr;
-  setup->gpu = nullptr;
-  return -ENOTSUP;
-}
+  ROCXIO_LOG_INFO("%s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
+                  "coherent=%d\n",
+                  queue_name, setup->virt, setup->gpu,
+                  (unsigned long long)setup->phys,
+                  setup->uses_coherent ? 1 : 0);
 
-ROCXIO_LOG_INFO("%s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
-                "coherent=%d\n",
-                queue_name, setup->virt, setup->gpu,
-                (unsigned long long)setup->phys, setup->uses_coherent ? 1 : 0);
-
-return 0;
+  return 0;
 }
 
 __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
