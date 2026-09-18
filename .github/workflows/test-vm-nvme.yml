@@ -106,7 +106,10 @@ env:
 jobs:
   test-vm-nvme:
     name: nvme-ep against an emulated NVMe SSD
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the runner image is as much a build input as
+    # the container tags below, and "latest" moves under us the same way a
+    # retagged image does. rocm-ernic's VM lanes pin theirs for this reason.
+    runs-on: ubuntu-24.04
     # The guest scales every ctest budget by 4 because the GPU is emulated,
     # and the nvme label includes entries with 600 s and 900 s budgets. A run
     # where those actually time out needs more than the old 120.
@@ -134,6 +137,50 @@ jobs:
             qemu-utils \
             rsync
 
+      # Size the guest from the runner rather than pinning 4 vCPU / 8 GiB,
+      # following the same shape as rocm-ernic's system-tests lanes: derive
+      # from the host, then floor at whatever the emulated device actually
+      # needs. A larger runner class then benefits without another edit here.
+      #
+      # Eight is a hard floor, not a preference. The guest's NVMe I/O queue
+      # count is min(num_online_cpus, max_ioqpairs), so vCPUs are queues:
+      # a 4-vCPU guest gets "nvme0: 4/0/0 default/read/poll queues" and the
+      # qid stress tests, which default to STRESS_CPU=7 and therefore QID 8,
+      # fail every iteration with
+      #   QUIESCE_NS: qid 8 out of range (nvme0n1 has 4 hw queues)
+      # surfacing as a bare ERANGE. Four more tests die on the hijack guard,
+      # which refuses --num-queues 4 when the controller has only 4 queues to
+      # give. Oversubscribing the runner's cores is the cheaper mistake:
+      # rocjitsu interprets every dispatch anyway, so the guest is not
+      # CPU-bound on the host in the way the vCPU count suggests.
+      - name: Size the guest from the runner
+        id: size
+        run: |
+          set -euo pipefail
+          HOST_CPUS=$(nproc)
+          HOST_MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+
+          # One core stays with the host: rocjitsu, the qemu process and the
+          # runner agent share it.
+          VM_VCPUS=$(( HOST_CPUS - 1 ))
+          [ "$VM_VCPUS" -lt 8 ] && VM_VCPUS=8
+
+          VM_VMEM=$(( HOST_MEM_MB * 3 / 4 ))
+          [ "$VM_VMEM" -gt 8192 ] && VM_VMEM=8192
+          [ "$VM_VMEM" -lt 2048 ] && VM_VMEM=2048
+
+          # The vfio-user server reaches guest RAM through a shared memfd, so
+          # /dev/shm must be at least the guest's size; round up and add slack.
+          SHM_GB=$(( VM_VMEM / 1024 + 4 ))
+
+          echo "host: ${HOST_CPUS} cpu / ${HOST_MEM_MB} MiB"
+          echo "guest: ${VM_VCPUS} vcpu / ${VM_VMEM} MiB / ${SHM_GB}g shm"
+          {
+            echo "vcpus=${VM_VCPUS}"
+            echo "vmem=${VM_VMEM}"
+            echo "shm-size=${SHM_GB}g"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Boot the rocjitsu + NVMe VM
         id: vm
         uses: ./.github/actions/rocjitsu-nvme-vm
@@ -143,9 +190,9 @@ jobs:
           qcow2-image: ${{ env.QCOW2_IMAGE }}
           images-dir: ${{ env.VM_IMAGES_DIR }}
           ssh-port: ${{ env.SSH_PORT }}
-          vcpus: "4"
-          vmem: "8192"
-          shm-size: 12g
+          vcpus: ${{ steps.size.outputs.vcpus }}
+          vmem: ${{ steps.size.outputs.vmem }}
+          shm-size: ${{ steps.size.outputs.shm-size }}
           nvme-count: "1"
 
       - name: Provision ROCm, amdgpu and firmware in the guest
@@ -217,6 +264,23 @@ jobs:
               'cat rocm-xio/build/Testing/Temporary/LastTest.log' \
               > artifacts/ctest-last.log 2>&1 || true
 
+      # Head and tail, never the whole stream. rocjitsu is built with
+      # RJ_LOG_GROUPS=CP and util/log.h reads that into a constexpr, so there
+      # is no runtime gate: it narrates every command-processor poll for the
+      # life of the container. The unbounded form of this step wrote a 19.3 GB
+      # artifact and took 14m53s on run 35368507895, and on the longer run
+      # before it it was still going after 74 minutes when the runner was
+      # declared lost -- taking the upload, and any explanation of the test
+      # failure, with it. rocm-ernic's VM lanes never stream a live log into
+      # an artifact for the same reason: they tail a bounded file instead.
+      #
+      # head runs before the filter on purpose. Either order is fast when
+      # non-CP lines are dense near the start, but head-first is bounded by
+      # construction -- it reads 5000 lines and SIGPIPEs the reader -- whereas
+      # filter-first is bounded only by how far apart the interesting lines
+      # happen to fall, and a CP-only stretch walks the whole file. --tail
+      # seeks, so the tail side is cheap either way.
+      #
       # The action left a .env in this directory, so compose resolves without
       # the image pins being repeated here.
       - name: Collect compose logs
@@ -224,15 +288,33 @@ jobs:
         working-directory: .github/compose/rocjitsu-nvme-vm
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          docker compose logs --no-color \
-            > "$GITHUB_WORKSPACE/artifacts/compose.log" 2>&1 || true
+          # Bring-up: the vfu/pci warnings that explain a device which never
+          # served are in the first few hundred lines.
+          timeout 120 docker compose logs --no-color 2>&1 \
+            | head -5000 \
+            | grep -v '\[rj log CP\]' \
+            > "$GITHUB_WORKSPACE/artifacts/compose-head.log" || true
+          # What the stack was doing when the tests gave up.
+          timeout 120 docker compose logs --no-color --tail 20000 2>&1 \
+            | grep -v '\[rj log CP\]' \
+            > "$GITHUB_WORKSPACE/artifacts/compose-tail.log" || true
+          ls -lh "$GITHUB_WORKSPACE/artifacts/"
 
+      # Named files rather than the whole directory, the way rocm-ernic's
+      # lanes enumerate theirs: a directory upload takes whatever a step
+      # happened to leave behind, which is how a 19.3 GB compose log ended up
+      # costing 1m42s of upload on top of the 14m53s that produced it.
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-vm-nvme-diagnostics
-          path: artifacts/
+          path: |
+            artifacts/guest-dmesg.txt
+            artifacts/ctest-last.log
+            artifacts/compose-head.log
+            artifacts/compose-tail.log
+          retention-days: 7
           if-no-files-found: warn
 
       - name: Tear down the stack
