@@ -3467,12 +3467,26 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
     if (prpPoolBytes > 0) {
       void* pool = nullptr;
-      hipError_t alloc_err = hipHostMalloc(&pool, prpPoolBytes,
-                                           hipHostMallocMapped);
-      if (alloc_err != hipSuccess || !pool) {
+      // On rocjitsu (wall clock = 0) hipHostMallocMapped uses HMM memory
+      // whose pagemap GPA is wrong, causing SPDK to read the PRP list from
+      // the wrong address and silently drop the KV Store command (no CQE).
+      // Use posix_memalign so the pool has a correct pagemap GPA.
+      bool pool_from_memalign = false;
+      {
+        int _wclk_pool = 0;
+        (void)hipDeviceGetAttribute(&_wclk_pool,
+                                    hipDeviceAttributeWallClockRate, 0);
+        if (_wclk_pool == 0) {
+          pool_from_memalign = (posix_memalign(&pool, NVME_PAGE_SIZE,
+                                               prpPoolBytes) == 0);
+        } else {
+          hipHostMalloc(&pool, prpPoolBytes, hipHostMallocMapped);
+        }
+      }
+      if (!pool) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list pool "
-                         "for queue %u: %s\n",
-                         qid, hipGetErrorString(alloc_err));
+                         "for queue %u\n",
+                         qid);
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
@@ -3480,7 +3494,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("PRP list pool for queue %u is not "
                          "page-aligned\n",
                          qid);
-        (void)hipHostFree(pool);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorInvalidValue;
         goto cleanup;
       }
@@ -3491,7 +3508,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("Failed to get PRP pool phys addr "
                          "for queue %u\n",
                          qid);
-        (void)hipHostFree(pool);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorInvalidValue;
         goto cleanup;
       }
@@ -3518,7 +3538,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list DMA "
                          "table for queue %u: %s\n",
                          qid, hipGetErrorString(dmas_err));
-        (void)hipHostFree(pool);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
@@ -3535,7 +3558,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                              "phys addr for queue %u slot %u page %u\n",
                              qid, s, p);
             (void)hipHostFree(page_dmas);
-            (void)hipHostFree(pool);
+            if (pool_from_memalign)
+              free(pool);
+            else
+              (void)hipHostFree(pool);
             result = hipErrorInvalidValue;
             goto cleanup;
           }
@@ -3964,7 +3990,9 @@ cleanup:
       (void)hipHostFree(prpPools[q].pageDmas);
     }
     if (prpPools[q].ptr && prpPools[q].hipAllocated) {
-      (void)hipHostFree(prpPools[q].ptr);
+      hipError_t pferr = hipHostFree(prpPools[q].ptr);
+      if (pferr != hipSuccess)
+        free(prpPools[q].ptr);
     }
   }
 

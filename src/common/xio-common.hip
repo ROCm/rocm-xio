@@ -2936,10 +2936,26 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
       uint32_t sys_np = (uint32_t)((size + sys_page - 1) / sys_page);
       uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
       size_t pa_bytes = nvme_np * sizeof(uint64_t);
+      // Use posix_memalign so the per-page GPA array itself has a correct
+      // pagemap GPA on rocjitsu (hipHostMallocMapped uses HMM memory whose
+      // pagemap GPA does not reflect where the CPU actually reads/writes).
       uint64_t* pa = nullptr;
-      hipError_t pa_err = hipHostMalloc((void**)&pa, pa_bytes,
-                                        hipHostMallocMapped);
-      if (pa_err == hipSuccess && pa) {
+      bool pa_from_memalign = false;
+      {
+        int _wclk2 = 0;
+        (void)hipDeviceGetAttribute(&_wclk2, hipDeviceAttributeWallClockRate,
+                                    0);
+        if (_wclk2 == 0) {
+          if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) ==
+              0) {
+            pa_from_memalign = true;
+          }
+        } else {
+          hipHostMalloc(reinterpret_cast<void**>(&pa), pa_bytes,
+                        hipHostMallocMapped);
+        }
+      }
+      if (pa) {
         memset(pa, 0, pa_bytes);
         uint64_t* sys_addrs = (uint64_t*)malloc((size_t)sys_np *
                                                 sizeof(uint64_t));
@@ -2949,7 +2965,10 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
         if (ret < 0) {
           ROCXIO_LOG_WARN("Failed to resolve per-page phys addrs: %s\n",
                           strerror(-ret));
-          (void)hipHostFree(pa);
+          if (pa_from_memalign)
+            free(pa);
+          else
+            (void)hipHostFree(pa);
         } else {
           uint32_t ratio = (uint32_t)(sys_page / nvme_page);
           for (uint32_t s = 0; s < sys_np; s++) {
@@ -3025,7 +3044,10 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
   }
 
   if (bufferInfo->pagePhysAddrs) {
-    (void)hipHostFree(bufferInfo->pagePhysAddrs);
+    // May be posix_memalign'd (rocjitsu) or hipHostMalloc'd.
+    hipError_t pferr = hipHostFree(bufferInfo->pagePhysAddrs);
+    if (pferr != hipSuccess)
+      free(bufferInfo->pagePhysAddrs);
   }
 
   bufferInfo->hostPtr = nullptr;
