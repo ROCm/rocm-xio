@@ -1735,95 +1735,70 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   // as a GPA.  Plain malloc memory IS present in pagemap and getPhysAddr()
   // returns the correct GPA.  On rocjitsu the GPU kernel runs as host CPU
   // code, so any CPU-accessible pointer is also GPU-accessible.
-  {
-    int _wclk = 0;
-    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
-    if (!is_device && _wclk == 0) {
-      void* plain = nullptr;
-      hipError_t perr = allocHostMemory(size, &plain, queue_name,
-                                        XIO_HOST_MEM_PLAIN);
-      if (perr == hipSuccess && plain) {
-        memset(plain, 0, size);
-        setup->virt = plain;
-        setup->gpu = plain;
-        setup->phys = getPhysAddr(plain);
-        if (setup->phys == 0)
-          setup->phys = reinterpret_cast<uint64_t>(plain);
-        ROCXIO_LOG_INFO("%s (rocjitsu plain): virt=%p phys=0x%llx\n",
-                        queue_name, plain, (unsigned long long)setup->phys);
-        return 0;
-      }
-    }
-  }
-  alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
-  if (alloc_err != hipSuccess) {
-    ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
-                    hipGetErrorString(alloc_err));
-    return -ENOMEM;
-  }
-
-  // Zero-initialize host queues; device memory is already
-  // zeroed by hipMemset inside allocateQueue().
+  // Always use plain page-aligned malloc for host SQ/CQ: HMM-backed
+  // hipHostMalloc memory has pagemap GPAs that do not reflect where the
+  // CPU writes, causing the kprobe to inject the wrong GPA into SPDK's
+  // CREATE_SQ/CQ.  posix_memalign gives correct pagemap GPAs on all targets.
   if (!is_device) {
-    memset(setup->virt, 0, size);
-  }
-
-  // Step 2: Reallocate with coherent memory if host memory.
-  // Skip when the GPU is rocjitsu (emulated GPU, clock rate = 0 KHz): on
-  // rocjitsu hipHostMallocCoherent uses a physical address domain that differs
-  // from what /proc/self/pagemap reports, so the kprobe injects the wrong GPA
-  // into SPDK's CREATE_SQ/CQ and SPDK reads zeros from the SQ.  Plain
-  // hipHostMallocMapped pagemap-derived GPA IS correct for rocjitsu because
-  // the GPU kernel runs as host CPU code and writes to the same physical pages
-  // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
-  // this path is not taken and coherent reallocation is unchanged.
-  if (!is_device) {
-    // hipDeviceAttributeWallClockRate is the GPU's hardware real-time clock.
-    // On rocjitsu (emulated GPU) this returns 0 regardless of rocjitsu version;
-    // on real AMD GPU hardware it is always > 0.  When wall clock = 0 the
-    // coherent memory path is skipped because rocjitsu's hipHostMallocCoherent
-    // maps to a physical address domain that does not match /proc/self/pagemap,
-    // causing the kprobe to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
-    int gpu_wall_clock_khz = 0;
-    (void)hipDeviceGetAttribute(&gpu_wall_clock_khz,
-                                hipDeviceAttributeWallClockRate, 0);
-    if (gpu_wall_clock_khz > 0) {
-      setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
+    void* plain = nullptr;
+    hipError_t perr = allocHostMemory(size, &plain, queue_name,
+                                      XIO_HOST_MEM_PLAIN);
+    if (perr == hipSuccess && plain) {
+      memset(plain, 0, size);
+      setup->virt = plain;
+      setup->gpu = plain;
+      setup->phys = getPhysAddr(plain);
+      if (setup->phys == 0)
+        setup->phys = reinterpret_cast<uint64_t>(plain);
+      ROCXIO_LOG_INFO("%s (rocjitsu plain): virt=%p phys=0x%llx\n", queue_name,
+                      plain, (unsigned long long)setup->phys);
+      return 0;
     }
   }
+}
+alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
+if (alloc_err != hipSuccess) {
+  ROCXIO_LOG_INFO("Failed to allocate %s: %s\n", queue_name,
+                  hipGetErrorString(alloc_err));
+  return -ENOMEM;
+}
 
-  // Step 3: Register with HIP (skip if coherent or device memory).
-  // hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
-  // GPU access, so hipHostRegister may return
-  // hipErrorHostMemoryAlreadyRegistered when reallocateQueue was skipped. Treat
-  // that as success.
-  if (!setup->uses_coherent && !is_device) {
-    hipError_t hip_err = hipHostRegister(setup->virt, size,
-                                         hipHostRegisterMapped);
-    if (hip_err == hipErrorHostMemoryAlreadyRegistered)
-      hip_err = hipSuccess;
-    if (hip_err != hipSuccess) {
-      ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
-                      hipGetErrorString(hip_err));
-      // Cleanup
-      if (setup->uses_coherent) {
-        (void)hipHostFree(setup->virt);
-      } else {
-        freeQueue(setup->virt, is_device, queue_name);
-      }
-      setup->virt = nullptr;
-      return -EIO;
-    }
-    hip_registered = true;
-  }
+// Zero-initialize host queues; device memory is already
+// zeroed by hipMemset inside allocateQueue().
+if (!is_device) {
+  memset(setup->virt, 0, size);
+}
 
-  // Step 4: Get GPU pointer
-  setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
-  if (!setup->gpu) {
+// Step 2: Reallocate with coherent memory if host memory.
+// Skip when the GPU is rocjitsu (emulated GPU, clock rate = 0 KHz): on
+// rocjitsu hipHostMallocCoherent uses a physical address domain that differs
+// from what /proc/self/pagemap reports, so the kprobe injects the wrong GPA
+// into SPDK's CREATE_SQ/CQ and SPDK reads zeros from the SQ.  Plain
+// hipHostMallocMapped pagemap-derived GPA IS correct for rocjitsu because
+// the GPU kernel runs as host CPU code and writes to the same physical pages
+// the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
+// this path is not taken and coherent reallocation is unchanged.
+// Step 2: coherent reallocation intentionally skipped.
+// posix_memalign (XIO_HOST_MEM_PLAIN, Step 1) gives correct pagemap GPAs on
+// all targets.  HMM-backed hipHostMallocCoherent/Mapped uses a physical
+// address domain that diverges from /proc/self/pagemap, causing the kprobe
+// to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
+(void)is_device; // suppress unused-variable warning if Step 3 is also skipped
+
+// Step 3: Register with HIP (skip if coherent or device memory).
+// hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
+// GPU access, so hipHostRegister may return
+// hipErrorHostMemoryAlreadyRegistered when reallocateQueue was skipped. Treat
+// that as success.
+if (!setup->uses_coherent && !is_device) {
+  hipError_t hip_err = hipHostRegister(setup->virt, size,
+                                       hipHostRegisterMapped);
+  if (hip_err == hipErrorHostMemoryAlreadyRegistered)
+    hip_err = hipSuccess;
+  if (hip_err != hipSuccess) {
+    ROCXIO_LOG_WARN("Failed to register %s with HIP: %s\n", queue_name,
+                    hipGetErrorString(hip_err));
     // Cleanup
-    if (hip_registered) {
-      (void)hipHostUnregister(setup->virt);
-    }
     if (setup->uses_coherent) {
       (void)hipHostFree(setup->virt);
     } else {
@@ -1832,52 +1807,69 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
     setup->virt = nullptr;
     return -EIO;
   }
+  hip_registered = true;
+}
 
-  // Step 5: Get physical address
-  if (!kernel_module_device) {
-    ROCXIO_LOG_ERROR("kernel_module_device required for %s\n", queue_name);
-    // Cleanup
-    if (hip_registered) {
-      (void)hipHostUnregister(setup->virt);
-    }
-    if (setup->uses_coherent) {
-      (void)hipHostFree(setup->virt);
-    } else {
-      freeQueue(setup->virt, is_device, queue_name);
-    }
-    setup->virt = nullptr;
-    setup->gpu = nullptr;
-    return -EINVAL;
+// Step 4: Get GPU pointer
+setup->gpu = getGpuPointer(setup->virt, is_device, queue_name);
+if (!setup->gpu) {
+  // Cleanup
+  if (hip_registered) {
+    (void)hipHostUnregister(setup->virt);
   }
-
-  setup->phys = getPhysAddr(setup->virt, size, is_device, nvme_bdf,
-                            kernel_module_device, is_emulated, queue_name);
-  if (setup->phys == 0 && is_device) {
-    // Device memory requires physical address
-    ROCXIO_LOG_ERROR("Failed to get physical address for %s device "
-                     "memory\n",
-                     queue_name);
-    // Cleanup
-    if (hip_registered) {
-      (void)hipHostUnregister(setup->virt);
-    }
-    if (setup->uses_coherent) {
-      (void)hipHostFree(setup->virt);
-    } else {
-      freeQueue(setup->virt, is_device, queue_name);
-    }
-    setup->virt = nullptr;
-    setup->gpu = nullptr;
-    return -ENOTSUP;
+  if (setup->uses_coherent) {
+    (void)hipHostFree(setup->virt);
+  } else {
+    freeQueue(setup->virt, is_device, queue_name);
   }
+  setup->virt = nullptr;
+  return -EIO;
+}
 
-  ROCXIO_LOG_INFO("%s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
-                  "coherent=%d\n",
-                  queue_name, setup->virt, setup->gpu,
-                  (unsigned long long)setup->phys,
-                  setup->uses_coherent ? 1 : 0);
+// Step 5: Get physical address
+if (!kernel_module_device) {
+  ROCXIO_LOG_ERROR("kernel_module_device required for %s\n", queue_name);
+  // Cleanup
+  if (hip_registered) {
+    (void)hipHostUnregister(setup->virt);
+  }
+  if (setup->uses_coherent) {
+    (void)hipHostFree(setup->virt);
+  } else {
+    freeQueue(setup->virt, is_device, queue_name);
+  }
+  setup->virt = nullptr;
+  setup->gpu = nullptr;
+  return -EINVAL;
+}
 
-  return 0;
+setup->phys = getPhysAddr(setup->virt, size, is_device, nvme_bdf,
+                          kernel_module_device, is_emulated, queue_name);
+if (setup->phys == 0 && is_device) {
+  // Device memory requires physical address
+  ROCXIO_LOG_ERROR("Failed to get physical address for %s device "
+                   "memory\n",
+                   queue_name);
+  // Cleanup
+  if (hip_registered) {
+    (void)hipHostUnregister(setup->virt);
+  }
+  if (setup->uses_coherent) {
+    (void)hipHostFree(setup->virt);
+  } else {
+    freeQueue(setup->virt, is_device, queue_name);
+  }
+  setup->virt = nullptr;
+  setup->gpu = nullptr;
+  return -ENOTSUP;
+}
+
+ROCXIO_LOG_INFO("%s setup complete: virt=%p, gpu=%p, phys=0x%llx, "
+                "coherent=%d\n",
+                queue_name, setup->virt, setup->gpu,
+                (unsigned long long)setup->phys, setup->uses_coherent ? 1 : 0);
+
+return 0;
 }
 
 __host__ int buildQueuePrpList(struct xioQueueSetup* setup, size_t queue_size,
@@ -2891,10 +2883,8 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     // appear in /proc/self/pagemap, so getPhysAddr() cannot return the correct
     // GPA.  On rocjitsu the GPU kernel runs as host CPU code, so plain malloc
     // IS accessible and its pagemap GPA IS where the CPU writes land.
-    int _wclk = 0;
-    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
-    bool rocjitsu_plain = (_wclk == 0);
-
+    // Always use plain posix_memalign: correct pagemap GPA on all targets.
+    const bool rocjitsu_plain = true;
     if (rocjitsu_plain) {
       hipError_t perr = allocHostMemory(size, &bufferInfo->hostPtr,
                                         "GPU accessible buffer (rocjitsu)",
@@ -2936,24 +2926,12 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
       uint32_t sys_np = (uint32_t)((size + sys_page - 1) / sys_page);
       uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
       size_t pa_bytes = nvme_np * sizeof(uint64_t);
-      // Use posix_memalign so the per-page GPA array itself has a correct
-      // pagemap GPA on rocjitsu (hipHostMallocMapped uses HMM memory whose
-      // pagemap GPA does not reflect where the CPU actually reads/writes).
+      // Always use posix_memalign: page-aligned memory with correct pagemap
+      // GPA on all targets (rocjitsu and real AMD GPU).
       uint64_t* pa = nullptr;
       bool pa_from_memalign = false;
-      {
-        int _wclk2 = 0;
-        (void)hipDeviceGetAttribute(&_wclk2, hipDeviceAttributeWallClockRate,
-                                    0);
-        if (_wclk2 == 0) {
-          if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) ==
-              0) {
-            pa_from_memalign = true;
-          }
-        } else {
-          hipHostMalloc(reinterpret_cast<void**>(&pa), pa_bytes,
-                        hipHostMallocMapped);
-        }
+      if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) == 0) {
+        pa_from_memalign = true;
       }
       if (pa) {
         memset(pa, 0, pa_bytes);
