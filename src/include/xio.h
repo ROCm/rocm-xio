@@ -1061,6 +1061,12 @@ struct pci_mmio_bridge_command {
  * @return 0 on success, negative error code on failure.
  */
 __host__ int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr);
+/** @brief Allocate shadow ring from heap for rocjitsu (flat GPU aperture). */
+__host__ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf,
+                                                  size_t size,
+                                                  void** virt_addr);
+/** @brief Write the override GPA to the bridge's config register. */
+__host__ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa);
 
 /**
  * @brief Register shadow buffer for GPU access.

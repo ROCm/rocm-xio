@@ -49,20 +49,26 @@ env:
   # SPDK: serves the NVMe KV (and optional LBA) namespace over vfio-user.
   # Built from mmgaggle/spdk@rados-nkv, not upstream spdk/spdk: the target-side
   # kvdev layer and nvmf_subsystem_add_kv_ns exist nowhere upstream.
-  SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20260917.g857483b-spdk.18d1d8d
+  SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20261020.g7cf462c-spdk.18d1d8d
 
   # QEMU: MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
+  #
+  # BLOCKED: the Oct 20 image (qemu.31e3d06) predates the override-GPA feature
+  # (added in bd4ebe947a).  A new image is needed that includes bd4ebe947a plus
+  # the LO-as-commit fix to pci_mmio_bridge_config_write (one-line change to the
+  # if-condition at hw/pci/pci-mmio-bridge.c:545).  Until that image is
+  # published, this pin is held at the Oct 14 build which carries bd4ebe947a.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261014.geea0485-qemu.31e3d06-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.g2cc8e79-rocjitsu.909c17f
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
 
-  # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
-  # gfx1250 firmware blobs, was dropped from the image after this tag. Used
-  # solely to synthesise firmware, never to serve the device.
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260915-rocjitsu.730bc62
+  # Source of gfx1250 firmware blobs (vfio_guest_firmware.py). Used solely to
+  # synthesise firmware, never to serve the device. Kept in sync with
+  # ROCJITSU_IMAGE now that vfio_guest_firmware.py is present in the Oct 20 build.
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
 
-  # The "rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
+  # The "ernic-rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
   # rocm-xio's build dependencies. MUST be the resolute build (see
   # test-vm-nvme.yml for the full explanation of why noble breaks here).
   #
@@ -70,7 +76,12 @@ env:
   # extracts the guest disk via `docker create` + `docker cp /output/.`,
   # which requires a runnable container image. The -qcow2-suffixed tags
   # are OCI artifacts (schema_version 4) that docker create cannot run.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
+  #
+  # ernic-rocjitsu flavour, built by qemu-minimal c5d51ce: its netplan
+  # matches the NIC by name (en*), so it boots with the MAC qemu-tool now
+  # derives from the SSH port. Guests built before qemu-minimal 3969f07
+  # (e.g. qm.5d68689) pin 52:54:00:12:34:56 and lose networking.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20261016.g9ef1ed8-vm.resolute-ernic-rocjitsu-qm.c5d51ce
 
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
@@ -156,6 +167,8 @@ jobs:
               -o NoHostAuthenticationForLocalhost=yes \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
               "$SSH_USER@localhost" \
               "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
                KV_NSID='$KV_NSID' \
@@ -171,7 +184,7 @@ jobs:
           # confirms the KV commands actually reached SPDK rather than
           # producing false-positive completions on the guest side.
           SPDK_CONTAINER="$SPDK_CONTAINER" \
-            ./../../scripts/test/spdk-kv-check.sh
+            ../../../scripts/test/spdk-kv-check.sh
 
       - name: Collect guest diagnostics
         if: always()

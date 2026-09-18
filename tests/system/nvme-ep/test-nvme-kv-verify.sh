@@ -54,6 +54,13 @@ if [ ! -f "$XIO_TESTER" ]; then
     exit 77
 fi
 
+# Pass --pci-mmio-bridge when the rocjitsu CI environment requests it.
+PCI_MMIO_BRIDGE_ARG=""
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
+   [ "${USE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
+fi
+
 # ---- phase 1: store each key with a distinct value ----------------------
 
 echo "KV verify: storing ${#KEYS[@]} keys to $KV_CTRL nsid=$KV_NSID"
@@ -68,6 +75,7 @@ for i in "${!KEYS[@]}"; do
         --write-io 1 --batch-size 1 \
         --value-size "$VALUE_SIZE" --data-buffer-size "$VALUE_SIZE" \
         --lfsr-seed "$seed" \
+        ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
         --less-timing > /dev/null
     echo "  stored key=$key seed=$seed"
 done
@@ -88,6 +96,7 @@ for i in $(seq $(( ${#KEYS[@]} - 1 )) -1 0); do
         --read-io 1 --batch-size 1 \
         --value-size "$VALUE_SIZE" --data-buffer-size "$VALUE_SIZE" \
         --lfsr-seed "$seed" --verify \
+        ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
         --less-timing 2>&1)
     if echo "$result" | grep -E "Verify Failed:[[:space:]]+[^0]" > /dev/null; then
         echo "  FAIL: data mismatch for key=$key"

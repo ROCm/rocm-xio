@@ -64,9 +64,29 @@ fi
 # the last occurrence of a flag.
 KV_MAX_VALUE=65536
 
-exec "$XIO_TESTER" nvme-ep \
+# Add --pci-mmio-bridge when the rocjitsu/vfio-user CI environment sets
+# XIO_FORCE_PCI_MMIO_BRIDGE=1 (or USE_PCI_MMIO_BRIDGE=1). On rocjitsu,
+# doorbell writes from the GPU kernel cannot reliably reach the SPDK
+# vfio-user controller via direct BAR0 mmap; the pci-mmio-bridge shadow
+# buffer path is the supported alternative.
+#
+# The pci-mmio-bridge path also requires LD_PRELOAD=libjemalloc.so.2.
+# The ROCm 10.x HIP runtime overflows its hipHostRegister tracking struct,
+# corrupting glibc's heap before the ring write reaches QEMU.  Jemalloc's
+# arena layout is resilient to this overflow for a single invocation.
+PCI_MMIO_BRIDGE_ARG=""
+JEMALLOC_PRELOAD=""
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
+   [ "${USE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
+    JEMALLOC_PRELOAD="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
+fi
+
+exec env ${JEMALLOC_PRELOAD:+LD_PRELOAD="$JEMALLOC_PRELOAD"} \
+    "$XIO_TESTER" nvme-ep \
     --controller "$KV_CTRL" \
     --namespace  "$KV_NSID" \
     --value-size "$KV_MAX_VALUE" \
     --data-buffer-size "$KV_MAX_VALUE" \
+    ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
     "$@"

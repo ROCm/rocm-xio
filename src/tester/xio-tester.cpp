@@ -51,6 +51,14 @@ static void sigintHandler(int sig) {
 }
 
 int main(int argc, char** argv) {
+  // Endpoint maps are declared before app so they are destroyed after app.
+  // CLI11 option objects hold raw pointers into endpoint config members (e.g.
+  // kvKeys vector). CLI::App::~App() calls to_string() on those pointers; if
+  // the configs are already freed that is use-after-free -> SIGSEGV.
+  std::map<std::string, CLI::App*> endpointSubcommands_storage;
+  std::map<std::string, std::unique_ptr<XioEndpoint>> endpoints_storage;
+  std::map<std::string, void*> endpointConfigs_storage;
+
   CLI::App app{"xio-tester: A test harness for rocm-xio."};
   app.fallthrough(true);
 
@@ -157,10 +165,10 @@ int main(int argc, char** argv) {
   // Get all available endpoints
   const auto& registry = getEndpointRegistry();
 
-  // Create subcommands for each endpoint
-  std::map<std::string, CLI::App*> endpointSubcommands;
-  std::map<std::string, std::unique_ptr<XioEndpoint>> endpoints;
-  std::map<std::string, void*> endpointConfigs;
+  // Create subcommands for each endpoint (backed by storage declared above)
+  auto& endpointSubcommands = endpointSubcommands_storage;
+  auto& endpoints = endpoints_storage;
+  auto& endpointConfigs = endpointConfigs_storage;
 
   for (const auto& endpointInfo : registry) {
     // Create endpoint object

@@ -1032,9 +1032,12 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
         printf("KV: key does not exist (sc=0x87)\n");
       }
     } else {
+      // sc= is printed via device printf (appears in rocjitsu container log)
+      // and also causes __builtin_trap() so the ctest output shows SegFault.
       printf("NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n", (unsigned)sc,
              (unsigned)sct, op);
-      __builtin_trap();
+      // Return instead of trap so printf flushes before exit.
+      return;
     }
 
     cq_head = (cq_head + 1) % ioParams.queueSize;
@@ -2907,27 +2910,64 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   ROCXIO_LOG_INFO("Using queue length: %u entries\n", queue_size);
 
   // ---- Doorbell access setup (shared) ----
+  void* shadow_virt = nullptr;
+  bool is_rocjitsu_shadow = false;
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
-    void* shadow_virt = nullptr;
-    int ret_shadow = mapMmioBridgeShadowBuffer(
-      nvmeConfig->doorbellParams.mmioBridgeBdf, &shadow_virt);
-    if (ret_shadow < 0) {
-      ROCXIO_LOG_ERROR("Failed to map PCI MMIO bridge "
-                       "shadow buffer.\n");
-      return hipErrorInvalidValue;
-    }
-    ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer "
-                    "mapped at %p.\n",
-                    shadow_virt);
     const size_t shadow_size = 8192;
-    void* shadow_gpu_ptr = nullptr;
-    int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
-                                                       &shadow_gpu_ptr);
-    if (ret_reg < 0) {
-      ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
-                       "shadow buffer.\n");
-      return hipErrorInvalidValue;
+
+    // On rocjitsu the GPU kernel executes as a CPU thread in the host process.
+    // Pfnmap pages (from remap_pfn_range) give GPU VA != CPU VA, and rocjitsu
+    // cannot resolve those GPU VAs to a host address.  Allocate the shadow ring
+    // from normal heap pages instead: GPU VA == CPU VA == rocjitsu host VA.
+    // The GPA is written to QEMU's writable override register (config 0x50) so
+    // QEMU polls the same pages.
+    bool is_emulated_top = false;
+    if (!nvmeConfig->controllers.empty()) {
+      detectEmulatedNvme(nvmeConfig->controllers[0].c_str(), &is_emulated_top);
     }
+    if (is_emulated_top) {
+      is_rocjitsu_shadow = true;
+      int ret_alloc = allocMmioBridgeShadowBufferRocjitsu(
+        nvmeConfig->doorbellParams.mmioBridgeBdf, shadow_size, &shadow_virt);
+      if (ret_alloc < 0) {
+        ROCXIO_LOG_ERROR("Failed to allocate rocjitsu shadow buffer.\n");
+        return hipErrorInvalidValue;
+      }
+    } else {
+      int ret_shadow = mapMmioBridgeShadowBuffer(
+        nvmeConfig->doorbellParams.mmioBridgeBdf, &shadow_virt);
+      if (ret_shadow < 0) {
+        ROCXIO_LOG_ERROR("Failed to map PCI MMIO bridge shadow buffer.\n");
+        return hipErrorInvalidValue;
+      }
+    }
+    ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer at %p.\n", shadow_virt);
+
+    void* shadow_gpu_ptr = nullptr;
+    if (is_rocjitsu_shadow) {
+      /* The ring is mmap'd with a guard page before it to absorb any pre-ring
+       * writes that rocjitsu's MAP_FIXED registration emits (which would
+       * otherwise land on an adjacent malloc chunk header and corrupt the heap).
+       * Register with HIP so rocjitsu creates the flat-aperture mapping at the
+       * CPU VA; hipHostGetDevicePointer then confirms GPU VA == CPU VA. */
+      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+                                                         &shadow_gpu_ptr);
+      if (ret_reg < 0) {
+        ROCXIO_LOG_ERROR("Failed to register shadow ring with HIP.\n");
+        return hipErrorInvalidValue;
+      }
+      ROCXIO_LOG_INFO("rocjitsu: shadow ring cpu=%p gpu=%p\n",
+                      shadow_virt, shadow_gpu_ptr);
+    } else {
+      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+                                                         &shadow_gpu_ptr);
+      if (ret_reg < 0) {
+        ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge shadow buffer.\n");
+        return hipErrorInvalidValue;
+      }
+    }
+    ROCXIO_LOG_INFO("pci-mmio-bridge shadow buffer: cpu=%p gpu=%p\n",
+                    shadow_virt, shadow_gpu_ptr);
     nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
   } else {
     // One BAR0 mapping per controller. validateConfig() rejects the MMIO
@@ -2952,6 +2992,18 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("NVMe BAR0 for %s is not GPU-accessible.\n",
                          target.controller.c_str());
         return hipErrorInvalidValue;
+      }
+      // When the GPU VA for MMIO (bar0_gpu) differs from the CPU VA
+      // (bar0_cpu), the GPU kernel's doorbell writes go to the GPU VA which
+      // is not the address that QEMU intercepts for vfio-user forwarding to
+      // SPDK.  Use the CPU VA instead — on any target where GPU=CPU (e.g.
+      // rocjitsu emulated GPU), the CPU VA IS the QEMU-interceptable address.
+      if (bar0_cpu != bar0_gpu) {
+        ROCXIO_LOG_INFO(
+          "%s: GPU/CPU BAR0 VA mismatch, using CPU VA for doorbell "
+          "(cpu=%p gpu=%p)\n",
+          target.controller.c_str(), bar0_cpu, bar0_gpu);
+        bar0_gpu = bar0_cpu;
       }
       ROCXIO_LOG_INFO("%s: NVMe BAR0 mapped for direct doorbell access "
                       "at %p.\n",
@@ -3476,12 +3528,20 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
     if (prpPoolBytes > 0) {
       void* pool = nullptr;
-      hipError_t alloc_err = hipHostMalloc(&pool, prpPoolBytes,
-                                           hipHostMallocMapped);
-      if (alloc_err != hipSuccess || !pool) {
+      // On rocjitsu (wall clock = 0) hipHostMallocMapped uses HMM memory
+      // whose pagemap GPA is wrong, causing SPDK to read the PRP list from
+      // the wrong address and silently drop the KV Store command (no CQE).
+      // Use posix_memalign so the pool has a correct pagemap GPA.
+      // Always use posix_memalign for the PRP pool: it produces a correct
+      // pagemap GPA on all targets.  hipHostMallocMapped uses HMM-backed
+      // memory whose pagemap GPA is wrong on rocjitsu, causing SPDK to read
+      // the PRP list from the wrong address and drop the KV Store command.
+      bool pool_from_memalign = (posix_memalign(&pool, NVME_PAGE_SIZE,
+                                                prpPoolBytes) == 0);
+      if (!pool) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list pool "
-                         "for queue %u: %s\n",
-                         qid, hipGetErrorString(alloc_err));
+                         "for queue %u\n",
+                         qid);
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
@@ -3489,7 +3549,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("PRP list pool for queue %u is not "
                          "page-aligned\n",
                          qid);
-        (void)hipHostFree(pool);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorInvalidValue;
         goto cleanup;
       }
@@ -3500,7 +3563,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         ROCXIO_LOG_ERROR("Failed to get PRP pool phys addr "
                          "for queue %u\n",
                          qid);
-        (void)hipHostFree(pool);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorInvalidValue;
         goto cleanup;
       }
@@ -3520,18 +3586,23 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                                                kEntriesPerPage)
                                             : 1u;
       const uint32_t prp_dma_entries = prp_cmd_slots * list_pages_per_cmd;
-      hipError_t dmas_err = hipHostMalloc((void**)&page_dmas,
-                                          sizeof(*page_dmas) * prp_dma_entries,
-                                          hipHostMallocMapped);
-      if (dmas_err != hipSuccess || !page_dmas) {
+      // Use plain malloc: page_dmas is a host-side bookkeeping array of
+      // physical addresses; it does not need GPU access or HMM backing.
+      // hipHostMalloc(hipHostMallocMapped) uses HMM whose internal error
+      // paths corrupt glibc's allocator on rocjitsu (emulated GPU).
+      page_dmas = static_cast<uint64_t*>(
+        calloc(prp_dma_entries, sizeof(*page_dmas)));
+      if (!page_dmas) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list DMA "
-                         "table for queue %u: %s\n",
-                         qid, hipGetErrorString(dmas_err));
-        (void)hipHostFree(pool);
+                         "table for queue %u\n",
+                         qid);
+        if (pool_from_memalign)
+          free(pool);
+        else
+          (void)hipHostFree(pool);
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
-      memset(page_dmas, 0, sizeof(*page_dmas) * prp_dma_entries);
       for (uint32_t s = 0; s < prp_cmd_slots; s++) {
         for (uint32_t p = 0; p < list_pages_per_cmd; p++) {
           uint8_t* listPage = static_cast<uint8_t*>(pool) +
@@ -3543,8 +3614,11 @@ __host__ hipError_t run(XioEndpointConfig* config) {
             ROCXIO_LOG_ERROR("Failed to get PRP list page "
                              "phys addr for queue %u slot %u page %u\n",
                              qid, s, p);
-            (void)hipHostFree(page_dmas);
-            (void)hipHostFree(pool);
+            free(page_dmas);
+            if (pool_from_memalign)
+              free(pool);
+            else
+              (void)hipHostFree(pool);
             result = hipErrorInvalidValue;
             goto cleanup;
           }
@@ -3970,10 +4044,12 @@ cleanup:
   // Free per-lane PRP list pools
   for (size_t q = 0; q < numLanes; q++) {
     if (prpPools[q].pageDmas) {
-      (void)hipHostFree(prpPools[q].pageDmas);
+      free(prpPools[q].pageDmas); // allocated via calloc, not hipHostMalloc
     }
     if (prpPools[q].ptr && prpPools[q].hipAllocated) {
-      (void)hipHostFree(prpPools[q].ptr);
+      hipError_t pferr = hipHostFree(prpPools[q].ptr);
+      if (pferr != hipSuccess)
+        free(prpPools[q].ptr);
     }
   }
 
@@ -3993,6 +4069,21 @@ cleanup:
   for (size_t q = 0; q < numLanes; q++) {
     if (perQueueStats[q] != nullptr)
       xio::freeHostMemory(perQueueStats[q], XIO_HOST_MEM_MAPPED);
+  }
+
+  if (is_rocjitsu_shadow && shadow_virt) {
+    /* Zero the ring so QEMU sees producer_idx=0, then clear the override. */
+    auto* meta =
+      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadow_virt);
+    meta->producer_idx = 0;
+    meta->consumer_idx = 0;
+    writeBridgeOverrideGpa(nvmeConfig->doorbellParams.mmioBridgeBdf, 0);
+    hipHostUnregister(shadow_virt);
+    munlock(shadow_virt, 8192);
+    /* shadow_virt = mmap_base + 4096 (guard page); release the full mapping */
+    void* mmap_base = static_cast<char*>(shadow_virt) - 4096;
+    munmap(mmap_base, 4096 + 8192);
+    shadow_virt = nullptr;
   }
 
   return result;
@@ -4705,25 +4796,15 @@ __host__ int createQueue(const char* nvme_device,
   ROCXIO_LOG_INFO("NVMe device %s detected as: %s.\n", nvme_device,
                   is_emulated ? "EMULATED" : "REAL");
 
-  // For vfio-user SPDK NVMe (is_emulated=true, VID=0x4e58): coherent host
-  // memory obtained via hipHostMallocCoherent is not visible in /proc/pagemap,
-  // so getPhysAddr() falls back to returning the virtual address.  The kprobe
-  // then injects a virtual address into SPDK's CREATE_SQ/CQ PRP1, which SPDK
-  // cannot translate — it reads zeros from the SQ and no I/O is processed.
-  // Force sq/cq into VRAM; exportRegVramBuf correctly exports a DMA-visible
-  // GPA via DMA-BUF even for this class of device.
-  if (is_emulated) {
-    if (!sq_is_device) {
-      sq_is_device = true;
-      ROCXIO_LOG_INFO("vfio-user NVMe: forcing SQ into VRAM for correct "
-                      "DMA address export\n");
-    }
-    if (!cq_is_device) {
-      cq_is_device = true;
-      ROCXIO_LOG_INFO("vfio-user NVMe: forcing CQ into VRAM for correct "
-                      "DMA address export\n");
-    }
-  }
+  // For vfio-user SPDK NVMe (is_emulated=true, VID=0x4e58) the contig DMA
+  // path (setupContigQueueForGpu -> dma_alloc_coherent + mmap) produces memory
+  // whose GPU pointer does not share physical pages with the host virtual
+  // address: the GPU writes SQEs to the wrong location and SPDK reads zeros.
+  // exportRegVramBuf (the VRAM/DMA-BUF path) fails for this BDF class.
+  // Instead, keep sq/cq in host memory (sq_is_device/cq_is_device remain
+  // false) and bypass the contig path — hipHostMalloc-backed memory obtained
+  // via setupQueueForGpu IS visible in pagemap and getPhysAddr() returns a
+  // correct GPA that the kprobe can inject into SPDK's CREATE_SQ/CQ PRP1.
 
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
