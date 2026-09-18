@@ -4732,9 +4732,9 @@ __host__ int createQueue(const char* nvme_device,
   bool cq_multi_page = !cq_is_device && cq_size_bytes > NVME_PAGE_SIZE;
 
   // CQR=1 + multi-page: use contiguous DMA path.
-  // Exception: emulated controllers (QEMU VID=0x1b36, SPDK vfio-user VID=0x4e58)
-  // cannot use dma_alloc_coherent-backed memory for GPU queues because the
-  // rocjitsu GPU emulator does not map that memory correctly via
+  // Exception: emulated controllers (QEMU VID=0x1b36, SPDK vfio-user
+  // VID=0x4e58) cannot use dma_alloc_coherent-backed memory for GPU queues
+  // because the rocjitsu GPU emulator does not map that memory correctly via
   // hipHostGetDevicePointer -- writes from the GPU kernel go to the wrong
   // physical location, so SPDK reads zeros from the SQ.  Use hipHostMalloc
   // (setupQueueForGpu) instead, which the rocjitsu GPU can write through.
