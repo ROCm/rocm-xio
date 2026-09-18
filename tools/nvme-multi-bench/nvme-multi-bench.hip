@@ -17,8 +17,6 @@
  *   --write         issue writes instead of reads
  */
 
-#include <hip/hip_runtime.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -28,6 +26,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <hip/hip_runtime.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -335,11 +335,10 @@ int main(int argc, char** argv) {
   hipStreamCreate(&stream);
   hipGetLastError();
 
-  hipLaunchKernelGGL(xio::nvme_ep::gpuKernelMultiQueuePersistent,
-                     dim3(n), dim3(1), 0, stream,
-                     d_configs, d_io, d_door, d_buf,
-                     queue_states_gpu, work_ring_gpu,
-                     ring_depth, stop_flag_gpu, (uint32_t)depth);
+  hipLaunchKernelGGL(xio::nvme_ep::gpuKernelMultiQueuePersistent, dim3(n),
+                     dim3(1), 0, stream, d_configs, d_io, d_door, d_buf,
+                     queue_states_gpu, work_ring_gpu, ring_depth, stop_flag_gpu,
+                     (uint32_t)depth);
 
   hipError_t launch_err = hipGetLastError();
   if (launch_err != hipSuccess) {
