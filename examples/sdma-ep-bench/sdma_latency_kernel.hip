@@ -5,12 +5,13 @@
 
 #include "sdma_latency_kernel.h"
 
+template <bool TIMESTAMPING_EN>
 __global__ void sdmaLatencyKernel(void* src, void* dst, size_t copySize,
                                   size_t numCopyCommands,
                                   xio::sdma_ep::SdmaQueueHandle** handles,
                                   uint64_t* signal, uint64_t expectedSignal,
                                   int64_t* start, int64_t* end,
-                                  LatencyBreakdown* breakdown, bool fineGrained,
+                                  LatencyBreakdown* breakdown,
                                   bool useQueueState) {
   if (threadIdx.x != 0)
     return;
@@ -40,7 +41,7 @@ __global__ void sdmaLatencyKernel(void* src, void* dst, size_t copySize,
     handle.submitPacket(base, pendingWptr, useQueueState ? &state : nullptr);
     int64_t submitEnd = wall_clock64();
 
-    if (fineGrained) {
+    if constexpr (TIMESTAMPING_EN) {
       breakdown->reserveStart[command] = reserveStart;
       breakdown->reserveEnd[command] = reserveEnd;
       breakdown->buildStart[command] = buildStart;
@@ -65,7 +66,7 @@ __global__ void sdmaLatencyKernel(void* src, void* dst, size_t copySize,
   int64_t atomicSubmitStart = wall_clock64();
   handle.submitPacket(base, pendingWptr, useQueueState ? &state : nullptr);
   int64_t atomicSubmitEnd = wall_clock64();
-  if (fineGrained) {
+  if constexpr (TIMESTAMPING_EN) {
     breakdown->atomicReserveStart[0] = atomicReserveStart;
     breakdown->atomicReserveEnd[0] = atomicReserveEnd;
     breakdown->atomicBuildStart[0] = atomicBuildStart;
@@ -73,10 +74,20 @@ __global__ void sdmaLatencyKernel(void* src, void* dst, size_t copySize,
     breakdown->atomicSubmitStart[0] = atomicSubmitStart;
     breakdown->atomicSubmitEnd[0] = atomicSubmitEnd;
   }
-  if (fineGrained)
+  if constexpr (TIMESTAMPING_EN) {
     breakdown->transferStart[0] = wall_clock64();
+  }
   xio::sdma_ep::waitSignal(signal, expectedSignal);
   end[0] = wall_clock64();
-  if (fineGrained)
+  if constexpr (TIMESTAMPING_EN) {
     breakdown->transferEnd[0] = end[0];
+  }
 }
+
+template __global__ void sdmaLatencyKernel<false>(
+  void*, void*, size_t, size_t, xio::sdma_ep::SdmaQueueHandle**, uint64_t*,
+  uint64_t, int64_t*, int64_t*, LatencyBreakdown*, bool);
+
+template __global__ void sdmaLatencyKernel<true>(
+  void*, void*, size_t, size_t, xio::sdma_ep::SdmaQueueHandle**, uint64_t*,
+  uint64_t, int64_t*, int64_t*, LatencyBreakdown*, bool);

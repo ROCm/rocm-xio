@@ -26,10 +26,11 @@ struct LatencyBreakdown {
   int64_t* transferEnd;
 };
 
+template <bool TIMESTAMPING_EN>
 __global__ void sdmaLatencyKernel(void* src, void* dst, size_t copySize,
                                   size_t numCopyCommands,
                                   xio::sdma_ep::SdmaQueueHandle** handles,
                                   uint64_t* signal, uint64_t expectedSignal,
                                   int64_t* start, int64_t* end,
-                                  LatencyBreakdown* breakdown, bool fineGrained,
+                                  LatencyBreakdown* breakdown,
                                   bool useQueueState);

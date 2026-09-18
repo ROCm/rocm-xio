@@ -36,7 +36,7 @@ struct Params {
   int dstGpu = 1;
   bool skipVerification = false;
   bool fine = false;
-  bool queueState = false;
+  bool noQueueState = false;
   std::string output = "latency.csv";
 };
 
@@ -138,19 +138,25 @@ void run(const Params& p) {
     HIP_CHECK(hipMemset(dst, 0, bytes));
     HIP_CHECK(hipDeviceSynchronize());
     if (!p.skipVerification) {
-      sdmaLatencyKernel<<<grid, block>>>(src, dst, size, p.commands,
-                                         handleDevice, signal, expected,
-                                         startDevice, endDevice,
-                                         breakdownDevice, p.fine, p.queueState);
+      if (p.fine)
+        sdmaLatencyKernel<true>
+          <<<grid, block>>>(src, dst, size, p.commands, handleDevice, signal,
+                            expected, startDevice, endDevice, breakdownDevice,
+                            !p.noQueueState);
+      else
+        sdmaLatencyKernel<false>
+          <<<grid, block>>>(src, dst, size, p.commands, handleDevice, signal,
+                            expected, startDevice, endDevice, breakdownDevice,
+                            !p.noQueueState);
       HIP_CHECK(hipDeviceSynchronize());
       verify(dst, bytes);
       ++expected;
     }
     for (size_t i = 0; i < p.warmup; ++i) {
-      sdmaLatencyKernel<<<grid, block>>>(src, dst, size, p.commands,
-                                         handleDevice, signal, expected,
-                                         startDevice, endDevice,
-                                         breakdownDevice, false, p.queueState);
+      sdmaLatencyKernel<false>
+        <<<grid, block>>>(src, dst, size, p.commands, handleDevice, signal,
+                          expected, startDevice, endDevice, breakdownDevice,
+                          !p.noQueueState);
       ++expected;
     }
     HIP_CHECK(hipDeviceSynchronize());
@@ -160,10 +166,16 @@ void run(const Params& p) {
     std::vector<double> deviceUs, hostUs;
     for (size_t i = 0; i < p.iterations; ++i) {
       HIP_CHECK(hipEventRecord(events[i]));
-      sdmaLatencyKernel<<<grid, block>>>(src, dst, size, p.commands,
-                                         handleDevice, signal, expected,
-                                         startDevice, endDevice,
-                                         breakdownDevice, p.fine, p.queueState);
+      if (p.fine)
+        sdmaLatencyKernel<true>
+          <<<grid, block>>>(src, dst, size, p.commands, handleDevice, signal,
+                            expected, startDevice, endDevice, breakdownDevice,
+                            !p.noQueueState);
+      else
+        sdmaLatencyKernel<false>
+          <<<grid, block>>>(src, dst, size, p.commands, handleDevice, signal,
+                            expected, startDevice, endDevice, breakdownDevice,
+                            !p.noQueueState);
       ++expected;
     }
     HIP_CHECK(hipEventRecord(events.back()));
@@ -278,8 +290,8 @@ int main(int argc, char** argv) {
   app.add_option("-o,--outputFile", p.output);
   app.add_flag("--skip-verification", p.skipVerification);
   app.add_flag("-l,--fine-grained", p.fine);
-  app.add_flag("--queue-state", p.queueState,
-               "Cache the queue read pointer during reservation");
+  app.add_flag("--no-queue-state", p.noQueueState,
+               "Disable cached queue read-pointer checks");
   CLI11_PARSE(app, argc, argv);
   if (p.minSize == 0 || p.maxSize < p.minSize || p.commands == 0 ||
       p.iterations == 0)
