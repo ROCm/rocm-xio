@@ -1393,10 +1393,16 @@ __host__ int detectEmulatedNvme(const char* device_path,
     return -EIO;
   }
 
-  // QEMU emulated NVMe controllers use Vendor ID 0x1b36 (Red Hat, Inc.)
+  // QEMU emulated NVMe controllers use Vendor ID 0x1b36 (Red Hat, Inc.).
+  // SPDK vfio-user NVMe controllers use Vendor ID 0x4e58 (Nutanix, Inc.).
+  // Both share a key property: dma_alloc_coherent memory is not accessible
+  // to the rocjitsu GPU via hipHostGetDevicePointer, so the contig DMA queue
+  // allocation path must be bypassed in favour of hipHostMalloc.
   const uint16_t QEMU_VENDOR_ID = 0x1b36;
+  const uint16_t SPDK_VFIO_USER_VENDOR_ID = 0x4e58;
 
-  bool is_emulated = (vendor_id == QEMU_VENDOR_ID);
+  bool is_emulated = (vendor_id == QEMU_VENDOR_ID ||
+                      vendor_id == SPDK_VFIO_USER_VENDOR_ID);
 
   *is_emulated_out = is_emulated;
 

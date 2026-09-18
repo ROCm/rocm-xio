@@ -30,10 +30,10 @@
 // the frontend but the GFX12 backend cannot lower it, producing a link-time
 // "Cannot select: intrinsic %llvm.amdgcn.s.waitcnt" crash.
 #if defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1250__)
-#  define XIO_SDMA_WAITCNT() \
-     __asm__ volatile("s_wait_storecnt 0\n\ts_wait_loadcnt 0" ::: "memory")
+#define XIO_SDMA_WAITCNT()                                                     \
+  __asm__ volatile("s_wait_storecnt 0\n\ts_wait_loadcnt 0" ::: "memory")
 #else
-#  define XIO_SDMA_WAITCNT() __builtin_amdgcn_s_waitcnt(0)
+#define XIO_SDMA_WAITCNT() __builtin_amdgcn_s_waitcnt(0)
 #endif
 
 #include "sdma_packets.hpp"

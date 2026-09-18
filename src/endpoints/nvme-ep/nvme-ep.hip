@@ -4508,37 +4508,31 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
                   queue_id, queue_size, cmd.cdw10, cq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
-  if (ret < 0) {
-    if (errno == EACCES || errno == EPERM) {
-      ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
-                       strerror(errno));
-      ROCXIO_LOG_INFO("Note: CREATE_CQ IOCTL requires root permissions.\n");
-      ROCXIO_LOG_ERROR("Please ensure you have CAP_SYS_ADMIN capability or "
-                       "run with sudo.\n");
-    } else {
-      ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
-                       strerror(errno));
+  // NVME_IOCTL_ADMIN_CMD returns 0 on NVMe success, a positive NVMe status
+  // code when the controller rejects the command, and a negative errno for
+  // system errors.  Only checking ret < 0 silently ignores controller
+  // rejections (e.g. SPDK refusing the physical address in PRP1).
+  if (ret != 0) {
+    if (ret < 0) {
+      if (errno == EACCES || errno == EPERM) {
+        ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
+                         strerror(errno));
+        ROCXIO_LOG_INFO("Note: CREATE_CQ IOCTL requires root permissions.\n");
+        ROCXIO_LOG_ERROR("Please ensure you have CAP_SYS_ADMIN capability or "
+                         "run with sudo.\n");
+      } else {
+        ROCXIO_LOG_ERROR("Failed to create completion queue: %s\n",
+                         strerror(errno));
+      }
+      ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
+      return -errno;
     }
-    ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
-    return -errno;
-  }
-
-  // Check completion status
-  if (cmd.result & 0xFFFE) {
-    uint16_t status_field = cmd.result & 0xFFFF;
-    uint8_t sc = NVME_CQE_STATUS_SC(status_field);
-    uint8_t sct = NVME_CQE_STATUS_SCT(status_field);
-    ROCXIO_LOG_ERROR("CREATE_CQ failed with status code 0x%02x (SCT=%u)\n", sc,
-                     sct);
-    if (sc == NVME_SC_INVALID_FIELD) {
-      ROCXIO_LOG_ERROR("Invalid field in command (queue_id=%u, "
-                       "queue_size=%u)\n",
-                       queue_id, queue_size);
-    } else if (sc == NVME_SC_CAP_EXCEEDED) {
-      ROCXIO_LOG_ERROR("Queue size exceeds controller capabilities "
-                       "(queue_size=%u)\n",
-                       queue_size);
-    }
+    // ret > 0: NVMe status code from the controller
+    uint8_t sc = (uint8_t)((ret >> 1) & 0xFF);
+    uint8_t sct = (uint8_t)((ret >> 9) & 0x7);
+    ROCXIO_LOG_ERROR("CREATE_CQ rejected by controller: NVMe status "
+                     "0x%x (sc=0x%02x sct=0x%02x, queue_id=%u)\n",
+                     ret, sc, sct, queue_id);
     ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
     return -EIO;
   }
@@ -4569,14 +4563,23 @@ __host__ int createQueueCommands(int nvme_fd, uint16_t queue_id,
                   queue_id, queue_size, cmd.cdw10, cmd.cdw11, sq_pc ? 1 : 0);
 
   ret = ioctlEintrSafe(nvme_fd, NVME_IOCTL_ADMIN_CMD, &cmd);
-  if (ret < 0) {
-    ROCXIO_LOG_ERROR("Failed to create submission queue: %s\n",
-                     strerror(errno));
+  if (ret != 0) {
+    if (ret < 0) {
+      ROCXIO_LOG_ERROR("Failed to create submission queue: %s\n",
+                       strerror(errno));
+      ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
+      return -errno;
+    }
+    uint8_t sc = (uint8_t)((ret >> 1) & 0xFF);
+    uint8_t sct = (uint8_t)((ret >> 9) & 0x7);
+    ROCXIO_LOG_ERROR("CREATE_SQ rejected by controller: NVMe status "
+                     "0x%x (sc=0x%02x sct=0x%02x, queue_id=%u)\n",
+                     ret, sc, sct, queue_id);
     ROCXIO_LOG_ERROR("Cannot proceed - queue creation failed.\n");
-    return -errno;
+    return -EIO;
   }
 
-  // Check completion status
+  // Check completion status (DW0 command-specific result)
   if (cmd.result & 0xFFFE) {
     uint16_t status_field = cmd.result & 0xFFFF;
     uint8_t sc = NVME_CQE_STATUS_SC(status_field);
@@ -4681,6 +4684,26 @@ __host__ int createQueue(const char* nvme_device,
   ROCXIO_LOG_INFO("NVMe device %s detected as: %s.\n", nvme_device,
                   is_emulated ? "EMULATED" : "REAL");
 
+  // For vfio-user SPDK NVMe (is_emulated=true, VID=0x4e58): coherent host
+  // memory obtained via hipHostMallocCoherent is not visible in /proc/pagemap,
+  // so getPhysAddr() falls back to returning the virtual address.  The kprobe
+  // then injects a virtual address into SPDK's CREATE_SQ/CQ PRP1, which SPDK
+  // cannot translate — it reads zeros from the SQ and no I/O is processed.
+  // Force sq/cq into VRAM; exportRegVramBuf correctly exports a DMA-visible
+  // GPA via DMA-BUF even for this class of device.
+  if (is_emulated) {
+    if (!sq_is_device) {
+      sq_is_device = true;
+      ROCXIO_LOG_INFO("vfio-user NVMe: forcing SQ into VRAM for correct "
+                      "DMA address export\n");
+    }
+    if (!cq_is_device) {
+      cq_is_device = true;
+      ROCXIO_LOG_INFO("vfio-user NVMe: forcing CQ into VRAM for correct "
+                      "DMA address export\n");
+    }
+  }
+
   nvme_fd = openDeviceWithRetry(nvme_device, O_RDWR, "NVMe device", 5, 100);
   if (nvme_fd < 0) {
     ROCXIO_LOG_ERROR("Failed to open NVMe device %s: %s.\n", nvme_device,
@@ -4708,8 +4731,14 @@ __host__ int createQueue(const char* nvme_device,
   bool sq_multi_page = !sq_is_device && sq_size_bytes > NVME_PAGE_SIZE;
   bool cq_multi_page = !cq_is_device && cq_size_bytes > NVME_PAGE_SIZE;
 
-  // CQR=1 + multi-page: use contiguous DMA path
-  if (cqr && sq_multi_page) {
+  // CQR=1 + multi-page: use contiguous DMA path.
+  // Exception: emulated controllers (QEMU VID=0x1b36, SPDK vfio-user VID=0x4e58)
+  // cannot use dma_alloc_coherent-backed memory for GPU queues because the
+  // rocjitsu GPU emulator does not map that memory correctly via
+  // hipHostGetDevicePointer -- writes from the GPU kernel go to the wrong
+  // physical location, so SPDK reads zeros from the SQ.  Use hipHostMalloc
+  // (setupQueueForGpu) instead, which the rocjitsu GPU can write through.
+  if (cqr && sq_multi_page && !is_emulated) {
     ROCXIO_LOG_INFO("CQR=1: using contiguous DMA for "
                     "submission queue (%zu bytes)\n",
                     sq_size_bytes);
@@ -4731,7 +4760,7 @@ __host__ int createQueue(const char* nvme_device,
       goto cleanup;
   }
 
-  if (cqr && cq_multi_page) {
+  if (cqr && cq_multi_page && !is_emulated) {
     ROCXIO_LOG_INFO("CQR=1: using contiguous DMA for "
                     "completion queue (%zu bytes)\n",
                     cq_size_bytes);
