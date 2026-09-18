@@ -30,6 +30,14 @@ on:
         description: Skip GPU bring-up (build-only smoke run)
         required: false
         default: "0"
+      timeout-scale:
+        description: >-
+          CTest timeout multiplier in the guest. The GPU is emulated, so
+          every dispatch is interpreted and the stock budgets do not fit.
+          Empty leaves the guest script's default of 4. Raising this eats
+          into the job's timeout-minutes ceiling.
+        required: false
+        default: ""
   schedule:
     # Weekly, off the hour so this does not pile onto every other cron job.
     - cron: '17 5 * * 1'
@@ -59,7 +67,16 @@ env:
   # the qemu *branch* instead, so two rebuilds could share a suffix and differ
   # in source; prefer commit-suffixed tags.
   QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260916.g2cc8e79-rocjitsu.909c17f
+  # A different lineage from the other pins here: built from the vfio-rocjitsu
+  # tree, not from ci-images, because stock rocJITsu cannot run this suite.
+  # Five local patches are needed before the guest gets past bring-up, and the
+  # last of them is what makes GPU tests run at all -- without it the CP never
+  # asks a gfx12 runtime for scratch, and every dispatch that needs scratch
+  # hangs forever. The suffix names the upstream commit and a sha256 over the
+  # patch series, since the patches are not the branch. NotesForRocjitsu.md in
+  # that tree documents each one for the rocJITsu maintainers; when they land
+  # upstream this pin should move back to a plain ci-images tag.
+  ROCJITSU_IMAGE: docker.io/sbates130272/vfio-rocjitsu:20260918-rocjitsu.20d4ce1c-patches.8e26335c
   # Held one tag back on purpose: vfio_guest_firmware.py, the only source of
   # gfx1250 firmware blobs, was dropped from the image after this tag. Used
   # solely to synthesise firmware, never to serve the device.
@@ -94,7 +111,10 @@ jobs:
   test-vm-nvme:
     name: nvme-ep against an emulated NVMe SSD
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The guest scales every ctest budget by 4 because the GPU is emulated,
+    # and the nvme label includes entries with 600 s and 900 s budgets. A run
+    # where those actually time out needs more than the old 120.
+    timeout-minutes: 240
 
     steps:
       - name: Check out code.
@@ -166,6 +186,7 @@ jobs:
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
           CTEST_LABEL: ${{ inputs.ctest-label || 'nvme' }}
           SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
+          TIMEOUT_SCALE: ${{ inputs.timeout-scale || '' }}
         run: |
           ssh -i "$SSH_KEY" -p "$SSH_PORT" \
               -o BatchMode=yes \
@@ -174,6 +195,7 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               "$SSH_USER@localhost" \
               "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+               ${TIMEOUT_SCALE:+TIMEOUT_SCALE='$TIMEOUT_SCALE'} \
                ./rocm-xio/scripts/test/vm-guest-test.sh"
 
       - name: Collect guest diagnostics

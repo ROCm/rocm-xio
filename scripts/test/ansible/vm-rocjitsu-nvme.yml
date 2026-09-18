@@ -55,15 +55,68 @@
     assert_gpu_firmware: true
 
   tasks:
-    # The rocjitsu image already blacklists autoload. Repeated here so this
-    # playbook does not silently depend on it: without a blacklist amdgpu binds
-    # at boot with default parameters and a failed probe, and a later modprobe
-    # is then a no-op that leaves no KFD node and no log line.
-    - name: Blacklist amdgpu autoload
+    # Two blacklists, because they cover different phases and only one of them
+    # is in force when it matters.
+    #
+    # /etc/modprobe.d is consulted by modprobe on the real root. It does nothing
+    # during initramfs: the initramfs carries its own copy of /etc/modprobe.d,
+    # frozen at the last update-initramfs, and amdgpu.ko is in there too (the
+    # DKMS build lands in updates/dkms/amdgpu.ko.zst). So a file written here by
+    # this playbook cannot retroactively govern the boot that already happened.
+    #
+    # modprobe.blacklist= on the kernel command line is what actually holds. It
+    # applies from the first userspace modprobe onward, initramfs included, and
+    # unlike the kernel's own module_blacklist= it still permits an explicit
+    # modprobe later -- which is exactly the shape we want, because the probe is
+    # deliberately deferred until the vfio-user server is serving.
+    #
+    # Without this, amdgpu binds at boot with default parameters against a
+    # device that is not ready, the probe fails, and the later modprobe is a
+    # no-op that leaves no KFD node and no new log line.
+    - name: Blacklist amdgpu for modprobe on the real root
       ansible.builtin.copy:
         dest: /etc/modprobe.d/amdgpu-blacklist.conf
         content: "blacklist amdgpu\n"
         mode: '0644'
+
+    # The base VM image happens to ship this file already. Write it anyway: an
+    # inherited boot policy that nothing in this repo owns is one image rebuild
+    # away from disappearing silently, and the failure it produces looks like a
+    # GPU bug rather than a provisioning regression.
+    - name: Blacklist amdgpu on the kernel command line
+      ansible.builtin.copy:
+        dest: /etc/default/grub.d/99-amdgpu-blacklist.cfg
+        mode: '0644'
+        content: |
+          GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT} modprobe.blacklist=amdgpu"
+      notify: Regenerate grub
+
+    # Assert rather than assume. This is the condition the whole deferred-probe
+    # design rests on, and it is cheap to check and confusing to debug.
+    - name: Require the boot-time blacklist to be in force
+      ansible.builtin.assert:
+        that: "'modprobe.blacklist=amdgpu' in ansible_cmdline_raw"
+        fail_msg: >-
+          amdgpu is not blacklisted on the running kernel command line
+          ({{ ansible_cmdline_raw }}). grub has been updated, but the running
+          boot predates it -- reboot the guest and re-run this playbook.
+      vars:
+        ansible_cmdline_raw: "{{ lookup('file', '/proc/cmdline') }}"
+
+    # If this fails the guest booted with the driver already bound, so the probe
+    # below would be a silent no-op.
+    - name: Require amdgpu to be unloaded before the probe is installed
+      ansible.builtin.command: cat /proc/modules
+      register: amdgpu_loaded_modules
+      changed_when: false
+
+    - name: Fail if amdgpu loaded at boot despite the blacklist
+      ansible.builtin.assert:
+        that: "amdgpu_loaded_modules.stdout is not search('(?m)^amdgpu ')"
+        fail_msg: >-
+          amdgpu is resident before the deferred probe ran. Something loaded it
+          during boot -- check the initramfs copy of /etc/modprobe.d and the
+          kernel command line.
 
     # ---------------------------------------------------------------------
     # Guest firmware: IP discovery table and gfx1250 stubs
@@ -255,14 +308,19 @@
           # Run only once the vfio-user server is serving.
           set -e
 
-          # The guest autoloads amdgpu at boot, before this playbook has
-          # blacklisted it or installed the gfx1250 firmware, so by the time we
-          # get here the module is already resident with a failed probe and the
-          # wrong parameters. modprobe would then succeed silently without
-          # rebinding anything, and the only symptom is a missing KFD node.
-          # Unload first so the parameters below actually take effect.
+          # The module should not be resident at all: it is blacklisted both on
+          # the kernel command line and in /etc/modprobe.d, and this probe is
+          # deliberately deferred until the vfio-user server is serving. Unload
+          # anyway. If anything did load it during boot it holds a failed probe
+          # and the wrong parameters, and modprobe would then return 0 without
+          # rebinding, leaving no KFD node and no new log line.
           modprobe -r amdgpu || true
 
+          # These seven are upstream's set, not ours. rocJITsu's own guest
+          # launcher (tools/vfio_guest_run.py) builds this exact command line
+          # from DEFAULT_APPEND plus M2_IP_BLOCK_MASK, and treats every one of
+          # them as policy its --append is forbidden to override. Keep them in
+          # step with the pinned rocJITsu commit rather than tuning them here.
           modprobe amdgpu \
             emu_mode=1 \
             fw_load_type=0 \
@@ -271,6 +329,16 @@
             vm_update_mode=3 \
             gpu_recovery=0 \
             vramlimit=256
+
+          # Echo back what the module actually took, the way upstream's guest
+          # init does. A parameter the running module rejected or silently
+          # clamped is otherwise invisible until the failure it causes.
+          echo "amdgpu-probe: module parameters"
+          for parameter in discovery emu_mode fw_load_type gpu_recovery \
+                           ip_block_mask vm_update_mode vramlimit; do
+            value=$(cat "/sys/module/amdgpu/parameters/${parameter}" 2>/dev/null || echo unset)
+            echo "  amdgpu.${parameter}=${value}"
+          done
 
           # modprobe returns 0 when the module loads but its PCI probe fails, so
           # check that the driver actually took the device.
@@ -286,3 +354,10 @@
         mode: '0440'
         validate: visudo -cf %s
         content: "{{ username }} ALL=(ALL) NOPASSWD:ALL\n"
+
+  handlers:
+    # Only affects the next boot, so this is safe to defer to the end of the
+    # play. The assertion above covers the running boot.
+    - name: Regenerate grub
+      ansible.builtin.command: update-grub
+      changed_when: true

@@ -24,6 +24,19 @@
 #   NVME_CTRL     NVMe controller (default: first /dev/nvme[0-9]+)
 #   CTEST_LABEL   ctest label regex (default: nvme)
 #   SKIP_GPU      Set to 1 to skip GPU bring-up and GPU tests
+#   TIMEOUT_SCALE CTest timeout multiplier (default: 4)
+#   BATCH_DEPTH   nvme-ep per-batch private array bound (default: 32)
+#
+# The last two exist because the GPU here is emulated, not real. rocJITsu
+# interprets every dispatch in software, so a test that takes seconds on
+# silicon takes minutes here -- hence TIMEOUT_SCALE. And the emulated device
+# can back only ~43 MB of scratch, while the default 256-entry per-batch
+# arrays in nvme-ep's kernel pin a 10 KB/thread private segment that a gfx12
+# runtime provisions for full occupancy regardless of grid size -- hence
+# BATCH_DEPTH. Neither default is appropriate for real hardware, which is
+# exactly why this script, the one thing that only ever runs inside the
+# rocJITsu guest, is where they are set. Same reasoning as
+# XIO_FORCE_PCI_MMIO_BRIDGE below.
 
 set -euo pipefail
 
@@ -32,6 +45,8 @@ BUILD_DIR="${BUILD_DIR:-${SRC_DIR}/build}"
 OFFLOAD_ARCH="${OFFLOAD_ARCH:-gfx1250}"
 CTEST_LABEL="${CTEST_LABEL:-nvme}"
 SKIP_GPU="${SKIP_GPU:-0}"
+TIMEOUT_SCALE="${TIMEOUT_SCALE:-4}"
+BATCH_DEPTH="${BATCH_DEPTH:-32}"
 
 banner() {
     echo ""
@@ -194,6 +209,8 @@ cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
     -DROCM_PATH="${ROCM_PATH}" \
     -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
+    -DXIO_CTEST_TIMEOUT_SCALE="${TIMEOUT_SCALE}" \
+    -DXIO_NVME_MAX_BATCH_DEPTH="${BATCH_DEPTH}" \
     -DBUILD_TESTING=ON
 
 banner "Building rocm-xio"

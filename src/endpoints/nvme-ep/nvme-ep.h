@@ -22,6 +22,19 @@
 
 namespace xio::nvme_ep {
 
+/*
+ * Upper bound on the per-batch arrays driveEndpointSingle() keeps in private
+ * memory. Each entry costs 40 bytes per thread (one timestamp plus four PRP
+ * words), so 256 entries pin a 10 KB/thread private segment on every launch,
+ * and a gfx12 runtime provisions scratch for full occupancy regardless of the
+ * grid size. Emulated GPUs cannot back that much scratch, so builds targeting
+ * one lower this at configure time (-DXIO_NVME_MAX_BATCH_DEPTH=32). It bounds
+ * the submission batch depth, not the I/O count.
+ */
+#ifndef XIO_NVME_MAX_BATCH_DEPTH
+#define XIO_NVME_MAX_BATCH_DEPTH 256U
+#endif
+
 /**
  * Polling limits for completion queue operations
  */

@@ -32,6 +32,10 @@
 #   --workdir DIR     Scratch directory (default: mktemp under /tmp)
 #   --ssh-port PORT   Host port for the guest (default: a free one)
 #   --ctest-label RE  ctest label regex in the guest (default: nvme)
+#   --timeout-scale N CTest timeout multiplier in the guest (default: the
+#                     guest script's own, 4). The GPU is emulated, so every
+#                     dispatch is interpreted; raise this, do not shorten the
+#                     tests. Lower it to 1 to see the unscaled budgets.
 #   --trace EVENTS    QEMU trace events (default: doorbell; "all" for every
 #                     pci_nvme* event, or a literal event name or glob). The
 #                     pci_mmio_bridge_* events are always on. Collected to
@@ -83,11 +87,12 @@ while [ $# -gt 0 ]; do
         --vcpus) VM_VCPUS="$2"; shift 2 ;;
         --vmem) VM_VMEM="$2"; shift 2 ;;
         --ctest-label) CTEST_LABEL="$2"; shift 2 ;;
+        --timeout-scale) TIMEOUT_SCALE="$2"; shift 2 ;;
         --trace) VM_NVME_TRACE="$2"; shift 2 ;;
         --skip-gpu) SKIP_GPU="1"; shift ;;
         --keep) KEEP=1; shift ;;
         --no-test) RUN_TEST=0; shift ;;
-        -h|--help) sed -n '7,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '7,50p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -203,10 +208,21 @@ trap cleanup EXIT
 # Bring-up
 # ----------------------------------------------------------------------
 say "Pulling pinned images"
-docker pull -q "$QEMU_IMAGE"
-docker pull -q "$ROCJITSU_IMAGE"
-docker pull -q "$ROCJITSU_FIRMWARE_IMAGE"
-docker pull -q "$QCOW2_IMAGE"
+# An override can name an image that was built here and never pushed, which is
+# the whole point of being able to override. Pull only what is not already
+# local; a pinned tag is still pulled, because it is expected to exist remotely
+# and a stale local copy of it would be the wrong thing to run.
+fetch() {
+    if docker image inspect "$1" > /dev/null 2>&1; then
+        echo "using local ${1}"
+    else
+        docker pull -q "$1"
+    fi
+}
+fetch "$QEMU_IMAGE"
+fetch "$ROCJITSU_IMAGE"
+fetch "$ROCJITSU_FIRMWARE_IMAGE"
+fetch "$QCOW2_IMAGE"
 
 say "Extracting guest disk payload"
 # ubuntu-qcow2-gen is FROM scratch with nothing but /output, so there is
@@ -318,7 +334,7 @@ fi
 say "Building and running nvme-ep tests in the guest"
 set +e
 ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
-    "CTEST_LABEL='${CTEST_LABEL}' SKIP_GPU='${SKIP_GPU}' ./rocm-xio/scripts/test/vm-guest-test.sh"
+    "CTEST_LABEL='${CTEST_LABEL}' SKIP_GPU='${SKIP_GPU}' ${TIMEOUT_SCALE:+TIMEOUT_SCALE='${TIMEOUT_SCALE}'} ./rocm-xio/scripts/test/vm-guest-test.sh"
 test_rc=$?
 set -e
 
