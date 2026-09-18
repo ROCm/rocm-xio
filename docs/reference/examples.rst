@@ -184,35 +184,13 @@ addition to latency and bandwidth.
    sudo /tmp/sdma-ep-bench-build/sdma-ep-rate \
      --srcGpu 0 --dstGpu 1 --numOfQueues 1 \
      --minCopySize 64 --maxCopySize 64 \
-     --numCopyCommands 10000 --iterations 10
+     --numCommands 10000 --mode copy --iterations 10
 
-The ``scripts/bench-packet-rate.sh`` driver sweeps one through eight queues
-and writes one CSV per queue count. Unlike ``--device-triggered`` bandwidth
-runs, this benchmark intentionally submits packets from device code because
-packet construction and doorbell submission are the quantities being measured.
-Pass ``--device-triggered`` to instead preprogram one immediately satisfied
-``POLL_REGMEM`` packet before every copy packet. The GPU releases the batch by
-setting the poll flag, allowing the added SDMA poll parsing/execution overhead
-to be measured. The CSV reports both copy-packet rate and total SDMA packet
-rate.
-Use ``--poll-only`` to measure immediately satisfied ``POLL_REGMEM`` packets
-without copies, or ``--atomic-only --atomic-memory local|remote`` to measure
-SDMA atomic-add processing against local or peer GPU memory. These modes are
-mutually exclusive with the copy and triggered modes.
-The ``--copy-atomic --atomic-memory local|remote`` mode performs the copy batch
-followed by one local or remote completion atomic; it does not alternate an
-atomic after every copy packet.
-Use ``--device-triggered-copy-only`` for a control variant that has one
-immediately satisfied poll at the beginning of the batch, followed by copy
-packets without per-copy polls. This helps separate host-backed queue overhead
-from the cost of repeated poll packets.
-Combining ``--device-initiated-poll`` with ``--copy-atomic`` measures the
-alternating ``POLL_REGMEM + COPY + ATOMIC`` sequence. Use
-``--atomic-memory local|remote`` to select the atomic target.
-The optional ``--sdma-timestamps`` flag brackets host-triggered batches with
-SDMA timestamp packets. The begin timestamp is placed after the initial poll
-and the end timestamp immediately before the completion atomic, so the result
-measures the SDMA batch itself rather than GPU trigger and completion polling.
+The ``--mode`` option selects one device-generated sequence: ``copy``,
+``poll-copy``, ``copy-atomic``, ``poll-copy-atomic``, ``poll-only``, or
+``atomic-only``. The ``copy-atomic`` and ``poll-copy-atomic`` modes emit an
+atomic after every copy packet. Use ``--atomic-memory local|remote`` to select
+the atomic target for atomic modes.
 
 The ``sdma-ep-latency`` executable measures GPU-side queue reservation, packet
 construction, submission, and SDMA completion latency for a single queue. Use

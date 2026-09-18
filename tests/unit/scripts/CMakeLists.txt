@@ -100,14 +100,8 @@ xio_add_bash_syntax_test(
   test-script-sdma-rate
   ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate.sh)
 xio_add_bash_syntax_test(
-  test-script-sdma-rate-compare
-  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-compare.sh)
-xio_add_bash_syntax_test(
   test-script-sdma-latency
   ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-latency.sh)
-xio_add_bash_syntax_test(
-  test-script-sdma-rate-all-modes
-  ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-all-modes.sh)
 xio_add_bash_syntax_test(
   test-script-sdma-rate-isolated
   ${CMAKE_SOURCE_DIR}/examples/sdma-ep-bench/scripts/bench-packet-rate-isolated.sh)

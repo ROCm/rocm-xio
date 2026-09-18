@@ -15,13 +15,11 @@ DST_GPU="${DST_GPU:-1}"
 MIN_COPY_SIZE="${MIN_COPY_SIZE:-64}"
 MAX_COPY_SIZE="${MAX_COPY_SIZE:-64}"
 NUM_COPY_COMMANDS="${NUM_COPY_COMMANDS:-10000}"
+MODE="${MODE:-copy}"
 MIN_QUEUES="${MIN_QUEUES:-1}"
 MAX_QUEUES="${MAX_QUEUES:-8}"
 WARMUP="${WARMUP:-1}"
 ITERATIONS="${ITERATIONS:-10}"
-DEVICE_TRIGGERED="${DEVICE_TRIGGERED:-0}"
-DEVICE_TRIGGERED_COPY_ONLY="${DEVICE_TRIGGERED_COPY_ONLY:-0}"
-SDMA_TIMESTAMPS="${SDMA_TIMESTAMPS:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PWD}}"
 
 if [[ ! -x "${RATE_BENCHMARK}" ]]; then
@@ -46,20 +44,12 @@ for ((queues = MIN_QUEUES; queues <= MAX_QUEUES; ++queues)); do
     --dstGpu "${DST_GPU}"
     --minCopySize "${MIN_COPY_SIZE}"
     --maxCopySize "${MAX_COPY_SIZE}"
-    --numCopyCommands "${NUM_COPY_COMMANDS}"
+    --numCommands "${NUM_COPY_COMMANDS}"
     --numOfQueues "${queues}"
+    --mode "${MODE}"
     --warmup "${WARMUP}"
     --iterations "${ITERATIONS}"
     --outputFile "${output_dir}/${result_csv}")
-  if [[ "${DEVICE_TRIGGERED}" == 1 ]]; then
-    command+=(--device-triggered)
-  fi
-  if [[ "${DEVICE_TRIGGERED_COPY_ONLY}" == 1 ]]; then
-    command+=(--device-triggered-copy-only)
-  fi
-  if [[ "${SDMA_TIMESTAMPS}" == 1 ]]; then
-    command+=(--sdma-timestamps)
-  fi
   printf 'Command:' >>"${log_file}"
   printf ' %q' "${command[@]}" >>"${log_file}"
   printf '\n' >>"${log_file}"

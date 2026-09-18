@@ -30,54 +30,44 @@ Available sweeps:
 - `bench-contention-singlequeue.sh`: vary producers sharing one queue.
 - `bench-contention-multiqueue.sh`: distribute a fixed workgroup count
   across multiple queues.
-- `bench-packet-rate.sh`: measure packet submission rate while varying queues.
-- `bench-packet-rate-compare.sh`: run regular and immediate-poll variants and
-  print Markdown MPPS/time comparison tables.
-- `bench-packet-rate-all-modes.sh`: run all rate modes with one queue.
-- `bench-packet-rate-isolated.sh`: compare copy, poll-only, local atomic,
-  remote atomic, device-initiated poll+copy, and copy+atomic local/remote modes
-  plus local and remote poll+copy+atomic with one queue.
+- `bench-latency.sh`: sweep GPU-initiated SDMA latency and optional fine-grained
+  queue-management timing.
+- `bench-packet-rate.sh`: measure one packet-rate mode while varying queues.
+- `bench-packet-rate-isolated.sh`: run all six packet-rate modes with one
+  queue, including local and remote atomic targets.
 
 The bandwidth benchmark now enables cached `SdmaQueueState` by default for
 queue read-pointer checks. Pass `--no-queue-state` to `sdma-ep-bw` to reproduce
 the uncached/original path.
-- `bench-latency.sh`: sweep GPU-initiated SDMA latency and optional fine-grained
-  queue-management timing.
 
 The packet-rate script uses `RATE_BENCHMARK` instead of `BENCHMARK` and
 accepts `SRC_GPU`, `DST_GPU`, `MIN_COPY_SIZE`, `MAX_COPY_SIZE`,
 `NUM_COPY_COMMANDS`, `MIN_QUEUES`, `MAX_QUEUES`, `WARMUP`, `ITERATIONS`,
-and `OUTPUT_ROOT` overrides.
-Set `DEVICE_TRIGGERED=1` to measure preprogrammed `POLL + COPY` packets whose
-poll condition is released immediately by the GPU.
-Set `DEVICE_TRIGGERED_COPY_ONLY=1` to measure a host-backed queue with one
-initial poll followed by copy-only packets.
-The rate executable also supports isolated packet modes:
+`MODE`, and `OUTPUT_ROOT` overrides.
+The rate executable selects one device-generated packet sequence with `--mode`:
 
 ```bash
-sdma-ep-rate --poll-only
-sdma-ep-rate --atomic-only --atomic-memory local
-sdma-ep-rate --atomic-only --atomic-memory remote
+sdma-ep-rate --mode copy
+sdma-ep-rate --mode poll-copy
+sdma-ep-rate --mode copy-atomic --atomic-memory local
+sdma-ep-rate --mode poll-copy-atomic --atomic-memory remote
+sdma-ep-rate --mode poll-only
+sdma-ep-rate --mode atomic-only --atomic-memory local
 ```
 
 These measure poll packets and local/remote atomic-add packets without copy
 traffic.
-Set `SDMA_TIMESTAMPS=1` to bracket host-triggered batches with SDMA timestamp
-packets. The bracket begins after the initial poll and ends before the final
-completion atomic.
-The regular device-initiated variant currently falls back to GPU timestamps in
-this mode because SDMA timestamp packets hang on device-created queues.
-
-For a paired run over queues 1, 2, 4, and 8:
+For a queue sweep, select the mode with `MODE`:
 
 ```bash
-scripts/bench-packet-rate-compare.sh
+MODE=poll-copy scripts/bench-packet-rate.sh
 ```
 
-The report estimates repeated-poll time as full device-triggered batch time
-minus copy-only batch time. All variants submit one contiguous batch per queue,
-so the estimate excludes per-copy host doorbell overhead. It remains a
-batch-level estimate, not a per-packet hardware timestamp.
+For a one-queue run covering every mode:
+
+```bash
+scripts/bench-packet-rate-isolated.sh
+```
 
 Common environment variables include `SRC_GPU`, `WARMUP`, `ITERATIONS`,
 `OUTPUT_ROOT`, and `BENCHMARK`. Each driver also exposes its sweep values
@@ -86,8 +76,13 @@ as uppercase environment variables near the top of the script.
 Each run creates a timestamped directory containing:
 
 - One CSV file for each tested configuration.
-- `summary.csv`, containing all configurations.
+- `summary.tsv`, containing command MPPS, time per command, and device latency
+  for every isolated mode.
+- `summary.md`, containing the same results as a Markdown table.
 - `benchmark.log`, containing commands and console output.
+
+The queue-sweep script additionally writes `summary.csv` containing all queue
+configurations.
 
 To plot one CSV or every individual CSV in a result directory:
 
