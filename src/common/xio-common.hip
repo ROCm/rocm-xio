@@ -1735,24 +1735,25 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   // as a GPA.  Plain malloc memory IS present in pagemap and getPhysAddr()
   // returns the correct GPA.  On rocjitsu the GPU kernel runs as host CPU
   // code, so any CPU-accessible pointer is also GPU-accessible.
-  // Always use plain page-aligned malloc for host SQ/CQ: HMM-backed
-  // hipHostMalloc memory has pagemap GPAs that do not reflect where the
-  // CPU writes, causing the kprobe to inject the wrong GPA into SPDK's
-  // CREATE_SQ/CQ.  posix_memalign gives correct pagemap GPAs on all targets.
-  if (!is_device) {
-    void* plain = nullptr;
-    hipError_t perr = allocHostMemory(size, &plain, queue_name,
-                                      XIO_HOST_MEM_PLAIN);
-    if (perr == hipSuccess && plain) {
-      memset(plain, 0, size);
-      setup->virt = plain;
-      setup->gpu = plain;
-      setup->phys = getPhysAddr(plain);
-      if (setup->phys == 0)
-        setup->phys = reinterpret_cast<uint64_t>(plain);
-      ROCXIO_LOG_INFO("%s (rocjitsu plain): virt=%p phys=0x%llx\n", queue_name,
-                      plain, (unsigned long long)setup->phys);
-      return 0;
+  {
+    int _wclk = 0;
+    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
+    (void)hipGetLastError(); // clear error if attribute unsupported on rocjitsu
+    if (!is_device && _wclk == 0) {
+      void* plain = nullptr;
+      hipError_t perr = allocHostMemory(size, &plain, queue_name,
+                                        XIO_HOST_MEM_PLAIN);
+      if (perr == hipSuccess && plain) {
+        memset(plain, 0, size);
+        setup->virt = plain;
+        setup->gpu = plain;
+        setup->phys = getPhysAddr(plain);
+        if (setup->phys == 0)
+          setup->phys = reinterpret_cast<uint64_t>(plain);
+        ROCXIO_LOG_INFO("%s (rocjitsu plain): virt=%p phys=0x%llx\n",
+                        queue_name, plain, (unsigned long long)setup->phys);
+        return 0;
+      }
     }
   }
   alloc_err = allocateQueue(size, is_device, queue_name, &setup->virt);
@@ -1777,11 +1778,21 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   // the GPU kernel runs as host CPU code and writes to the same physical pages
   // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
   // this path is not taken and coherent reallocation is unchanged.
-  // Step 2: coherent reallocation intentionally skipped.
-  // posix_memalign (XIO_HOST_MEM_PLAIN, Step 1) gives correct pagemap GPAs on
-  // all targets.  HMM-backed hipHostMallocCoherent/Mapped uses a physical
-  // address domain that diverges from /proc/self/pagemap, causing the kprobe
-  // to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
+  if (!is_device) {
+    // hipDeviceAttributeWallClockRate is the GPU's hardware real-time clock.
+    // On rocjitsu (emulated GPU) this returns 0 regardless of rocjitsu version;
+    // on real AMD GPU hardware it is always > 0.  When wall clock = 0 the
+    // coherent memory path is skipped because rocjitsu's hipHostMallocCoherent
+    // maps to a physical address domain that does not match /proc/self/pagemap,
+    // causing the kprobe to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
+    int gpu_wall_clock_khz = 0;
+    (void)hipDeviceGetAttribute(&gpu_wall_clock_khz,
+                                hipDeviceAttributeWallClockRate, 0);
+    (void)hipGetLastError(); // clear error if attribute unsupported on rocjitsu
+    if (gpu_wall_clock_khz > 0) {
+      setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
+    }
+  }
 
   // Step 3: Register with HIP (skip if coherent or device memory).
   // hipHostMallocMapped (used by allocateQueue) auto-registers the memory for
@@ -2882,8 +2893,10 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     // appear in /proc/self/pagemap, so getPhysAddr() cannot return the correct
     // GPA.  On rocjitsu the GPU kernel runs as host CPU code, so plain malloc
     // IS accessible and its pagemap GPA IS where the CPU writes land.
-    // Always use plain posix_memalign: correct pagemap GPA on all targets.
-    const bool rocjitsu_plain = true;
+    int _wclk = 0;
+    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
+    bool rocjitsu_plain = (_wclk == 0);
+
     if (rocjitsu_plain) {
       hipError_t perr = allocHostMemory(size, &bufferInfo->hostPtr,
                                         "GPU accessible buffer (rocjitsu)",
@@ -2925,12 +2938,26 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
       uint32_t sys_np = (uint32_t)((size + sys_page - 1) / sys_page);
       uint32_t nvme_np = (uint32_t)((size + nvme_page - 1) / nvme_page);
       size_t pa_bytes = nvme_np * sizeof(uint64_t);
-      // Always use posix_memalign: page-aligned memory with correct pagemap
-      // GPA on all targets (rocjitsu and real AMD GPU).
+      // Use posix_memalign so the per-page GPA array itself has a correct
+      // pagemap GPA on rocjitsu (hipHostMallocMapped uses HMM memory whose
+      // pagemap GPA does not reflect where the CPU actually reads/writes).
       uint64_t* pa = nullptr;
       bool pa_from_memalign = false;
-      if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) == 0) {
-        pa_from_memalign = true;
+      {
+        int _wclk2 = 0;
+        (void)hipDeviceGetAttribute(&_wclk2, hipDeviceAttributeWallClockRate,
+                                    0);
+        (void)hipGetLastError(); // clear error if attribute unsupported on
+                                 // rocjitsu
+        if (_wclk2 == 0) {
+          if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) ==
+              0) {
+            pa_from_memalign = true;
+          }
+        } else {
+          hipHostMalloc(reinterpret_cast<void**>(&pa), pa_bytes,
+                        hipHostMallocMapped);
+        }
       }
       if (pa) {
         memset(pa, 0, pa_bytes);
