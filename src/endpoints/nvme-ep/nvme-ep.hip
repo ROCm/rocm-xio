@@ -2907,6 +2907,17 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                        "shadow buffer.\n");
       return hipErrorInvalidValue;
     }
+    // On rocjitsu (emulated GPU), the GPU kernel runs as host CPU code.
+    // hipHostGetDevicePointer returns a GPU VA that differs from the CPU
+    // mmap VA but does NOT alias the same physical pages when rocjitsu
+    // emulates the address translation.  Use the CPU VA so the GPU kernel
+    // (running as CPU) writes directly to the QEMU-interceptable mmap.
+    if (shadow_gpu_ptr != shadow_virt) {
+      ROCXIO_LOG_INFO("/dev/nvme0: rocjitsu detected, using CPU VA for "
+                      "pci-mmio-bridge shadow buffer (cpu=%p gpu=%p)\n",
+                      shadow_virt, shadow_gpu_ptr);
+      shadow_gpu_ptr = shadow_virt;
+    }
     nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
   } else {
     // One BAR0 mapping per controller. validateConfig() rejects the MMIO
