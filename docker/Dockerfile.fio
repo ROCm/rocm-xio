@@ -160,7 +160,7 @@ FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS final
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nvme-cli \
-        libaio1 \
+        libaio-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # fio binary

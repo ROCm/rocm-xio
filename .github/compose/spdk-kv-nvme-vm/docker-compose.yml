@@ -1,0 +1,118 @@
+---
+# SPDK NVMe KV + rocjitsu GPU + QEMU VM stack for rocm-xio KV command set testing.
+#
+# Brings up an SPDK vfio-user NVMe server (KV + optional LBA namespaces) and
+# a rocjitsu vfio-user GPU server alongside a qemu-system VM that attaches to
+# both. The pci-mmio-bridge device lets GPU __device__ code ring NVMe doorbells
+# directly, which is what makes GPU-initiated KV store/retrieve possible.
+#
+# The QEMU image MUST be the sbates-fork variant: pci-mmio-bridge only exists
+# on dev/stephen/pci-mmio-bridge-submit, and qemu-tool hard-fails if the binary
+# does not advertise the device.
+#
+# Both vfio-user servers share the vfu-sockets tmpfs volume. SPDK is told to
+# put its socket under /run/vfu/nvme (via VFIO_USER_SOCKET_DIR) so that a
+# single volume mount point covers both server sockets:
+#
+#   /run/vfu/rocjitsu.sock  -- GPU server
+#   /run/vfu/nvme/cntrl     -- NVMe KV server
+#
+# This avoids the single-VFIO_USER_SOCKET-per-entrypoint limitation noted in
+# the SPDK image documentation: QEMU here uses explicit --vfio-userdev flags
+# via qemu-tool rather than the VFIO_USER_SOCKET env shortcut.
+#
+# Every image is pinned to a dated tag. Do not use :latest here -- a silent
+# retag upstream turns a green run red with no diff to point at.
+#
+# Usage (normally driven by .github/actions/spdk-kv-nvme-vm):
+#   cp env.example .env && $EDITOR .env
+#   docker compose up --detach
+
+services:
+  spdk-nvme:
+    image: "${SPDK_IMAGE:?SPDK_IMAGE must be set to a pinned tag}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    environment:
+      NVME_NAMESPACES: "${NVME_NAMESPACES:-kv:mem}"
+      # Place the vfio-user socket under the shared volume so QEMU can reach
+      # it without a separate mount.
+      VFIO_USER_SOCKET_DIR: /run/vfu/nvme
+    restart: on-failure
+    healthcheck:
+      # The socket appears once nvmf_tgt has finished configuring the
+      # subsystem. This is the same predicate the SPDK image uses internally
+      # for --probe, so it is authoritative.
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/nvme/cntrl"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  rocjitsu:
+    image: "${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be set to a pinned tag}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    command:
+      - rocjitsu
+      - --config
+      - "/usr/local/share/rocjitsu/configs/${ROCJITSU_CONFIG:-gfx1250_mi455x.json}"
+      - --vfio-socket
+      - /run/vfu/rocjitsu.sock
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/rocjitsu.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  qemu:
+    image: "${QEMU_IMAGE:?QEMU_IMAGE must be set to a pinned sbates-fork tag}"
+    depends_on:
+      spdk-nvme:
+        condition: service_healthy
+      rocjitsu:
+        condition: service_healthy
+    volumes:
+      - vfu-sockets:/run/vfu:ro
+      - "${VM_IMAGES_DIR:?VM_IMAGES_DIR must be set}:${VM_IMAGES_DIR}"
+    devices:
+      - /dev/kvm
+    # Both the rocjitsu GPU and the SPDK NVMe server reach guest RAM through
+    # shared memfds, so /dev/shm must be >= guest memory.
+    shm_size: "${VM_SHM_SIZE:-12g}"
+    ports:
+      - "${VM_SSH_PORT:-2222}:2222"
+    entrypoint:
+      - qemu-tool
+      - run-vm
+    command:
+      - --images
+      - "${VM_IMAGES_DIR}"
+      - --vm-name
+      - "${VM_NAME:-batesste-ci-vm}"
+      - --vcpus
+      - "${VM_VCPUS:-4}"
+      - --vmem
+      - "${VM_VMEM:-8192}"
+      - --ssh-port
+      - "2222"
+      - --kvm
+      # Rocjitsu emulated GPU.
+      - --vfio-userdev
+      - /run/vfu/rocjitsu.sock
+      # SPDK NVMe KV controller. Note: no --nvme N here; SPDK provides the
+      # controller rather than QEMU's own NVMe emulation.
+      - --vfio-userdev
+      - /run/vfu/nvme/cntrl
+      - --pci-mmio-bridge
+      - --nvme-trace
+      - "${VM_NVME_TRACE:-doorbell}"
+
+volumes:
+  vfu-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
