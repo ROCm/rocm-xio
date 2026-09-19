@@ -2899,26 +2899,35 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                     "mapped at %p.\n",
                     shadow_virt);
     const size_t shadow_size = 8192;
-    void* shadow_gpu_ptr = nullptr;
-    int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
-                                                       &shadow_gpu_ptr);
-    if (ret_reg < 0) {
-      ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
-                       "shadow buffer.\n");
-      return hipErrorInvalidValue;
+    // On rocjitsu (wall clock = 0 KHz), the GPU kernel runs as host CPU
+    // code.  hipHostGetDevicePointer returns a GPU VA that differs from the
+    // CPU mmap VA but does not alias the same physical pages under rocjitsu's
+    // address translation, so writes to the GPU VA miss the QEMU-interceptable
+    // mmap region.  Skip HIP registration and use shadow_virt directly; the
+    // GPU kernel running as CPU can access any CPU-accessible pointer.
+    {
+      int _wclk_sb = 0;
+      (void)hipDeviceGetAttribute(&_wclk_sb, hipDeviceAttributeWallClockRate,
+                                  0);
+      (void)hipGetLastError();
+      if (_wclk_sb == 0) {
+        ROCXIO_LOG_INFO("rocjitsu detected: using CPU VA for pci-mmio-bridge "
+                        "shadow buffer (%p)\n",
+                        shadow_virt);
+        nvmeConfig->doorbellParams.shadowBufferVirt = shadow_virt;
+      } else {
+        void* shadow_gpu_ptr = nullptr;
+        int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
+                                                           shadow_size,
+                                                           &shadow_gpu_ptr);
+        if (ret_reg < 0) {
+          ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
+                           "shadow buffer.\n");
+          return hipErrorInvalidValue;
+        }
+        nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
+      }
     }
-    // On rocjitsu (emulated GPU), the GPU kernel runs as host CPU code.
-    // hipHostGetDevicePointer returns a GPU VA that differs from the CPU
-    // mmap VA but does NOT alias the same physical pages when rocjitsu
-    // emulates the address translation.  Use the CPU VA so the GPU kernel
-    // (running as CPU) writes directly to the QEMU-interceptable mmap.
-    if (shadow_gpu_ptr != shadow_virt) {
-      ROCXIO_LOG_INFO("/dev/nvme0: rocjitsu detected, using CPU VA for "
-                      "pci-mmio-bridge shadow buffer (cpu=%p gpu=%p)\n",
-                      shadow_virt, shadow_gpu_ptr);
-      shadow_gpu_ptr = shadow_virt;
-    }
-    nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
   } else {
     // One BAR0 mapping per controller. validateConfig() rejects the MMIO
     // bridge path with more than one target, so only this branch fans out.
