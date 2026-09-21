@@ -189,6 +189,7 @@ cd "${BUILD_DIR}"
 #
 # XIO_FORCE_PCI_MMIO_BRIDGE is required for the same reason as the LBA
 # path: GPU doorbells are replayed through the pci-mmio-bridge.
+set +e
 sudo env \
     ROCXIO_NVME_KV_CTRL="${KV_CTRL}" \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
@@ -196,13 +197,9 @@ sudo env \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
-          --no-tests=error; _ctest_rc=$?
-
-# Print any KV CQE error captured before __builtin_trap() fired.
-if [ -f /tmp/kv-cqe-error.txt ]; then
-    echo "=== KV CQE error ===" >&2
-    cat /tmp/kv-cqe-error.txt >&2
-fi
+          --no-tests=error
+_ctest_rc=$?
+set -e
 exit $_ctest_rc
 
 banner "Done"

@@ -1032,18 +1032,12 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
         printf("KV: key does not exist (sc=0x87)\n");
       }
     } else {
-      // Write error to /tmp/kv-cqe-error.txt before trap so it survives.
-      {
-        FILE* ef = fopen("/tmp/kv-cqe-error.txt", "w");
-        if (ef) {
-          fprintf(ef, "NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n",
-                  (unsigned)sc, (unsigned)sct, op);
-          fclose(ef);
-        }
-      }
+      // sc= is printed via device printf (appears in rocjitsu container log)
+      // and also causes __builtin_trap() so the ctest output shows SegFault.
       printf("NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n", (unsigned)sc,
              (unsigned)sct, op);
-      __builtin_trap();
+      // Return instead of trap so printf flushes before exit.
+      return;
     }
 
     cq_head = (cq_head + 1) % ioParams.queueSize;
