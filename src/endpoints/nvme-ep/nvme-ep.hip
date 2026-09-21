@@ -3530,13 +3530,16 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                                                kEntriesPerPage)
                                             : 1u;
       const uint32_t prp_dma_entries = prp_cmd_slots * list_pages_per_cmd;
-      hipError_t dmas_err = hipHostMalloc((void**)&page_dmas,
-                                          sizeof(*page_dmas) * prp_dma_entries,
-                                          hipHostMallocMapped);
-      if (dmas_err != hipSuccess || !page_dmas) {
+      // Use plain malloc: page_dmas is a host-side bookkeeping array of
+      // physical addresses; it does not need GPU access or HMM backing.
+      // hipHostMalloc(hipHostMallocMapped) uses HMM whose internal error
+      // paths corrupt glibc's allocator on rocjitsu (emulated GPU).
+      page_dmas = static_cast<uint64_t*>(
+        calloc(prp_dma_entries, sizeof(*page_dmas)));
+      if (!page_dmas) {
         ROCXIO_LOG_ERROR("Failed to allocate PRP list DMA "
-                         "table for queue %u: %s\n",
-                         qid, hipGetErrorString(dmas_err));
+                         "table for queue %u\n",
+                         qid);
         if (pool_from_memalign)
           free(pool);
         else
@@ -3544,7 +3547,6 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         result = hipErrorMemoryAllocation;
         goto cleanup;
       }
-      memset(page_dmas, 0, sizeof(*page_dmas) * prp_dma_entries);
       for (uint32_t s = 0; s < prp_cmd_slots; s++) {
         for (uint32_t p = 0; p < list_pages_per_cmd; p++) {
           uint8_t* listPage = static_cast<uint8_t*>(pool) +
@@ -3556,7 +3558,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
             ROCXIO_LOG_ERROR("Failed to get PRP list page "
                              "phys addr for queue %u slot %u page %u\n",
                              qid, s, p);
-            (void)hipHostFree(page_dmas);
+            free(page_dmas);
             if (pool_from_memalign)
               free(pool);
             else
@@ -3986,7 +3988,7 @@ cleanup:
   // Free per-lane PRP list pools
   for (size_t q = 0; q < numLanes; q++) {
     if (prpPools[q].pageDmas) {
-      (void)hipHostFree(prpPools[q].pageDmas);
+      free(prpPools[q].pageDmas); // allocated via calloc, not hipHostMalloc
     }
     if (prpPools[q].ptr && prpPools[q].hipAllocated) {
       hipError_t pferr = hipHostFree(prpPools[q].ptr);
