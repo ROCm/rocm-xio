@@ -196,6 +196,13 @@ sudo env \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
-          --no-tests=error
+          --no-tests=error; _ctest_rc=$?
+
+# Print any KV CQE error captured before __builtin_trap() fired.
+if [ -f /tmp/kv-cqe-error.txt ]; then
+    echo "=== KV CQE error ===" >&2
+    cat /tmp/kv-cqe-error.txt >&2
+fi
+exit $_ctest_rc
 
 banner "Done"
