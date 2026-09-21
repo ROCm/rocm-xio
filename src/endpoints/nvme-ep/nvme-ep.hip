@@ -2899,12 +2899,21 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                     "mapped at %p.\n",
                     shadow_virt);
     const size_t shadow_size = 8192;
+    void* shadow_gpu_ptr = nullptr;
+    int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+                                                       &shadow_gpu_ptr);
+    if (ret_reg < 0) {
+      ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
+                       "shadow buffer.\n");
+      return hipErrorInvalidValue;
+    }
     // On rocjitsu (wall clock = 0 KHz), the GPU kernel runs as host CPU
     // code.  hipHostGetDevicePointer returns a GPU VA that differs from the
     // CPU mmap VA but does not alias the same physical pages under rocjitsu's
     // address translation, so writes to the GPU VA miss the QEMU-interceptable
-    // mmap region.  Skip HIP registration and use shadow_virt directly; the
-    // GPU kernel running as CPU can access any CPU-accessible pointer.
+    // mmap region.  Use shadow_virt (CPU mmap VA) as the write address; the
+    // GPU kernel running as CPU code can access any CPU-accessible pointer.
+    // HIP registration above is still needed so validateGpuPointer passes.
     {
       int _wclk_sb = 0;
       (void)hipDeviceGetAttribute(&_wclk_sb, hipDeviceAttributeWallClockRate,
@@ -2912,19 +2921,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       (void)hipGetLastError();
       if (_wclk_sb == 0) {
         ROCXIO_LOG_INFO("rocjitsu detected: using CPU VA for pci-mmio-bridge "
-                        "shadow buffer (%p)\n",
-                        shadow_virt);
+                        "shadow buffer (cpu=%p gpu=%p)\n",
+                        shadow_virt, shadow_gpu_ptr);
         nvmeConfig->doorbellParams.shadowBufferVirt = shadow_virt;
       } else {
-        void* shadow_gpu_ptr = nullptr;
-        int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
-                                                           shadow_size,
-                                                           &shadow_gpu_ptr);
-        if (ret_reg < 0) {
-          ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
-                           "shadow buffer.\n");
-          return hipErrorInvalidValue;
-        }
         nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
       }
     }
