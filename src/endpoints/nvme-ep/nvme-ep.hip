@@ -1034,7 +1034,7 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
     } else {
       printf("NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n", (unsigned)sc,
              (unsigned)sct, op);
-      __builtin_trap();
+      return; // diagnostic: return instead of trap so sc= appears in output
     }
 
     cq_head = (cq_head + 1) % ioParams.queueSize;
