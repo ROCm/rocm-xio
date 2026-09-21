@@ -1034,7 +1034,7 @@ __device__ static void driveEndpointKv(const XioEndpointConfig& config,
     } else {
       printf("NVMe KV CQE error: sc=0x%02x sct=0x%02x (op=%u)\n", (unsigned)sc,
              (unsigned)sct, op);
-      return; // diagnostic: return instead of trap so sc= appears in output
+      __builtin_trap();
     }
 
     cq_head = (cq_head + 1) % ioParams.queueSize;
@@ -2898,22 +2898,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     ROCXIO_LOG_INFO("PCI MMIO bridge shadow buffer "
                     "mapped at %p.\n",
                     shadow_virt);
-    const size_t shadow_size = 8192;
-    void* shadow_gpu_ptr = nullptr;
-    int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
-                                                       &shadow_gpu_ptr);
-    if (ret_reg < 0) {
-      ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
-                       "shadow buffer.\n");
-      return hipErrorInvalidValue;
-    }
-    // On rocjitsu (wall clock = 0 KHz), the GPU kernel runs as host CPU
-    // code.  hipHostGetDevicePointer returns a GPU VA that differs from the
-    // CPU mmap VA but does not alias the same physical pages under rocjitsu's
-    // address translation, so writes to the GPU VA miss the QEMU-interceptable
-    // mmap region.  Use shadow_virt (CPU mmap VA) as the write address; the
-    // GPU kernel running as CPU code can access any CPU-accessible pointer.
-    // HIP registration above is still needed so validateGpuPointer passes.
+    // On rocjitsu (wall clock = 0 KHz) the shadow buffer is a PCI MMIO mmap
+    // whose pages are non-paged I/O PFNs.  hipHostRegister() calls
+    // get_user_pages() on them internally; for I/O PFNs that fails and
+    // corrupts the glibc allocator.  Skip HIP registration entirely and use
+    // shadow_virt directly — the GPU kernel runs as host CPU code on rocjitsu
+    // so any CPU-accessible pointer works as the write target.  Also skip
+    // validateGpuPointer for the same reason: the unregistered mmap pointer
+    // is not in HIP's tracking tables, so hipPointerGetAttributes returns an
+    // error that would cause run() to bail out before launching the kernel.
     {
       int _wclk_sb = 0;
       (void)hipDeviceGetAttribute(&_wclk_sb, hipDeviceAttributeWallClockRate,
@@ -2921,10 +2914,20 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       (void)hipGetLastError();
       if (_wclk_sb == 0) {
         ROCXIO_LOG_INFO("rocjitsu detected: using CPU VA for pci-mmio-bridge "
-                        "shadow buffer (cpu=%p gpu=%p)\n",
-                        shadow_virt, shadow_gpu_ptr);
+                        "shadow buffer (%p), skipping HIP registration\n",
+                        shadow_virt);
         nvmeConfig->doorbellParams.shadowBufferVirt = shadow_virt;
       } else {
+        const size_t shadow_size = 8192;
+        void* shadow_gpu_ptr = nullptr;
+        int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
+                                                           shadow_size,
+                                                           &shadow_gpu_ptr);
+        if (ret_reg < 0) {
+          ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge "
+                           "shadow buffer.\n");
+          return hipErrorInvalidValue;
+        }
         nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
       }
     }
@@ -2976,7 +2979,15 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   void* shadowBufferVirt = nvmeConfig->doorbellParams.shadowBufferVirt;
 
   if (shadowBufferVirt != nullptr) {
-    if (!validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
+    // On rocjitsu the shadow buffer is a raw PCI MMIO mmap that was not
+    // registered with HIP (hipHostRegister corrupts the heap for I/O PFNs).
+    // Skip validateGpuPointer — the GPU kernel runs as CPU code and can
+    // dereference any CPU-accessible pointer directly.
+    int _wclk_sv = 0;
+    (void)hipDeviceGetAttribute(&_wclk_sv, hipDeviceAttributeWallClockRate, 0);
+    (void)hipGetLastError();
+    if (_wclk_sv != 0 &&
+        !validateGpuPointer(shadowBufferVirt, "Shadow buffer", false)) {
       ROCXIO_LOG_ERROR("Shadow buffer is not "
                        "GPU-accessible.\n");
       return hipErrorInvalidValue;
