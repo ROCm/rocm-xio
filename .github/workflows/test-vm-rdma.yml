@@ -1,0 +1,181 @@
+---
+# Build and test rocm-xio inside a VM that has a rocjitsu emulated AMD GPU
+# and a rocm-ernic emulated Pensando ionic RDMA NIC, both attached over
+# vfio-user.  The RDMA NIC runs in loopback mode, so no second host is needed.
+#
+# This exercises the rdma-ep ionic loopback path end to end without physical
+# RDMA hardware.
+
+name: rocm-xio - test-vm-rdma
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ctest-label:
+        description: ctest label regex to run inside the guest
+        required: false
+        default: "rdma"
+      skip-gpu:
+        description: Skip GPU bring-up (build-only smoke run)
+        required: false
+        default: "0"
+  schedule:
+    - cron: '57 5 * * 2'
+
+concurrency:
+  group: test-vm-rdma-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # QEMU: standard image is fine — no pci-mmio-bridge needed for rdma-ep.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g7cf462c-qemu.31e3d06-vfu.8039244
+
+  # rocjitsu: emulated AMD GPU over vfio-user.
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+
+  # Firmware source for gfx1250 blobs.
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+
+  # rocm-ernic: emulated Pensando ionic RDMA NIC over vfio-user, loopback mode.
+  ERNIC_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261020.g7cf462c-ernic.31d3114-vfu.8039244
+
+  # ernic-rocjitsu qcow2: carries ROCm userspace, amdgpu-dkms and ionic DKMS.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20261020.g7cf462c-vm.resolute-ernic-rocjitsu-qm.b4eb552
+
+  VM_IMAGES_DIR: /var/lib/qemu-tool/images
+  SSH_PORT: "2222"
+
+jobs:
+  test-vm-rdma:
+    name: rdma-ep ionic loopback against rocm-ernic vfio-user NIC
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible
+        run: python3 -m pip install ansible-core
+
+      - name: Install host tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            cloud-image-utils \
+            qemu-utils \
+            rsync
+
+      - name: Boot the rocjitsu + ernic + QEMU VM
+        id: vm
+        uses: ./.github/actions/ernic-rdma-vm
+        with:
+          qemu-image: ${{ env.QEMU_IMAGE }}
+          rocjitsu-image: ${{ env.ROCJITSU_IMAGE }}
+          ernic-image: ${{ env.ERNIC_IMAGE }}
+          qcow2-image: ${{ env.QCOW2_IMAGE }}
+          images-dir: ${{ env.VM_IMAGES_DIR }}
+          ssh-port: ${{ env.SSH_PORT }}
+          vcpus: "4"
+          vmem: "8192"
+          shm-size: 12g
+
+      - name: Provision ROCm, amdgpu and firmware in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          ROCJITSU_IMAGE: ${{ env.ROCJITSU_IMAGE }}
+          ROCJITSU_FIRMWARE_IMAGE: ${{ env.ROCJITSU_FIRMWARE_IMAGE }}
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+        run: ./scripts/test/vm-provision.sh
+
+      - name: Copy the rocm-xio checkout into the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          rsync -az --delete \
+            --exclude /build --exclude /build-alola --exclude /.venv \
+            -e "ssh -i $SSH_KEY -p $SSH_PORT \
+                -o BatchMode=yes \
+                -o NoHostAuthenticationForLocalhost=yes \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null" \
+            ./ "$SSH_USER@localhost:rocm-xio/"
+
+      - name: Build and run rdma-ep loopback tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'rdma' }}
+          SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              "$SSH_USER@localhost" \
+              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+               VENDOR=ionic \
+               ./rocm-xio/scripts/test/vm-guest-test-rdma.sh"
+
+      - name: Collect guest diagnostics
+        if: always()
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+        run: |
+          mkdir -p artifacts
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'sudo dmesg' > artifacts/guest-dmesg.txt 2>&1 || true
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes -o ConnectTimeout=5 \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "$SSH_USER@localhost" \
+              'cat rocm-xio/build/Testing/Temporary/LastTest.log' \
+              > artifacts/ctest-last.log 2>&1 || true
+
+      - name: Collect compose logs
+        if: always()
+        working-directory: ${{ steps.vm.outputs.compose-dir }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          docker compose logs --no-color \
+            > "$GITHUB_WORKSPACE/artifacts/compose.log" 2>&1 || true
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-vm-rdma-diagnostics
+          path: artifacts/
+          if-no-files-found: warn
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: ${{ steps.vm.outputs.compose-dir }}
+        run: docker compose down --volumes --timeout 10 || true

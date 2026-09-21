@@ -1,0 +1,96 @@
+---
+# rocjitsu GPU + rocm-ernic RDMA NIC + QEMU VM stack for rocm-xio RDMA testing.
+#
+# Brings up a rocjitsu vfio-user GPU server and a rocm-ernic vfio-user RDMA
+# NIC server (in loopback mode) alongside a QEMU guest.  Inside the guest the
+# ionic RDMA driver exposes rocm-ionic0 and rocm-rdma-ionic0 after the udev
+# naming rules are installed; setup-rdma-loopback.sh configures the loopback.
+#
+# Every image is pinned to a dated tag. Do not use :latest here.
+#
+# Usage (normally driven by .github/actions/ernic-rdma-vm):
+#   cp env.example .env && $EDITOR .env
+#   docker compose up --detach
+
+services:
+  rocjitsu:
+    image: "${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be set to a pinned tag}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    command:
+      - rocjitsu
+      - --config
+      - "/usr/local/share/rocjitsu/configs/${ROCJITSU_CONFIG:-gfx1250_mi455x.json}"
+      - --vfio-socket
+      - /run/vfu/rocjitsu.sock
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/rocjitsu.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  ernic:
+    image: "${ERNIC_IMAGE:?ERNIC_IMAGE must be set to a pinned tag}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    # Loopback backend: the emulated NIC reflects all packets back to the
+    # sender, which is the correct mode for single-node RDMA loopback tests.
+    command:
+      - rocm-ernic
+      - --socket
+      - /run/vfu/ernic.sock
+      - --backend
+      - loopback
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/ernic.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  qemu:
+    image: "${QEMU_IMAGE:?QEMU_IMAGE must be set to a pinned tag}"
+    depends_on:
+      rocjitsu:
+        condition: service_healthy
+      ernic:
+        condition: service_healthy
+    volumes:
+      - vfu-sockets:/run/vfu:ro
+      - "${VM_IMAGES_DIR:?VM_IMAGES_DIR must be set}:${VM_IMAGES_DIR}"
+    devices:
+      - /dev/kvm
+    shm_size: "${VM_SHM_SIZE:-12g}"
+    ports:
+      - "${VM_SSH_PORT:-2222}:2222"
+    entrypoint:
+      - qemu-tool
+      - run-vm
+    command:
+      - --images
+      - "${VM_IMAGES_DIR}"
+      - --vm-name
+      - "${VM_NAME:-batesste-ci-vm}"
+      - --vcpus
+      - "${VM_VCPUS:-4}"
+      - --vmem
+      - "${VM_VMEM:-8192}"
+      - --ssh-port
+      - "2222"
+      - --kvm
+      # Rocjitsu emulated GPU.
+      - --vfio-userdev
+      - /run/vfu/rocjitsu.sock
+      # rocm-ernic emulated ionic RDMA NIC in loopback mode.
+      - --vfio-userdev
+      - /run/vfu/ernic.sock
+
+volumes:
+  vfu-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

@@ -5,6 +5,11 @@
 [![Docs](https://github.com/ROCm/rocm-xio/actions/workflows/docs-check.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/docs-check.yml)
 [![Test](https://github.com/ROCm/rocm-xio/actions/workflows/test-emulate.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-emulate.yml)
 [![Spelling](https://github.com/ROCm/rocm-xio/actions/workflows/spell-check.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/spell-check.yml)
+
+[![VM NVMe](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme.yml)
+[![VM NVMe KV](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme-kv.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme-kv.yml)
+[![VM RDMA](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-rdma.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-rdma.yml)
+
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](INSTALL.md)
 [![ROCm](https://img.shields.io/badge/ROCm-supported-green.svg)](https://rocm.docs.amd.com)
 [![Language](https://img.shields.io/badge/language-HIP%20%7C%20C%2B%2B-orange.svg)](https://rocm.docs.amd.com/projects/HIP/en/latest/)
@@ -12,6 +17,11 @@
 [![rdma-ep](https://img.shields.io/badge/rdma--ep-supported-green.svg)][ep-rdma]
 [![sdma-ep](https://img.shields.io/badge/sdma--ep-supported-green.svg)][ep-sdma]
 [![test-ep](https://img.shields.io/badge/test--ep-supported-green.svg)][ep-test]
+
+[![QEMU](https://img.shields.io/badge/qemu-sbates--fork-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork)
+[![rocjitsu](https://img.shields.io/badge/rocjitsu-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu)
+[![SPDK](https://img.shields.io/badge/spdk-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user)
+[![ernic](https://img.shields.io/badge/ernic-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-ernic)
 
 > [!CAUTION]
 > This release is an *early-access* software technology preview. Running

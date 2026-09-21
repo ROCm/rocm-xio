@@ -10,18 +10,16 @@
 # both presented over vfio-user with the pci-mmio-bridge. Run this in
 # the guest, not on the host.
 #
-# Parallels vm-guest-test.sh (the LBA/rocjitsu path) but exercises the
-# NVMe Key-Value command set: xio-tester --kv-op store/retrieve in both
-# host-buffer (mode 0) and VRAM/P2PDMA (mode 8).
+# Exercises the NVMe Key-Value command set: xio-tester --kv-op
+# store/retrieve in both host-buffer (mode 0) and VRAM/P2PDMA (mode 8).
 #
 # Environment variables:
 #   SRC_DIR       rocm-xio source tree (default: ~/rocm-xio)
 #   BUILD_DIR     Build directory (default: $SRC_DIR/build)
 #   OFFLOAD_ARCH  GPU arch to compile for (default: gfx1250)
-#   KV_NSID       NVMe namespace device path for the KV namespace,
-#                 e.g. /dev/nvme0n1 (required; set by CI action from
-#                 the SPDK server's nsid map log line)
-#   CTEST_LABEL   ctest label regex (default: nvme kv)
+#   KV_NSID       Integer NSID of the KV namespace (required; set by CI
+#                 action from the SPDK server's nsid map log line)
+#   CTEST_LABEL   ctest label regex (default: kv)
 #   SKIP_GPU      Set to 1 to skip GPU bring-up and GPU tests
 
 set -euo pipefail
@@ -37,45 +35,16 @@ SKIP_GPU="${SKIP_GPU:-0}"
 # --namespace 1 instead.
 KV_NSID="${KV_NSID:?KV_NSID must be set to the integer NSID of the KV namespace (e.g. 1)}"
 
-banner() {
-    echo ""
-    echo "=== $* ==="
-}
+# shellcheck source=vm-guest-test-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
 # GPU bring-up
 # --------------------------------------------------------------
-if [ "${SKIP_GPU}" != "1" ]; then
-    banner "Loading amdgpu against the rocjitsu emulated device"
-    sudo /usr/local/bin/amdgpu-probe
-
-    banner "Waiting for a KFD agent to appear"
-    for _ in $(seq 1 60); do
-        if [ -d /sys/class/kfd/kfd/topology/nodes/1 ]; then
-            break
-        fi
-        sleep 5
-    done
-    if [ ! -d /sys/class/kfd/kfd/topology/nodes/1 ]; then
-        echo "ERROR: no KFD agent after amdgpu load" >&2
-        sudo dmesg | tail -100 >&2
-        exit 1
-    fi
-
-    banner "KFD agent"
-    for node in /sys/class/kfd/kfd/topology/nodes/[1-9]*; do
-        [ -r "${node}/properties" ] || continue
-        echo "${node}:"
-        grep -E '^(gfx_target_version|simd_count|vendor_id|device_id) ' \
-            "${node}/properties" || true
-    done
-    if command -v rocminfo > /dev/null; then
-        rocminfo | grep -E 'Name:|gfx' || true
-    fi
-fi
+gpu_bringup
 
 # --------------------------------------------------------------
-# Locate the NVMe controller and verify KV namespace
+# Locate the NVMe controller
 # --------------------------------------------------------------
 banner "Locating NVMe controller for SPDK KV namespace (NSID ${KV_NSID})"
 
@@ -99,82 +68,11 @@ echo "NVMe controller: ${KV_CTRL}  KV NSID: ${KV_NSID}"
 sudo nvme id-ctrl "${KV_CTRL}" 2>/dev/null | grep -E "^mn|^sn" | head -4 || true
 
 # --------------------------------------------------------------
-# Build rocm-xio
+# Build + kernel module
 # --------------------------------------------------------------
-banner "Configuring rocm-xio"
-
-roots=()
-for d in /opt/rocm /opt/rocm-*; do
-    [ -d "${d}" ] && roots+=("${d}")
-done
-if [ "${#roots[@]}" -eq 0 ]; then
-    echo "ERROR: no /opt/rocm* directory in the guest at all." >&2
-    exit 1
-fi
-
-if [ -z "${ROCM_PATH:-}" ]; then
-    hip_lang=$(find "${roots[@]}" -maxdepth 5 \
-                   -type d -name hip-lang -path '*/cmake/*' 2>/dev/null |
-                   head -1 || true)
-    if [ -n "${hip_lang}" ]; then
-        ROCM_PATH=$(dirname "$(dirname "$(dirname "${hip_lang}")")")
-    else
-        hipcc=$(find "${roots[@]}" -maxdepth 4 \
-                    -type f \( -name hipcc -o -name amdclang++ \) 2>/dev/null |
-                    head -1 || true)
-        if [ -n "${hipcc}" ]; then
-            ROCM_PATH=$(dirname "$(dirname "${hipcc}")")
-        fi
-    fi
-fi
-if [ -z "${ROCM_PATH:-}" ]; then
-    echo "ERROR: no HIP toolchain under ${roots[*]}." >&2
-    exit 1
-fi
-echo "Using ROCM_PATH=${ROCM_PATH}"
-export ROCM_PATH
-export PATH="${ROCM_PATH}/bin:${PATH}"
-
-HIP_CXX=""
-for c in "${ROCM_PATH}/bin/amdclang++" "${ROCM_PATH}/bin/hipcc" \
-         "${ROCM_PATH}/llvm/bin/clang++"; do
-    [ -x "${c}" ] && HIP_CXX="${c}" && break
-done
-if [ -n "${HIP_CXX}" ]; then
-    echo "Using HIP compiler: ${HIP_CXX}"
-else
-    echo "WARNING: no amdclang++/hipcc found under ${ROCM_PATH}" >&2
-fi
-
-# RelWithDebInfo is not a preference: -O0 device code never completes a GPU
-# dispatch on the emulated rocjitsu target (see vm-guest-test.sh for the
-# full explanation).
-cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
-    ${HIP_CXX:+-DCMAKE_HIP_COMPILER="${HIP_CXX}"} \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-    -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
-    -DROCM_PATH="${ROCM_PATH}" \
-    -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
-    -DBUILD_TESTING=ON
-
-banner "Building rocm-xio"
-cmake --build "${BUILD_DIR}" --parallel "$(nproc)"
-
-# --------------------------------------------------------------
-# Kernel module and udev rules
-# --------------------------------------------------------------
-banner "Installing rocm-xio udev rules"
-sudo "${SRC_DIR}/udev/setup-udev-rules.sh" --install
-
-banner "Building and loading the rocm-xio kernel module"
-make -C "${SRC_DIR}/kernel/rocm-xio"
-sudo rmmod rocm_xio 2>/dev/null || true
-sudo insmod "${SRC_DIR}/kernel/rocm-xio/rocm-xio.ko"
-lsmod | grep -q rocm_xio || {
-    echo "ERROR: rocm-xio module did not load" >&2
-    sudo dmesg | tail -50 >&2
-    exit 1
-}
+find_rocm
+build_xio_tester
+load_kernel_module
 
 # --------------------------------------------------------------
 # Tests
@@ -187,10 +85,13 @@ cd "${BUILD_DIR}"
 # KV namespaces are not block devices; run-nvme-kv-test.sh uses these two
 # vars to construct --controller / --namespace for xio-tester directly.
 #
-# XIO_FORCE_PCI_MMIO_BRIDGE is required for the same reason as the LBA
-# path: GPU doorbells are replayed through the pci-mmio-bridge.
-set +e
-sudo env \
+# XIO_FORCE_PCI_MMIO_BRIDGE is required: GPU doorbells are replayed through
+# the pci-mmio-bridge because direct BAR0 mmap does not work for vfio-user.
+# Wrap with a wall-clock timeout: xio-tester can block in KFD/HSA syscalls
+# that ignore SIGTERM; --kill-after=30 sends SIGKILL as a backstop.
+# Max time: 8 tests x 120 s + 30 s kill grace = ~990 s (< 20 min).
+timeout --kill-after=30 1000 \
+    sudo env \
     ROCXIO_NVME_KV_CTRL="${KV_CTRL}" \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \
@@ -198,8 +99,5 @@ sudo env \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
           --no-tests=error
-_ctest_rc=$?
-set -e
-exit $_ctest_rc
 
 banner "Done"
