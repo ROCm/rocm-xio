@@ -1727,19 +1727,16 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   bool hip_registered = false;
 
   // Step 1: Allocate queue memory.
-  // For rocjitsu (emulated GPU, wall clock rate = 0 KHz) use plain malloc
-  // rather than hipHostMallocMapped: HMM-backed hipHostMallocMapped memory
-  // does not appear in /proc/self/pagemap (page-not-present), so getPhysAddr()
-  // falls back to returning the virtual address.  The kprobe then injects a
-  // virtual address as PRP1 into SPDK's CREATE_SQ/CQ, which SPDK cannot use
-  // as a GPA.  Plain malloc memory IS present in pagemap and getPhysAddr()
-  // returns the correct GPA.  On rocjitsu the GPU kernel runs as host CPU
-  // code, so any CPU-accessible pointer is also GPU-accessible.
+  // For rocjitsu (emulated NVMe, is_emulated=true) use plain malloc rather
+  // than hipHostMallocMapped: HMM-backed hipHostMallocMapped memory does not
+  // appear in /proc/self/pagemap (page-not-present), so getPhysAddr() falls
+  // back to returning the virtual address.  The kprobe then injects a virtual
+  // address as PRP1 into SPDK's CREATE_SQ/CQ, which SPDK cannot use as a GPA.
+  // Plain malloc memory IS present in pagemap and getPhysAddr() returns the
+  // correct GPA.  On rocjitsu the GPU kernel runs as host CPU code, so any
+  // CPU-accessible pointer is also GPU-accessible.
   {
-    int _wclk = 0;
-    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
-    (void)hipGetLastError(); // clear error if attribute unsupported on rocjitsu
-    if (!is_device && _wclk == 0) {
+    if (!is_device && is_emulated) {
       void* plain = nullptr;
       hipError_t perr = allocHostMemory(size, &plain, queue_name,
                                         XIO_HOST_MEM_PLAIN);
@@ -1778,20 +1775,12 @@ __host__ int setupQueueForGpu(size_t size, bool is_device, uint32_t nvme_bdf,
   // the GPU kernel runs as host CPU code and writes to the same physical pages
   // the CPU sees.  On real AMD GPU hardware the clock rate is always > 0, so
   // this path is not taken and coherent reallocation is unchanged.
-  if (!is_device) {
-    // hipDeviceAttributeWallClockRate is the GPU's hardware real-time clock.
-    // On rocjitsu (emulated GPU) this returns 0 regardless of rocjitsu version;
-    // on real AMD GPU hardware it is always > 0.  When wall clock = 0 the
-    // coherent memory path is skipped because rocjitsu's hipHostMallocCoherent
-    // maps to a physical address domain that does not match /proc/self/pagemap,
-    // causing the kprobe to inject the wrong GPA into SPDK's CREATE_SQ/CQ.
-    int gpu_wall_clock_khz = 0;
-    (void)hipDeviceGetAttribute(&gpu_wall_clock_khz,
-                                hipDeviceAttributeWallClockRate, 0);
-    (void)hipGetLastError(); // clear error if attribute unsupported on rocjitsu
-    if (gpu_wall_clock_khz > 0) {
-      setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
-    }
+  if (!is_device && !is_emulated) {
+    // Skip coherent reallocation on rocjitsu (is_emulated=true): coherent
+    // memory uses a physical address domain that differs from pagemap, causing
+    // the kprobe to inject the wrong GPA.  On real hardware (is_emulated=false)
+    // use coherent memory for GPU visibility.
+    setup->uses_coherent = reallocateQueue(&setup->virt, size, queue_name);
   }
 
   // Step 3: Register with HIP (skip if coherent or device memory).
@@ -2786,6 +2775,14 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
 
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
+  // Detect emulated NVMe (rocjitsu/SPDK vfio-user) once at the top so both
+  // device and host branches can use it without calling hipDeviceGetAttribute
+  // (which returns hipErrorInvalidValue on rocjitsu and can trigger internal
+  // malloc/free in the HIP error path, corrupting glibc's heap).
+  bool is_emulated_top = false;
+  if (devicePath != nullptr)
+    (void)detectEmulatedNvme(devicePath, &is_emulated_top);
+
   if (dataBufferOnDevice) {
     // spdk-5co: UNCACHED VRAM. Plain hipMalloc (XIO_DEVICE_MEM_HIP) is coarse-
     // grained device memory: GPU stores may only become system-visible at
@@ -2893,9 +2890,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     // appear in /proc/self/pagemap, so getPhysAddr() cannot return the correct
     // GPA.  On rocjitsu the GPU kernel runs as host CPU code, so plain malloc
     // IS accessible and its pagemap GPA IS where the CPU writes land.
-    int _wclk = 0;
-    (void)hipDeviceGetAttribute(&_wclk, hipDeviceAttributeWallClockRate, 0);
-    bool rocjitsu_plain = (_wclk == 0);
+    bool rocjitsu_plain = is_emulated_top;
 
     if (rocjitsu_plain) {
       hipError_t perr = allocHostMemory(size, &bufferInfo->hostPtr,
@@ -2944,12 +2939,7 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
       uint64_t* pa = nullptr;
       bool pa_from_memalign = false;
       {
-        int _wclk2 = 0;
-        (void)hipDeviceGetAttribute(&_wclk2, hipDeviceAttributeWallClockRate,
-                                    0);
-        (void)hipGetLastError(); // clear error if attribute unsupported on
-                                 // rocjitsu
-        if (_wclk2 == 0) {
+        if (rocjitsu_plain) {
           if (posix_memalign(reinterpret_cast<void**>(&pa), 4096, pa_bytes) ==
               0) {
             pa_from_memalign = true;
