@@ -157,8 +157,8 @@ cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
     -DBUILD_TESTING=ON
 
-banner "Building rocm-xio"
-cmake --build "${BUILD_DIR}" --parallel "$(nproc)"
+banner "Building rocm-xio (xio-tester only)"
+cmake --build "${BUILD_DIR}" --target xio-tester --parallel "$(nproc)"
 
 # --------------------------------------------------------------
 # Kernel module and udev rules
