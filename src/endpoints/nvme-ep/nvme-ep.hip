@@ -2912,7 +2912,21 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     }
     ROCXIO_LOG_INFO("pci-mmio-bridge shadow buffer: cpu=%p gpu=%p\n",
                     shadow_virt, shadow_gpu_ptr);
-    nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
+    // On rocjitsu the GPU kernel runs as host CPU code.  The HIP GPU VA
+    // (shadow_gpu_ptr) differs from the CPU mmap VA (shadow_virt) and maps to
+    // different physical pages, so writes to shadow_gpu_ptr miss the
+    // QEMU-interceptable region.  When the addresses differ, use shadow_virt:
+    // the GPU kernel running as CPU code can write to any CPU-accessible
+    // pointer, and shadow_virt is the mmap that QEMU polls.
+    if (shadow_gpu_ptr != shadow_virt) {
+      ROCXIO_LOG_INFO(
+        "rocjitsu: shadow buffer GPU VA != CPU VA, using CPU VA for writes "
+        "(cpu=%p gpu=%p)\n",
+        shadow_virt, shadow_gpu_ptr);
+      nvmeConfig->doorbellParams.shadowBufferVirt = shadow_virt;
+    } else {
+      nvmeConfig->doorbellParams.shadowBufferVirt = shadow_gpu_ptr;
+    }
   } else {
     // One BAR0 mapping per controller. validateConfig() rejects the MMIO
     // bridge path with more than one target, so only this branch fans out.
