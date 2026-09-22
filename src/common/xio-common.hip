@@ -2734,27 +2734,43 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   volatile struct pci_mmio_bridge_ring_meta* meta =
     static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
   uint32_t slot = meta->producer_idx % meta->queue_depth;
-  volatile struct pci_mmio_bridge_command* cmdSlot =
-    reinterpret_cast<volatile struct pci_mmio_bridge_command*>(
-      static_cast<volatile uint8_t*>(shadowBufferVirt) +
-      sizeof(struct pci_mmio_bridge_ring_meta) +
-      (slot * sizeof(struct pci_mmio_bridge_command)));
-  struct pci_mmio_bridge_command cmd;
-  cmd.target_bdf = targetBdf;
-  cmd.target_bar = targetBar;
-  cmd.reserved1 = 0;
-  cmd.offset = offset;
-  cmd.value = value;
-  cmd.command = command;
-  cmd.size = size;
-  cmd.status = PCI_MMIO_BRIDGE_STATUS_PENDING;
-  cmd.reserved2 = 0;
-  cmd.sequence = slot;
-  XioComEnqueue<sizeof(struct pci_mmio_bridge_command), true>(&cmd, cmdSlot);
-  meta->producer_idx = meta->producer_idx + 1;
+  volatile uint8_t* dst = static_cast<volatile uint8_t*>(shadowBufferVirt) +
+                          sizeof(struct pci_mmio_bridge_ring_meta) +
+                          (slot * sizeof(struct pci_mmio_bridge_command));
+  // Write each field of the packed pci_mmio_bridge_command directly to the
+  // volatile destination to guarantee the values reach host-visible memory.
+  // Building a local struct and passing &cmd to XioComEnqueue causes the
+  // gfx1250 backend to keep the struct in GPU registers; on rocjitsu (GPU
+  // kernel running as CPU code) the uint64_t* cast then reads register-file
+  // garbage, producing command=0 in every ring slot.
+  dst[0] = (uint8_t)(targetBdf & 0xffu);
+  dst[1] = (uint8_t)(targetBdf >> 8u);
+  dst[2] = targetBar;
+  dst[3] = 0u;
+  dst[4] = (uint8_t)(offset & 0xffu);
+  dst[5] = (uint8_t)((offset >> 8u) & 0xffu);
+  dst[6] = (uint8_t)((offset >> 16u) & 0xffu);
+  dst[7] = (uint8_t)((offset >> 24u) & 0xffu);
+  dst[8] = (uint8_t)(value & 0xffu);
+  dst[9] = (uint8_t)((value >> 8u) & 0xffu);
+  dst[10] = (uint8_t)((value >> 16u) & 0xffu);
+  dst[11] = (uint8_t)((value >> 24u) & 0xffu);
+  dst[12] = (uint8_t)((value >> 32u) & 0xffu);
+  dst[13] = (uint8_t)((value >> 40u) & 0xffu);
+  dst[14] = (uint8_t)((value >> 48u) & 0xffu);
+  dst[15] = (uint8_t)((value >> 56u) & 0xffu);
+  dst[16] = command;
+  dst[17] = size;
+  dst[18] = PCI_MMIO_BRIDGE_STATUS_PENDING;
+  dst[19] = 0u;
+  dst[20] = (uint8_t)(slot & 0xffu);
+  dst[21] = (uint8_t)((slot >> 8u) & 0xffu);
+  dst[22] = (uint8_t)((slot >> 16u) & 0xffu);
+  dst[23] = (uint8_t)((slot >> 24u) & 0xffu);
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
 #endif
+  meta->producer_idx = meta->producer_idx + 1;
 }
 
 // Allocate GPU-accessible buffer for DMA operations

@@ -52,7 +52,7 @@ env:
   SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20260917.g857483b-spdk.18d1d8d
 
   # QEMU: MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260918.g7438e48-qemu.7794baa-vfu.8039244
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260919.g359579e-qemu.7794baa-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
   ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260921.gb3399b3-rocjitsu.8e01a5a
@@ -70,7 +70,7 @@ env:
   # extracts the guest disk via `docker create` + `docker cp /output/.`,
   # which requires a runnable container image. The -qcow2-suffixed tags
   # are OCI artifacts (schema_version 4) that docker create cannot run.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260921.g584b3f9-vm.resolute-rocjitsu-qm.5d68689
 
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"

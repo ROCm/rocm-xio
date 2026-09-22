@@ -189,7 +189,18 @@ cd "${BUILD_DIR}"
 #
 # XIO_FORCE_PCI_MMIO_BRIDGE is required for the same reason as the LBA
 # path: GPU doorbells are replayed through the pci-mmio-bridge.
-sudo env \
+# Wrap the entire ctest run with a wall-clock timeout to handle the case
+# where xio-tester is stuck in a blocking KFD/HSA syscall that ignores
+# SIGTERM.  --kill-after=30 sends SIGKILL 30 s after SIGTERM if the
+# process still has not exited, guaranteeing the SSH session terminates.
+# Max time: 8 tests x 120 s + 30 s kill grace = ~990 s (< 20 min).
+# Wrap the entire ctest run with a wall-clock timeout to handle the case
+# where xio-tester is stuck in a blocking KFD/HSA syscall that ignores
+# SIGTERM.  --kill-after=30 sends SIGKILL 30 s after SIGTERM if the
+# process still has not exited, guaranteeing the SSH session terminates.
+# Max time: 8 tests x 120 s + 30 s kill grace = ~990 s (< 20 min).
+timeout --kill-after=30 1000 \
+    sudo env \
     ROCXIO_NVME_KV_CTRL="${KV_CTRL}" \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \

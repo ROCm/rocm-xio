@@ -69,7 +69,7 @@ for i in "${!KEYS[@]}"; do
     # Each key gets a unique seed derived from its index so the LFSR
     # pattern is distinct per key; a wrong-key return would mismatch.
     seed=$(printf "0x%08x" $(( 0xc01dc0fe + i )))
-    timeout 60 "$XIO_TESTER" nvme-ep \
+    timeout --kill-after=5 60 "$XIO_TESTER" nvme-ep \
         --controller "$KV_CTRL" --namespace "$KV_NSID" \
         --kv-op store --key "$key" \
         --write-io 1 --batch-size 1 \
@@ -90,7 +90,7 @@ echo "KV verify: retrieving keys in reverse order and verifying data"
 for i in $(seq $(( ${#KEYS[@]} - 1 )) -1 0); do
     key="${KEYS[$i]}"
     seed=$(printf "0x%08x" $(( 0xc01dc0fe + i )))
-    result=$(timeout 60 "$XIO_TESTER" nvme-ep \
+    result=$(timeout --kill-after=5 60 "$XIO_TESTER" nvme-ep \
         --controller "$KV_CTRL" --namespace "$KV_NSID" \
         --kv-op retrieve --key "$key" \
         --read-io 1 --batch-size 1 \
