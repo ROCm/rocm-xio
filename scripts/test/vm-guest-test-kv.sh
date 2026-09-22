@@ -189,7 +189,6 @@ cd "${BUILD_DIR}"
 #
 # XIO_FORCE_PCI_MMIO_BRIDGE is required for the same reason as the LBA
 # path: GPU doorbells are replayed through the pci-mmio-bridge.
-set +e
 sudo env \
     ROCXIO_NVME_KV_CTRL="${KV_CTRL}" \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
@@ -198,8 +197,5 @@ sudo env \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
           --no-tests=error
-_ctest_rc=$?
-set -e
-exit $_ctest_rc
 
 banner "Done"
