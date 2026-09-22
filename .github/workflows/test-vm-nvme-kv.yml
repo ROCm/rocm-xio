@@ -156,6 +156,8 @@ jobs:
               -o NoHostAuthenticationForLocalhost=yes \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
               "$SSH_USER@localhost" \
               "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
                KV_NSID='$KV_NSID' \
