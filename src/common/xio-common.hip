@@ -2775,13 +2775,35 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
 
   bool dataBufferOnDevice = (memoryMode & XIO_MEM_MODE_DATA_DEVICE) != 0;
 
-  // Detect emulated NVMe (rocjitsu/SPDK vfio-user) once at the top so both
-  // device and host branches can use it without calling hipDeviceGetAttribute
-  // (which returns hipErrorInvalidValue on rocjitsu and can trigger internal
-  // malloc/free in the HIP error path, corrupting glibc's heap).
+  // Detect emulated NVMe (rocjitsu/SPDK vfio-user) for the host buffer path.
+  // Calling detectEmulatedNvme a second time (after the caller already called
+  // it in createQueue) corrupts glibc's heap on some rocjitsu images -- the
+  // std::string destructors in detectEmulatedNvme trip a free() on a block
+  // that was overwritten between the two calls.  Read the VID directly from
+  // sysfs instead to avoid the std::string allocations entirely.
   bool is_emulated_top = false;
-  if (devicePath != nullptr)
-    (void)detectEmulatedNvme(devicePath, &is_emulated_top);
+  if (devicePath != nullptr && targetBdf != 0) {
+    // Fast path: read vendor ID from sysfs without std::string heap allocs.
+    // targetBdf encodes domain:bus:dev.fn the same way rocm-xio uses it.
+    uint16_t domain = (targetBdf >> 16) & 0xFFFF;
+    uint8_t bus = (targetBdf >> 8) & 0xFF;
+    uint8_t dev = (targetBdf >> 3) & 0x1F;
+    uint8_t fn = targetBdf & 0x7;
+    char vendor_path[128];
+    snprintf(vendor_path, sizeof(vendor_path),
+             "/sys/bus/pci/devices/%04x:%02x:%02x.%x/vendor", domain, bus, dev,
+             fn);
+    int vfd = open(vendor_path, O_RDONLY);
+    if (vfd >= 0) {
+      char buf[16] = {};
+      if (read(vfd, buf, sizeof(buf) - 1) > 0) {
+        unsigned long vid = strtoul(buf, nullptr, 16);
+        // SPDK vfio-user VID = 0x4e58; QEMU emulated NVMe VID = 0x1b36.
+        is_emulated_top = (vid == 0x4e58u || vid == 0x1b36u);
+      }
+      close(vfd);
+    }
+  }
 
   if (dataBufferOnDevice) {
     // spdk-5co: UNCACHED VRAM. Plain hipMalloc (XIO_DEVICE_MEM_HIP) is coarse-
