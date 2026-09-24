@@ -49,7 +49,7 @@ env:
   # SPDK: serves the NVMe KV (and optional LBA) namespace over vfio-user.
   # Built from mmgaggle/spdk@rados-nkv, not upstream spdk/spdk: the target-side
   # kvdev layer and nvmf_subsystem_add_kv_ns exist nowhere upstream.
-  SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20260917.g857483b-spdk.18d1d8d
+  SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20260922.gd2b49c6-spdk.18d1d8d
 
   # QEMU: MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
   QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260919.g359579e-qemu.7794baa-vfu.8039244
