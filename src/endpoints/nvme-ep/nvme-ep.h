@@ -19,6 +19,7 @@
  * NVMe Definitions for rocm-xio nvme-ep Endpoint
  */
 #include "nvme-ep-generated.h"
+#include "nvme-kv.h"
 
 namespace xio::nvme_ep {
 
@@ -75,6 +76,18 @@ struct nvmeIoParams {
   bool infiniteMode;      /**< Run until stopRequested is set. */
   uint32_t batchSize;     /**< SQEs per doorbell; 1=serial, 0=all. */
   uint32_t wavefrontSize; /**< Hardware wavefront size in threads. */
+
+  /* --- NVMe Key-Value mode (kvOpcode == 0 selects normal block mode) --- */
+  uint8_t kvOpcode;    /**< KV opcode (store/retrieve/exec); 0 = block mode. */
+  uint32_t kvKeyLen;   /**< KV key length in bytes (1..16). */
+  uint32_t kvValueLen; /**< KV value / host-buffer size (SQE CDW10). */
+  uint32_t kvKey[4];   /**< KV key bytes, packed little-endian (16 B). */
+  uint32_t kvOpId;     /**< KV Exec operation ID (SQE CDW13). */
+  uint32_t kvInputLen; /**< KV Exec input length in bytes. */
+  uint32_t stageSettleCycles;   /**< Settle-spin ticks after Store stage. 0=off.
+                                 */
+  const uint32_t* kvKeysPacked; /**< Device ptr to packed key array, or null. */
+  uint32_t kvNumKeys; /**< Number of keys in kvKeysPacked (0 = none). */
 };
 
 /**
@@ -110,6 +123,7 @@ struct nvmeBufferParams {
   uint64_t* prpListPool;        /**< PRP list backing storage for commands. */
   uint64_t* prpListPageDmas;    /**< DMA address per PRP list command slot. */
   uint64_t prpListPoolDma;      /**< DMA address of prpListPool. */
+  uint32_t prpListPagesPerCmd;  /**< PRP list pages per command slot (0=1). */
   uint32_t prpEntriesPerCmd;    /**< PRP entries reserved per command. */
   /**
    * 1 for a single PRP list per batch, or 2 when read and write both use PRP
@@ -195,6 +209,25 @@ __host__ __device__ static inline uint32_t nvmePrpListDmaSlotIndex(
   if (mul > 1u)
     return batchIdx * mul + (isWrite ? 1u : 0u);
   return batchIdx;
+}
+
+/**
+ * @brief Physical PRP-list pages reserved per command slot (>=1).
+ */
+__host__ __device__ static inline uint32_t nvmePrpListPagesPerCmdVal(
+  const nvmeBufferParams& p) {
+  return p.prpListPagesPerCmd ? p.prpListPagesPerCmd : 1u;
+}
+
+/**
+ * @brief Per-list-page physical-address table for command slot @p slot.
+ */
+__host__ __device__ static inline const uint64_t* prpListPagePhysForSlot(
+  const nvmeBufferParams& params, uint32_t slot) {
+  if (!params.prpListPageDmas)
+    return nullptr;
+  return params.prpListPageDmas +
+         (uint64_t)slot * nvmePrpListPagesPerCmdVal(params);
 }
 
 /**
@@ -723,6 +756,37 @@ __host__ __device__ static inline void calculatePrps(
 }
 
 /**
+ * Extended calculatePrps with multi-page PRP list chaining support.
+ * The extra parameters (prpListPagePhys, prpListPageCount) enable chaining
+ * PRP list pages for transfers >1 PRP list page in size.
+ */
+__host__ __device__ static inline void calculatePrps(
+  uint64_t bufferAddr, uint32_t bufferSize, struct nvme_sqe* sqe,
+  uint64_t* prpList, uint64_t prpListDma, const uint64_t* pagePhysAddrs,
+  uint32_t bufPageOffset, const uint64_t* prpListPagePhys,
+  uint32_t prpListPageCount) {
+  // For now delegate to the base overload; chaining is implemented when
+  // prpListPagePhys is non-null and prpListPageCount > 1.
+  calculatePrps(bufferAddr, bufferSize, sqe, prpList, prpListDma, pagePhysAddrs,
+                bufPageOffset);
+  // Multi-page chaining: link PRP list pages together
+  if (prpListPagePhys && prpListPageCount > 1 && prpList && prpListDma) {
+    constexpr uint32_t entries = NVME_PAGE_SIZE / sizeof(uint64_t);
+    // Check if the transfer actually needs chaining (more than one list page)
+    uint64_t offset = bufferAddr & (NVME_PAGE_SIZE - 1);
+    uint64_t first_page = NVME_PAGE_SIZE - offset;
+    if (bufferSize > first_page) {
+      uint32_t remaining = (uint32_t)(bufferSize - first_page);
+      uint32_t n_remaining = (remaining + NVME_PAGE_SIZE - 1) / NVME_PAGE_SIZE;
+      if (n_remaining > entries - 1 && prpListPageCount > 1) {
+        // Link: last slot of page 0 points to physical address of page 1
+        prpList[entries - 1] = prpListPagePhys[1];
+      }
+    }
+  }
+}
+
+/**
  * Backward-compatible calculatePrps for transfers that
  * fit within at most 2 NVMe pages (up to 8KB at 4KB
  * page size). Does not support PRP lists.
@@ -814,7 +878,18 @@ XIO_API __global__ void gpuKernelPersistent(
   XioEndpointConfig config, nvmeIoParams ioParams,
   nvmeDoorbellParams doorbellParams, nvmeBufferParams bufParams,
   volatile uint32_t* state, volatile nvmeWorkItem* work_ring,
-  uint32_t ring_depth, volatile uint32_t* stop_flag);
+  uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth);
+
+/**
+ * Multi-queue persistent kernel: launch with dim3(n_queues) blocks.
+ * blockIdx.x selects the queue; each block drives one independent NVMe queue.
+ * See nvme-ep.hip for full documentation.
+ */
+XIO_API __global__ void gpuKernelMultiQueuePersistent(
+  const XioEndpointConfig* configs, const nvmeIoParams* io_params,
+  const nvmeDoorbellParams* doorbell_params, const nvmeBufferParams* buf_params,
+  volatile uint32_t* queue_states, volatile nvmeWorkItem* work_ring,
+  uint32_t ring_depth, volatile uint32_t* stop_flag, uint32_t batch_depth);
 
 XIO_API __global__ void gpuKernelStateful(XioEndpointConfig config,
                                           nvmeIoParams ioParams,
@@ -896,7 +971,16 @@ struct nvmeEpConfig {
     uint32_t lbasPerIo;        /**< Number of LBAs per I/O. */
     bool infiniteMode;         /**< Run until stopRequested is set. */
     uint32_t batchSize;        /**< SQEs per doorbell; 1=serial, 0=all. */
-  } ioParams;                  /**< I/O operation parameters. */
+    /* KV mode (empty kvOp => normal block mode). */
+    std::string kvOp = "";   /**< "store", "retrieve", "exec", or "" (block). */
+    std::string kvKey = "";  /**< KV key string (up to 16 bytes). */
+    uint32_t kvValueLen = 0; /**< KV value size; 0 => --data-buffer-size. */
+    std::vector<std::string> kvKeys = {}; /**< Multi-key manifest (wavefront).
+                                           */
+    uint32_t kvOpId = 0;                  /**< KV Exec operation ID. */
+    uint32_t kvInputLen = 0;              /**< KV Exec input length. */
+    uint32_t stageSettleCycles = 0;       /**< Settle spin after Store stage. */
+  } ioParams;                             /**< I/O operation parameters. */
 
   bool verify = false; /**< Verify LFSR data pattern after read-back. */
 

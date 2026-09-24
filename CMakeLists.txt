@@ -65,7 +65,7 @@ else()
 endif()
 
 # Add cmake/ to the module search path (all modes need this)
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 if(NOT XIO_DOCS_ONLY)
 
@@ -231,11 +231,11 @@ option(XIO_SDMA_OSS7
   ${_XIO_SDMA_OSS7_DEFAULT})
 
 # Project directories
-set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/src/include)
-set(ENDPOINTS_DIR ${PROJECT_SOURCE_DIR}/src/endpoints)
-set(ENDPOINTS_COMMON_DIR ${PROJECT_SOURCE_DIR}/src/endpoints/common)
-set(COMMON_DIR ${PROJECT_SOURCE_DIR}/src/common)
-set(TESTER_DIR ${PROJECT_SOURCE_DIR}/src/tester)
+set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
+set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
+set(ENDPOINTS_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/endpoints/common)
+set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
+set(TESTER_DIR ${CMAKE_SOURCE_DIR}/src/tester)
 set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
 set(NVME_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/nvme)
@@ -617,6 +617,7 @@ install(FILES
     ${INCLUDE_DIR}/xio-export.h
     ${INCLUDE_DIR}/rocm-xio-uapi.h
     ${INCLUDE_DIR}/xio-endpoint-registry.h
+    ${INCLUDE_DIR}/nvme-kv.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
     COMPONENT rocm-xio
 )
@@ -679,7 +680,7 @@ include(CMakePackageConfigHelpers)
 
 # configure_package_config_file will automatically get version from project()
 configure_package_config_file(
-    ${PROJECT_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
+    ${CMAKE_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
     ${CMAKE_BINARY_DIR}/rocm-xio-config.cmake
     INSTALL_DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
     PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR

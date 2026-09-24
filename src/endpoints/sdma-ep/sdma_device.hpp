@@ -16,6 +16,26 @@
 #include <hip/hip_ext.h>
 #include <hip/hip_runtime.h>
 
+// GFX12 (gfx1200, gfx1201, gfx1250) removed the unified s_waitcnt instruction
+// and replaced it with per-counter s_wait_* instructions. XIO_SDMA_WAITCNT()
+// selects the correct form at compile time so the same source builds for both
+// generations. The macro waits for all outstanding VMEM store and load
+// completions, which is what the SDMA ring-buffer submit path requires before
+// updating the write pointer and ringing the doorbell.
+//
+// GFX12 uses inline assembly rather than a clang builtin: the per-counter
+// builtins (__builtin_amdgcn_s_wait_{store,load}cnt) were not yet exposed in
+// the clang frontend shipped with ROCm 10.0, even though the assembler and
+// backend accept the instructions. The unified s_waitcnt builtin is accepted by
+// the frontend but the GFX12 backend cannot lower it, producing a link-time
+// "Cannot select: intrinsic %llvm.amdgcn.s.waitcnt" crash.
+#if defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1250__)
+#define XIO_SDMA_WAITCNT()                                                     \
+  __asm__ volatile("s_wait_storecnt 0\n\ts_wait_loadcnt 0" ::: "memory")
+#else
+#define XIO_SDMA_WAITCNT() __builtin_amdgcn_s_waitcnt(0)
+#endif
+
 #include "sdma_packets.hpp"
 #include "sdma_pkt_struct.h"
 #include "sdma_pkt_struct_mi4.h"
@@ -421,17 +441,17 @@ struct SdmaQueueHandle {
         }
       }
     }
-    __builtin_amdgcn_s_waitcnt(0);
+    XIO_SDMA_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(wptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    __builtin_amdgcn_s_waitcnt(0);
+    XIO_SDMA_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(doorbell, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_SYSTEM);
-    __builtin_amdgcn_s_waitcnt(0);
+    XIO_SDMA_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(committedWptr, pendingWptr, __ATOMIC_RELAXED,
@@ -549,7 +569,7 @@ struct SdmaQueueSingleProducerHandle : SdmaQueueHandle {
   __device__ __forceinline__ void submitPacket(uint64_t base,
                                                uint64_t pendingWptr) const {
     *wptr = pendingWptr;
-    __builtin_amdgcn_s_waitcnt(0);
+    XIO_SDMA_WAITCNT();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     *doorbell = pendingWptr;

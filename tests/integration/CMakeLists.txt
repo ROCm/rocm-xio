@@ -51,6 +51,15 @@ xio_add_install_test(
     ${CMAKE_SOURCE_DIR}/examples/nvme-ep-info
 )
 
+# Compile-only: NVMe Key-Value host-side validation tools. kv_cpu_probe always
+# builds; create_rbd builds only when librados/librbd are present. Running
+# kv_cpu_probe needs a KV NVMe controller, so this stays build-only in CI.
+xio_add_install_test(
+  NAME nvme-kv-examples
+  SOURCE_DIR
+    ${CMAKE_SOURCE_DIR}/examples/nvme-kv
+)
+
 # Compile-only: MPI allgather via shader-initiated SDMA
 # (needs MPI + N GPUs to run).
 find_package(MPI QUIET)

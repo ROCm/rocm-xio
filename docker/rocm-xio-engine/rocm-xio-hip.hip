@@ -544,7 +544,8 @@ extern "C" int rxio_start_persistent(struct rxio_queue_ctx* ctx,
   hipLaunchKernelGGL(xio::nvme_ep::gpuKernelPersistent, dim3(1), dim3(1), 0,
                      ctx->stream, ctx->ep_cfg, io, ctx->doorbell,
                      ctx->buf_params_template, ctx->queue_state_gpu,
-                     ctx->work_ring_gpu, ctx->ring_depth, ctx->stop_flag_gpu);
+                     ctx->work_ring_gpu, ctx->ring_depth, ctx->stop_flag_gpu,
+                     ctx->ring_depth);
 
   hipError_t lerr = hipGetLastError();
   if (lerr != hipSuccess) {
