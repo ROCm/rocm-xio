@@ -19,11 +19,14 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/ioctl.h>
+#include <linux/fs.h>
 #include <unistd.h>
 
 #include "../fio.h"
@@ -356,6 +359,20 @@ static int fio_rocm_xio_get_file_size(struct thread_data* td,
     f->real_file_size = rxio_ns_capacity_lbas(fd->ctx) * fd->lba_size;
     fio_file_set_size_known(f);
     return 0;
+  }
+  /* Engine hasn't opened the device yet — query size via a temporary fd. */
+  if (f->file_name) {
+    int tmpfd = open(f->file_name, O_RDONLY);
+    if (tmpfd >= 0) {
+      unsigned long long bytes = 0;
+      if (ioctl(tmpfd, BLKGETSIZE64, &bytes) == 0 && bytes) {
+        f->real_file_size = bytes;
+        fio_file_set_size_known(f);
+        close(tmpfd);
+        return 0;
+      }
+      close(tmpfd);
+    }
   }
   return generic_get_file_size(td, f);
 }
