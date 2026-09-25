@@ -282,7 +282,7 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
   /* PRP pool: one 4KB page per slot */
   uint64_t xfer_pages = (ctx->single_buf_size + NVME_PAGE_SIZE - 1) /
                         NVME_PAGE_SIZE;
-  if (xfer_pages > 1) {
+  if (xfer_pages > 2) {
     constexpr uint32_t prp_pp = NVME_PAGE_SIZE / sizeof(uint64_t);
     size_t prp_entries = (size_t)prp_pp * (size_t)ctx->batch_cap;
     long sp = sysconf(_SC_PAGESIZE);
@@ -300,9 +300,39 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
     if (herr != hipSuccess)
       return -EIO;
 
-    ctx->prp_pool_dma = xio::getPhysAddr(ph);
+    /* Verify the PRP pool pages are physically contiguous by checking
+     * each page's physical address.  The NVMe controller uses
+     * prp_pool_dma + slot*4KB to locate each slot's PRP list page, so
+     * the pool must be contiguous.  Re-try once with a fresh allocation
+     * if the first attempt is not contiguous. */
+    ctx->prp_pool_dma = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+      uint64_t base = xio::getPhysAddr(ph);
+      if (!base) break;
+      bool contiguous = true;
+      for (size_t pg = 1; pg < ctx->prp_pool_bytes / NVME_PAGE_SIZE; pg++) {
+        uint64_t paddr = xio::getPhysAddr((uint8_t*)ph + pg * NVME_PAGE_SIZE);
+        if (paddr != base + pg * NVME_PAGE_SIZE) {
+          contiguous = false;
+          break;
+        }
+      }
+      if (contiguous) {
+        ctx->prp_pool_dma = base;
+        break;
+      }
+      /* Not contiguous — free and retry with a fresh allocation */
+      hipHostFree(ph);
+      ph = nullptr;
+      herr = hipHostMalloc(&ph, ctx->prp_pool_bytes, hipHostMallocDefault);
+      if (herr != hipSuccess) { ph = nullptr; break; }
+      memset(ph, 0, ctx->prp_pool_bytes);
+      ctx->prp_pool_cpu = ph;
+      herr = hipHostGetDevicePointer(&ctx->prp_pool_gpu, ph, 0);
+      if (herr != hipSuccess) break;
+    }
     if (!ctx->prp_pool_dma) {
-      fprintf(stderr, "rxio: getPhysAddr PRP pool failed\n");
+      fprintf(stderr, "rxio: PRP pool physical pages not contiguous\n");
       return -EIO;
     }
   }
@@ -313,7 +343,10 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
     herr = hipHostMalloc(&qs, 2 * sizeof(uint32_t), hipHostMallocDefault);
     if (herr != hipSuccess)
       return -ENOMEM;
-    memset(qs, 0, 2 * sizeof(uint32_t));
+    /* state[0] = sq_tail(lo16)|cq_head(hi16)=0; state[1] = expected_phase.
+     * NVMe spec §4.6: first CQE after queue creation has phase bit = 1. */
+    ((uint32_t*)qs)[0] = 0;
+    ((uint32_t*)qs)[1] = 1;
 
     ctx->queue_state_cpu = (volatile uint32_t*)qs;
     void* qs_gpu = nullptr;
@@ -526,7 +559,11 @@ extern "C" int rxio_start_persistent(struct rxio_queue_ctx* ctx,
   /* Build ioParams template (lbas set per-op in work item; lbaSize needed) */
   xio::nvme_ep::nvmeIoParams io = {};
   io.lbaSize = ctx->lba_size;
-  io.lbasPerIo = 1; /* overridden per-op via lbas in work item */
+  /* Must match single_buf_size so buf_off = slot * xfer_size lands correctly.
+   * Per-op lbas in the work item overrides the NVMe NLB but not buf_off. */
+  io.lbasPerIo = (ctx->lba_size > 0)
+      ? (uint32_t)(ctx->single_buf_size / ctx->lba_size)
+      : 1;
   io.nsid = ctx->nsid;
   io.queueSize = ctx->queue_size;
   io.infiniteMode = false;
