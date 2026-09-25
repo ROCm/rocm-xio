@@ -709,13 +709,18 @@ __host__ __device__ static inline void calculatePrps(
     return;
   }
 
-  for (uint32_t i = 0; i < num_remaining_pages; i++) {
-    if (pagePhysAddrs) {
-      prpList[i] = pagePhysAddrs[bufPageOffset + 1 + i];
-    } else {
-      prpList[i] = ((bufferAddr + first_page_size) &
-                    ~((uint64_t)(NVME_PAGE_SIZE - 1))) +
-                   (uint64_t)i * NVME_PAGE_SIZE;
+  /* prpList == nullptr means the PRP list is pre-written by the host (CPU).
+   * Just point PRP2 at the pre-populated list; skip the GPU write to avoid
+   * PCIe store stalls before the doorbell. */
+  if (prpList) {
+    for (uint32_t i = 0; i < num_remaining_pages; i++) {
+      if (pagePhysAddrs) {
+        prpList[i] = pagePhysAddrs[bufPageOffset + 1 + i];
+      } else {
+        prpList[i] = ((bufferAddr + first_page_size) &
+                      ~((uint64_t)(NVME_PAGE_SIZE - 1))) +
+                     (uint64_t)i * NVME_PAGE_SIZE;
+      }
     }
   }
 
