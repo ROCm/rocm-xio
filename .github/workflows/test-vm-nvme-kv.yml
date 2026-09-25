@@ -140,12 +140,11 @@ jobs:
                 -o UserKnownHostsFile=/dev/null" \
             ./ "$SSH_USER@localhost:rocm-xio/"
 
-      - name: Build and run nvme-ep KV tests in the guest
+      - name: Build the guest and load the rocm-xio module
         env:
           SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
-          CTEST_LABEL: ${{ inputs.ctest-label || 'kv' }}
           SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
           # kv-nsid is the integer NSID from the SPDK nsid map (e.g. "1");
           # the guest script discovers the controller device itself.
@@ -159,8 +158,102 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=10 \
               "$SSH_USER@localhost" \
-              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
+              "PHASE=setup SKIP_GPU='$SKIP_GPU' \
                KV_NSID='$KV_NSID' \
+               ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
+
+      # The three snapshot steps below are the RPC-callable equivalent of the
+      # poll_reqs counter that gave WF its only SPDK-side signal on 2026-09-23
+      # (see scripts/test/spdk-kv-io-snapshot.sh header): a way to see, from
+      # the runner, whether SPDK's own state moved the way a KV store/retrieve
+      # should move it, independent of the SPDK build's log configuration.
+      - name: Snapshot SPDK state (before store)
+        working-directory: .github/compose/spdk-kv-nvme-vm
+        env:
+          SPDK_CONTAINER: spdk-kv-nvme-vm-spdk-nvme-1
+          SNAPSHOT_DIR: ${{ github.workspace }}/artifacts/spdk-snapshots
+        run: SPDK_CONTAINER="$SPDK_CONTAINER" SNAPSHOT_DIR="$SNAPSHOT_DIR" ./../../scripts/test/spdk-kv-io-snapshot.sh before-store
+
+      - name: Run KV store tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'kv' }}
+          KV_NSID: ${{ steps.vm.outputs.kv-nsid }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              "$SSH_USER@localhost" \
+              "PHASE=test CTEST_LABEL='$CTEST_LABEL' KV_NSID='$KV_NSID' \
+               TEST_NAME_REGEX=store \
+               ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
+
+      - name: Snapshot SPDK state (after store)
+        working-directory: .github/compose/spdk-kv-nvme-vm
+        env:
+          SPDK_CONTAINER: spdk-kv-nvme-vm-spdk-nvme-1
+          SNAPSHOT_DIR: ${{ github.workspace }}/artifacts/spdk-snapshots
+          SNAPSHOT_DIFF_AGAINST: before-store
+        run: |
+          SPDK_CONTAINER="$SPDK_CONTAINER" SNAPSHOT_DIR="$SNAPSHOT_DIR" \
+            SNAPSHOT_DIFF_AGAINST="$SNAPSHOT_DIFF_AGAINST" \
+            ./../../scripts/test/spdk-kv-io-snapshot.sh after-store
+
+      - name: Run KV retrieve tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'kv' }}
+          KV_NSID: ${{ steps.vm.outputs.kv-nsid }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              "$SSH_USER@localhost" \
+              "PHASE=test CTEST_LABEL='$CTEST_LABEL' KV_NSID='$KV_NSID' \
+               TEST_NAME_REGEX=retrieve \
+               ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
+
+      - name: Snapshot SPDK state (after retrieve)
+        working-directory: .github/compose/spdk-kv-nvme-vm
+        env:
+          SPDK_CONTAINER: spdk-kv-nvme-vm-spdk-nvme-1
+          SNAPSHOT_DIR: ${{ github.workspace }}/artifacts/spdk-snapshots
+          SNAPSHOT_DIFF_AGAINST: after-store
+        run: |
+          SPDK_CONTAINER="$SPDK_CONTAINER" SNAPSHOT_DIR="$SNAPSHOT_DIR" \
+            SNAPSHOT_DIFF_AGAINST="$SNAPSHOT_DIFF_AGAINST" \
+            ./../../scripts/test/spdk-kv-io-snapshot.sh after-retrieve
+
+      - name: Run remaining kv-labeled tests in the guest
+        env:
+          SSH_PORT: ${{ steps.vm.outputs.ssh-port }}
+          SSH_USER: ${{ steps.vm.outputs.ssh-user }}
+          SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
+          CTEST_LABEL: ${{ inputs.ctest-label || 'kv' }}
+          KV_NSID: ${{ steps.vm.outputs.kv-nsid }}
+        run: |
+          ssh -i "$SSH_KEY" -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o NoHostAuthenticationForLocalhost=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=10 \
+              "$SSH_USER@localhost" \
+              "PHASE=test CTEST_LABEL='$CTEST_LABEL' KV_NSID='$KV_NSID' \
+               TEST_EXCLUDE_REGEX='store|retrieve' \
                ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
 
       - name: Cross-check SPDK stored the KV keys (host-side)
@@ -214,6 +307,9 @@ jobs:
           name: test-vm-nvme-kv-diagnostics
           path: artifacts/
           if-no-files-found: warn
+          # artifacts/spdk-snapshots/spdk-snapshot-{before-store,after-store,
+          # after-retrieve}.json (written by the three snapshot steps above)
+          # are already under artifacts/, so this same upload covers them.
 
       - name: Tear down the stack
         if: always()
