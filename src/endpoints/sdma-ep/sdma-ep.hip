@@ -114,6 +114,34 @@ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
                                                              dstDeviceId);
 }
 
+uintptr_t getQueueDeviceHandle(int srcDeviceId, int dstDeviceId) {
+  auto* queue = ::anvil::AnvilLib::getInstance().getSdmaQueue(srcDeviceId,
+                                                              dstDeviceId);
+  if (queue == nullptr || queue->deviceHandle() == nullptr) {
+    throw std::runtime_error("device queue is not initialized");
+  }
+  return reinterpret_cast<uintptr_t>(queue->deviceHandle());
+}
+
+std::vector<uint64_t> getQueueDeviceState(int srcDeviceId, int dstDeviceId) {
+  const auto ctx = getPythonDeviceContext(srcDeviceId, dstDeviceId);
+  std::vector<uint64_t> state = {
+    *reinterpret_cast<const uint64_t*>(ctx.rptr),
+    *reinterpret_cast<const uint64_t*>(ctx.wptr),
+  };
+  for (const uintptr_t address : {ctx.cachedWptr, ctx.committedWptr}) {
+    uint64_t value = 0;
+    const hipError_t error = hipMemcpy(&value,
+                                       reinterpret_cast<const void*>(address),
+                                       sizeof(value), hipMemcpyDeviceToHost);
+    if (error != hipSuccess) {
+      throw std::runtime_error(hipGetErrorString(error));
+    }
+    state.push_back(value);
+  }
+  return state;
+}
+
 SdmaQueueHostHandle getHostHandle(int srcDeviceId, int dstDeviceId,
                                   int channelIdx) {
   return ::anvil::AnvilLib::getInstance().getHostHandle(srcDeviceId,

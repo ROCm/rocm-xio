@@ -40,6 +40,10 @@ option(XIO_BUILD_PYTHON
   "Build Python bindings for sdma-ep"
   OFF)
 
+option(XIO_BUILD_DEVICE_BITCODE
+  "Build LLVM bitcode for XIO SDMA device functions (for Triton extern_libs)"
+  OFF)
+
 # OFFLOAD_ARCH → CMAKE_HIP_ARCHITECTURES must be set BEFORE
 # project() because enabling LANGUAGES HIP triggers compiler
 # detection which auto-populates CMAKE_HIP_ARCHITECTURES.
@@ -497,6 +501,11 @@ if(XIO_SDMA_OSS7)
     " (arch: ${_BARE_ARCH})")
 else()
   message(STATUS "SDMA pre-OSS7 packet support (default)")
+endif()
+
+# Optional flat device ABI for Triton and other LLVM bitcode consumers.
+if(XIO_BUILD_DEVICE_BITCODE)
+  include(XIODeviceBitcode)
 endif()
 
 # Dependencies on generated files

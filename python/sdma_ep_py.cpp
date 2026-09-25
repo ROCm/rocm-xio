@@ -59,6 +59,22 @@ void register_sdma_ep(nb::module_& m) {
     "src_device"_a, "dst_device"_a,
     "Get device context handles for the queue (queue 0)");
 
+  m.def(
+    "get_queue_device_handle",
+    [](int srcDevice, int dstDevice) {
+      return sdma_ep::getQueueDeviceHandle(srcDevice, dstDevice);
+    },
+    "src_device"_a, "dst_device"_a,
+    "Get the device address of the initialized SdmaQueueHandle (queue 0)");
+
+  m.def(
+    "get_queue_device_state",
+    [](int srcDevice, int dstDevice) {
+      return sdma_ep::getQueueDeviceState(srcDevice, dstDevice);
+    },
+    "src_device"_a, "dst_device"_a,
+    "Get rptr, wptr, cachedWptr, and committedWptr for queue 0");
+
   // Host-initiated data transfer functions
   m.def(
     "put",

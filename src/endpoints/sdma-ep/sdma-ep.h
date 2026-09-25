@@ -230,6 +230,18 @@ SdmaQueuePythonDeviceCtx getPythonDeviceContext(int srcDeviceId,
                                                 int dstDeviceId);
 
 /**
+ * @brief Return the device address of the initialized SDMA queue handle.
+ *
+ * The returned address points to a device-resident SdmaQueueHandle and may be
+ * passed directly to a GPU kernel. It remains valid until the queue is
+ * destroyed or the endpoint is shut down.
+ */
+uintptr_t getQueueDeviceHandle(int srcDeviceId, int dstDeviceId);
+
+/** Return {rptr, wptr, cachedWptr, committedWptr} for a device queue. */
+std::vector<uint64_t> getQueueDeviceState(int srcDeviceId, int dstDeviceId);
+
+/**
  * @brief Get a host handle for SDMA operations.
  *
  * Returns a handle that can be used to perform host-initiated

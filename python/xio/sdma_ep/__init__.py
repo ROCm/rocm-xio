@@ -21,6 +21,8 @@ __all__ = [
     'create_queue',
     'create_host_queue',
     'get_queue_device_ctx',
+    'get_queue_device_handle',
+    'get_queue_device_state',
     'put',
     'put_signal',
     'put_tile',
