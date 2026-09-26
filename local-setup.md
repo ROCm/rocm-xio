@@ -10,7 +10,7 @@ Written for: Stephen, morning of 2026-09-22.
 | QEMU (sbates fork, has pci-mmio-bridge) | `sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260918.g7438e48-qemu.7794baa-vfu.8039244` |
 | rocjitsu GPU server | `sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260921.gb3399b3-rocjitsu.8e01a5a` |
 | Firmware source (old, has full gfx1250 blobs) | `sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1` |
-| Guest disk (qcow2 container format) | `sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689` |
+| Guest disk (qcow2 container format) | `sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20260925.g12f12f8-vm.resolute-ernic-rocjitsu-qm.e73a1e6` |
 
 ## 1. Extract the guest disk (one-time)
 
@@ -18,7 +18,7 @@ The qcow2 image is an OCI container with the disk and SSH key in `/output/`.
 Pull and extract:
 
 ```bash
-QCOW2_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689
+QCOW2_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20260925.g12f12f8-vm.resolute-ernic-rocjitsu-qm.e73a1e6
 IMAGES_DIR=/var/lib/qemu-tool/images
 
 docker pull "$QCOW2_IMAGE"
