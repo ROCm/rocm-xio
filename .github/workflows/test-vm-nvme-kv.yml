@@ -178,7 +178,7 @@ jobs:
           # confirms the KV commands actually reached SPDK rather than
           # producing false-positive completions on the guest side.
           SPDK_CONTAINER="$SPDK_CONTAINER" \
-            ./../../scripts/test/spdk-kv-check.sh
+            ../../../scripts/test/spdk-kv-check.sh
 
       - name: Collect guest diagnostics
         if: always()
