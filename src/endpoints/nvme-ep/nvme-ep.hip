@@ -4694,6 +4694,34 @@ static void freeQueueSetup(struct xioQueueSetup* s, bool is_device,
   s->gpu = nullptr;
 }
 
+// With CQR=1 every queue is created with PC=1, so the controller treats the
+// queue as one physically contiguous run starting at PRP1. setupQueueForGpu()
+// does not guarantee that for a multi-page queue. Returns 0 if every page of
+// the queue follows the previous one, -EINVAL if not.
+static int checkQueuePhysContig(const struct xioQueueSetup* s, size_t size,
+                                const char* name) {
+  const size_t max_pages = 1024;
+  uint64_t phys[max_pages];
+  int num_pages = getPagePhysAddrs(s->virt, size, phys, max_pages);
+  if (num_pages < 0) {
+    ROCXIO_LOG_ERROR("Could not resolve physical pages of %s: %s\n", name,
+                     strerror(-num_pages));
+    return num_pages;
+  }
+  long page_sz = sysconf(_SC_PAGESIZE);
+  for (int i = 1; i < num_pages; i++) {
+    uint64_t expected = phys[0] + static_cast<uint64_t>(i) * page_sz;
+    if (phys[i] != expected) {
+      ROCXIO_LOG_ERROR("%s is not physically contiguous: page %d at "
+                       "0x%llx, expected 0x%llx.\n",
+                       name, i, (unsigned long long)phys[i],
+                       (unsigned long long)expected);
+      return -EINVAL;
+    }
+  }
+  return 0;
+}
+
 __host__ int createQueue(const char* nvme_device,
                          const char* kernel_module_device, uint16_t queue_id,
                          uint16_t queue_size, uint32_t nvme_bdf,
@@ -4828,6 +4856,27 @@ __host__ int createQueue(const char* nvme_device,
     if (ret < 0) {
       freeQueueSetup(&sq_setup, sq_is_device, "submission queue",
                      sq_size_bytes);
+      goto cleanup;
+    }
+  }
+
+  // Emulated controllers skip the contiguous DMA path above, but CQR=1 still
+  // forces PC=1 below. Refuse a multi-page queue that is not physically
+  // contiguous: an SPDK vfio-user target zero-fills the whole PC=1 range at
+  // CREATE time, overwriting whatever memory follows the first page.
+  if (cqr && is_emulated && (sq_multi_page || cq_multi_page)) {
+    int contig_ret = 0;
+    if (sq_multi_page)
+      contig_ret = checkQueuePhysContig(&sq_setup, sq_size_bytes,
+                                        "submission queue");
+    if (contig_ret == 0 && cq_multi_page)
+      contig_ret = checkQueuePhysContig(&cq_setup, cq_size_bytes,
+                                        "completion queue");
+    if (contig_ret < 0) {
+      ROCXIO_LOG_ERROR("CQR=1 requires contiguous queues. Try "
+                       "--queue-length %zu or smaller.\n",
+                       (size_t)(NVME_PAGE_SIZE / NVME_EP_SQE_SIZE));
+      ret = contig_ret;
       goto cleanup;
     }
   }

@@ -69,6 +69,22 @@ inputs:
     description: Seconds to wait for the guest to accept SSH.
     required: false
     default: "300"
+  spdk-debug-log:
+    description: >-
+      Set to "1" (default) to enable SPDK debug log flags and DEBUG print
+      level on the KV NVMe server right after it becomes healthy, so the
+      compose logs already captured to CI artifacts trace XIO-initiated
+      NVMe/vfio-user/KV commands in detail. Set to "0" to leave the
+      target's default (NOTICE) logging in place.
+    required: false
+    default: "1"
+  spdk-log-flags:
+    description: >-
+      Comma-separated SPDK log flag names to enable when spdk-debug-log
+      is "1". See scripts/test/spdk-enable-logging.sh and `nvmf_tgt -h`
+      ("Log options") for the full list this image supports.
+    required: false
+    default: "nvmf,nvmf_vfio,vfio_user,vfio_user_db,vfu,kvdev,kvdev_mem"
 
 outputs:
   ssh-port:
@@ -263,6 +279,25 @@ runs:
         echo "lba-nsid=$lba_nsid" >> "$GITHUB_OUTPUT"
         echo "KV namespace device: $kv_nsid"
         echo "LBA namespace device: ${lba_nsid:-(none)}"
+
+    - name: Enable SPDK log flags (INFO-level only on this release image)
+      # See scripts/test/spdk-enable-logging.sh's header: on the pinned
+      # CONFIG_DEBUG=n image this unlocks only the "nvmf" flag's INFOLOG
+      # sites in lib/nvmf/ctrlr.c (invalid/unsupported-command paths), not
+      # full DEBUGLOG tracing of the vfio-user/KV path. Kept because it is
+      # cheap and still surfaces malformed-command traffic in compose logs;
+      # it is not a substitute for the RPC state snapshots taken around the
+      # guest's store/retrieve steps (scripts/test/spdk-kv-io-snapshot.sh).
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      env:
+        XIO_SPDK_DEBUG_LOG: ${{ inputs.spdk-debug-log }}
+        SPDK_LOG_FLAGS: ${{ inputs.spdk-log-flags }}
+      run: |
+        set -euo pipefail
+        SPDK_CONTAINER="$(docker compose ps -q spdk-nvme)"
+        export SPDK_CONTAINER
+        "${{ github.action_path }}/../../../scripts/test/spdk-enable-logging.sh"
 
     - name: Wait for guest SSH
       shell: bash
