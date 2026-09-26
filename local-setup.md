@@ -104,8 +104,8 @@ sudo mkdir -p /lib/firmware/amdgpu
 sudo cp /tmp/gc_12_1_0*.bin /tmp/sdma_7_1_0.bin /tmp/ip_discovery.bin /lib/firmware/amdgpu/
 echo 'blacklist amdgpu' | sudo tee /etc/modprobe.d/amdgpu-blacklist.conf > /dev/null
 sudo modprobe -r amdgpu 2>/dev/null || true
-sudo modprobe amdgpu emu_mode=1 fw_load_type=0 discovery=2 \
-  ip_block_mask=0x3f vm_update_mode=3 gpu_recovery=0 vramlimit=256
+# The image ships the emulation parameters for its own amdgpu-dkms build.
+sudo /usr/local/bin/amdgpu-probe
 sleep 3
 ls /dev/kfd && echo "GPU ready"
 GUEST
