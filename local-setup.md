@@ -10,7 +10,7 @@ Written for: Stephen, morning of 2026-09-22.
 | QEMU (sbates fork, has pci-mmio-bridge) | `sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260918.g7438e48-qemu.7794baa-vfu.8039244` |
 | rocjitsu GPU server | `sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260921.gb3399b3-rocjitsu.8e01a5a` |
 | Firmware source (old, has full gfx1250 blobs) | `sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1` |
-| Guest disk (qcow2 container format) | `sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689` |
+| Guest disk (qcow2 container format) | `sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20260925.g12f12f8-vm.resolute-ernic-rocjitsu-qm.e73a1e6` |
 
 ## 1. Extract the guest disk (one-time)
 
@@ -18,7 +18,7 @@ The qcow2 image is an OCI container with the disk and SSH key in `/output/`.
 Pull and extract:
 
 ```bash
-QCOW2_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260918.g7438e48-vm.resolute-rocjitsu-qm.5d68689
+QCOW2_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20260925.g12f12f8-vm.resolute-ernic-rocjitsu-qm.e73a1e6
 IMAGES_DIR=/var/lib/qemu-tool/images
 
 docker pull "$QCOW2_IMAGE"
@@ -104,8 +104,8 @@ sudo mkdir -p /lib/firmware/amdgpu
 sudo cp /tmp/gc_12_1_0*.bin /tmp/sdma_7_1_0.bin /tmp/ip_discovery.bin /lib/firmware/amdgpu/
 echo 'blacklist amdgpu' | sudo tee /etc/modprobe.d/amdgpu-blacklist.conf > /dev/null
 sudo modprobe -r amdgpu 2>/dev/null || true
-sudo modprobe amdgpu emu_mode=1 fw_load_type=0 discovery=2 \
-  ip_block_mask=0x3f vm_update_mode=3 gpu_recovery=0 vramlimit=256
+# The image ships the emulation parameters for its own amdgpu-dkms build.
+sudo /usr/local/bin/amdgpu-probe
 sleep 3
 ls /dev/kfd && echo "GPU ready"
 GUEST

@@ -62,7 +62,7 @@ env:
   # solely to synthesise firmware, never to serve the device.
   ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
 
-  # The "rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
+  # The "ernic-rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
   # rocm-xio's build dependencies. MUST be the resolute build (see
   # test-vm-nvme.yml for the full explanation of why noble breaks here).
   #
@@ -70,7 +70,12 @@ env:
   # extracts the guest disk via `docker create` + `docker cp /output/.`,
   # which requires a runnable container image. The -qcow2-suffixed tags
   # are OCI artifacts (schema_version 4) that docker create cannot run.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260921.g584b3f9-vm.resolute-rocjitsu-qm.5d68689
+  #
+  # ernic-rocjitsu flavour, built by qemu-minimal e73a1e6: its netplan
+  # matches the NIC by name (en*), so it boots with the MAC qemu-tool now
+  # derives from the SSH port. Guests built before qemu-minimal 3969f07
+  # (e.g. qm.5d68689) pin 52:54:00:12:34:56 and lose networking.
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20260925.g12f12f8-vm.resolute-ernic-rocjitsu-qm.e73a1e6
 
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
@@ -173,7 +178,7 @@ jobs:
           # confirms the KV commands actually reached SPDK rather than
           # producing false-positive completions on the guest side.
           SPDK_CONTAINER="$SPDK_CONTAINER" \
-            ./../../scripts/test/spdk-kv-check.sh
+            ../../../scripts/test/spdk-kv-check.sh
 
       - name: Collect guest diagnostics
         if: always()
