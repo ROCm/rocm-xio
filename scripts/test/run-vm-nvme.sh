@@ -341,15 +341,17 @@ ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
     bash -s -- \
     "$CTEST_LABEL" \
     "$SKIP_GPU" \
+    "${CTEST_EXCLUDE_LABEL:-}" \
     "${TIMEOUT_SCALE:-}" \
     "${CTEST_EXCLUDE_REGEX:-}" \
     "${INCLUDE_VM_KNOWN_FAILS:-}" <<'GUEST_TEST'
 set -euo pipefail
 export CTEST_LABEL="$1"
 export SKIP_GPU="$2"
-[ -n "${3}" ] && export TIMEOUT_SCALE="$3"
-[ -n "${4}" ] && export CTEST_EXCLUDE_REGEX="$4"
-[ -n "${5}" ] && export INCLUDE_VM_KNOWN_FAILS="$5"
+[ -n "${3}" ] && export CTEST_EXCLUDE_LABEL="$3"
+[ -n "${4}" ] && export TIMEOUT_SCALE="$4"
+[ -n "${5}" ] && export CTEST_EXCLUDE_REGEX="$5"
+[ -n "${6}" ] && export INCLUDE_VM_KNOWN_FAILS="$6"
 exec ./rocm-xio/scripts/test/vm-guest-test.sh
 GUEST_TEST
 test_rc=$?
