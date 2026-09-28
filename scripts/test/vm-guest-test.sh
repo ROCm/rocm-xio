@@ -89,7 +89,13 @@ VM_KNOWN_FAILING_TESTS=(
     nvme-ep-num-queues-4
     nvme-ep-batch-16-queues-4
 )
-VM_KNOWN_FAILING_TESTS_REGEX="^($(IFS='|'; echo "${VM_KNOWN_FAILING_TESTS[*]}"))$"
+VM_KNOWN_FAILING_TESTS_REGEX_PARTS=()
+for test_name in "${VM_KNOWN_FAILING_TESTS[@]}"; do
+    VM_KNOWN_FAILING_TESTS_REGEX_PARTS+=("$(printf '%s' "${test_name}" \
+        | sed 's/[][(){}.^$*+?|\\-]/\\&/g')")
+done
+VM_KNOWN_FAILING_TESTS_REGEX="^($(IFS='|'; echo \
+    "${VM_KNOWN_FAILING_TESTS_REGEX_PARTS[*]}"))$"
 
 if [ "${INCLUDE_VM_KNOWN_FAILS}" != "1" ]; then
     if [ -n "${CTEST_EXCLUDE_REGEX}" ]; then
