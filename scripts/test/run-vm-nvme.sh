@@ -338,7 +338,12 @@ fi
 say "Building and running nvme-ep tests in the guest"
 set +e
 ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
-    "CTEST_LABEL='${CTEST_LABEL}' SKIP_GPU='${SKIP_GPU}' ${TIMEOUT_SCALE:+TIMEOUT_SCALE='${TIMEOUT_SCALE}'} ./rocm-xio/scripts/test/vm-guest-test.sh"
+    "CTEST_LABEL='${CTEST_LABEL}' \
+     SKIP_GPU='${SKIP_GPU}' \
+     ${TIMEOUT_SCALE:+TIMEOUT_SCALE='${TIMEOUT_SCALE}'} \
+     ${CTEST_EXCLUDE_REGEX:+CTEST_EXCLUDE_REGEX='${CTEST_EXCLUDE_REGEX}'} \
+     ${INCLUDE_VM_KNOWN_FAILS:+INCLUDE_VM_KNOWN_FAILS='${INCLUDE_VM_KNOWN_FAILS}'} \
+     ./rocm-xio/scripts/test/vm-guest-test.sh"
 test_rc=$?
 set -e
 
