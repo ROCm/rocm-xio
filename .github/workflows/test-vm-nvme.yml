@@ -261,11 +261,20 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "$SSH_USER@localhost" \
-              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
-               ${CTEST_EXCLUDE_LABEL:+CTEST_EXCLUDE_LABEL='$CTEST_EXCLUDE_LABEL'} \
-               ${TIMEOUT_SCALE:+TIMEOUT_SCALE='$TIMEOUT_SCALE'} \
-               ${BATCH_DEPTH:+BATCH_DEPTH='$BATCH_DEPTH'} \
-               ./rocm-xio/scripts/test/vm-guest-test.sh"
+              bash -s -- \
+              "$CTEST_LABEL" \
+              "$SKIP_GPU" \
+              "${CTEST_EXCLUDE_LABEL:-}" \
+              "${TIMEOUT_SCALE:-}" \
+              "${BATCH_DEPTH:-}" <<'GUEST_TEST'
+          set -euo pipefail
+          export CTEST_LABEL="$1"
+          export SKIP_GPU="$2"
+          [ -n "${3}" ] && export CTEST_EXCLUDE_LABEL="$3"
+          [ -n "${4}" ] && export TIMEOUT_SCALE="$4"
+          [ -n "${5}" ] && export BATCH_DEPTH="$5"
+          exec ./rocm-xio/scripts/test/vm-guest-test.sh
+          GUEST_TEST
 
       - name: Collect guest diagnostics
         if: always()
