@@ -77,7 +77,19 @@ INCLUDE_VM_KNOWN_FAILS="${INCLUDE_VM_KNOWN_FAILS:-0}"
 #   - multi-queue shapes still exceed the emulator's scratch budget or hang
 # Keeping them in the VM lane turns the job red without increasing confidence in
 # production hardware coverage. Set INCLUDE_VM_KNOWN_FAILS=1 to run them anyway.
-VM_KNOWN_FAILING_TESTS_REGEX='^(nvme-verify-seq-device-mem|nvme-smoke-batch-(4|16|128)|nvme-smoke-queues-(2|4)|nvme-smoke-queues-2-batch-16|nvme-verify-seq-device-mem-multi-lba|nvme-ep-num-queues-4|nvme-ep-batch-16-queues-4)$'
+VM_KNOWN_FAILING_TESTS=(
+    nvme-verify-seq-device-mem
+    nvme-smoke-batch-4
+    nvme-smoke-batch-16
+    nvme-smoke-batch-128
+    nvme-smoke-queues-2
+    nvme-smoke-queues-4
+    nvme-smoke-queues-2-batch-16
+    nvme-verify-seq-device-mem-multi-lba
+    nvme-ep-num-queues-4
+    nvme-ep-batch-16-queues-4
+)
+VM_KNOWN_FAILING_TESTS_REGEX="^($(IFS='|'; echo "${VM_KNOWN_FAILING_TESTS[*]}"))$"
 
 if [ "${INCLUDE_VM_KNOWN_FAILS}" != "1" ]; then
     if [ -n "${CTEST_EXCLUDE_REGEX}" ]; then
