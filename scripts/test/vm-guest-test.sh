@@ -29,7 +29,8 @@
 #                 ctest test-name regex to exclude (default: known rocJITsu-
 #                 unsupported NVMe cases)
 #   INCLUDE_VM_KNOWN_FAILS
-#                 Set to 1 to run the default excluded VM-known-failing tests
+#                 Set to 1 to disable only the built-in VM-known-failing test
+#                 exclusions; caller-supplied CTEST_EXCLUDE_REGEX still applies
 #   SKIP_GPU      Set to 1 to skip GPU bring-up and GPU tests
 #   TIMEOUT_SCALE CTest timeout multiplier (default: 4)
 #   BATCH_DEPTH   nvme-ep per-batch private array bound (default: 16)
@@ -62,7 +63,8 @@ BUILD_DIR="${BUILD_DIR:-${SRC_DIR}/build}"
 OFFLOAD_ARCH="${OFFLOAD_ARCH:-gfx1250}"
 CTEST_LABEL="${CTEST_LABEL:-nvme}"
 CTEST_EXCLUDE_LABEL="${CTEST_EXCLUDE_LABEL:-}"
-CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX:-}"
+USER_CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX:-}"
+CTEST_EXCLUDE_REGEX=""
 SKIP_GPU="${SKIP_GPU:-0}"
 TIMEOUT_SCALE="${TIMEOUT_SCALE:-4}"
 BATCH_DEPTH="${BATCH_DEPTH:-16}"
@@ -76,7 +78,8 @@ INCLUDE_VM_KNOWN_FAILS="${INCLUDE_VM_KNOWN_FAILS:-0}"
 #     emulated bridge path
 #   - multi-queue shapes still exceed the emulator's scratch budget or hang
 # Keeping them in the VM lane turns the job red without increasing confidence in
-# production hardware coverage. Set INCLUDE_VM_KNOWN_FAILS=1 to run them anyway.
+# production hardware coverage. Set INCLUDE_VM_KNOWN_FAILS=1 to disable only
+# this built-in exclusion list; caller-supplied CTEST_EXCLUDE_REGEX still wins.
 VM_KNOWN_FAILING_TESTS=(
     nvme-verify-seq-device-mem
     nvme-smoke-batch-4
@@ -90,22 +93,22 @@ VM_KNOWN_FAILING_TESTS=(
     nvme-ep-batch-16-queues-4
 )
 VM_KNOWN_FAILING_TESTS_REGEX_PARTS=()
-VM_KNOWN_FAILING_TESTS_REGEX=""
 if [ "${#VM_KNOWN_FAILING_TESTS[@]}" -gt 0 ]; then
     for test_name in "${VM_KNOWN_FAILING_TESTS[@]}"; do
         VM_KNOWN_FAILING_TESTS_REGEX_PARTS+=("$(printf '%s' "${test_name}" \
             | sed 's/[][(){}.^$*+?|\\-]/\\&/g')")
     done
-    VM_KNOWN_FAILING_TESTS_REGEX="^($(IFS='|'; echo \
+    BUILTIN_VM_KNOWN_FAILING_TESTS_REGEX="^($(IFS='|'; echo \
         "${VM_KNOWN_FAILING_TESTS_REGEX_PARTS[*]}"))$"
 fi
 
 if [ "${INCLUDE_VM_KNOWN_FAILS}" != "1" ]; then
-    if [ -n "${CTEST_EXCLUDE_REGEX}" ]; then
-        CTEST_EXCLUDE_REGEX="(${CTEST_EXCLUDE_REGEX})|${VM_KNOWN_FAILING_TESTS_REGEX}"
-    else
-        CTEST_EXCLUDE_REGEX="${VM_KNOWN_FAILING_TESTS_REGEX}"
-    fi
+    CTEST_EXCLUDE_REGEX="${BUILTIN_VM_KNOWN_FAILING_TESTS_REGEX:-}"
+fi
+if [ -n "${USER_CTEST_EXCLUDE_REGEX}" ] && [ -n "${CTEST_EXCLUDE_REGEX}" ]; then
+    CTEST_EXCLUDE_REGEX="(${USER_CTEST_EXCLUDE_REGEX})|${CTEST_EXCLUDE_REGEX}"
+elif [ -n "${USER_CTEST_EXCLUDE_REGEX}" ]; then
+    CTEST_EXCLUDE_REGEX="${USER_CTEST_EXCLUDE_REGEX}"
 fi
 
 banner() {

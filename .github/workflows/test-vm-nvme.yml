@@ -54,7 +54,8 @@ on:
       include-vm-known-fails:
         description: >-
           Set to 1 to run the guest script's default rocJITsu-known-failing
-          tests too.
+          tests too. This disables only the guest script's built-in excludes;
+          any user-supplied ctest exclude regex still applies.
         required: false
         default: "0"
       batch-depth:
