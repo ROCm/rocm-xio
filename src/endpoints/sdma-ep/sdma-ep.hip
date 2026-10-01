@@ -46,8 +46,12 @@ int createQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
     return -1;
   }
   try {
-    uint32_t engineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
+    int selectedEngineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
       srcDeviceId, dstDeviceId);
+    if (selectedEngineId < 0) {
+      throw std::runtime_error("No valid SDMA engine found for GPU pair");
+    }
+    uint32_t engineId = static_cast<uint32_t>(selectedEngineId);
     int channelIdx = 0;
     ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx);
@@ -77,8 +81,12 @@ int createHostQueue(int srcDeviceId, int dstDeviceId, SdmaQueueInfo* info) {
     return -1;
   }
   try {
-    uint32_t engineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
+    int selectedEngineId = ::anvil::AnvilLib::getInstance().getSdmaEngineId(
       srcDeviceId, dstDeviceId);
+    if (selectedEngineId < 0) {
+      throw std::runtime_error("No valid SDMA engine found for GPU pair");
+    }
+    uint32_t engineId = static_cast<uint32_t>(selectedEngineId);
     int channelIdx = 0;
     ::anvil::SdmaQueue* q = ::anvil::AnvilLib::getInstance().createSdmaQueue(
       srcDeviceId, dstDeviceId, engineId, &channelIdx, true);

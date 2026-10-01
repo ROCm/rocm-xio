@@ -90,6 +90,11 @@ private:
   uint32_t getKfdNodeId(int deviceId);
 
   /**
+   * @brief Return the HSA agent matching a HIP-visible device by PCI BDF.
+   */
+  hsa_agent_t& getHsaAgent(int deviceId);
+
+  /**
    * @brief Return the legacy OAM-table SDMA engine for a GPU pair.
    */
   int getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId);
@@ -137,6 +142,9 @@ private:
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> sdma_channels_;
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash>
     host_sdma_channels_;
+  std::vector<hsa_agent_t> cpu_agents_;
+  std::vector<hsa_agent_t> gpu_agents_;
+  std::vector<hsa_agent_t> hip_gpu_agents_;
 };
 
 extern AnvilLib& anvil;
