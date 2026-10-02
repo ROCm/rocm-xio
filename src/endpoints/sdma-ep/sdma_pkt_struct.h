@@ -2,7 +2,8 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Pre-OSS7 (CDNA3 / MI300X) SDMA packet structures.
+ * Pre-OSS7 SDMA packet structures (SDMA 4.4.x: CDNA3 / MI300X and
+ * CDNA4 / MI350X).
  */
 
 #pragma once
