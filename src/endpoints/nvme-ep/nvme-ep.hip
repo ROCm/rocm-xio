@@ -1121,10 +1121,15 @@ __global__ void gpuKernelPersistent(
 
       uint64_t* prpSlot = nullptr;
       uint64_t prpDma = 0;
-      if (bufParams.prpListPool && bufParams.prpEntriesPerCmd > 0) {
-        prpSlot = bufParams.prpListPool +
-                  (size_t)slot * bufParams.prpEntriesPerCmd;
-        prpDma = bufParams.prpListPoolDma + (uint64_t)slot * NVME_PAGE_SIZE;
+      if (bufParams.prpEntriesPerCmd > 0 &&
+          (bufParams.prpListPool || bufParams.prpListPoolDma)) {
+        /* prpListPool=nullptr means PRP list is pre-populated (by the
+         * rxio_prp_prefill setup kernel); skip GPU writes, just set PRP2. */
+        prpSlot = bufParams.prpListPool
+                    ? (bufParams.prpListPool +
+                       (size_t)slot * bufParams.prpEntriesPerCmd)
+                    : nullptr;
+        prpDma = prpListDmaForSlot(bufParams, slot);
       }
       uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
       calculatePrps(base_addr, (size_t)lbas_op * ioParams.lbaSize, &sqeLocal,
@@ -1136,6 +1141,11 @@ __global__ void gpuKernelPersistent(
     sq_tail = (sq_tail + 1) % ioParams.queueSize;
 
     /* ── SQ doorbell ──────────────────────────────────── */
+    /* Ensure PRP list writes to host-pinned memory are globally visible
+     * (NVMe controller-visible) before the doorbell write to BAR0 MMIO.
+     * Without this fence, write ordering between PCIe and MMIO is not
+     * guaranteed on RDNA/GCN, causing the controller to read stale PRP data. */
+    __builtin_amdgcn_s_waitcnt(0 /* vmcnt=0, expcnt=0, lgkmcnt=0 */);
     nvme_ep::ringDoorbell(sq_tail, doorbellParams);
 
     /* ── Poll CQE ─────────────────────────────────────── */

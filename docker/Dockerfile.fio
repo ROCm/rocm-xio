@@ -29,8 +29,9 @@
 # The image is built for the gfx1201 target (AMD Radeon RX 9070 XT /
 # MI300X family).  Change ROCM_ARCH to target a different GPU.
 
-ARG ROCM_VERSION=6.4
+ARG ROCM_VERSION=7.14.1-full
 ARG ROCM_ARCH=gfx1201
+ARG KERNEL_VERSION=7.0.0-28-generic
 
 # ────────────────────────────────────────────────────────────────────
 # Stage 1: build librocm-xio.so
@@ -45,10 +46,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         git \
         pkg-config \
-        libhsa-runtime-dev \
         libelf-dev \
         libnuma-dev \
-    && rm -rf /var/lib/apt/lists/*
+        libdrm-dev \
+        libdrm-amdgpu1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf 'if(NOT TARGET numa::numa)\n  find_library(_NUMA_LIB numa)\n  add_library(numa::numa UNKNOWN IMPORTED)\n  set_target_properties(numa::numa PROPERTIES IMPORTED_LOCATION "${_NUMA_LIB}")\nendif()\n' \
+       > /opt/rocm/lib/cmake/hsakmt/numa-target.cmake \
+    && echo 'include(${CMAKE_CURRENT_LIST_DIR}/numa-target.cmake)' \
+       >> /opt/rocm/lib/cmake/hsakmt/hsakmtTargets.cmake \
+    && mkdir -p /usr/lib64 \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libc.so /usr/lib64/libc.so
 
 WORKDIR /src/rocm-xio
 
@@ -125,6 +133,7 @@ RUN /opt/rocm/bin/hipcc \
         -fPIC \
         -DAXIIO_ENDPOINT_NVME \
         -I/usr/local/include/rocm-xio \
+        -I/usr/local/include/rocm-xio/endpoints/nvme-ep \
         -I/opt/rocm/include \
         -I/src/fio \
         -c engines/rocm-xio-hip.hip \
@@ -154,14 +163,42 @@ RUN mkdir -p /usr/local/lib/fio && \
         -lamdhip64
 
 # ────────────────────────────────────────────────────────────────────
-# Stage 3: runtime image
+# Stage 3: kernel module build
+# ────────────────────────────────────────────────────────────────────
+FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS kmod-build
+
+ARG KERNEL_VERSION=7.0.0-28-generic
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        kmod \
+        linux-headers-${KERNEL_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY kernel/rocm-xio/ /src/kmod/
+
+RUN make -C /lib/modules/${KERNEL_VERSION}/build \
+        M=/src/kmod \
+        modules \
+    && cp /src/kmod/rocm-xio.ko /rocm-xio.ko
+
+# ────────────────────────────────────────────────────────────────────
+# Stage 4: runtime image
 # ────────────────────────────────────────────────────────────────────
 FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION} AS final
+
+ARG KERNEL_VERSION=7.0.0-28-generic
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nvme-cli \
         libaio1 \
+        kmod \
+        libdrm2 \
+        libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
+
+# kernel module
+COPY --from=kmod-build /rocm-xio.ko /opt/rocm-xio-fio/rocm-xio.ko
 
 # fio binary
 COPY --from=fio-build /usr/local/bin/fio /usr/local/bin/fio

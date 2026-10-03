@@ -15,6 +15,33 @@
 
 #include "rocm-xio-hip.h"
 
+/* One-shot setup kernel: writes PRP list entries for every slot into the
+ * hipHostMallocMapped pool BEFORE the persistent kernel is launched.
+ * This avoids GPU stores to host memory inside the long-running persistent
+ * kernel, which stall indefinitely on gfx1201 in PASSTHROUGH mode. */
+__global__ static void rxio_prp_prefill(
+    uint64_t* __restrict__ prp_pool,
+    const uint64_t* __restrict__ page_phys_addrs,
+    uint64_t buf_dma_base,
+    uint32_t single_buf_pages,
+    uint32_t prp_pp,
+    uint32_t n_slots) {
+  uint32_t s = blockIdx.x * blockDim.x + threadIdx.x;
+  if (s >= n_slots) return;
+  uint64_t* slot_list = prp_pool + (size_t)s * prp_pp;
+  uint32_t n_entries = (single_buf_pages > 1) ? (single_buf_pages - 1) : 0;
+  if (n_entries > prp_pp) n_entries = prp_pp;
+  if (page_phys_addrs) {
+    uint32_t off = s * single_buf_pages;
+    for (uint32_t i = 0; i < n_entries; i++)
+      slot_list[i] = page_phys_addrs[off + 1 + i];
+  } else {
+    uint64_t base = buf_dma_base + (uint64_t)s * single_buf_pages * 4096ULL;
+    for (uint32_t i = 0; i < n_entries; i++)
+      slot_list[i] = base + (uint64_t)(i + 1) * 4096ULL;
+  }
+}
+
 #ifndef __HIP_DEVICE_COMPILE__
 
 #include <cerrno>
@@ -128,6 +155,8 @@ struct rxio_queue_ctx {
   void* prp_pool_gpu;
   size_t prp_pool_bytes;
   uint64_t prp_pool_dma;
+  uint64_t* prp_page_dmas_cpu;
+  uint64_t* prp_page_dmas_gpu;
 
   void* bar0_cpu;
   void* bar0_gpu;
@@ -282,29 +311,43 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
   /* PRP pool: one 4KB page per slot */
   uint64_t xfer_pages = (ctx->single_buf_size + NVME_PAGE_SIZE - 1) /
                         NVME_PAGE_SIZE;
-  if (xfer_pages > 1) {
+  if (xfer_pages > 2) {
     constexpr uint32_t prp_pp = NVME_PAGE_SIZE / sizeof(uint64_t);
     size_t prp_entries = (size_t)prp_pp * (size_t)ctx->batch_cap;
     long sp = sysconf(_SC_PAGESIZE);
     size_t hp = (sp > 0) ? (size_t)sp : 4096;
     ctx->prp_pool_bytes = (prp_entries * sizeof(uint64_t) + hp - 1) & ~(hp - 1);
 
+    /* Use hipHostMallocMapped (same as nvme-ep.hip / xio-tester): GPU writes
+     * PRP entries from the kernel with XIO_DOORBELL_FENCE_AGGRESSIVE ordering,
+     * exactly matching the gpuKernelStateful path that is known to work. */
     void* ph = nullptr;
-    herr = hipHostMalloc(&ph, ctx->prp_pool_bytes, hipHostMallocDefault);
-    if (herr != hipSuccess)
-      return -ENOMEM;
+    herr = hipHostMalloc(&ph, ctx->prp_pool_bytes, hipHostMallocMapped);
+    if (herr != hipSuccess) return -ENOMEM;
     memset(ph, 0, ctx->prp_pool_bytes);
     ctx->prp_pool_cpu = ph;
-
     herr = hipHostGetDevicePointer(&ctx->prp_pool_gpu, ph, 0);
-    if (herr != hipSuccess)
-      return -EIO;
+    if (herr != hipSuccess) ctx->prp_pool_gpu = ph;
 
-    ctx->prp_pool_dma = xio::getPhysAddr(ph);
-    if (!ctx->prp_pool_dma) {
-      fprintf(stderr, "rxio: getPhysAddr PRP pool failed\n");
-      return -EIO;
+    /* Per-slot DMA address table (mirrors nvme-ep.hip page_dmas[]) */
+    const uint32_t n_slots = (uint32_t)ctx->batch_cap;
+    uint64_t* pdmas = nullptr;
+    herr = hipHostMalloc((void**)&pdmas, sizeof(*pdmas) * n_slots,
+                         hipHostMallocMapped);
+    if (herr != hipSuccess) { hipHostFree(ph); return -ENOMEM; }
+    bool dmas_ok = true;
+    for (uint32_t s = 0; s < n_slots; s++) {
+      pdmas[s] = xio::getPhysAddr((uint8_t*)ph + (size_t)s * prp_pp * sizeof(uint64_t));
+      if (!pdmas[s]) { dmas_ok = false; break; }
     }
+    if (!dmas_ok) {
+      fprintf(stderr, "rxio: getPhysAddr failed for PRP pool slot\n");
+      hipHostFree(pdmas); hipHostFree(ph); return -EIO;
+    }
+    ctx->prp_pool_dma      = pdmas[0];
+    ctx->prp_page_dmas_cpu = pdmas;
+    herr = hipHostGetDevicePointer((void**)&ctx->prp_page_dmas_gpu, pdmas, 0);
+    if (herr != hipSuccess) ctx->prp_page_dmas_gpu = pdmas;
   }
 
   /* Persistent queue state for stateful kernel (2 × uint32_t) */
@@ -313,7 +356,10 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
     herr = hipHostMalloc(&qs, 2 * sizeof(uint32_t), hipHostMallocDefault);
     if (herr != hipSuccess)
       return -ENOMEM;
-    memset(qs, 0, 2 * sizeof(uint32_t));
+    /* state[0] = sq_tail(lo16)|cq_head(hi16)=0; state[1] = expected_phase.
+     * NVMe spec §4.6: first CQE after queue creation has phase bit = 1. */
+    ((uint32_t*)qs)[0] = 0;
+    ((uint32_t*)qs)[1] = 1;
 
     ctx->queue_state_cpu = (volatile uint32_t*)qs;
     void* qs_gpu = nullptr;
@@ -345,9 +391,13 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
     ctx->buf_params_template.readNumPages = ctx->data_buf.numPages;
     ctx->buf_params_template.writeNumPages = ctx->data_buf.numPages;
   }
-  if (xfer_pages > 1 && ctx->prp_pool_gpu) {
-    ctx->buf_params_template.prpListPool = (uint64_t*)ctx->prp_pool_gpu;
-    ctx->buf_params_template.prpListPoolDma = ctx->prp_pool_dma;
+  if (xfer_pages > 2 && ctx->prp_pool_gpu) {
+    /* prpListPool=nullptr: PRP list is pre-populated by rxio_prp_prefill.
+     * Persistent kernel sets PRP2=prpListDmaForSlot() without GPU stores.
+     * prpListPageDmas gives per-slot physical addresses for the stride lookup. */
+    ctx->buf_params_template.prpListPool     = nullptr;
+    ctx->buf_params_template.prpListPoolDma  = ctx->prp_pool_dma;
+    ctx->buf_params_template.prpListPageDmas = ctx->prp_page_dmas_gpu;
     ctx->buf_params_template.prpEntriesPerCmd =
       xio::nvme_ep::prpListEntriesPerPage();
     ctx->buf_params_template.prpSlotsPerBatch = 1;
@@ -366,6 +416,25 @@ extern "C" int rxio_setup(struct rxio_queue_ctx* ctx, const char* controller,
   if (herr != hipSuccess) {
     fprintf(stderr, "rxio: hipStreamCreate: %s\n", hipGetErrorString(herr));
     return -EIO;
+  }
+
+  /* Pre-populate PRP list pool via a one-shot kernel on the stream.
+   * GPU stores from a fresh (stateful) kernel complete without stalling,
+   * unlike stores from the long-running persistent kernel. */
+  if (ctx->prp_pool_gpu && ctx->single_buf_size > 2 * NVME_PAGE_SIZE) {
+    constexpr uint32_t PRP_PP = NVME_PAGE_SIZE / sizeof(uint64_t);
+    const uint32_t n_slots = (uint32_t)ctx->batch_cap;
+    hipLaunchKernelGGL(rxio_prp_prefill, dim3(1), dim3(64), 0, ctx->stream,
+                       (uint64_t*)ctx->prp_pool_gpu,
+                       ctx->data_buf.pagePhysAddrs,
+                       ctx->data_buf.dmaAddr,
+                       (uint32_t)(ctx->single_buf_size / NVME_PAGE_SIZE),
+                       PRP_PP, n_slots);
+    herr = hipStreamSynchronize(ctx->stream);
+    if (herr != hipSuccess) {
+      fprintf(stderr, "rxio: prp_prefill: %s\n", hipGetErrorString(herr));
+      return -EIO;
+    }
   }
 
   return 0;
@@ -408,7 +477,7 @@ extern "C" int rxio_submit(struct rxio_queue_ctx* ctx, uint64_t lba,
   }
   if (ctx->prp_pool_gpu && ctx->buf_params_template.prpListPool) {
     uint32_t prp_pp = xio::nvme_ep::prpListEntriesPerPage();
-    bp.prpListPool = (uint64_t*)ctx->prp_pool_gpu + (size_t)slot * prp_pp;
+    bp.prpListPool    = (uint64_t*)ctx->prp_pool_gpu + (size_t)slot * prp_pp;
     bp.prpListPoolDma = ctx->prp_pool_dma + (uint64_t)slot * NVME_PAGE_SIZE;
   }
 
@@ -526,7 +595,11 @@ extern "C" int rxio_start_persistent(struct rxio_queue_ctx* ctx,
   /* Build ioParams template (lbas set per-op in work item; lbaSize needed) */
   xio::nvme_ep::nvmeIoParams io = {};
   io.lbaSize = ctx->lba_size;
-  io.lbasPerIo = 1; /* overridden per-op via lbas in work item */
+  /* Must match single_buf_size so buf_off = slot * xfer_size lands correctly.
+   * Per-op lbas in the work item overrides the NVMe NLB but not buf_off. */
+  io.lbasPerIo = (ctx->lba_size > 0)
+      ? (uint32_t)(ctx->single_buf_size / ctx->lba_size)
+      : 1;
   io.nsid = ctx->nsid;
   io.queueSize = ctx->queue_size;
   io.infiniteMode = false;
@@ -656,6 +729,11 @@ extern "C" void rxio_teardown(struct rxio_queue_ctx* ctx) {
   if (ctx->data_buf.gpuPtr || ctx->data_buf.hostPtr)
     xio::freeGpuAccessibleBuffer(&ctx->data_buf);
 
+  if (ctx->prp_page_dmas_cpu) {
+    (void)hipHostFree(ctx->prp_page_dmas_cpu);
+    ctx->prp_page_dmas_cpu = nullptr;
+    ctx->prp_page_dmas_gpu = nullptr;
+  }
   if (ctx->prp_pool_cpu) {
     (void)hipHostFree(ctx->prp_pool_cpu);
     ctx->prp_pool_cpu = nullptr;
