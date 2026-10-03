@@ -154,6 +154,31 @@ Returns exit code 77 (CTest SKIP convention) when the NVMe
 device cannot be opened, so it can be registered as a CTest
 with graceful skip behavior.
 
+``nvme-kv``
+^^^^^^^^^^^
+
+Host-side validation tools for the NVMe Key-Value path (see
+:ref:`nvme-kv`). Unlike the other examples these are plain C
+programs with no rocm-xio / HIP dependency:
+
+- ``kv_cpu_probe`` --- GPU-free KV Store/Retrieve through the
+  ``/dev/nvme0`` passthrough ioctl. Validates KV controller
+  enumeration and the KV SQE encoding without touching the
+  GPU doorbell.
+- ``create_rbd`` --- creates and pattern-fills an RBD test
+  image so the nvme-ep block path can be validated against an
+  RBD-backed namespace.
+
+**Requirements**:
+
+- ``kv_cpu_probe``: a KV-capable NVMe controller to run
+  (builds anywhere).
+- ``create_rbd``: Ceph's librados/librbd (``librados-dev`` /
+  ``librbd-dev``); skipped at configure time when absent.
+
+The install-integration suite builds these compile-only ---
+running them needs a KV controller or a Ceph cluster.
+
 Write new examples
 ------------------
 

@@ -24,20 +24,15 @@
  *      physical addresses into PRP1/PRP2 fields
  */
 
-#define pr_fmt(fmt) "rocm-xio: " fmt
-
 #include "rocm-xio.h"
 
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_resource.h>
-#include <linux/blk-mq.h>
-#include <linux/blkdev.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
-#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/io_uring.h>
 #include <linux/kernel.h>
@@ -50,8 +45,6 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
-#include <linux/xarray.h>
 
 #define DEVICE_NAME ROCM_XIO_DEVICE_NAME
 #define CLASS_NAME "rocm_axiio"
@@ -84,10 +77,9 @@ struct queue_addr_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
-  __u8 queue_type;    /* 0=SQ, 1=CQ */
-  __u32 nvme_bdf;     /* NVMe device BDF (ROCM_XIO_BDF encoding) */
-  __u64 prp2;         /* PRP2 for PC=0 queues (0=none) */
-  struct file* owner; /* fd that registered this entry */
+  __u8 queue_type; /* 0=SQ, 1=CQ */
+  __u16 nvme_bdf;  /* NVMe device BDF (0xBBDD format) */
+  __u64 prp2;      /* PRP2 for PC=0 queues (0=none) */
   struct list_head list;
 };
 
@@ -96,7 +88,6 @@ struct vram_buffer_entry {
   __u64 virt_addr;
   __u64 phys_addr;
   __u64 size;
-  struct file* owner; /* fd that registered this entry */
   struct list_head list;
   // For passthrough NVMe - keep attachment alive for P2PDMA
   struct dma_buf* dmabuf;
@@ -128,86 +119,6 @@ static LIST_HEAD(contig_allocs);
 static DEFINE_SPINLOCK(contig_allocs_lock);
 static __u32 contig_alloc_next_id = 1;
 
-/*
- * Tracking for quiesced NVMe namespace request_queues.
- *
- * Each entry pins the userspace-provided block-device file so the
- * underlying struct block_device (and its request_queue) stays
- * valid for the duration of the quiesce window. Entries are owned
- * by the rocm-xio file that issued ROCM_XIO_QUIESCE_NS and are
- * released either by an explicit ROCM_XIO_UNQUIESCE_NS ioctl or
- * automatically when that fd is closed.
- *
- * Two flavours exist:
- *
- *   - mode == QUIESCED_NS_MODE_FULL: blk_mq_quiesce_queue() was
- *     called on the entire namespace request_queue. The block
- *     layer stops dispatching new I/O on every hardware queue
- *     backing this namespace.
- *
- *   - mode == QUIESCED_NS_MODE_HCTX: only the hardware context
- *     matching @hctx_idx (= qid - 1) is stopped via
- *     blk_mq_stop_hw_queue(). The kernel continues to dispatch
- *     I/O for the same namespace on the namespace's other
- *     hardware queues, which is the usual ask when rocm-xio only
- *     reclaims a single NVMe I/O queue ID.
- */
-enum quiesced_ns_mode {
-  QUIESCED_NS_MODE_FULL = 0,
-  QUIESCED_NS_MODE_HCTX = 1,
-};
-
-struct quiesced_ns_entry {
-  struct file* bdev_file;  /* pinned namespace bdev file */
-  struct block_device* bd; /* convenience pointer (no extra ref) */
-  struct file* owner;      /* rocm-xio fd that quiesced this ns */
-  enum quiesced_ns_mode mode;
-  unsigned int hctx_idx; /* only valid when mode == HCTX */
-  struct list_head list;
-};
-
-static LIST_HEAD(quiesced_ns);
-static DEFINE_MUTEX(quiesced_ns_lock);
-
-static struct block_device* rocm_xio_file_to_bdev(struct file* bdev_file) {
-  struct inode* inode;
-
-  if (!bdev_file)
-    return NULL;
-
-  /*
-   * The real bdev inode that I_BDEV() expects lives at
-   * f_mapping->host, not file_inode() (which is the devtmpfs inode on
-   * Linux 6.5+); using file_inode() yields a wild block_device pointer.
-   */
-  if (bdev_file->f_mapping)
-    inode = bdev_file->f_mapping->host;
-  else
-    inode = file_inode(bdev_file);
-  if (!inode || !S_ISBLK(inode->i_mode))
-    return NULL;
-  return I_BDEV(inode);
-}
-
-/*
- * Look up a hardware context by index on a request_queue.
- *
- * Upstream kernels switched request_queue from an array (@queue_hw_ctx)
- * to an xarray (@hctx_table) around v6.14. Distro kernels may not follow
- * the same boundary, so we detect the field at build time via the Makefile
- * rather than relying on LINUX_VERSION_CODE.
- */
-static struct blk_mq_hw_ctx* rocm_xio_hctx_at(struct request_queue* q,
-                                              unsigned int idx) {
-  if (!q || idx >= q->nr_hw_queues)
-    return NULL;
-#ifdef ROCM_XIO_NO_HCTX_TABLE
-  return q->queue_hw_ctx[idx];
-#else
-  return xa_load(&q->hctx_table, idx);
-#endif
-}
-
 static void contig_alloc_release(struct kref* ref) {
   struct contig_alloc_entry* ca = container_of(ref, struct contig_alloc_entry,
                                                ref);
@@ -215,689 +126,6 @@ static void contig_alloc_release(struct kref* ref) {
   pci_dev_put(ca->pdev);
   kfree(ca);
 }
-
-/*
- * QID wedge fix: when xio-tester reclaims a QID the kernel still owns,
- * the kprobe re-points the device-side queue and xio-tester's later
- * DELETE_SQ/DELETE_CQ destroy it without recreating it; the kernel's
- * struct nvme_queue still believes it is live, so the next kernel I/O
- * on that hctx times out and forces a controller reset.
- *
- * Fix: snapshot each kernel queue's DMA addrs/depth/vector at
- * nvme_alloc_queue() time, track which (pdev, qid) pairs the kprobe
- * hijacked, and on the wedge event re-issue CREATE_CQ + CREATE_SQ from
- * the snapshot so the device's per-QID context lines back up with the
- * still-intact nvme_queue.
- *
- * Struct-layout assumptions live in the nvmeq_layout mirror below,
- * version-gated so a kernel that reshuffles struct nvme_queue gets a
- * compile-time hint.
- */
-
-/* Forward declaration -- exported from nvme-core, declared here to
- * avoid pulling in drivers/nvme/host/nvme.h which is not in
- * /lib/modules/.../build/include.
- */
-extern int nvme_submit_sync_cmd(struct request_queue* q,
-                                struct nvme_command* cmd, void* buf,
-                                unsigned bufflen);
-
-#warning "rocm-xio QID-restore code: verify struct nvme_queue layout via: " \
-         "pahole -C nvme_queue /sys/kernel/btf/nvme"
-
-/*
- * Mirror of the private struct nvme_queue (drivers/nvme/host/pci.c).
- * Layout is version-specific; do not reorder or extend without
- * re-verifying against the running kernel's pci.c.
- */
-struct rocm_xio_nvmeq_layout {
-  void* dev; /* struct nvme_dev * */
-  /*
-   * descriptor_pools was added between dev and sq_lock in kernels after
-   * v6.8 (confirmed present at offset 8 via BTF on 7.0.0-28-generic).
-   * Two dma_pool pointers: large (offset 8) + small (offset 16).
-   */
-  void* descriptor_pool_large; /* struct dma_pool * */
-  void* descriptor_pool_small; /* struct dma_pool * */
-  spinlock_t sq_lock;
-  void* sq_cmds;
-  spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;
-  void* cqes; /* struct nvme_completion * */
-  dma_addr_t sq_dma_addr;
-  dma_addr_t cq_dma_addr;
-  u32 __iomem* q_db;
-  u32 q_depth;
-  u16 cq_vector;
-  u16 sq_tail;
-  u16 last_sq_tail;
-  u16 cq_head;
-  u16 qid;
-  u8 cq_phase;
-  u8 sqes;
-  unsigned long flags;
-};
-
-/*
- * Compile-time check: sq_dma_addr must be at offset 80, matching the BTF
- * layout confirmed on 7.0.0-28-generic. If this fires the struct mirror
- * needs re-verification against the running kernel's nvme BTF.
- */
-static_assert(offsetof(struct rocm_xio_nvmeq_layout, sq_dma_addr) == 80,
-              "rocm_xio_nvmeq_layout: sq_dma_addr offset mismatch — "
-              "re-verify struct nvme_queue layout via: "
-              "pahole -C nvme_queue /sys/kernel/btf/nvme");
-
-/* Bit positions within nvme_queue->flags. NVMEQ_POLLED is the only
- * one we read.
- */
-#define ROCM_XIO_NVMEQ_ENABLED 0
-#define ROCM_XIO_NVMEQ_SQ_CMB 1
-#define ROCM_XIO_NVMEQ_DELETE_ERROR 2
-#define ROCM_XIO_NVMEQ_POLLED 3
-
-/*
- * Mirror of the leading portion of struct nvme_dev. We only need the
- * @queues pointer and @dev (for to_pci_dev). queue_count lives inside
- * the embedded nvme_ctrl but we never read it from here; we always
- * cross-reference against our own snapshot list.
- */
-struct rocm_xio_nvme_dev_layout {
-  void* queues; /* struct nvme_queue * */
-};
-
-/*
- * Snapshot of one (pci_dev, qid) kernel-side NVMe queue. Keyed by
- * (pdev, qid). We hold a pci_dev ref so the bus address stays
- * meaningful even if the device unbinds.
- *
- * @admin_q is captured at snapshot time so we don't have to chase
- * private nvme_ctrl layout offsets at recreation time. It is the
- * request_queue we feed to nvme_submit_sync_cmd().
- */
-struct nvme_queue_snapshot {
-  struct pci_dev* pdev;
-  u16 qid;
-  dma_addr_t sq_dma_addr;
-  dma_addr_t cq_dma_addr;
-  u32 q_depth;
-  u16 cq_vector;
-  bool polled;
-  struct request_queue* admin_q;
-  /*
-   * The struct nvme_dev* that owns this queue. Captured so the
-   * resurrect path can reach the live struct nvme_queue via
-   * dev->queues[qid] and reset its host-side ring pointers after
-   * CREATE_CQ/CREATE_SQ (see rocm_xio_resurrect_work_fn). Stored as
-   * void* because we never pull private nvme_dev fields through it
-   * except @queues, which we reach via rocm_xio_nvme_dev_layout.
-   */
-  void* dev; /* struct nvme_dev * */
-  struct list_head list;
-};
-
-static LIST_HEAD(nvme_queue_snapshots);
-static DEFINE_SPINLOCK(nvme_queue_snapshots_lock);
-
-/*
- * Per-(bdf, qid) record of queues that have been wedged by
- * xio-tester. Entries are added when the kprobe sees a hijacked
- * CREATE_SQ/CREATE_CQ. Entries are marked "needs_resurrect" when
- * the kprobe sees a DELETE_SQ/DELETE_CQ for the same (bdf, qid)
- * pair. A workqueue then runs in process context to issue
- * CREATE_CQ + CREATE_SQ via the snapshotted admin_q.
- *
- * Keyed globally by (bdf, qid), NOT by file owner. xio-tester
- * splits queue registration, contig allocation, and the actual
- * NVMe ops across multiple file descriptors, so a per-fd model
- * fires release-time resurrect against the wrong fd's lifetime.
- * Watching DELETE in the kprobe and scheduling work matches the
- * real "wedge event" (device-side queue destroyed by user
- * command).
- *
- * We deliberately store BDF rather than pci_dev* here because the
- * kprobe records entries from atomic context where
- * pci_get_domain_bus_and_slot() (which may sleep on the PCI bus
- * mutex) is not safe to call.
- */
-struct poisoned_qid_entry {
-  u16 bdf;
-  u16 qid;
-  bool created;         /* kprobe saw injected CREATE_* */
-  bool needs_resurrect; /* kprobe saw DELETE_*, work not yet done */
-  struct list_head list;
-};
-
-static LIST_HEAD(poisoned_qids);
-static DEFINE_SPINLOCK(poisoned_qids_lock);
-
-/*
- * Pending snapshot capture deferred to process context.
- *
- * The kretprobe return handlers run with preemption disabled (atomic
- * context), but resolving struct nvme_dev* -> struct pci_dev* requires
- * walking the global PCI bus via for_each_pci_dev() / pci_get_device(),
- * whose klist iteration may SLEEP. So the handlers only read the
- * already-allocated queue's scalar fields (plain memory reads, atomic
- * safe), stash them here, and kick rocm_xio_snapshot_work which performs
- * the bus walk and nvme_queue_snapshot_store() in process context.
- *
- * This mirrors the poisoned_qids principle above: defer anything that
- * may sleep (the PCI lookup) out of the kprobe's atomic context.
- */
-struct pending_snapshot_entry {
-  void* nvme_dev; /* struct nvme_dev * -- match key for pci_get_drvdata */
-  u16 qid;
-  dma_addr_t sq_dma_addr;
-  dma_addr_t cq_dma_addr;
-  u32 q_depth;
-  u16 cq_vector;
-  bool polled;
-  struct request_queue* admin_q;
-  struct list_head list;
-};
-
-static LIST_HEAD(pending_snapshots);
-static DEFINE_SPINLOCK(pending_snapshots_lock);
-
-/* kretprobe storage: pass nvmeq + qid from entry to return handler.
- * Used by both nvme_alloc_queue (initial allocation) and
- * nvme_create_queue (per-create / per-reset).
- */
-struct rocm_xio_alloc_queue_ctx {
-  void* nvme_dev; /* struct nvme_dev *  (alloc_queue path) */
-  void* nvmeq;    /* struct nvme_queue * (create_queue path) */
-  int qid;
-};
-
-/*
- * Store or update a snapshot for (pdev, qid). Caller must hold a
- * reference on @pdev; on success the snapshot owns one additional
- * reference (we always pci_dev_get inside).
- */
-static void nvme_queue_snapshot_store(struct pci_dev* pdev, u16 qid,
-                                      dma_addr_t sq_dma, dma_addr_t cq_dma,
-                                      u32 depth, u16 cq_vector, bool polled,
-                                      struct request_queue* admin_q,
-                                      void* nvme_dev) {
-  struct nvme_queue_snapshot *snap, *existing;
-  unsigned long flags_irq;
-  bool replaced = false;
-
-  snap = kmalloc(sizeof(*snap), GFP_ATOMIC);
-  if (!snap) {
-    pr_warn("rocm-axiio: snapshot kmalloc failed for %s qid=%u\n",
-            pci_name(pdev), qid);
-    return;
-  }
-  snap->pdev = pci_dev_get(pdev);
-  snap->qid = qid;
-  snap->sq_dma_addr = sq_dma;
-  snap->cq_dma_addr = cq_dma;
-  snap->q_depth = depth;
-  snap->cq_vector = cq_vector;
-  snap->polled = polled;
-  snap->admin_q = admin_q;
-  snap->dev = nvme_dev;
-  INIT_LIST_HEAD(&snap->list);
-
-  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
-  list_for_each_entry(existing, &nvme_queue_snapshots, list) {
-    if (existing->pdev == pdev && existing->qid == qid) {
-      existing->sq_dma_addr = sq_dma;
-      existing->cq_dma_addr = cq_dma;
-      existing->q_depth = depth;
-      existing->cq_vector = cq_vector;
-      existing->polled = polled;
-      existing->admin_q = admin_q;
-      existing->dev = nvme_dev;
-      replaced = true;
-      break;
-    }
-  }
-  if (!replaced)
-    list_add(&snap->list, &nvme_queue_snapshots);
-  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
-
-  if (replaced) {
-    pci_dev_put(snap->pdev);
-    kfree(snap);
-    pr_info("rocm-axiio: nvme queue snapshot UPDATED %s qid=%u "
-            "sq=0x%llx cq=0x%llx depth=%u vec=%u polled=%d admin_q=%p\n",
-            pci_name(pdev), qid, (unsigned long long)sq_dma,
-            (unsigned long long)cq_dma, depth, cq_vector, (int)polled, admin_q);
-  } else {
-    pr_info("rocm-axiio: nvme queue snapshot CAPTURED %s qid=%u "
-            "sq=0x%llx cq=0x%llx depth=%u vec=%u polled=%d admin_q=%p\n",
-            pci_name(pdev), qid, (unsigned long long)sq_dma,
-            (unsigned long long)cq_dma, depth, cq_vector, (int)polled, admin_q);
-  }
-}
-
-/* Return a copy of the snapshot for (pdev, qid), or false if none. */
-static bool nvme_queue_snapshot_lookup(struct pci_dev* pdev, u16 qid,
-                                       struct nvme_queue_snapshot* out) {
-  struct nvme_queue_snapshot* s;
-  unsigned long flags_irq;
-  bool found = false;
-
-  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
-  list_for_each_entry(s, &nvme_queue_snapshots, list) {
-    if (s->pdev == pdev && s->qid == qid) {
-      *out = *s;
-      INIT_LIST_HEAD(&out->list);
-      out->pdev = pdev; /* do not transfer ref */
-      found = true;
-      break;
-    }
-  }
-  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
-  return found;
-}
-
-static void nvme_queue_snapshots_free_all(void) {
-  struct nvme_queue_snapshot *s, *tmp;
-  unsigned long flags_irq;
-  LIST_HEAD(to_free);
-
-  spin_lock_irqsave(&nvme_queue_snapshots_lock, flags_irq);
-  list_for_each_entry_safe(s, tmp, &nvme_queue_snapshots, list) {
-    list_del(&s->list);
-    list_add(&s->list, &to_free);
-  }
-  spin_unlock_irqrestore(&nvme_queue_snapshots_lock, flags_irq);
-
-  list_for_each_entry_safe(s, tmp, &to_free, list) {
-    list_del(&s->list);
-    pci_dev_put(s->pdev);
-    kfree(s);
-  }
-}
-
-/*
- * Process-context worker that drains pending_snapshots. The kretprobe
- * return handlers can only read the queue scalars (atomic context);
- * resolving struct nvme_dev* -> struct pci_dev* requires a
- * for_each_pci_dev() bus walk that may sleep, so it is done here.
- */
-static void rocm_xio_snapshot_work_fn(struct work_struct* w) {
-  struct pending_snapshot_entry *entry, *tmp;
-  unsigned long flags_irq;
-  LIST_HEAD(local);
-
-  /* Splice out under the lock so we don't hold it across the (sleeping)
-   * bus walk below. */
-  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
-  list_splice_init(&pending_snapshots, &local);
-  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
-
-  list_for_each_entry_safe(entry, tmp, &local, list) {
-    struct pci_dev* iter = NULL;
-    struct pci_dev* pdev = NULL;
-
-    /* Legal here (process context): for_each_pci_dev() may sleep.
-     * The macro auto-puts the previous iterator when advancing, but a
-     * 'break' leaves a ref on the matching dev. nvme_queue_snapshot_store
-     * takes its own ref via pci_dev_get, so we drop this extra one with
-     * pci_dev_put after storing. */
-    for_each_pci_dev(iter) {
-      if (iter->driver && pci_get_drvdata(iter) == entry->nvme_dev) {
-        pdev = iter;
-        break;
-      }
-    }
-
-    if (pdev) {
-      nvme_queue_snapshot_store(pdev, entry->qid, entry->sq_dma_addr,
-                                entry->cq_dma_addr, entry->q_depth,
-                                entry->cq_vector, entry->polled, entry->admin_q,
-                                entry->nvme_dev);
-      pci_dev_put(pdev);
-    } else {
-      pr_warn("rocm-axiio: snapshot: could not resolve pci_dev for "
-              "nvme_dev=%p qid=%u\n",
-              entry->nvme_dev, entry->qid);
-    }
-
-    list_del(&entry->list);
-    kfree(entry);
-  }
-}
-
-/* Forward decl: workqueue handler does the actual resurrect.
- *
- * Use delayed_work with a short delay so we run AFTER the user-issued
- * DELETE_SQ/DELETE_CQ pair has completed on the device. The kprobe
- * fires in pre-handler context (before the kernel submits the
- * DELETE command to the controller), so an immediate schedule_work
- * can race the controller-side teardown and we'd CREATE_CQ against
- * a still-live CQ (returns 0x4101 Invalid Queue Identifier).
- *
- * 250ms is well over a single admin-command latency in the worst
- * case while still being unnoticeable to the next kernel I/O on
- * that hctx.
- */
-#define ROCM_XIO_RESURRECT_DELAY_MS 250
-static void rocm_xio_resurrect_work_fn(struct work_struct* w);
-static DECLARE_DELAYED_WORK(rocm_xio_resurrect_work,
-                            rocm_xio_resurrect_work_fn);
-
-/*
- * Process-context worker that drains pending_snapshots and performs the
- * (sleeping) PCI bus walk + nvme_queue_snapshot_store() that the atomic
- * kretprobe return handlers must not do themselves.
- */
-static void rocm_xio_snapshot_work_fn(struct work_struct* w);
-static DECLARE_WORK(rocm_xio_snapshot_work, rocm_xio_snapshot_work_fn);
-
-/*
- * Mark (bdf, qid) as hijacked by a kprobe-injected CREATE_*.
- * Idempotent. Called from kprobe pre-handler (atomic).
- */
-static void poisoned_qid_mark_created(u16 bdf, u16 qid) {
-  struct poisoned_qid_entry *e, *existing = NULL;
-  unsigned long flags_irq;
-
-  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-  list_for_each_entry(e, &poisoned_qids, list) {
-    if (e->bdf == bdf && e->qid == qid) {
-      existing = e;
-      break;
-    }
-  }
-  if (existing) {
-    existing->created = true;
-    spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-    return;
-  }
-  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-
-  e = kmalloc(sizeof(*e), GFP_ATOMIC);
-  if (!e) {
-    pr_warn("rocm-axiio: poisoned_qid kmalloc failed for bdf=0x%04x qid=%u\n",
-            bdf, qid);
-    return;
-  }
-  e->bdf = bdf;
-  e->qid = qid;
-  e->created = true;
-  e->needs_resurrect = false;
-  INIT_LIST_HEAD(&e->list);
-
-  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-  /* Re-check under lock */
-  list_for_each_entry(existing, &poisoned_qids, list) {
-    if (existing->bdf == bdf && existing->qid == qid) {
-      existing->created = true;
-      spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-      kfree(e);
-      return;
-    }
-  }
-  list_add(&e->list, &poisoned_qids);
-  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-
-  pr_info("rocm-axiio: tracked hijacked CREATE_* on bdf 0x%04x qid %u\n", bdf,
-          qid);
-}
-
-/*
- * Mark (bdf, qid) as deleted on the device by a user-issued
- * DELETE_*. If we previously saw a hijacked CREATE_* for the same
- * pair, schedule resurrection. Called from kprobe pre-handler
- * (atomic).
- *
- * Note: this must be called on DELETE_CQ (opcode 0x04), not
- * DELETE_SQ. DELETE_SQ is sent first, DELETE_CQ second, and the
- * device must have processed BOTH before we can issue CREATE_CQ
- * for the same QID -- otherwise the controller still sees a live
- * CQ and rejects our CREATE_CQ with Invalid Queue Identifier
- * (0x4101). Scheduling on DELETE_CQ guarantees the pair has at
- * least reached the controller.
- */
-static void poisoned_qid_mark_deleted(u16 bdf, u16 qid) {
-  struct poisoned_qid_entry* e;
-  unsigned long flags_irq;
-  bool schedule = false;
-
-  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-  list_for_each_entry(e, &poisoned_qids, list) {
-    if (e->bdf == bdf && e->qid == qid) {
-      if (e->created) {
-        e->needs_resurrect = true;
-        schedule = true;
-      }
-      break;
-    }
-  }
-  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-
-  if (schedule) {
-    pr_info("rocm-axiio: user DELETE on bdf 0x%04x qid %u; scheduling "
-            "queue resurrection in %u ms\n",
-            bdf, qid, ROCM_XIO_RESURRECT_DELAY_MS);
-    /* mod_delayed_work coalesces multiple DELETE events into a
-     * single resurrect pass at the latest scheduled time. */
-    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
-                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
-  }
-}
-
-/* kretprobe entry for nvme_alloc_queue(dev, qid, depth):
- * stash (dev, qid) from RDI/RSI.
- */
-static int nvme_alloc_queue_entry_handler(struct kretprobe_instance* ri,
-                                          struct pt_regs* regs) {
-  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
-                                           ri->data;
-#ifdef CONFIG_X86_64
-  ctx->nvme_dev = (void*)regs->di;
-  ctx->nvmeq = NULL;
-  ctx->qid = (int)regs->si;
-#else
-  ctx->nvme_dev = NULL;
-  ctx->nvmeq = NULL;
-  ctx->qid = -1;
-#endif
-  return 0;
-}
-
-/* kretprobe entry for nvme_create_queue(nvmeq, qid, polled):
- * stash (nvmeq, qid) from RDI/RSI.
- */
-static int nvme_create_queue_entry_handler(struct kretprobe_instance* ri,
-                                           struct pt_regs* regs) {
-  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
-                                           ri->data;
-#ifdef CONFIG_X86_64
-  ctx->nvme_dev = NULL;
-  ctx->nvmeq = (void*)regs->di;
-  ctx->qid = (int)regs->si;
-#else
-  ctx->nvme_dev = NULL;
-  ctx->nvmeq = NULL;
-  ctx->qid = -1;
-#endif
-  return 0;
-}
-
-/* kretprobe return: if call succeeded, snapshot dev->queues[qid]. */
-static int nvme_alloc_queue_ret_handler(struct kretprobe_instance* ri,
-                                        struct pt_regs* regs) {
-  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
-                                           ri->data;
-  struct rocm_xio_nvme_dev_layout* dev_layout;
-  struct rocm_xio_nvmeq_layout* nvmeq;
-  struct pending_snapshot_entry* pend;
-  unsigned long flags_irq;
-  long retval;
-
-#ifdef CONFIG_X86_64
-  retval = (long)regs->ax;
-#else
-  return 0;
-#endif
-
-  if (retval != 0)
-    return 0; /* alloc failed, nothing to snapshot */
-  if (!ctx->nvme_dev || ctx->qid < 0)
-    return 0;
-
-  dev_layout = (struct rocm_xio_nvme_dev_layout*)ctx->nvme_dev;
-  if (!dev_layout->queues)
-    return 0;
-
-  /*
-   * dev->queues is an array of struct nvme_queue; stride is the real
-   * kernel sizeof(struct nvme_queue) (version-specific), NOT our
-   * mirror's size.
-   */
-  {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
-  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-    const size_t kernel_nvmeq_stride = 192;
-#else
-    const size_t kernel_nvmeq_stride = sizeof(struct rocm_xio_nvmeq_layout);
-#endif
-    nvmeq = (struct rocm_xio_nvmeq_layout*)((u8*)dev_layout->queues +
-                                            (size_t)ctx->qid *
-                                              kernel_nvmeq_stride);
-  }
-
-  /*
-   * Atomic context: read the queue's scalar fields here, but defer the
-   * (sleeping) nvme_dev -> pci_dev bus walk + snapshot_store to
-   * rocm_xio_snapshot_work_fn().
-   *
-   * admin_q is read from version-specific struct nvme_dev offsets, so
-   * only on the verified kernel range; elsewhere leave it NULL (the
-   * resurrect path tolerates that) rather than type-pun an unverified
-   * offset.
-   */
-  pend = kmalloc(sizeof(*pend), GFP_ATOMIC);
-  if (!pend) {
-    pr_warn_once("rocm-axiio: snapshot: pending kmalloc failed (qid=%d)\n",
-                 ctx->qid);
-    return 0;
-  }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
-  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-  {
-    const size_t NVME_DEV_CTRL_OFFSET = 496;
-    const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
-    pend->admin_q = *(struct request_queue**)((u8*)ctx->nvme_dev +
-                                              NVME_DEV_CTRL_OFFSET +
-                                              NVME_CTRL_ADMIN_Q_OFFSET);
-  }
-#else
-  pend->admin_q = NULL;
-#endif
-  pend->nvme_dev = ctx->nvme_dev;
-  pend->qid = (u16)ctx->qid;
-  pend->sq_dma_addr = nvmeq->sq_dma_addr;
-  pend->cq_dma_addr = nvmeq->cq_dma_addr;
-  pend->q_depth = nvmeq->q_depth;
-  pend->cq_vector = nvmeq->cq_vector;
-  pend->polled = test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags);
-  INIT_LIST_HEAD(&pend->list);
-
-  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
-  list_add(&pend->list, &pending_snapshots);
-  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
-  schedule_work(&rocm_xio_snapshot_work);
-  return 0;
-}
-
-static struct kretprobe nvme_alloc_queue_krp = {
-  .kp.symbol_name = "nvme_alloc_queue",
-  .entry_handler = nvme_alloc_queue_entry_handler,
-  .handler = nvme_alloc_queue_ret_handler,
-  .data_size = sizeof(struct rocm_xio_alloc_queue_ctx),
-  .maxactive = 32,
-};
-
-static bool nvme_alloc_queue_krp_registered = false;
-
-/* kretprobe return for nvme_create_queue: read nvmeq fields directly.
- * Snapshot is captured for every (pdev, qid) on every reset, since
- * nvme_create_queue is invoked each time the controller comes back.
- */
-static int nvme_create_queue_ret_handler(struct kretprobe_instance* ri,
-                                         struct pt_regs* regs) {
-  struct rocm_xio_alloc_queue_ctx* ctx = (struct rocm_xio_alloc_queue_ctx*)
-                                           ri->data;
-  struct rocm_xio_nvmeq_layout* nvmeq;
-  struct pending_snapshot_entry* pend;
-  unsigned long flags_irq;
-  void* nvme_dev_ptr;
-  long retval;
-
-#ifdef CONFIG_X86_64
-  retval = (long)regs->ax;
-#else
-  return 0;
-#endif
-
-  if (retval != 0)
-    return 0;
-  if (!ctx->nvmeq || ctx->qid < 0)
-    return 0;
-
-  nvmeq = (struct rocm_xio_nvmeq_layout*)ctx->nvmeq;
-  nvme_dev_ptr = nvmeq->dev;
-
-  /*
-   * As in the alloc handler: this runs in atomic context, so we cannot
-   * walk the PCI bus here (it may sleep). Read the queue scalars now and
-   * defer the bus walk + snapshot_store to rocm_xio_snapshot_work_fn().
-   */
-  pend = kmalloc(sizeof(*pend), GFP_ATOMIC);
-  if (!pend) {
-    pr_warn_once(
-      "rocm-axiio: snapshot(create_queue): pending kmalloc failed (qid=%d)\n",
-      ctx->qid);
-    return 0;
-  }
-  /*
-   * admin_q offsets are version specific (see nvme_alloc_queue_ret_handler);
-   * only read them on the verified kernel range, else leave NULL.
-   */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
-  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-  {
-    const size_t NVME_DEV_CTRL_OFFSET = 496;
-    const size_t NVME_CTRL_ADMIN_Q_OFFSET = 56;
-    pend->admin_q = *(struct request_queue**)((u8*)nvme_dev_ptr +
-                                              NVME_DEV_CTRL_OFFSET +
-                                              NVME_CTRL_ADMIN_Q_OFFSET);
-  }
-#else
-  pend->admin_q = NULL;
-#endif
-  pend->nvme_dev = nvme_dev_ptr;
-  pend->qid = (u16)ctx->qid;
-  pend->sq_dma_addr = nvmeq->sq_dma_addr;
-  pend->cq_dma_addr = nvmeq->cq_dma_addr;
-  pend->q_depth = nvmeq->q_depth;
-  pend->cq_vector = nvmeq->cq_vector;
-  pend->polled = test_bit(ROCM_XIO_NVMEQ_POLLED, &nvmeq->flags);
-  INIT_LIST_HEAD(&pend->list);
-
-  spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
-  list_add(&pend->list, &pending_snapshots);
-  spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
-  schedule_work(&rocm_xio_snapshot_work);
-  return 0;
-}
-
-static struct kretprobe nvme_create_queue_krp = {
-  .kp.symbol_name = "nvme_create_queue",
-  .entry_handler = nvme_create_queue_entry_handler,
-  .handler = nvme_create_queue_ret_handler,
-  .data_size = sizeof(struct rocm_xio_alloc_queue_ctx),
-  .maxactive = 32,
-};
-
-static bool nvme_create_queue_krp_registered = false;
 
 static void contig_vma_open(struct vm_area_struct* vma) {
   struct contig_alloc_entry* ca = vma->vm_private_data;
@@ -924,7 +152,7 @@ static DEFINE_MUTEX(mmio_bridge_lock);
  * We pin the buffer, so move_notify should never be called.
  */
 static void rocm_xio_move_notify(struct dma_buf_attachment* attach) {
-  pr_warn_ratelimited("move_notify called on pinned buffer "
+  pr_warn_ratelimited("rocm-axiio: move_notify called on pinned buffer "
                       "(should not happen)\n");
 }
 
@@ -948,7 +176,7 @@ static int extract_vram_offset_from_amdgpu_bo(struct dma_buf* dmabuf,
   unsigned long page_offset;
 
   if (!dmabuf || !dmabuf->priv) {
-    pr_err("Invalid dmabuf or missing private data\n");
+    pr_err("rocm-axiio: Invalid dmabuf or missing private data\n");
     return -EINVAL;
   }
 
@@ -961,7 +189,7 @@ static int extract_vram_offset_from_amdgpu_bo(struct dma_buf* dmabuf,
   tbo = container_of(gem_obj, struct ttm_buffer_object, base);
 
   if (!tbo->resource) {
-    pr_err("TTM resource not available\n");
+    pr_err("rocm-axiio: TTM resource not available\n");
     return -EINVAL;
   }
 
@@ -973,22 +201,22 @@ static int extract_vram_offset_from_amdgpu_bo(struct dma_buf* dmabuf,
   /* Convert page offset to byte offset (assuming 4KB pages) */
   *offset = page_offset << PAGE_SHIFT;
 
-  pr_info("Extracted from TTM resource:\n");
+  pr_info("rocm-axiio: Extracted from TTM resource:\n");
   pr_info("  page_offset=0x%lx, byte_offset=0x%llx\n", page_offset, *offset);
   pr_info("  resource.mem_type=%u, size=0x%zx\n", resource->mem_type,
           resource->size);
 
   /* Verify this is actually VRAM (mem_type should be TTM_PL_VRAM = 2) */
   if (resource->mem_type != 2) {
-    pr_err("Buffer is not in VRAM (mem_type=%u, expected 2)\n",
+    pr_err("rocm-axiio: Buffer is not in VRAM (mem_type=%u, expected 2)\n",
            resource->mem_type);
     return -EINVAL;
   }
 
   /* Sanity check: offset should be within BAR size */
   if (*offset >= bar_size) {
-    pr_warn("Calculated offset 0x%llx exceeds BAR size 0x%llx\n", *offset,
-            (u64)bar_size);
+    pr_warn("rocm-axiio: Calculated offset 0x%llx exceeds BAR size 0x%llx\n",
+            *offset, (u64)bar_size);
     /* Continue anyway - might be correct for large VRAM BARs */
   }
 
@@ -1017,13 +245,13 @@ static int extract_vram_offset_from_sg(struct sg_table* sgt,
     phys_addr = sg_phys(sg);
     dma_addr = sg_dma_address(sg);
 
-    pr_info("sg[%d]: phys=0x%llx dma=0x%llx len=%u\n", i, (u64)phys_addr,
-            (u64)dma_addr, sg->length);
+    pr_info("rocm-axiio: sg[%d]: phys=0x%llx dma=0x%llx len=%u\n", i,
+            (u64)phys_addr, (u64)dma_addr, sg->length);
 
     /* Check if physical address is within the GPU BAR range */
     if (phys_addr >= bar_start && phys_addr < (bar_start + bar_size)) {
       *offset = phys_addr - bar_start;
-      pr_info("Found VRAM offset from sg_phys: 0x%llx\n", *offset);
+      pr_info("rocm-axiio: Found VRAM offset from sg_phys: 0x%llx\n", *offset);
       return 0;
     }
   }
@@ -1032,7 +260,7 @@ static int extract_vram_offset_from_sg(struct sg_table* sgt,
    * The sg_table doesn't have GPU BAR addresses (as expected for VRAM).
    * Try to extract the real VRAM offset from AMDGPU's TTM resource first.
    */
-  pr_info("Trying TTM resource extraction...\n");
+  pr_info("rocm-axiio: Trying TTM resource extraction...\n");
   if (extract_vram_offset_from_amdgpu_bo(dmabuf, bar_start, bar_size, offset) ==
       0) {
     /* Success! TTM gave us the real offset */
@@ -1047,20 +275,21 @@ static int extract_vram_offset_from_sg(struct sg_table* sgt,
   sg = sgt->sgl;
   dma_addr = sg_dma_address(sg);
 
-  pr_info("TTM failed, trying DMA address as direct offset: "
+  pr_info("rocm-axiio: TTM failed, trying DMA address as direct offset: "
           "0x%llx\n",
           (u64)dma_addr);
 
   if (dma_addr > 0 && dma_addr < bar_size) {
     *offset = dma_addr;
-    pr_warn("Using DMA address as VRAM offset (may be wrong!): "
+    pr_warn("rocm-axiio: Using DMA address as VRAM offset (may be wrong!): "
             "0x%llx\n",
             *offset);
     return 0;
   }
 
-  pr_err("Could not extract VRAM offset from sg_table or TTM\n");
-  pr_err("dma_addr=0x%llx bar_size=0x%llx\n", (u64)dma_addr, (u64)bar_size);
+  pr_err("rocm-axiio: Could not extract VRAM offset from sg_table or TTM\n");
+  pr_err("rocm-axiio: dma_addr=0x%llx bar_size=0x%llx\n", (u64)dma_addr,
+         (u64)bar_size);
 
   return -EINVAL;
 }
@@ -1078,7 +307,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
   /* Get dmabuf */
   dmabuf = dma_buf_get(dmabuf_fd);
   if (IS_ERR(dmabuf)) {
-    pr_err("dma_buf_get failed: %ld\n", PTR_ERR(dmabuf));
+    pr_err("rocm-axiio: dma_buf_get failed: %ld\n", PTR_ERR(dmabuf));
     return PTR_ERR(dmabuf);
   }
 
@@ -1087,7 +316,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
   /* Find AMD GPU by scanning PCI devices */
   gpu_dev = pci_get_device(PCI_VENDOR_ID_ATI, PCI_ANY_ID, NULL);
   if (!gpu_dev) {
-    pr_err("AMD GPU not found\n");
+    pr_err("rocm-axiio: AMD GPU not found\n");
     ret = -ENODEV;
     goto cleanup_no_attach;
   }
@@ -1102,7 +331,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
   attach = dma_buf_dynamic_attach(dmabuf, &gpu_dev->dev, &rocm_xio_attach_ops,
                                   NULL);
   if (IS_ERR(attach)) {
-    pr_err("dma_buf_dynamic_attach failed: %ld\n", PTR_ERR(attach));
+    pr_err("rocm-axiio: dma_buf_dynamic_attach failed: %ld\n", PTR_ERR(attach));
     ret = PTR_ERR(attach);
     goto cleanup_no_attach;
   }
@@ -1110,18 +339,18 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
   /* Pin the buffer so it doesn't move */
   ret = dma_buf_pin(attach);
   if (ret) {
-    pr_err("dma_buf_pin failed: %d\n", ret);
+    pr_err("rocm-axiio: dma_buf_pin failed: %d\n", ret);
     goto cleanup_detach;
   }
 
   sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
   if (IS_ERR(sgt)) {
-    pr_err("dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
+    pr_err("rocm-axiio: dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
     ret = PTR_ERR(sgt);
     goto cleanup;
   }
 
-  pr_info("dmabuf mapped: nents=%u\n", sgt->nents);
+  pr_info("rocm-axiio: dmabuf mapped: nents=%u\n", sgt->nents);
 
   /* Find the GPU VRAM BAR */
   for (i = 0; i < PCI_STD_NUM_BARS; i++) {
@@ -1133,7 +362,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
 
     /* Use BAR 0 for VRAM (typical for AMD GPUs) */
     if (i == 0 && (pci_resource_flags(gpu_dev, i) & IORESOURCE_PREFETCH)) {
-      pr_info("Found GPU VRAM BAR%d: GPA=0x%llx size=0x%llx\n", i,
+      pr_info("rocm-axiio: Found GPU VRAM BAR%d: GPA=0x%llx size=0x%llx\n", i,
               (u64)bar_start, (u64)bar_size);
 
       /*
@@ -1144,12 +373,12 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
       if (extract_vram_offset_from_sg(sgt, gpu_dev, bar_start, bar_size, dmabuf,
                                       &vram_offset) == 0) {
         *bar_gpa = bar_start + vram_offset;
-        pr_info("BAR GPA=0x%llx (base=0x%llx + offset=0x%llx)\n", *bar_gpa,
-                (u64)bar_start, vram_offset);
+        pr_info("rocm-axiio: BAR GPA=0x%llx (base=0x%llx + offset=0x%llx)\n",
+                *bar_gpa, (u64)bar_start, vram_offset);
       } else {
         /* Fallback: return BAR base (will be wrong but better than crashing) */
         *bar_gpa = bar_start;
-        pr_warn("Failed to extract offset, using BAR base\n");
+        pr_warn("rocm-axiio: Failed to extract offset, using BAR base\n");
       }
 
       ret = 0;
@@ -1157,7 +386,7 @@ static int get_dmabuf_bar_gpa(int dmabuf_fd, __u64* bar_gpa, __u64* size) {
     }
   }
 
-  pr_err("No suitable GPU VRAM BAR found\n");
+  pr_err("rocm-axiio: No suitable GPU VRAM BAR found\n");
   ret = -EINVAL;
 
 cleanup:
@@ -1180,33 +409,32 @@ cleanup_no_attach:
  * Returns attachment info via output parameters - caller must keep alive
  */
 /* Extract BDF from pci_dev structure */
-static __u32 pci_dev_to_bdf(struct pci_dev* pdev) {
+static __u16 pci_dev_to_bdf(struct pci_dev* pdev) {
   if (!pdev)
     return 0;
-  /* Encode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
-  return ((__u32)pci_domain_nr(pdev->bus) << 16) |
-         ((__u32)(pdev->bus->number) << 8) | (__u32)(pdev->devfn);
+  /* Encode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
+  return ((__u16)(pdev->bus->number) << 8) | (__u16)(pdev->devfn);
 }
 
 /* Format BDF as PCI address string (e.g., "0000:85:00.0") */
-static void format_bdf_as_pci_addr(__u32 bdf, char* buf, size_t buf_size) {
+static void format_bdf_as_pci_addr(__u16 bdf, char* buf, size_t buf_size) {
   if (bdf == 0 || !buf || buf_size < 13) {
     if (buf && buf_size > 0)
       buf[0] = '\0';
     return;
   }
 
-  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
-  unsigned int domain = (bdf >> 16) & 0xFFFF;
+  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
   unsigned int bus = (bdf >> 8) & 0xFF;
   unsigned int devfn = bdf & 0xFF;
+  unsigned int device = (devfn >> 3) & 0x1F;
+  unsigned int function = devfn & 0x7;
 
-  /* Format as DDDD:BB:DD.F using kernel PCI helpers for slot/func */
-  snprintf(buf, buf_size, "%04x:%02x:%02x.%x", domain, bus, PCI_SLOT(devfn),
-           PCI_FUNC(devfn));
+  /* Format as DDDD:BB:DD.F (domain is always 0000 for now) */
+  snprintf(buf, buf_size, "0000:%02x:%02x.%x", bus, device, function);
 }
 
-static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
+static int get_dmabuf_phys_addr(int dmabuf_fd, __u16 nvme_bdf, __u64* phys_addr,
                                 __u64* size, struct dma_buf** dmabuf_out,
                                 struct dma_buf_attachment** attach_out,
                                 struct sg_table** sgt_out,
@@ -1220,10 +448,10 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
   int ret = 0;
   unsigned int domain, bus, devfn;
 
-  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
-  domain = (nvme_bdf >> 16) & 0xFFFF;
+  /* Decode BDF: format is 0x0BDF (bus=B, dev=D, func=F) */
   bus = (nvme_bdf >> 8) & 0xFF;
   devfn = nvme_bdf & 0xFF;
+  domain = 0; /* Assume domain 0 for now */
 
   /* Find the NVMe PCI device */
   pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -1231,81 +459,59 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
     char pci_addr[16];
     format_bdf_as_pci_addr(nvme_bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
-      pr_err("NVMe device not found (%s)\n", pci_addr);
+      pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
     } else {
-      pr_err("NVMe device not found (BDF: 0x%08x)\n", nvme_bdf);
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", nvme_bdf);
     }
     return -ENODEV;
   }
   dev = &pdev->dev;
 
-  pr_info("Using NVMe device %s for P2PDMA\n", pci_name(pdev));
+  {
+    char pci_addr[16];
+    format_bdf_as_pci_addr(nvme_bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Using NVMe device %s (%s) for P2PDMA\n",
+              pci_name(pdev), pci_addr);
+    } else {
+      pr_info("rocm-axiio: Using NVMe device %s for P2PDMA\n", pci_name(pdev));
+    }
+  }
 
   /* Get dmabuf from fd */
   dmabuf = dma_buf_get(dmabuf_fd);
   if (IS_ERR(dmabuf)) {
-    pr_err("dma_buf_get failed: %ld\n", PTR_ERR(dmabuf));
+    pr_err("rocm-axiio: dma_buf_get failed: %ld\n", PTR_ERR(dmabuf));
     ret = PTR_ERR(dmabuf);
     goto err_put_pci;
   }
 
   *size = dmabuf->size;
 
-  /*
-   * Attach to the NVMe device.
-   *
-   * This must be a dynamic attach with allow_peer2peer set (via
-   * rocm_xio_attach_ops), matching the emulated/GPA path above. A static
-   * dma_buf_attach() makes amdgpu pin the BO into GTT (host memory) for
-   * importer compatibility, so the address returned below is a host RAM
-   * address rather than the GPU VRAM that the GPU-side virtual address
-   * maps to. The failure is silent: transfers report completion but data
-   * never appears in VRAM, and SQEs written by the GPU are never seen by
-   * the controller.
-   */
-  attach = dma_buf_dynamic_attach(dmabuf, dev, &rocm_xio_attach_ops, NULL);
+  /* Attach to NVMe device */
+  attach = dma_buf_attach(dmabuf, dev);
   if (IS_ERR(attach)) {
-    pr_err("dma_buf_dynamic_attach failed: %ld\n", PTR_ERR(attach));
+    pr_err("rocm-axiio: dma_buf_attach failed: %ld\n", PTR_ERR(attach));
     ret = PTR_ERR(attach);
     goto err_put_dmabuf;
-  }
-
-  /* Pin so the BO cannot move while the NVMe holds its address */
-  ret = dma_buf_pin(attach);
-  if (ret) {
-    pr_err("dma_buf_pin failed: %d\n", ret);
-    goto err_detach;
   }
 
   /* Map for DMA - this is where P2PDMA magic happens */
   sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
   if (IS_ERR(sgt)) {
-    pr_err("dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
+    pr_err("rocm-axiio: dma_buf_map_attachment failed: %ld\n", PTR_ERR(sgt));
     ret = PTR_ERR(sgt);
-    goto err_unpin;
+    goto err_detach;
   }
 
   /* Get DMA address from scatter-gather list */
   if (sgt->nents > 0) {
-    /*
-     * Userspace resolves buffer addresses as base + offset, which is only
-     * valid when the mapping is a single contiguous segment. Refuse
-     * multi-segment mappings rather than silently mis-addressing
-     * everything past segment 0.
-     */
-    if (sgt->nents > 1) {
-      pr_err("dmabuf mapped as %u segments; non-contiguous mappings are "
-             "not supported\n",
-             sgt->nents);
-      ret = -EOPNOTSUPP;
-      goto err_unmap;
-    }
     dma_addr = sg_dma_address(sgt->sgl);
     *phys_addr = (__u64)dma_addr;
-    pr_info("✅ P2PDMA address: 0x%llx (size: %llu, nents: %u)\n", *phys_addr,
-            *size, sgt->nents);
+    pr_info("rocm-axiio: ✅ P2PDMA address: 0x%llx (size: %llu)\n", *phys_addr,
+            *size);
   } else {
-    pr_err("No DMA segments\n");
+    pr_err("rocm-axiio: No DMA segments\n");
     ret = -EINVAL;
     goto err_unmap;
   }
@@ -1320,8 +526,6 @@ static int get_dmabuf_phys_addr(int dmabuf_fd, __u32 nvme_bdf, __u64* phys_addr,
 
 err_unmap:
   dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
-err_unpin:
-  dma_buf_unpin(attach);
 err_detach:
   dma_buf_detach(dmabuf, attach);
 err_put_dmabuf:
@@ -1333,15 +537,15 @@ err_put_pci:
 }
 
 /* Get NVMe device info */
-static int get_nvme_device_info(__u32 bdf, struct rocm_xio_device_info* info) {
+static int get_nvme_device_info(__u16 bdf, struct rocm_xio_device_info* info) {
   struct pci_dev* nvme_dev = NULL;
   unsigned int domain, bus, devfn;
   resource_size_t bar0_start, bar0_size;
 
-  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
-  domain = (bdf >> 16) & 0xFFFF;
+  /* Decode BDF: format is 0x0BDF (bus=B, dev=D, func=F) */
   bus = (bdf >> 8) & 0xFF;
   devfn = bdf & 0xFF;
+  domain = 0; /* Assume domain 0 for now */
 
   /* Find the NVMe PCI device */
   nvme_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -1349,9 +553,9 @@ static int get_nvme_device_info(__u32 bdf, struct rocm_xio_device_info* info) {
     char pci_addr[16];
     format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
-      pr_err("NVMe device not found (%s)\n", pci_addr);
+      pr_err("rocm-axiio: NVMe device not found (%s)\n", pci_addr);
     } else {
-      pr_err("NVMe device not found (BDF: 0x%08x)\n", bdf);
+      pr_err("rocm-axiio: NVMe device not found (BDF: 0x%04x)\n", bdf);
     }
     return -ENODEV;
   }
@@ -1370,7 +574,15 @@ static int get_nvme_device_info(__u32 bdf, struct rocm_xio_device_info* info) {
   /* Maximum queues: typically 65535 for NVMe 1.4+ */
   info->max_queues = 65535;
 
-  pr_info("Device info for %s:\n", pci_name(nvme_dev));
+  {
+    char pci_addr[16];
+    format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
+    if (pci_addr[0] != '\0') {
+      pr_info("rocm-axiio: Device info for %s:\n", pci_addr);
+    } else {
+      pr_info("rocm-axiio: Device info for BDF 0x%04x:\n", bdf);
+    }
+  }
   pr_info("  BAR0: 0x%llx (size: 0x%llx)\n", (u64)info->bar0_addr,
           (u64)info->bar0_size);
   pr_info("  Doorbell stride: %u bytes\n", info->doorbell_stride);
@@ -1382,16 +594,16 @@ static int get_nvme_device_info(__u32 bdf, struct rocm_xio_device_info* info) {
 
 /* Get PCI MMIO bridge shadow buffer GPA from PCI config space */
 static int get_mmio_bridge_shadow_buffer(
-  __u32 bridge_bdf, struct rocm_xio_mmio_bridge_shadow_req* req) {
+  __u16 bridge_bdf, struct rocm_xio_mmio_bridge_shadow_req* req) {
   struct pci_dev* bridge_dev = NULL;
   unsigned int domain, bus, devfn;
   __u32 gpa_low = 0, gpa_high = 0;
   __u64 shadow_gpa = 0;
 
-  /* Decode BDF: bits 31:16=domain, 15:8=bus, 7:3=dev, 2:0=func */
-  domain = (bridge_bdf >> 16) & 0xFFFF;
+  /* Decode BDF: format is 0xBBDD (bus=B, dev=D, func=F) */
   bus = (bridge_bdf >> 8) & 0xFF;
   devfn = bridge_bdf & 0xFF;
+  domain = 0; /* Assume domain 0 for now */
 
   /* Find the PCI MMIO bridge device */
   bridge_dev = pci_get_domain_bus_and_slot(domain, bus, devfn);
@@ -1399,9 +611,10 @@ static int get_mmio_bridge_shadow_buffer(
     char pci_addr[16];
     format_bdf_as_pci_addr(bridge_bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
-      pr_err("PCI MMIO bridge device not found (%s)\n", pci_addr);
+      pr_err("rocm-axiio: PCI MMIO bridge device not found (%s)\n", pci_addr);
     } else {
-      pr_err("PCI MMIO bridge device not found (BDF: 0x%08x)\n", bridge_bdf);
+      pr_err("rocm-axiio: PCI MMIO bridge device not found (BDF: 0x%04x)\n",
+             bridge_bdf);
     }
     return -ENODEV;
   }
@@ -1413,7 +626,7 @@ static int get_mmio_bridge_shadow_buffer(
   shadow_gpa = ((__u64)gpa_high << 32) | gpa_low;
 
   if (shadow_gpa == 0) {
-    pr_err("PCI MMIO bridge shadow GPA is 0 (not configured)\n");
+    pr_err("rocm-axiio: PCI MMIO bridge shadow GPA is 0 (not configured)\n");
     pci_dev_put(bridge_dev);
     return -EINVAL;
   }
@@ -1422,7 +635,7 @@ static int get_mmio_bridge_shadow_buffer(
   req->shadow_gpa = shadow_gpa;
   req->shadow_size = 8192; /* 8KB shadow buffer (typical size) */
 
-  pr_info("PCI MMIO bridge shadow buffer: GPA=0x%llx, size=%llu\n",
+  pr_info("rocm-axiio: PCI MMIO bridge shadow buffer: GPA=0x%llx, size=%llu\n",
           (unsigned long long)shadow_gpa, (unsigned long long)req->shadow_size);
 
   pci_dev_put(bridge_dev);
@@ -1454,9 +667,9 @@ static __u64 lookup_queue_phys_addr(__u64 virt_addr) {
  * Look up BDF for queue address.
  * Returns BDF if found, 0 otherwise.
  */
-static __u32 lookup_queue_bdf(__u64 virt_addr) {
+static __u16 lookup_queue_bdf(__u64 virt_addr) {
   struct queue_addr_entry* entry;
-  __u32 bdf = 0;
+  __u16 bdf = 0;
 
   spin_lock(&queue_addrs_lock);
   list_for_each_entry(entry, &queue_addrs, list) {
@@ -1525,21 +738,12 @@ static __u64 lookup_buffer_phys_addr(__u64 virt_addr) {
 /*
  * Kprobe pre-handler for nvme_submit_user_cmd.
  * Injects physical addresses into PRP1/PRP2 for NVMe commands.
- *
- * Admin and I/O command sets share numeric opcodes (e.g. 0x01 = CREATE_SQ
- * in admin vs. Write in I/O).  The first argument, struct request_queue *q,
- * is the authoritative discriminator: admin commands are always submitted on
- * the controller's admin queue, which has no associated gendisk (q->disk ==
- * NULL), while I/O commands are submitted on a namespace queue that does have
- * a gendisk.  All per-command-set handlers are guarded by is_admin so that
- * opcode 0x01 is never misclassified.
  */
 static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
-  struct request_queue* q;
   struct nvme_command* cmd;
   u64 ubuffer;
+  unsigned int bufflen;
   u8 opcode;
-  bool is_admin;
   __u64 phys_addr;
 
   if (!inject_enabled)
@@ -1556,12 +760,12 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
      * RDI = arg0 (q)
      * RSI = arg1 (cmd)
      * RDX = arg2 (ubuffer)
-     * RCX = arg3 (bufflen, not used here)
+     * RCX = arg3 (bufflen)
      */
 #ifdef CONFIG_X86_64
-  q = (struct request_queue*)regs->di;
   cmd = (struct nvme_command*)regs->si;
   ubuffer = regs->dx;
+  bufflen = (unsigned int)regs->cx;
 #else
   /* For non-x86_64, we'd need architecture-specific register access */
   return 0;
@@ -1570,76 +774,37 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
   if (!cmd)
     return 0;
 
-  /*
-   * Distinguish admin from I/O commands via the queue type.  Admin queues
-   * have no gendisk (no namespace); I/O queues always have one.
-   */
-  is_admin = (!q || !q->disk);
-
   opcode = cmd->common.opcode;
 
-  /* Handle admin DELETE_SQ (0x00) and DELETE_CQ (0x04) */
-  if (is_admin && (opcode == 0x00 || opcode == 0x04)) {
+  /* Handle DELETE_SQ (0x00) and DELETE_CQ (0x04) */
+  if (opcode == 0x00 || opcode == 0x04) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    __u32 bdf = lookup_queue_bdf(ubuffer);
+    __u16 bdf = lookup_queue_bdf(ubuffer);
     char pci_addr[16];
     format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
-      pr_info("Intercepted %s command (%s)\n",
+      pr_info("rocm-axiio: Intercepted %s command (%s)\n",
               opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ", pci_addr);
     } else {
-      pr_info("Intercepted %s command\n",
+      pr_info("rocm-axiio: Intercepted %s command\n",
               opcode == 0x00 ? "DELETE_SQ" : "DELETE_CQ");
     }
     pr_info("  Queue ID: %u\n", queue_id);
-
-    /*
-     * If we've previously seen the kernel's CREATE_* for this
-     * (bdf, qid) get hijacked, the device is about to lose the
-     * queue. Trigger resurrection on DELETE_CQ (opcode 0x04), which
-     * is the second of the DELETE_SQ/DELETE_CQ pair. By the time
-     * the device acks DELETE_CQ, the CQ no longer exists and our
-     * CREATE_CQ won't collide.
-     *
-     * For DELETE we don't have a registered queue_addr lookup that
-     * reliably gives BDF (the ubuffer at DELETE time might not be
-     * the queue's PRP). So if lookup_queue_bdf returned 0 we fall
-     * back to "any bdf with a matching qid in the poisoned list".
-     */
-    if (opcode == 0x04) {
-      if (bdf) {
-        poisoned_qid_mark_deleted(bdf, queue_id);
-      } else {
-        struct poisoned_qid_entry* pe;
-        unsigned long flags_irq;
-        u16 found_bdf = 0;
-        spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-        list_for_each_entry(pe, &poisoned_qids, list) {
-          if (pe->qid == queue_id && pe->created) {
-            found_bdf = pe->bdf;
-            break;
-          }
-        }
-        spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-        if (found_bdf)
-          poisoned_qid_mark_deleted(found_bdf, queue_id);
-      }
-    }
   }
 
-  /* Handle admin CREATE_CQ (0x05) and CREATE_SQ (0x01) */
-  if (is_admin && (opcode == 0x05 || opcode == 0x01) && ubuffer != 0) {
+  /* Handle CREATE_CQ (0x05) and CREATE_SQ (0x01) */
+  if ((opcode == 0x05 || opcode == 0x01) && bufflen == 0 && ubuffer != 0) {
     /* Queue ID is in cdw10 (lower 16 bits) */
     __u16 queue_id = le32_to_cpu(cmd->common.cdw10) & 0xFFFF;
-    __u32 bdf = lookup_queue_bdf(ubuffer);
+    __u16 bdf = lookup_queue_bdf(ubuffer);
     char pci_addr[16];
     format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
     if (pci_addr[0] != '\0') {
-      pr_info("Intercepted %s command (%s)\n",
+      pr_info("rocm-axiio: Intercepted %s command (%s)\n",
               opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ", pci_addr);
     } else {
-      pr_info("Intercepted %s command\n",
+      pr_info("rocm-axiio: Intercepted %s command\n",
               opcode == 0x05 ? "CREATE_CQ" : "CREATE_SQ");
     }
     pr_info("  Queue ID: %u\n", queue_id);
@@ -1651,7 +816,6 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     phys_addr = lookup_queue_phys_addr(ubuffer);
     if (phys_addr) {
       __u64 prp2_val;
-      u16 hijack_bdf;
 
       cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
       pr_info("  Injected PRP1: 0x%016llx\n", (unsigned long long)phys_addr);
@@ -1661,24 +825,15 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
         cmd->common.dptr.prp2 = cpu_to_le64(prp2_val);
         pr_info("  Injected PRP2: 0x%016llx\n", (unsigned long long)prp2_val);
       }
-
-      /*
-       * Track that (bdf, qid) had its kernel CREATE_* hijacked.
-       * The actual resurrect is triggered later when xio-tester
-       * issues DELETE_SQ for the same (bdf, qid).
-       */
-      hijack_bdf = lookup_queue_bdf(ubuffer);
-      if (hijack_bdf)
-        poisoned_qid_mark_created(hijack_bdf, queue_id);
     } else {
-      pr_info("Queue not registered, "
+      pr_info("rocm-axiio: Queue not registered, "
               "using ubuffer directly\n");
       cmd->common.dptr.prp1 = cpu_to_le64(ubuffer);
     }
   }
 
   /* Handle I/O commands (READ=0x02, WRITE=0x01) - inject buffer addresses */
-  if (!is_admin && (opcode == 0x01 || opcode == 0x02)) {
+  if (opcode == 0x01 || opcode == 0x02) {
     __u64 prp1_val = le64_to_cpu(cmd->common.dptr.prp1);
     __u64 prp2_val = le64_to_cpu(cmd->common.dptr.prp2);
 
@@ -1687,7 +842,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     if (prp1_val && prp1_val < 0x100000000ULL) {
       phys_addr = lookup_buffer_phys_addr(prp1_val);
       if (phys_addr) {
-        pr_debug("Injecting PRP1 for I/O: 0x%016llx\n",
+        pr_debug("rocm-axiio: Injecting PRP1 for I/O: 0x%016llx\n",
                  (unsigned long long)phys_addr);
         cmd->common.dptr.prp1 = cpu_to_le64(phys_addr);
       }
@@ -1697,7 +852,7 @@ static int nvme_submit_user_cmd_pre(struct kprobe* p, struct pt_regs* regs) {
     if (prp2_val && prp2_val < 0x100000000ULL) {
       phys_addr = lookup_buffer_phys_addr(prp2_val);
       if (phys_addr) {
-        pr_debug("Injecting PRP2 for I/O: 0x%016llx\n",
+        pr_debug("rocm-axiio: Injecting PRP2 for I/O: 0x%016llx\n",
                  (unsigned long long)phys_addr);
         cmd->common.dptr.prp2 = cpu_to_le64(phys_addr);
       }
@@ -1723,10 +878,11 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         char pci_addr[16];
         format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Getting VRAM physical address for NVMe %s\n", pci_addr);
+          pr_info("rocm-axiio: Getting VRAM physical address for NVMe %s\n",
+                  pci_addr);
         } else {
-          pr_info("Getting VRAM physical address for NVMe BDF "
-                  "0x%08x\n",
+          pr_info("rocm-axiio: Getting VRAM physical address for NVMe BDF "
+                  "0x%04x\n",
                   req.nvme_bdf);
         }
       }
@@ -1770,7 +926,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
        * GET_VRAM_PHYS_ADDR, then uses normal NVMe driver interface.
        * The kprobe automatically injects physical addresses.
        */
-      pr_info("Queue management handled via kprobe injection\n");
+      pr_info("rocm-axiio: Queue management handled via kprobe injection\n");
       return -EOPNOTSUPP;
 
     case ROCM_XIO_BIND_DEVICE: {
@@ -1784,9 +940,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         char pci_addr[16];
         format_bdf_as_pci_addr(req.bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Device binding requested for %s\n", pci_addr);
+          pr_info("rocm-axiio: Device binding requested for %s\n", pci_addr);
         } else {
-          pr_info("Device binding requested for BDF 0x%08x\n", req.bdf);
+          pr_info("rocm-axiio: Device binding requested for BDF 0x%04x\n",
+                  req.bdf);
         }
       }
       return 0;
@@ -1819,13 +976,13 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         char pci_addr[16];
         format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Registered queue address: virt=0x%016llx "
+          pr_info("rocm-axiio: Registered queue address: virt=0x%016llx "
                   "phys=0x%016llx size=0x%llx type=%u (%s)\n",
                   (unsigned long long)req.virt_addr,
                   (unsigned long long)req.phys_addr,
                   (unsigned long long)req.size, req.queue_type, pci_addr);
         } else {
-          pr_info("Registered queue address: virt=0x%016llx "
+          pr_info("rocm-axiio: Registered queue address: virt=0x%016llx "
                   "phys=0x%016llx size=0x%llx type=%u\n",
                   (unsigned long long)req.virt_addr,
                   (unsigned long long)req.phys_addr,
@@ -1840,16 +997,14 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_unregister_queue_addr_req req;
       struct queue_addr_entry *entry, *tmp;
       bool found = false;
-      __u32 found_nvme_bdf = 0;
 
       if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
         return -EFAULT;
 
       spin_lock(&queue_addrs_lock);
       list_for_each_entry_safe(entry, tmp, &queue_addrs, list) {
-        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
+        if (entry->virt_addr == req.virt_addr) {
           list_del(&entry->list);
-          found_nvme_bdf = entry->nvme_bdf;
           kfree(entry);
           found = true;
           break;
@@ -1858,20 +1013,20 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       spin_unlock(&queue_addrs_lock);
 
       if (!found) {
-        pr_warn("Queue address 0x%016llx not found\n",
+        pr_warn("rocm-axiio: Queue address 0x%016llx not found\n",
                 (unsigned long long)req.virt_addr);
         return -ENOENT;
       }
 
       {
         char pci_addr[16];
-        format_bdf_as_pci_addr(found_nvme_bdf, pci_addr, sizeof(pci_addr));
+        format_bdf_as_pci_addr(entry->nvme_bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Unregistered queue address: virt=0x%016llx "
+          pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx "
                   "(%s)\n",
                   (unsigned long long)req.virt_addr, pci_addr);
         } else {
-          pr_info("Unregistered queue address: virt=0x%016llx\n",
+          pr_info("rocm-axiio: Unregistered queue address: virt=0x%016llx\n",
                   (unsigned long long)req.virt_addr);
         }
       }
@@ -1906,9 +1061,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
           char pci_addr[16];
           format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
           if (pci_addr[0] != '\0') {
-            pr_info("Emulated NVMe (%s) - using GPU BAR GPA\n", pci_addr);
+            pr_info("rocm-axiio: Emulated NVMe (%s) - using GPU BAR GPA\n",
+                    pci_addr);
           } else {
-            pr_info("Emulated NVMe - using GPU BAR GPA\n");
+            pr_info("rocm-axiio: Emulated NVMe - using GPU BAR GPA\n");
           }
         }
         ret = get_dmabuf_bar_gpa(req.dmabuf_fd, &phys_addr, &req.size);
@@ -1920,9 +1076,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
           char pci_addr[16];
           format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
           if (pci_addr[0] != '\0') {
-            pr_info("Passthrough NVMe (%s) - using P2PDMA IOVA\n", pci_addr);
+            pr_info("rocm-axiio: Passthrough NVMe (%s) - using P2PDMA IOVA\n",
+                    pci_addr);
           } else {
-            pr_info("Passthrough NVMe - using P2PDMA IOVA\n");
+            pr_info("rocm-axiio: Passthrough NVMe - using P2PDMA IOVA\n");
           }
         }
         ret = get_dmabuf_phys_addr(req.dmabuf_fd, req.nvme_bdf, &phys_addr,
@@ -1938,7 +1095,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         /* Cleanup passthrough attachment if allocated */
         if (!is_emulated && sgt && attach && dmabuf) {
           dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
-          dma_buf_unpin(attach);
           dma_buf_detach(dmabuf, attach);
           dma_buf_put(dmabuf);
           if (nvme_pdev)
@@ -1952,7 +1108,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       entry->phys_addr = phys_addr;
       entry->size = req.size;
       entry->is_passthrough = !is_emulated;
-      entry->owner = file;
 
       /* Store attachment info for passthrough (keep alive) */
       if (!is_emulated) {
@@ -1974,7 +1129,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       req.phys_addr = phys_addr;
 
       /* Extract BDF for logging */
-      __u32 bdf = req.nvme_bdf;
+      __u16 bdf = req.nvme_bdf;
       if (bdf == 0 && entry->nvme_pdev) {
         bdf = pci_dev_to_bdf(entry->nvme_pdev);
       }
@@ -1983,7 +1138,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         char pci_addr[16];
         format_bdf_as_pci_addr(bdf, pci_addr, sizeof(pci_addr));
         if (pci_addr[0] != '\0') {
-          pr_info("Registered buffer: virt=0x%016llx "
+          pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
                   "phys=0x%016llx size=0x%llx (%s)%s\n",
                   (unsigned long long)entry->virt_addr,
                   (unsigned long long)phys_addr, (unsigned long long)req.size,
@@ -1991,7 +1146,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
                   entry->is_passthrough ? " (P2PDMA attachment kept alive)"
                                         : "");
         } else {
-          pr_info("Registered buffer: virt=0x%016llx "
+          pr_info("rocm-axiio: Registered buffer: virt=0x%016llx "
                   "phys=0x%016llx size=0x%llx%s\n",
                   (unsigned long long)entry->virt_addr,
                   (unsigned long long)phys_addr, (unsigned long long)req.size,
@@ -2010,7 +1165,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
             entry->dmabuf) {
           dma_buf_unmap_attachment(entry->attach, entry->sgt,
                                    DMA_BIDIRECTIONAL);
-          dma_buf_unpin(entry->attach);
           dma_buf_detach(entry->dmabuf, entry->attach);
           dma_buf_put(entry->dmabuf);
           if (entry->nvme_pdev)
@@ -2020,6 +1174,116 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -EFAULT;
       }
 
+      return 0;
+    }
+
+    case ROCM_XIO_GET_BUFFER_PAGES: {
+      /* Return per-page DMA addresses of a registered VRAM buffer by walking
+       * its kept-alive P2PDMA scatter-gather mapping. This lets userspace build
+       * a (chained) PRP list describing a physically non-contiguous VRAM
+       * allocation, rather than assuming one contiguous run from phys_addr. */
+      struct rocm_xio_get_buffer_pages_req req;
+      struct vram_buffer_entry* entry;
+      struct sg_table* sgt = NULL;
+      struct scatterlist* sg;
+      __u64 __user* uaddrs;
+      __u32 page_size, count = 0;
+      bool found = false;
+      int i;
+
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+
+      page_size = req.page_size ? req.page_size : 4096;
+      uaddrs = (__u64 __user*)(uintptr_t)req.page_addrs;
+      if (!uaddrs || req.max_pages == 0)
+        return -EINVAL;
+
+      /* Locate the buffer; copy its sg_table pointer under the lock. The
+       * mapping stays alive until UNREGISTER_BUFFER, so it is safe to walk
+       * after dropping the lock for this serial (single bring-up) use. */
+      spin_lock(&vram_buffers_lock);
+      list_for_each_entry(entry, &vram_buffers, list) {
+        if (entry->virt_addr == req.virt_addr) {
+          found = true;
+          sgt = entry->sgt;
+          break;
+        }
+      }
+      spin_unlock(&vram_buffers_lock);
+
+      if (!found)
+        return -ENOENT;
+      if (!sgt) /* emulated buffers have no P2PDMA sg_table */
+        return -EOPNOTSUPP;
+
+      /*
+       * Emit exactly one DMA address per logical @page_size page of the
+       * transfer, walking the sg segments as a single concatenated byte
+       * stream. The registered buffer's sg mapping may cover MORE bytes than
+       * the caller's transfer (the VRAM allocation is rounded up), and a
+       * naive per-segment walk both over-counts and rounds each segment up
+       * independently (so Sum(ceil(seg_len/ps)) can exceed
+       * ceil(total/ps)). We therefore stop once @max_pages logical pages
+       * have been produced, and we guard against a logical page that would
+       * straddle two physically-discontiguous segments (only possible when a
+       * non-final segment's length is not a multiple of @page_size): such a
+       * page is not representable by a single PRP entry, so we report rather
+       * than silently mis-address.
+       */
+      {
+        unsigned int carry = 0; /* leftover bytes consumed from prev segment */
+
+        for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+          dma_addr_t seg = sg_dma_address(sg);
+          unsigned int seg_len = sg_dma_len(sg);
+          unsigned int off = 0;
+
+          if (count >= req.max_pages)
+            break;
+
+          /*
+           * A previous segment ended mid-page. A full PRP page must be a
+           * single contiguous 4096-region, so this is only valid if the
+           * previous segment ended exactly on a page boundary (carry == 0).
+           */
+          if (carry != 0) {
+            pr_err("rocm-axiio: GET_BUFFER_PAGES: segment %d not "
+                   "page-aligned (carry=%u); page straddles discontiguous "
+                   "VRAM segments\n",
+                   i, carry);
+            return -EINVAL;
+          }
+
+          for (off = 0; off + page_size <= seg_len; off += page_size) {
+            __u64 pa = (__u64)seg + off;
+
+            if (count >= req.max_pages)
+              break;
+            if (put_user(pa, &uaddrs[count]))
+              return -EFAULT;
+            count++;
+          }
+
+          /* Track a trailing partial page for the straddle guard above. */
+          carry = seg_len - off;
+        }
+      }
+
+      if (count < req.max_pages) {
+        pr_err("rocm-axiio: GET_BUFFER_PAGES: only %u of %u pages "
+               "available\n",
+               count, req.max_pages);
+        return -E2BIG;
+      }
+
+      req.num_pages = count;
+      if (copy_to_user((void __user*)arg, &req, sizeof(req)))
+        return -EFAULT;
+
+      pr_info("rocm-axiio: GET_BUFFER_PAGES: virt=0x%llx -> %u pages "
+              "(nents=%u)\n",
+              (unsigned long long)req.virt_addr, count, sgt->nents);
       return 0;
     }
 
@@ -2033,7 +1297,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
 
       spin_lock(&vram_buffers_lock);
       list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
-        if (entry->virt_addr == req.virt_addr && entry->owner == file) {
+        if (entry->virt_addr == req.virt_addr) {
           list_del(&entry->list);
           found = true;
           break;
@@ -2042,13 +1306,13 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       spin_unlock(&vram_buffers_lock);
 
       if (!found) {
-        pr_warn("Buffer 0x%016llx not found\n",
+        pr_warn("rocm-axiio: Buffer 0x%016llx not found\n",
                 (unsigned long long)req.virt_addr);
         return -ENOENT;
       }
 
       /* Extract BDF for logging */
-      __u32 bdf = 0;
+      __u16 bdf = 0;
       if (entry->nvme_pdev) {
         bdf = pci_dev_to_bdf(entry->nvme_pdev);
       }
@@ -2061,17 +1325,17 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         if (entry->is_passthrough && entry->sgt && entry->attach &&
             entry->dmabuf) {
           if (pci_addr[0] != '\0') {
-            pr_info("Cleaning up P2PDMA attachment for buffer 0x%016llx "
-                    "(%s)\n",
-                    (unsigned long long)entry->virt_addr, pci_addr);
+            pr_info(
+              "rocm-axiio: Cleaning up P2PDMA attachment for buffer 0x%016llx "
+              "(%s)\n",
+              (unsigned long long)entry->virt_addr, pci_addr);
           } else {
-            pr_info("Cleaning up P2PDMA attachment for buffer "
+            pr_info("rocm-axiio: Cleaning up P2PDMA attachment for buffer "
                     "0x%016llx\n",
                     (unsigned long long)entry->virt_addr);
           }
           dma_buf_unmap_attachment(entry->attach, entry->sgt,
                                    DMA_BIDIRECTIONAL);
-          dma_buf_unpin(entry->attach);
           dma_buf_detach(entry->dmabuf, entry->attach);
           dma_buf_put(entry->dmabuf);
           if (entry->nvme_pdev)
@@ -2079,10 +1343,10 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         }
 
         if (pci_addr[0] != '\0') {
-          pr_info("Unregistered buffer: virt=0x%016llx (%s)\n",
+          pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx (%s)\n",
                   (unsigned long long)req.virt_addr, pci_addr);
         } else {
-          pr_info("Unregistered buffer: virt=0x%016llx\n",
+          pr_info("rocm-axiio: Unregistered buffer: virt=0x%016llx\n",
                   (unsigned long long)req.virt_addr);
         }
       }
@@ -2116,7 +1380,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       struct rocm_xio_alloc_contig_req req;
       struct contig_alloc_entry* ca;
       struct pci_dev* pdev;
-      unsigned int domain, bus, devfn;
+      unsigned int bus, devfn;
       void* cpu_addr;
       dma_addr_t dma_addr;
 
@@ -2124,20 +1388,19 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -EFAULT;
 
       if (req.size == 0 || req.size > (16 * 1024 * 1024)) {
-        pr_err("contig alloc: invalid "
+        pr_err("rocm-axiio: contig alloc: invalid "
                "size %llu\n",
                (unsigned long long)req.size);
         return -EINVAL;
       }
 
-      domain = (req.nvme_bdf >> 16) & 0xFFFF;
       bus = (req.nvme_bdf >> 8) & 0xFF;
       devfn = req.nvme_bdf & 0xFF;
-      pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
+      pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
       if (!pdev) {
         char pci_addr[16];
         format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
-        pr_err("contig alloc: NVMe "
+        pr_err("rocm-axiio: contig alloc: NVMe "
                "device not found (%s)\n",
                pci_addr);
         return -ENODEV;
@@ -2146,7 +1409,7 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       cpu_addr = dma_alloc_coherent(&pdev->dev, req.size, &dma_addr,
                                     GFP_KERNEL);
       if (!cpu_addr) {
-        pr_err("contig alloc: "
+        pr_err("rocm-axiio: contig alloc: "
                "dma_alloc_coherent failed for "
                "%llu bytes\n",
                (unsigned long long)req.size);
@@ -2178,9 +1441,15 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       req.phys_addr = (__u64)dma_addr;
       req.mmap_offset = ca->id;
 
-      pr_info("contig alloc: size=%llu dma=0x%llx id=%u (%s)\n",
-              (unsigned long long)req.size, (unsigned long long)dma_addr,
-              ca->id, pci_name(pdev));
+      {
+        char pci_addr[16];
+        format_bdf_as_pci_addr(req.nvme_bdf, pci_addr, sizeof(pci_addr));
+        pr_info("rocm-axiio: contig alloc: "
+                "size=%llu dma=0x%llx id=%u "
+                "(%s)\n",
+                (unsigned long long)req.size, (unsigned long long)dma_addr,
+                ca->id, pci_addr);
+      }
 
       if (copy_to_user((void __user*)arg, &req, sizeof(req))) {
         spin_lock(&contig_allocs_lock);
@@ -2192,279 +1461,6 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
         return -EFAULT;
       }
 
-      return 0;
-    }
-
-    case ROCM_XIO_QUIESCE_NS: {
-      struct rocm_xio_quiesce_ns_req req;
-      struct file* bdev_file;
-      struct block_device* bd;
-      struct request_queue* q;
-      struct blk_mq_hw_ctx* hctx = NULL;
-      struct quiesced_ns_entry* entry;
-      struct quiesced_ns_entry* existing;
-      enum quiesced_ns_mode mode;
-      unsigned int hctx_idx = 0;
-
-      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
-        return -EFAULT;
-
-      if (req.bdev_fd < 0)
-        return -EINVAL;
-
-      bdev_file = fget(req.bdev_fd);
-      if (!bdev_file) {
-        pr_err("rocm-axiio: QUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
-        return -EBADF;
-      }
-
-      bd = rocm_xio_file_to_bdev(bdev_file);
-      if (!bd) {
-        pr_err("rocm-axiio: QUIESCE_NS: fd %d is not a block device\n",
-               req.bdev_fd);
-        fput(bdev_file);
-        return -ENOTBLK;
-      }
-
-      q = bdev_get_queue(bd);
-      if (!q) {
-        pr_err("rocm-axiio: QUIESCE_NS: no request_queue for bdev\n");
-        fput(bdev_file);
-        return -ENODEV;
-      }
-
-      if (req.qid == 0) {
-        mode = QUIESCED_NS_MODE_FULL;
-      } else {
-        /*
-         * NVMe IO queue ID @qid maps to blk-mq hctx index
-         * @qid - 1 in the default I/O queue map used by the
-         * upstream NVMe PCI driver. Validate against the live
-         * queue topology so a stale qid does not index past
-         * the array.
-         */
-        if (!queue_is_mq(q)) {
-          pr_err("rocm-axiio: QUIESCE_NS: %pg is not a blk-mq queue\n", bd);
-          fput(bdev_file);
-          return -EOPNOTSUPP;
-        }
-        hctx_idx = req.qid - 1;
-        if (hctx_idx >= q->nr_hw_queues) {
-          pr_err("rocm-axiio: QUIESCE_NS: qid %u out of range "
-                 "(%pg has %u hw queues)\n",
-                 req.qid, bd, q->nr_hw_queues);
-          fput(bdev_file);
-          return -ERANGE;
-        }
-        hctx = rocm_xio_hctx_at(q, hctx_idx);
-        if (!hctx) {
-          pr_err("rocm-axiio: QUIESCE_NS: no hctx for qid %u on %pg\n", req.qid,
-                 bd);
-          fput(bdev_file);
-          return -ENODEV;
-        }
-        mode = QUIESCED_NS_MODE_HCTX;
-      }
-
-      entry = kmalloc(sizeof(*entry), GFP_KERNEL);
-      if (!entry) {
-        fput(bdev_file);
-        return -ENOMEM;
-      }
-
-      entry->bdev_file = bdev_file;
-      entry->bd = bd;
-      entry->owner = file;
-      entry->mode = mode;
-      entry->hctx_idx = hctx_idx;
-
-      /*
-       * Hold quiesced_ns_lock across the duplicate check, the blk-mq
-       * quiesce, AND the list_add as a single critical section. If the
-       * lock were dropped between the check and the insert, two
-       * concurrent QUIESCE_NS calls for the same (fd, bd, mode, hctx)
-       * could both pass the duplicate check and both call
-       * blk_mq_quiesce_queue(): the block layer's quiesce_depth would be
-       * raised twice while only one entry is tracked, so a single
-       * unquiesce at release/explicit-unquiesce time would leave the
-       * queue permanently quiesced (all I/O hung). The lock is a mutex,
-       * so sleeping inside blk_mq_quiesce_queue() is permitted.
-       */
-      mutex_lock(&quiesced_ns_lock);
-      list_for_each_entry(existing, &quiesced_ns, list) {
-        if (existing->owner != file || existing->bd != bd)
-          continue;
-        if (existing->mode == QUIESCED_NS_MODE_FULL &&
-            mode == QUIESCED_NS_MODE_FULL) {
-          mutex_unlock(&quiesced_ns_lock);
-          pr_info("rocm-axiio: QUIESCE_NS: %pg already fully quiesced by "
-                  "this fd\n",
-                  bd);
-          kfree(entry);
-          fput(bdev_file);
-          return 0;
-        }
-        if (existing->mode == QUIESCED_NS_MODE_HCTX &&
-            mode == QUIESCED_NS_MODE_HCTX && existing->hctx_idx == hctx_idx) {
-          mutex_unlock(&quiesced_ns_lock);
-          pr_info("rocm-axiio: QUIESCE_NS: %pg qid %u already stopped by "
-                  "this fd\n",
-                  bd, req.qid);
-          kfree(entry);
-          fput(bdev_file);
-          return 0;
-        }
-      }
-
-      if (mode == QUIESCED_NS_MODE_FULL) {
-        blk_mq_quiesce_queue(q);
-        pr_info("rocm-axiio: QUIESCE_NS: quiesced entire request_queue "
-                "for %pg\n",
-                bd);
-      } else {
-        /*
-         * Hold a brief whole-queue quiesce while we mark the
-         * target hctx stopped. blk_mq_quiesce_queue() waits for
-         * any in-flight dispatch (including one that may already
-         * be touching the SQ we are about to reclaim) to
-         * complete; the unquiesce immediately afterwards lets
-         * the namespace's other hardware queues resume normal
-         * I/O while our target hctx stays stopped.
-         */
-        blk_mq_quiesce_queue(q);
-        blk_mq_stop_hw_queue(hctx);
-        blk_mq_unquiesce_queue(q);
-        pr_info("rocm-axiio: QUIESCE_NS: stopped hctx %u (qid %u) on %pg; "
-                "other queues continue to dispatch\n",
-                hctx_idx, req.qid, bd);
-      }
-
-      list_add(&entry->list, &quiesced_ns);
-      mutex_unlock(&quiesced_ns_lock);
-
-      return 0;
-    }
-
-    case ROCM_XIO_UNQUIESCE_NS: {
-      struct rocm_xio_quiesce_ns_req req;
-      struct file* bdev_file;
-      struct block_device* bd;
-      struct request_queue* q;
-      struct quiesced_ns_entry *entry, *tmp;
-      struct quiesced_ns_entry* found = NULL;
-      unsigned int hctx_idx = 0;
-      enum quiesced_ns_mode want_mode;
-
-      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
-        return -EFAULT;
-
-      if (req.bdev_fd < 0)
-        return -EINVAL;
-
-      bdev_file = fget(req.bdev_fd);
-      if (!bdev_file) {
-        pr_err("rocm-axiio: UNQUIESCE_NS: invalid bdev fd %d\n", req.bdev_fd);
-        return -EBADF;
-      }
-
-      bd = rocm_xio_file_to_bdev(bdev_file);
-      if (!bd) {
-        pr_err("rocm-axiio: UNQUIESCE_NS: fd %d is not a block device\n",
-               req.bdev_fd);
-        fput(bdev_file);
-        return -ENOTBLK;
-      }
-
-      if (req.qid == 0) {
-        want_mode = QUIESCED_NS_MODE_FULL;
-      } else {
-        want_mode = QUIESCED_NS_MODE_HCTX;
-        hctx_idx = req.qid - 1;
-      }
-
-      mutex_lock(&quiesced_ns_lock);
-      list_for_each_entry_safe(entry, tmp, &quiesced_ns, list) {
-        if (entry->owner != file || entry->bd != bd)
-          continue;
-        if (entry->mode != want_mode)
-          continue;
-        if (want_mode == QUIESCED_NS_MODE_HCTX && entry->hctx_idx != hctx_idx)
-          continue;
-        list_del(&entry->list);
-        found = entry;
-        break;
-      }
-      mutex_unlock(&quiesced_ns_lock);
-
-      if (!found) {
-        pr_warn("rocm-axiio: UNQUIESCE_NS: no quiesce entry for %pg (qid %u)\n",
-                bd, req.qid);
-        fput(bdev_file);
-        return -ENOENT;
-      }
-
-      q = bdev_get_queue(found->bd);
-      if (q) {
-        if (found->mode == QUIESCED_NS_MODE_FULL) {
-          blk_mq_unquiesce_queue(q);
-          pr_info("rocm-axiio: UNQUIESCE_NS: resumed entire request_queue "
-                  "for %pg\n",
-                  found->bd);
-        } else {
-          struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, found->hctx_idx);
-          if (hctx) {
-            blk_mq_start_hw_queue(hctx);
-            pr_info("rocm-axiio: UNQUIESCE_NS: started hctx %u (qid %u) "
-                    "on %pg\n",
-                    found->hctx_idx, req.qid, found->bd);
-          } else {
-            pr_warn("rocm-axiio: UNQUIESCE_NS: lost hctx %u for %pg\n",
-                    found->hctx_idx, found->bd);
-          }
-        }
-      } else {
-        pr_warn("rocm-axiio: UNQUIESCE_NS: lost request_queue for %pg\n",
-                found->bd);
-      }
-
-      fput(found->bdev_file);
-      kfree(found);
-      fput(bdev_file);
-      return 0;
-    }
-
-    case ROCM_XIO_DEBUG_RESURRECT_QID: {
-      /*
-       * TEST-ONLY: drive the production resurrect path for (bdf, qid)
-       * without the GPU/xio-tester hijack, reusing the exact real
-       * DELETE_CQ-triggered sequence (mark created + needs_resurrect,
-       * then schedule the work). No production caller uses this.
-       *
-       * Requires a previously captured snapshot for (bdf, qid), and the
-       * caller must have already issued DELETE_SQ + DELETE_CQ so the
-       * controller side is actually gone.
-       */
-      struct rocm_xio_debug_resurrect_req req;
-
-      /* This debug trigger drives admin NVMe commands at an arbitrary
-       * (bdf, qid); gate it behind CAP_SYS_ADMIN so it cannot be abused
-       * if /dev/rocm-xio is ever made accessible to unprivileged users. */
-      if (!capable(CAP_SYS_ADMIN))
-        return -EPERM;
-
-      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
-        return -EFAULT;
-
-      pr_info("rocm-axiio: DEBUG_RESURRECT_QID: forcing resurrect of "
-              "bdf=0x%04x qid=%u (test-only path)\n",
-              req.bdf, req.qid);
-
-      /* poisoned_qid_mark_created is idempotent; it creates the entry
-       * if absent and sets created=true. Then mark_deleted flips
-       * needs_resurrect and schedules the delayed work -- identical to
-       * the kprobe-driven sequence. */
-      poisoned_qid_mark_created(req.bdf, req.qid);
-      poisoned_qid_mark_deleted(req.bdf, req.qid);
       return 0;
     }
 
@@ -2487,13 +1483,13 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       spin_unlock(&contig_allocs_lock);
 
       if (!found) {
-        pr_warn("contig free: id=%u "
+        pr_warn("rocm-axiio: contig free: id=%u "
                 "not found or not owned by caller\n",
                 req.mmap_offset);
         return -ENOENT;
       }
 
-      pr_info("contig free: id=%u "
+      pr_info("rocm-axiio: contig free: id=%u "
               "dma=0x%llx size=%zu\n",
               ca->id, (unsigned long long)ca->dma_addr, ca->size);
 
@@ -2519,7 +1515,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
 
     if (mmio_bridge_shadow_gpa == 0) {
       mutex_unlock(&mmio_bridge_lock);
-      pr_err("PCI MMIO bridge shadow "
+      pr_err("rocm-axiio: PCI MMIO bridge shadow "
              "buffer not configured\n");
       return -EINVAL;
     }
@@ -2530,13 +1526,13 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
                           vma->vm_page_prot);
     if (ret < 0) {
       mutex_unlock(&mmio_bridge_lock);
-      pr_err("Failed to remap shadow "
+      pr_err("rocm-axiio: Failed to remap shadow "
              "buffer: %d\n",
              ret);
       return ret;
     }
 
-    pr_info("Mapped MMIO bridge shadow: "
+    pr_info("rocm-axiio: Mapped MMIO bridge shadow: "
             "GPA=0x%llx size=%llu vaddr=0x%lx\n",
             (unsigned long long)mmio_bridge_shadow_gpa,
             (unsigned long long)mmio_bridge_shadow_size, vma->vm_start);
@@ -2567,7 +1563,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
     spin_unlock(&contig_allocs_lock);
 
     if (!found) {
-      pr_err("contig mmap: id=%u "
+      pr_err("rocm-axiio: contig mmap: id=%u "
              "not found or not owned by mapping file\n",
              target_id);
       return -ENOENT;
@@ -2575,7 +1571,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
 
     size = vma->vm_end - vma->vm_start;
     if (size > ca->size) {
-      pr_err("contig mmap: requested "
+      pr_err("rocm-axiio: contig mmap: requested "
              "size %lu > alloc size %zu\n",
              size, ca->size);
       kref_put(&ca->ref, contig_alloc_release);
@@ -2587,7 +1583,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
     ret = dma_mmap_coherent(&ca->pdev->dev, vma, ca->cpu_addr, ca->dma_addr,
                             size);
     if (ret < 0) {
-      pr_err("contig mmap: "
+      pr_err("rocm-axiio: contig mmap: "
              "dma_mmap_coherent failed: "
              "%d\n",
              ret);
@@ -2598,7 +1594,7 @@ static int rocm_xio_mmap(struct file* file, struct vm_area_struct* vma) {
     vma->vm_private_data = ca;
     vma->vm_ops = &contig_vm_ops;
 
-    pr_info("contig mmap: id=%u "
+    pr_info("rocm-axiio: contig mmap: id=%u "
             "dma=0x%llx size=%lu vaddr=0x%lx\n",
             target_id, (unsigned long long)ca->dma_addr, size, vma->vm_start);
 
@@ -2619,365 +1615,13 @@ static int rocm_xio_uring_cmd(struct io_uring_cmd* ioucmd,
    *   - Look up phys_addr from registered buffers
    *   - Return result via io_uring_cmd_done()
    */
-  pr_debug("io_uring_cmd not yet implemented\n");
+  pr_debug("rocm-axiio: io_uring_cmd not yet implemented\n");
   return -ENOSYS;
-}
-
-/*
- * Resurrect every NVMe queue currently flagged as needing it.
- *
- * For each entry in poisoned_qids with needs_resurrect=true:
- *   1. Resolve the pci_dev and look up our cached snapshot.
- *   2. Submit CREATE_CQ then CREATE_SQ to the controller's admin
- *      queue with the kernel's original DMA addresses. This makes
- *      the device side of the QID line back up with the kernel's
- *      still-intact struct nvme_queue, so the next kernel I/O on
- *      that hctx no longer times out.
- *
- * Runs as workqueue work_struct -- process context, may sleep.
- *
- * Logging is verbose by design -- a malformed CREATE_SQ from kernel
- * context can panic the controller, so we want a clear breadcrumb
- * trail in dmesg if something misbehaves.
- */
-static void rocm_xio_resurrect_work_fn(struct work_struct* w) {
-  struct poisoned_qid_entry *pe, *pe_tmp;
-  unsigned long flags_irq;
-  bool clone_oom = false;
-  LIST_HEAD(to_resurrect);
-
-  (void)w;
-
-  /*
-   * Snapshot the set of entries that need resurrection AND
-   * atomically clear the flag, so we don't double-fire if another
-   * DELETE schedules us again while we're running.
-   */
-  spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-  list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
-    if (pe->needs_resurrect) {
-      /* Detach a clone-ish view: build a parallel list of small
-       * structs for the worker to iterate without holding the
-       * spinlock.
-       *
-       * Allocate the clone BEFORE clearing the flags. If the
-       * GFP_ATOMIC allocation fails we must NOT consume the
-       * needs_resurrect flag: doing so would permanently strand the
-       * QID (the device deleted it, but the kernel still believes it
-       * exists, and no future event would re-trigger us because
-       * @created would also be cleared). Instead leave the entry
-       * untouched and reschedule a retry below.
-       */
-      struct poisoned_qid_entry* clone = kmalloc(sizeof(*clone), GFP_ATOMIC);
-      if (!clone) {
-        clone_oom = true;
-        continue;
-      }
-      pe->needs_resurrect = false;
-      pe->created = false; /* fresh slate: we're handing the QID back */
-      clone->bdf = pe->bdf;
-      clone->qid = pe->qid;
-      clone->created = false;
-      clone->needs_resurrect = false;
-      INIT_LIST_HEAD(&clone->list);
-      list_add_tail(&clone->list, &to_resurrect);
-    }
-  }
-  spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-
-  if (clone_oom) {
-    pr_warn("rocm-axiio: resurrect: clone alloc failed under memory "
-            "pressure; retrying in %u ms\n",
-            ROCM_XIO_RESURRECT_DELAY_MS);
-    mod_delayed_work(system_wq, &rocm_xio_resurrect_work,
-                     msecs_to_jiffies(ROCM_XIO_RESURRECT_DELAY_MS));
-  }
-
-  list_for_each_entry_safe(pe, pe_tmp, &to_resurrect, list) {
-    struct pci_dev* pdev;
-    struct nvme_queue_snapshot snap;
-    struct nvme_command c;
-    int rc;
-    unsigned int bus, devfn;
-    int cq_flags;
-
-    list_del(&pe->list);
-
-    bus = (pe->bdf >> 8) & 0xFF;
-    devfn = pe->bdf & 0xFF;
-    pdev = pci_get_domain_bus_and_slot(0, bus, devfn);
-    if (!pdev) {
-      pr_warn("rocm-axiio: resurrect: pci_dev for bdf 0x%04x not found, "
-              "skipping qid=%u\n",
-              pe->bdf, pe->qid);
-      kfree(pe);
-      continue;
-    }
-
-    if (!nvme_queue_snapshot_lookup(pdev, pe->qid, &snap)) {
-      pr_warn("rocm-axiio: resurrect: NO snapshot for %s qid=%u; "
-              "kernel will hit a one-time timeout on this QID. "
-              "(Snapshot will be captured on the controller reset that "
-              "follows.)\n",
-              pci_name(pdev), pe->qid);
-      pci_dev_put(pdev);
-      kfree(pe);
-      continue;
-    }
-
-    if (!snap.admin_q) {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u has snapshot but no admin_q, "
-              "skipping\n",
-              pci_name(pdev), pe->qid);
-      pci_dev_put(pdev);
-      kfree(pe);
-      continue;
-    }
-
-    if (snap.q_depth == 0 || snap.sq_dma_addr == 0 || snap.cq_dma_addr == 0) {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot looks bogus "
-              "(depth=%u sq=0x%llx cq=0x%llx), skipping\n",
-              pci_name(pdev), pe->qid, snap.q_depth,
-              (unsigned long long)snap.sq_dma_addr,
-              (unsigned long long)snap.cq_dma_addr);
-      pci_dev_put(pdev);
-      kfree(pe);
-      continue;
-    }
-
-    /* ---- CREATE_CQ ---- (must come first; SQ references the CQ) */
-    memset(&c, 0, sizeof(c));
-    cq_flags = NVME_QUEUE_PHYS_CONTIG;
-    if (!snap.polled)
-      cq_flags |= NVME_CQ_IRQ_ENABLED;
-
-    c.create_cq.opcode = nvme_admin_create_cq;
-    c.create_cq.prp1 = cpu_to_le64(snap.cq_dma_addr);
-    c.create_cq.cqid = cpu_to_le16(pe->qid);
-    c.create_cq.qsize = cpu_to_le16(snap.q_depth - 1);
-    c.create_cq.cq_flags = cpu_to_le16(cq_flags);
-    c.create_cq.irq_vector = cpu_to_le16(snap.cq_vector);
-
-    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_CQ "
-            "prp1=0x%llx qsize=%u cq_flags=0x%x vec=%u\n",
-            pci_name(pdev), pe->qid, (unsigned long long)snap.cq_dma_addr,
-            snap.q_depth - 1, cq_flags, snap.cq_vector);
-
-    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
-    if (rc) {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_CQ failed: %d\n",
-              pci_name(pdev), pe->qid, rc);
-      pci_dev_put(pdev);
-      kfree(pe);
-      continue;
-    }
-
-    /* ---- CREATE_SQ ---- */
-    memset(&c, 0, sizeof(c));
-    c.create_sq.opcode = nvme_admin_create_sq;
-    c.create_sq.prp1 = cpu_to_le64(snap.sq_dma_addr);
-    c.create_sq.sqid = cpu_to_le16(pe->qid);
-    c.create_sq.qsize = cpu_to_le16(snap.q_depth - 1);
-    c.create_sq.sq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG);
-    c.create_sq.cqid = cpu_to_le16(pe->qid);
-
-    pr_info("rocm-axiio: resurrect: %s qid=%u CREATE_SQ "
-            "prp1=0x%llx qsize=%u\n",
-            pci_name(pdev), pe->qid, (unsigned long long)snap.sq_dma_addr,
-            snap.q_depth - 1);
-
-    rc = nvme_submit_sync_cmd(snap.admin_q, &c, NULL, 0);
-    if (rc) {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u CREATE_SQ failed: %d "
-              "(controller now has CQ but no SQ for this qid; a kernel "
-              "I/O on this hctx will still time out and trigger a reset)\n",
-              pci_name(pdev), pe->qid, rc);
-      pci_dev_put(pdev);
-      kfree(pe);
-      continue;
-    }
-
-    /*
-     * ---- Host-side ring-pointer write-back ----
-     *
-     * CREATE_CQ + CREATE_SQ reset the controller's internal SQ-head /
-     * CQ-tail to the top, but the kernel's host-side copies in struct
-     * nvme_queue are untouched because nvme_init_queue() is never
-     * called on our passthrough resurrect path. Without this the host
-     * keeps stale sq_tail/cq_head/cq_phase and the first post-resurrect
-     * I/O writes the wrong SQ slot / checks the wrong phase and hangs.
-     *
-     * Mirror exactly the four ring pointers nvme_init_queue sets:
-     *   sq_tail = 0; last_sq_tail = 0; cq_head = 0; cq_phase = 1;
-     * (and clear the CQE ring, below, so a stale phase-1 CQE at the old
-     * cq_head is not mistaken for a fresh completion). The other
-     * nvme_init_queue side effects are inert here: q_db is unchanged
-     * across resurrect, dbbuf is not advertised by this controller, and
-     * online_queues must not be bumped (the queue was never torn down
-     * host-side).
-     *
-     * SAFETY / LOCKING:
-     *   sq_tail/last_sq_tail are written by the submit path under
-     *   nvmeq->sq_lock; we take that same (offset-verified) lock so the
-     *   reset is atomic w.r.t. concurrent dispatch. The lock is never
-     *   taken from hard-IRQ context, so plain spin_lock is correct.
-     *
-     *   cq_head/cq_phase are written lock-free by the completion path.
-     *   We rely on the queue being wedged at resurrect time (device has
-     *   no such QID and QUIESCE_NS stopped this hctx), so no completion
-     *   can be in flight. wmb() publishes the reset before the first
-     *   post-UNQUIESCE I/O.
-     */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0) &&                           \
-  LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
-    /*
-     * Liveness/identity re-validation before trusting snap.dev: it is
-     * a raw nvme_dev* captured earlier with no refcount (the pci_dev
-     * ref does not keep the nvme_dev alive), so reading its fields
-     * after a driver detach would be a use-after-free. The nvme_pci
-     * driver stores nvme_dev as pdev drvdata, so matching it confirms
-     * the same nvme_dev is still attached. Best-effort (a tiny TOCTOU
-     * window remains) but closes the long-detached case.
-     */
-    if (snap.dev && pci_get_drvdata(pdev) == snap.dev) {
-      struct rocm_xio_nvme_dev_layout* dev_layout =
-        (struct rocm_xio_nvme_dev_layout*)snap.dev;
-      if (dev_layout->queues) {
-        /*
-         * dev->queues is an array of struct nvme_queue (NOT pointers);
-         * stride is the real kernel sizeof (version-specific). Index by
-         * qid and cast to the mirror.
-         */
-        const size_t kernel_nvmeq_stride = 192;
-        struct rocm_xio_nvmeq_layout* live_nvmeq =
-          (struct rocm_xio_nvmeq_layout*)((u8*)dev_layout->queues +
-                                          (size_t)pe->qid *
-                                            kernel_nvmeq_stride);
-
-        /*
-         * Clear the CQE ring (matches nvme_init_queue) so a stale
-         * phase-1 CQE at the old cq_head is not mistaken for a fresh
-         * completion after we reset cq_head=0, cq_phase=1.
-         */
-        if (live_nvmeq->cqes && snap.q_depth)
-          memset(live_nvmeq->cqes, 0,
-                 (size_t)snap.q_depth * sizeof(struct nvme_completion));
-
-        /* sq_tail / last_sq_tail under sq_lock (submit-path lock). */
-        spin_lock(&live_nvmeq->sq_lock);
-        live_nvmeq->sq_tail = 0;
-        live_nvmeq->last_sq_tail = 0;
-        spin_unlock(&live_nvmeq->sq_lock);
-
-        /* cq_head / cq_phase: no concurrent writer at resurrect time
-         * (see SAFETY note above). */
-        live_nvmeq->cq_head = 0;
-        live_nvmeq->cq_phase = 1;
-
-        wmb(); /* publish before the first post-resurrect I/O */
-
-        pr_info("rocm-axiio: resurrect: %s qid=%u host ring pointers "
-                "reset (sq_tail=last_sq_tail=cq_head=0, cq_phase=1)\n",
-                pci_name(pdev), pe->qid);
-      } else {
-        pr_warn("rocm-axiio: resurrect: %s qid=%u dev->queues NULL, "
-                "skipping host ring-pointer reset (queue may still "
-                "desync)\n",
-                pci_name(pdev), pe->qid);
-      }
-    } else if (snap.dev) {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u nvme driver detached "
-              "(pci_get_drvdata != snapshot nvme_dev); skipping host "
-              "ring-pointer reset to avoid use-after-free on the freed "
-              "nvme_dev (queue may still desync)\n",
-              pci_name(pdev), pe->qid);
-    } else {
-      pr_warn("rocm-axiio: resurrect: %s qid=%u snapshot has no nvme_dev, "
-              "skipping host ring-pointer reset\n",
-              pci_name(pdev), pe->qid);
-    }
-#else
-    pr_warn("rocm-axiio: resurrect: host ring-pointer reset compiled out "
-            "(kernel not in [6.8, 6.10)); mirror layout unverified for "
-            "this kernel -- qid=%u may desync\n",
-            pe->qid);
-#endif
-
-    pr_info("rocm-axiio: resurrect: %s qid=%u DONE\n", pci_name(pdev), pe->qid);
-
-    pci_dev_put(pdev);
-    kfree(pe);
-  }
 }
 
 static int rocm_xio_release(struct inode* inode, struct file* file) {
   struct contig_alloc_entry *ca, *tmp;
-  struct quiesced_ns_entry *qn, *qn_tmp;
   LIST_HEAD(to_release);
-  LIST_HEAD(quiesce_release);
-
-  /*
-   * Queue resurrection no longer runs here; it is triggered from the
-   * kprobe on the user DELETE_* (the real "device-side queue is gone"
-   * event), which may pre-date close and span multiple fds. Per-fd
-   * release was unreliable.
-   */
-
-  /* Clean up queue address registrations owned by this fd */
-  {
-    struct queue_addr_entry *qentry, *qtmp;
-    LIST_HEAD(queues_to_free);
-
-    spin_lock(&queue_addrs_lock);
-    list_for_each_entry_safe(qentry, qtmp, &queue_addrs, list) {
-      if (qentry->owner == file) {
-        list_del(&qentry->list);
-        list_add(&qentry->list, &queues_to_free);
-      }
-    }
-    spin_unlock(&queue_addrs_lock);
-
-    list_for_each_entry_safe(qentry, qtmp, &queues_to_free, list) {
-      list_del(&qentry->list);
-      pr_info("rocm-axiio: release: unregistering queue addr "
-              "virt=0x%016llx\n",
-              (unsigned long long)qentry->virt_addr);
-      kfree(qentry);
-    }
-  }
-
-  /* Clean up buffer registrations owned by this fd */
-  {
-    struct vram_buffer_entry *bentry, *btmp;
-    LIST_HEAD(buffers_to_free);
-
-    spin_lock(&vram_buffers_lock);
-    list_for_each_entry_safe(bentry, btmp, &vram_buffers, list) {
-      if (bentry->owner == file) {
-        list_del(&bentry->list);
-        list_add(&bentry->list, &buffers_to_free);
-      }
-    }
-    spin_unlock(&vram_buffers_lock);
-
-    list_for_each_entry_safe(bentry, btmp, &buffers_to_free, list) {
-      list_del(&bentry->list);
-      pr_info("rocm-axiio: release: unregistering buffer "
-              "virt=0x%016llx\n",
-              (unsigned long long)bentry->virt_addr);
-      if (bentry->is_passthrough && bentry->sgt && bentry->attach &&
-          bentry->dmabuf) {
-        dma_buf_unmap_attachment(bentry->attach, bentry->sgt,
-                                 DMA_BIDIRECTIONAL);
-        dma_buf_unpin(bentry->attach);
-        dma_buf_detach(bentry->dmabuf, bentry->attach);
-        dma_buf_put(bentry->dmabuf);
-        if (bentry->nvme_pdev)
-          pci_dev_put(bentry->nvme_pdev);
-      }
-      kfree(bentry);
-    }
-  }
 
   spin_lock(&contig_allocs_lock);
   list_for_each_entry_safe(ca, tmp, &contig_allocs, list) {
@@ -2990,46 +1634,11 @@ static int rocm_xio_release(struct inode* inode, struct file* file) {
 
   list_for_each_entry_safe(ca, tmp, &to_release, list) {
     list_del(&ca->list);
-    pr_info("release: freeing "
+    pr_info("rocm-axiio: release: freeing "
             "contig id=%u dma=0x%llx "
             "size=%zu\n",
             ca->id, (unsigned long long)ca->dma_addr, ca->size);
     kref_put(&ca->ref, contig_alloc_release);
-  }
-
-  /*
-   * Auto-unquiesce any namespaces this fd left quiesced. The
-   * block layer would otherwise stay quiesced forever if a
-   * caller crashed between QUIESCE_NS and UNQUIESCE_NS.
-   */
-  mutex_lock(&quiesced_ns_lock);
-  list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
-    if (qn->owner == file) {
-      list_del(&qn->list);
-      list_add(&qn->list, &quiesce_release);
-    }
-  }
-  mutex_unlock(&quiesced_ns_lock);
-
-  list_for_each_entry_safe(qn, qn_tmp, &quiesce_release, list) {
-    struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
-    list_del(&qn->list);
-    if (q) {
-      if (qn->mode == QUIESCED_NS_MODE_FULL) {
-        blk_mq_unquiesce_queue(q);
-        pr_info("rocm-axiio: release: auto-unquiesced request_queue for %pg\n",
-                qn->bd);
-      } else {
-        struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, qn->hctx_idx);
-        if (hctx) {
-          blk_mq_start_hw_queue(hctx);
-          pr_info("rocm-axiio: release: auto-restarted hctx %u for %pg\n",
-                  qn->hctx_idx, qn->bd);
-        }
-      }
-    }
-    fput(qn->bdev_file);
-    kfree(qn);
   }
 
   return 0;
@@ -3050,7 +1659,7 @@ static int __init rocm_xio_init(void) {
   /* Register character device */
   major_number = register_chrdev(0, DEVICE_NAME, &fops);
   if (major_number < 0) {
-    pr_err("Failed to register device: %d\n", major_number);
+    pr_err("rocm-axiio: Failed to register device: %d\n", major_number);
     return major_number;
   }
 
@@ -3075,44 +1684,14 @@ static int __init rocm_xio_init(void) {
     nvme_kp.pre_handler = nvme_submit_user_cmd_pre;
     ret = register_kprobe(&nvme_kp);
     if (ret < 0) {
-      pr_warn("Failed to register kprobe: %d\n", ret);
+      pr_warn("rocm-axiio: Failed to register kprobe: %d\n", ret);
       pr_warn("  Injection disabled - module will work in ioctl-only mode\n");
       inject_enabled = false;
     } else {
-      pr_info("Kprobe registered successfully\n");
+      pr_info("rocm-axiio: Kprobe registered successfully\n");
       pr_info("  Hooked: %s at %p\n", nvme_kp.symbol_name, nvme_kp.addr);
       pr_info("  Monitoring for CREATE_CQ/CREATE_SQ and I/O commands\n");
     }
-  }
-
-  /*
-   * Register kretprobe on nvme_alloc_queue so we snapshot each I/O
-   * queue's DMA addrs/depth/vector for the resurrection path.
-   *
-   * Queues allocated BEFORE this module loads are not captured; the
-   * first controller reset after load re-invokes nvme_alloc_queue and
-   * from then on we have snapshots.
-   */
-  ret = register_kretprobe(&nvme_alloc_queue_krp);
-  if (ret < 0) {
-    pr_warn("rocm-axiio: Failed to register nvme_alloc_queue kretprobe: %d\n",
-            ret);
-    pr_warn("  Initial queue snapshot disabled (only matters at probe).\n");
-  } else {
-    nvme_alloc_queue_krp_registered = true;
-    pr_info("rocm-axiio: nvme_alloc_queue kretprobe registered at %p\n",
-            nvme_alloc_queue_krp.kp.addr);
-  }
-
-  ret = register_kretprobe(&nvme_create_queue_krp);
-  if (ret < 0) {
-    pr_warn("rocm-axiio: Failed to register nvme_create_queue kretprobe: %d\n",
-            ret);
-    pr_warn("  QID resurrection on release will be disabled.\n");
-  } else {
-    nvme_create_queue_krp_registered = true;
-    pr_info("rocm-axiio: nvme_create_queue kretprobe registered at %p\n",
-            nvme_create_queue_krp.kp.addr);
   }
 
   pr_info("rocm-axiio: Module loaded\n");
@@ -3132,63 +1711,6 @@ static void __exit rocm_xio_exit(void) {
     unregister_kprobe(&nvme_kp);
   }
 
-  if (nvme_alloc_queue_krp_registered) {
-    unregister_kretprobe(&nvme_alloc_queue_krp);
-    nvme_alloc_queue_krp_registered = false;
-    pr_info("rocm-axiio: nvme_alloc_queue kretprobe unregistered "
-            "(missed=%d)\n",
-            nvme_alloc_queue_krp.nmissed);
-  }
-  if (nvme_create_queue_krp_registered) {
-    unregister_kretprobe(&nvme_create_queue_krp);
-    nvme_create_queue_krp_registered = false;
-    pr_info("rocm-axiio: nvme_create_queue kretprobe unregistered "
-            "(missed=%d)\n",
-            nvme_create_queue_krp.nmissed);
-  }
-
-  /* Wait for any pending snapshot/resurrect work to finish before
-   * tearing down the snapshot/pending/poisoned lists. The kretprobes
-   * are already unregistered above, so no new pending entries can be
-   * enqueued. cancel_work_sync lets an already-scheduled snapshot work
-   * run to completion (draining pending_snapshots) before returning. */
-  cancel_work_sync(&rocm_xio_snapshot_work);
-  cancel_delayed_work_sync(&rocm_xio_resurrect_work);
-
-  /* Defensively drain any pending snapshot captures that were enqueued
-   * but never processed (should be empty after cancel_work_sync, but
-   * avoid a leak if one slipped in). */
-  {
-    struct pending_snapshot_entry *pse, *pse_tmp;
-    unsigned long flags_irq;
-    LIST_HEAD(to_free);
-    spin_lock_irqsave(&pending_snapshots_lock, flags_irq);
-    list_splice_init(&pending_snapshots, &to_free);
-    spin_unlock_irqrestore(&pending_snapshots_lock, flags_irq);
-    list_for_each_entry_safe(pse, pse_tmp, &to_free, list) {
-      list_del(&pse->list);
-      kfree(pse);
-    }
-  }
-
-  /* Free any remaining queue snapshots and poisoned-qid entries */
-  nvme_queue_snapshots_free_all();
-  {
-    struct poisoned_qid_entry *pe, *pe_tmp;
-    unsigned long flags_irq;
-    LIST_HEAD(to_free);
-    spin_lock_irqsave(&poisoned_qids_lock, flags_irq);
-    list_for_each_entry_safe(pe, pe_tmp, &poisoned_qids, list) {
-      list_del(&pe->list);
-      list_add(&pe->list, &to_free);
-    }
-    spin_unlock_irqrestore(&poisoned_qids_lock, flags_irq);
-    list_for_each_entry_safe(pe, pe_tmp, &to_free, list) {
-      list_del(&pe->list);
-      kfree(pe);
-    }
-  }
-
   /* Clean up registered queue addresses */
   spin_lock(&queue_addrs_lock);
   list_for_each_entry_safe(qentry, qtmp, &queue_addrs, list) {
@@ -3198,28 +1720,20 @@ static void __exit rocm_xio_exit(void) {
   spin_unlock(&queue_addrs_lock);
 
   /* Clean up registered buffers */
-  {
-    LIST_HEAD(to_free);
-
-    spin_lock(&vram_buffers_lock);
-    list_splice_init(&vram_buffers, &to_free);
-    spin_unlock(&vram_buffers_lock);
-
-    list_for_each_entry_safe(entry, tmp, &to_free, list) {
-      list_del(&entry->list);
-      /* Cleanup passthrough attachment if needed */
-      if (entry->is_passthrough && entry->sgt && entry->attach &&
-          entry->dmabuf) {
-        dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
-        dma_buf_unpin(entry->attach);
-        dma_buf_detach(entry->dmabuf, entry->attach);
-        dma_buf_put(entry->dmabuf);
-        if (entry->nvme_pdev)
-          pci_dev_put(entry->nvme_pdev);
-      }
-      kfree(entry);
+  spin_lock(&vram_buffers_lock);
+  list_for_each_entry_safe(entry, tmp, &vram_buffers, list) {
+    list_del(&entry->list);
+    /* Cleanup passthrough attachment if needed */
+    if (entry->is_passthrough && entry->sgt && entry->attach && entry->dmabuf) {
+      dma_buf_unmap_attachment(entry->attach, entry->sgt, DMA_BIDIRECTIONAL);
+      dma_buf_detach(entry->dmabuf, entry->attach);
+      dma_buf_put(entry->dmabuf);
+      if (entry->nvme_pdev)
+        pci_dev_put(entry->nvme_pdev);
     }
+    kfree(entry);
   }
+  spin_unlock(&vram_buffers_lock);
 
   /* Clean up contiguous DMA allocations */
   {
@@ -3235,44 +1749,10 @@ static void __exit rocm_xio_exit(void) {
 
     list_for_each_entry_safe(ca, ca_tmp, &to_free, list) {
       list_del(&ca->list);
-      pr_info("exit: freeing contig "
+      pr_info("rocm-axiio: exit: freeing contig "
               "id=%u dma=0x%llx size=%zu\n",
               ca->id, (unsigned long long)ca->dma_addr, ca->size);
       kref_put(&ca->ref, contig_alloc_release);
-    }
-  }
-
-  /* Unquiesce any namespaces still held by the module */
-  {
-    struct quiesced_ns_entry *qn, *qn_tmp;
-    LIST_HEAD(qn_free);
-
-    mutex_lock(&quiesced_ns_lock);
-    list_for_each_entry_safe(qn, qn_tmp, &quiesced_ns, list) {
-      list_del(&qn->list);
-      list_add(&qn->list, &qn_free);
-    }
-    mutex_unlock(&quiesced_ns_lock);
-
-    list_for_each_entry_safe(qn, qn_tmp, &qn_free, list) {
-      struct request_queue* q = qn->bd ? bdev_get_queue(qn->bd) : NULL;
-      list_del(&qn->list);
-      if (q) {
-        if (qn->mode == QUIESCED_NS_MODE_FULL) {
-          blk_mq_unquiesce_queue(q);
-          pr_info("rocm-axiio: exit: unquiesced request_queue for %pg\n",
-                  qn->bd);
-        } else {
-          struct blk_mq_hw_ctx* hctx = rocm_xio_hctx_at(q, qn->hctx_idx);
-          if (hctx) {
-            blk_mq_start_hw_queue(hctx);
-            pr_info("rocm-axiio: exit: restarted hctx %u for %pg\n",
-                    qn->hctx_idx, qn->bd);
-          }
-        }
-      }
-      fput(qn->bdev_file);
-      kfree(qn);
     }
   }
 
@@ -3280,7 +1760,7 @@ static void __exit rocm_xio_exit(void) {
   class_destroy(rocm_xio_class);
   unregister_chrdev(major_number, DEVICE_NAME);
 
-  pr_info("Module unloaded\n");
+  pr_info("rocm-axiio: Module unloaded\n");
 }
 
 module_init(rocm_xio_init);

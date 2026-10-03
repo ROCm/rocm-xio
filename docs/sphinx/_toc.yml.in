@@ -20,13 +20,13 @@ subtrees:
     title: Run tests
   - file: how-to/vm-testing
     title: Run VM-isolated tests
-  - file: how-to/fio-engine
-    title: Use the fio engine
 
 - caption: Conceptual
   entries:
   - file: conceptual/memory-modes
     title: Memory modes, allocation, and coherence
+  - file: nvme-kv
+    title: NVMe Key-Value support
 
 - caption: Reference
   entries:
@@ -34,8 +34,6 @@ subtrees:
     title: Examples
   - file: reference/performance
     title: Performance measurements
-  - file: reference/fio-engine-results
-    title: fio engine benchmark results
   - file: reference/endpoints
     title: Endpoints
   - file: reference/environment-variables
