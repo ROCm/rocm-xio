@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * OSS7.0 SDMA packet structures (CDNA4 / MI350X and later).
+ * OSS7.0 SDMA packet structures (MI400-series and later).
  *
  * Struct definitions derived from the field macros in sdma-packet.h
  * (auto-generated from OSS_70-sDMA_MAS.md).  Each struct mirrors

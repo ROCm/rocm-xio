@@ -214,9 +214,11 @@ message(STATUS "CMAKE_HIP_ARCHITECTURES: ${CMAKE_HIP_ARCHITECTURES}")
 
 # SDMA generation auto-detection from GPU architecture.
 # OSS7.0 SDMA targets use different packet structures than
-# pre-OSS7 (CDNA3 / MI300X).  Extend this list when new
-# OSS7.0 architectures land (e.g. MI450 / CDNA5).
-set(_SDMA_OSS7_TARGETS "gfx950")
+# pre-OSS7 parts.  gfx950 (CDNA4 / MI350X) is NOT OSS7.0: it
+# carries SDMA 4.4.5, which shares the SDMA 4.4.x packet format
+# with gfx942 (CDNA3 / MI300X, SDMA 4.4.2). Extend this list
+# when OSS7.0 architectures land (e.g. MI400-series).
+set(_SDMA_OSS7_TARGETS "gfx1250")
 string(REGEX MATCH "gfx[0-9a-f]+" _BARE_ARCH
        "${OFFLOAD_ARCH}")
 set(_XIO_SDMA_OSS7_DEFAULT OFF)

@@ -9,10 +9,11 @@ on AMD GPUs that can perform memory-to-memory transfers, including peer-to-peer
 
 ## Hardware Requirements
 
-- **AMD MI300X** (CDNA3 / gfx942) -- default build (pre-OSS7
-  SDMA packets)
-- **AMD MI350X** (CDNA4 / gfx950) and later -- OSS7.0 SDMA
-  packets, auto-detected from `OFFLOAD_ARCH`
+- **AMD MI300X** (CDNA3 / gfx942) or **AMD MI350X** (CDNA4 /
+  gfx950) -- default build (pre-OSS7 SDMA packets)
+- **OSS7.0 SDMA hardware** (MI400-series and later) -- OSS7.0 SDMA
+  packets, enabled with `XIO_SDMA_OSS7` (see
+  [OSS7.0 Support](#oss70-support))
 - **ROCm 6.0+** with hsakmt library support
 - **P2P mode**: Multi-GPU system and XGMI/Infinity Fabric for
   GPU-to-GPU
@@ -39,7 +40,8 @@ Thunk) interface.
   (backward-compatibility shim)
 - **sdma_opcodes.h**: Shared SDMA opcode and sub-opcode constants
   for all generations; OSS7.0 sub-opcodes gated by `XIO_SDMA_OSS7`
-- **sdma_pkt_struct.h**: Pre-OSS7 (MI300X) SDMA packet structures
+- **sdma_pkt_struct.h**: Pre-OSS7 (MI300X and MI350X) SDMA packet
+  structures
 - **sdma_pkt_struct_mi4.h**: OSS7.0 packet structures, gated by
   `XIO_SDMA_OSS7` (see [OSS7.0 Support](#oss70-support))
 - **sdma-packet.h**: OSS7.0 SDMA field-level macro definitions
@@ -211,20 +213,28 @@ with XGMI links; otherwise values are N/A.
 
 ## OSS7.0 Support
 
-The sdma-ep supports OSS7.0 SDMA packet formats used by CDNA4
-(MI350X / gfx950) and later architectures. The correct packet
-generation is **auto-detected** from `OFFLOAD_ARCH` at CMake
-configure time.
+The sdma-ep supports OSS7.0 SDMA packet formats used by MI400-series
+and later architectures. The correct packet generation is
+**auto-detected** from `OFFLOAD_ARCH` at CMake configure time.
+
+CDNA4 does not use OSS7.0. MI350X (gfx950) carries SDMA 4.4.5,
+which uses the same SDMA 4.4.x packet format as MI300X (gfx942,
+SDMA 4.4.2). Build gfx950 with the default pre-OSS7 packets.
+Enabling `XIO_SDMA_OSS7` on gfx950 makes the SDMA engine misinterpret
+the fused 19-DWORD copy-and-signal packet as a 7-DWORD linear copy
+followed by unrelated packets.
 
 ### Architecture-Based Auto-Detection
 
 CMake detects the GPU architecture from `OFFLOAD_ARCH` (which
 is itself auto-detected via `rocminfo` or specified manually)
 and enables OSS7.0 packets for architectures in the
-`_SDMA_OSS7_TARGETS` list:
+`_SDMA_OSS7_TARGETS` list. No currently supported architecture
+is in that list, so gfx942 and gfx950 builds use pre-OSS7
+packets:
 
 ```bash
-# Auto-detected: gfx950 enables OSS7.0 automatically
+# Auto-detected: gfx950 uses pre-OSS7 SDMA packets
 cmake -B build -DOFFLOAD_ARCH=gfx950
 
 # Manual override for cross-compilation or pre-silicon
@@ -233,7 +243,14 @@ cmake -B build -DXIO_SDMA_OSS7=ON
 
 When `XIO_SDMA_OSS7` is enabled (auto or manual), the build
 defines `XIO_SDMA_OSS7=1` for all sdma-ep sources. The
-default (pre-OSS7) build targets MI300X hardware.
+default (pre-OSS7) build targets MI300X and MI350X hardware.
+CMake warns when `XIO_SDMA_OSS7` is on and `OFFLOAD_ARCH`
+contains a CDNA (gfx9) target.
+
+`XIO_SDMA_OSS7` is a cached option. Older releases auto-enabled it
+for gfx950, so an existing gfx950 build tree may still hold
+`XIO_SDMA_OSS7=ON`; reconfigure it with `-DXIO_SDMA_OSS7=OFF` or use
+a fresh build directory.
 
 ### OSS7.0 Packet Types
 
@@ -254,7 +271,7 @@ Struct names retain the `_MI4` suffix from the hardware MAS.
 
 ### Key Optimization: Combined Copy + Signal
 
-On MI300X (pre-OSS7), a copy-with-signal requires **two
+On MI300X and MI350X (pre-OSS7), a copy-with-signal requires **two
 packets** in the SDMA ring: a `COPY_LINEAR` (7 DWORDs)
 followed by an `ATOMIC` (8 DWORDs) for the signal increment.
 
