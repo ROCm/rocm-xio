@@ -36,6 +36,8 @@
 #                     guest script's own, 4). The GPU is emulated, so every
 #                     dispatch is interpreted; raise this, do not shorten the
 #                     tests. Lower it to 1 to see the unscaled budgets.
+#   --batch-depth N   nvme-ep per-batch private array bound in the guest
+#                     (default: the guest script's own, 16)
 #   --trace EVENTS    QEMU trace events (default: doorbell; "all" for every
 #                     pci_nvme* event, or a literal event name or glob). The
 #                     pci_mmio_bridge_* events are always on. Collected to
@@ -88,6 +90,7 @@ while [ $# -gt 0 ]; do
         --vmem) VM_VMEM="$2"; shift 2 ;;
         --ctest-label) CTEST_LABEL="$2"; shift 2 ;;
         --timeout-scale) TIMEOUT_SCALE="$2"; shift 2 ;;
+        --batch-depth) BATCH_DEPTH="$2"; shift 2 ;;
         --trace) VM_NVME_TRACE="$2"; shift 2 ;;
         --skip-gpu) SKIP_GPU="1"; shift ;;
         --keep) KEEP=1; shift ;;
@@ -338,7 +341,24 @@ fi
 say "Building and running nvme-ep tests in the guest"
 set +e
 ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
-    "CTEST_LABEL='${CTEST_LABEL}' SKIP_GPU='${SKIP_GPU}' ${TIMEOUT_SCALE:+TIMEOUT_SCALE='${TIMEOUT_SCALE}'} ./rocm-xio/scripts/test/vm-guest-test.sh"
+    bash -s -- \
+    "$CTEST_LABEL" \
+    "$SKIP_GPU" \
+    "${CTEST_EXCLUDE_LABEL:-}" \
+    "${TIMEOUT_SCALE:-}" \
+    "${CTEST_EXCLUDE_REGEX:-}" \
+    "${INCLUDE_VM_KNOWN_FAILS:-}" \
+    "${BATCH_DEPTH:-}" <<'GUEST_TEST'
+set -euo pipefail
+export CTEST_LABEL="$1"
+export SKIP_GPU="$2"
+[ -n "${3}" ] && export CTEST_EXCLUDE_LABEL="$3"
+[ -n "${4}" ] && export TIMEOUT_SCALE="$4"
+[ -n "${5}" ] && export CTEST_EXCLUDE_REGEX="$5"
+[ -n "${6}" ] && export INCLUDE_VM_KNOWN_FAILS="$6"
+[ -n "${7}" ] && export BATCH_DEPTH="$7"
+exec ./rocm-xio/scripts/test/vm-guest-test.sh
+GUEST_TEST
 test_rc=$?
 set -e
 

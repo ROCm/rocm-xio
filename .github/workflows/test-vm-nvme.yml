@@ -45,6 +45,19 @@ on:
           only applies to manual runs.
         required: false
         default: ""
+      ctest-exclude-regex:
+        description: >-
+          ctest test-name regex to exclude inside the guest. Empty leaves
+          only the guest script's default rocJITsu exclusions.
+        required: false
+        default: ""
+      include-vm-known-fails:
+        description: >-
+          Set to 1 to run the guest script's default rocJITsu-known-failing
+          tests too. This disables only the guest script's built-in excludes;
+          any user-supplied ctest exclude regex still applies.
+        required: false
+        default: "0"
       batch-depth:
         description: >-
           nvme-ep per-batch private array bound. Each entry costs 40 B/thread
@@ -251,6 +264,8 @@ jobs:
           # 0.11 s. Worth running, not worth running on every push, so the
           # weekly schedule and manual runs still get them.
           CTEST_EXCLUDE_LABEL: ${{ github.event_name == 'pull_request' && 'stress' || inputs.ctest-exclude-label || '' }}
+          CTEST_EXCLUDE_REGEX: ${{ inputs.ctest-exclude-regex || '' }}
+          INCLUDE_VM_KNOWN_FAILS: ${{ inputs.include-vm-known-fails || '0' }}
           SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
           TIMEOUT_SCALE: ${{ inputs.timeout-scale || '' }}
           BATCH_DEPTH: ${{ inputs.batch-depth || '' }}
@@ -261,11 +276,24 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               "$SSH_USER@localhost" \
-              "CTEST_LABEL='$CTEST_LABEL' SKIP_GPU='$SKIP_GPU' \
-               ${CTEST_EXCLUDE_LABEL:+CTEST_EXCLUDE_LABEL='$CTEST_EXCLUDE_LABEL'} \
-               ${TIMEOUT_SCALE:+TIMEOUT_SCALE='$TIMEOUT_SCALE'} \
-               ${BATCH_DEPTH:+BATCH_DEPTH='$BATCH_DEPTH'} \
-               ./rocm-xio/scripts/test/vm-guest-test.sh"
+              bash -s -- \
+              "$CTEST_LABEL" \
+              "$SKIP_GPU" \
+              "${CTEST_EXCLUDE_LABEL:-}" \
+              "${TIMEOUT_SCALE:-}" \
+              "${CTEST_EXCLUDE_REGEX:-}" \
+              "${INCLUDE_VM_KNOWN_FAILS:-}" \
+              "${BATCH_DEPTH:-}" <<'GUEST_TEST'
+          set -euo pipefail
+          export CTEST_LABEL="$1"
+          export SKIP_GPU="$2"
+          [ -n "${3}" ] && export CTEST_EXCLUDE_LABEL="$3"
+          [ -n "${4}" ] && export TIMEOUT_SCALE="$4"
+          [ -n "${5}" ] && export CTEST_EXCLUDE_REGEX="$5"
+          [ -n "${6}" ] && export INCLUDE_VM_KNOWN_FAILS="$6"
+          [ -n "${7}" ] && export BATCH_DEPTH="$7"
+          exec ./rocm-xio/scripts/test/vm-guest-test.sh
+          GUEST_TEST
 
       - name: Collect guest diagnostics
         if: always()
