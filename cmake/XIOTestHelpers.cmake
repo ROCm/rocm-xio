@@ -10,6 +10,28 @@ set(XIO_ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
 set(XIO_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
 set(XIO_TEST_COMMON_DIR ${CMAKE_SOURCE_DIR}/tests/unit/common)
 
+# Multiplier applied to every CTest TIMEOUT this file and XIOInstallTests.cmake
+# set. `ctest --timeout` cannot do this: it only supplies a default for tests
+# with no TIMEOUT property, and every test here ends up with an explicit one.
+# An emulated GPU (rocJITsu over vfio-user) runs dispatches one to two orders
+# of magnitude slower than silicon, so the guest runner configures with
+# -DXIO_CTEST_TIMEOUT_SCALE=N. Keep it at 1 on real hardware: scaling hides
+# regressions, and the last two "it is just a ctest timeout" episodes on this
+# path were genuine bugs.
+set(XIO_CTEST_TIMEOUT_SCALE "1" CACHE STRING
+  "Multiplier for all CTest timeouts (raise for emulated GPUs)")
+if(NOT XIO_CTEST_TIMEOUT_SCALE MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+    "XIO_CTEST_TIMEOUT_SCALE must be a positive integer, got "
+    "'${XIO_CTEST_TIMEOUT_SCALE}'")
+endif()
+
+# _xio_scaled_timeout(<seconds> <out_var>)
+function(_xio_scaled_timeout _in _out)
+  math(EXPR _scaled "${_in} * ${XIO_CTEST_TIMEOUT_SCALE}")
+  set(${_out} ${_scaled} PARENT_SCOPE)
+endfunction()
+
 # xio_add_test()
 #
 # Add a HIP test executable registered with CTest.
@@ -115,26 +137,23 @@ function(xio_add_test)
 
   # Apply timeout (with sensible defaults by label)
   if(XIO_TEST_TIMEOUT)
-    set_tests_properties(${XIO_TEST_NAME}
-      PROPERTIES TIMEOUT ${XIO_TEST_TIMEOUT})
+    set(_timeout ${XIO_TEST_TIMEOUT})
   else()
     list(FIND XIO_TEST_LABELS "unit" _is_unit)
     list(FIND XIO_TEST_LABELS "hardware" _is_hw)
     list(FIND XIO_TEST_LABELS "stress" _is_stress)
     if(NOT _is_stress EQUAL -1)
-      set_tests_properties(${XIO_TEST_NAME}
-        PROPERTIES TIMEOUT 600)
+      set(_timeout 600)
     elseif(NOT _is_hw EQUAL -1)
-      set_tests_properties(${XIO_TEST_NAME}
-        PROPERTIES TIMEOUT 300)
+      set(_timeout 300)
     elseif(NOT _is_unit EQUAL -1)
-      set_tests_properties(${XIO_TEST_NAME}
-        PROPERTIES TIMEOUT 60)
+      set(_timeout 60)
     else()
-      set_tests_properties(${XIO_TEST_NAME}
-        PROPERTIES TIMEOUT 120)
+      set(_timeout 120)
     endif()
   endif()
+  _xio_scaled_timeout(${_timeout} _timeout)
+  set_tests_properties(${XIO_TEST_NAME} PROPERTIES TIMEOUT ${_timeout})
 
   # GPU resource groups for CTest resource allocation
   if(XIO_TEST_GPU)
@@ -201,12 +220,12 @@ function(xio_add_script_test)
   endif()
 
   if(XIO_STEST_TIMEOUT)
-    set_tests_properties(${XIO_STEST_NAME}
-      PROPERTIES TIMEOUT ${XIO_STEST_TIMEOUT})
+    set(_timeout ${XIO_STEST_TIMEOUT})
   else()
-    set_tests_properties(${XIO_STEST_NAME}
-      PROPERTIES TIMEOUT 120)
+    set(_timeout 120)
   endif()
+  _xio_scaled_timeout(${_timeout} _timeout)
+  set_tests_properties(${XIO_STEST_NAME} PROPERTIES TIMEOUT ${_timeout})
 
   set_tests_properties(${XIO_STEST_NAME}
     PROPERTIES

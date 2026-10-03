@@ -46,7 +46,8 @@ if(XIO_SDMA_OSS7)
 endif()
 
 add_test(NAME test-xio-cli-options COMMAND test-xio-cli-options)
+_xio_scaled_timeout(30 _timeout)
 set_tests_properties(test-xio-cli-options PROPERTIES
   LABELS "unit;tester"
-  TIMEOUT 30
+  TIMEOUT ${_timeout}
 )

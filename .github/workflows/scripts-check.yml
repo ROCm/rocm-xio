@@ -1,4 +1,4 @@
-name: scripts-check
+name: rocm-xio - scripts-check
 
 on:
   workflow_dispatch:

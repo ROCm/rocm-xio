@@ -46,10 +46,11 @@ function(xio_install_test_fixture)
       --install ${CMAKE_BINARY_DIR}
       --prefix ${XIO_INSTALL_TEST_PREFIX}
   )
+  _xio_scaled_timeout(120 _timeout)
   set_tests_properties(install-rocm-xio PROPERTIES
     FIXTURES_SETUP ROCM_XIO_INSTALL
     LABELS "integration"
-    TIMEOUT 120
+    TIMEOUT ${_timeout}
   )
 endfunction()
 
@@ -133,9 +134,10 @@ function(xio_add_install_test)
       "or SCRIPT is required")
   endif()
 
+  _xio_scaled_timeout(120 _timeout)
   set_tests_properties(${_test_name} PROPERTIES
     FIXTURES_REQUIRED ROCM_XIO_INSTALL
     LABELS "integration"
-    TIMEOUT 120
+    TIMEOUT ${_timeout}
   )
 endfunction()

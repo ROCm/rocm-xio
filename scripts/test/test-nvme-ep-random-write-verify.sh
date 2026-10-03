@@ -153,6 +153,11 @@ fi
 if [ -n "${ROCXIO_NVME_QUEUE_ID:-}" ]; then
     write_cmd="$write_cmd --queue-id $ROCXIO_NVME_QUEUE_ID"
 fi
+# Required under the rocjitsu VM: without the bridge the GPU's doorbell writes
+# never reach the emulated controller. See test-nvme-ep-data-verification.sh.
+if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
+    write_cmd="$write_cmd --pci-mmio-bridge"
+fi
 
 echo "Command: $write_cmd"
 WRITE_LOG="$TEMP_DIR/write.log"

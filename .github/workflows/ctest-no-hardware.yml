@@ -8,7 +8,7 @@
 # separate -LE hardware -LE system would still run hardware-only and system-only
 # tests. See tests/CMakeLists.txt for the label convention.
 
-name: ctest-no-hardware
+name: rocm-xio - ctest-no-hardware
 
 permissions:
   contents: read
@@ -36,6 +36,13 @@ on:
       - 'scripts/**'
       - 'Makefile'
       - 'tests/**'
+
+env:
+  # Build-time header downloads go through the API on this token
+  # rather than raw.githubusercontent.com, which rate-limits the
+  # shared runner egress IP with HTTP 429 when several jobs start
+  # at once. See scripts/build/gh-fetch-lib.sh.
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   ctest-no-hardware:
