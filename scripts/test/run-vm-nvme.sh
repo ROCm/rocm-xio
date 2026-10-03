@@ -340,23 +340,26 @@ fi
 
 say "Building and running nvme-ep tests in the guest"
 set +e
+# ssh serializes the remote command as a shell string, so empty optional
+# arguments vanish unless they are replaced with a placeholder first.
 ssh -i "$SSH_KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$VM_USER@localhost" \
     bash -s -- \
     "$CTEST_LABEL" \
     "$SKIP_GPU" \
-    "${CTEST_EXCLUDE_LABEL:-}" \
-    "${TIMEOUT_SCALE:-}" \
-    "${CTEST_EXCLUDE_REGEX:-}" \
-    "${INCLUDE_VM_KNOWN_FAILS:-}" \
-    "${BATCH_DEPTH:-}" <<'GUEST_TEST'
+    "${CTEST_EXCLUDE_LABEL:-__ROCM_XIO_EMPTY_VM_ARG__}" \
+    "${TIMEOUT_SCALE:-__ROCM_XIO_EMPTY_VM_ARG__}" \
+    "${CTEST_EXCLUDE_REGEX:-__ROCM_XIO_EMPTY_VM_ARG__}" \
+    "${INCLUDE_VM_KNOWN_FAILS:-__ROCM_XIO_EMPTY_VM_ARG__}" \
+    "${BATCH_DEPTH:-__ROCM_XIO_EMPTY_VM_ARG__}" <<'GUEST_TEST'
 set -euo pipefail
 export CTEST_LABEL="$1"
 export SKIP_GPU="$2"
-[ -n "${3}" ] && export CTEST_EXCLUDE_LABEL="$3"
-[ -n "${4}" ] && export TIMEOUT_SCALE="$4"
-[ -n "${5}" ] && export CTEST_EXCLUDE_REGEX="$5"
-[ -n "${6}" ] && export INCLUDE_VM_KNOWN_FAILS="$6"
-[ -n "${7}" ] && export BATCH_DEPTH="$7"
+empty_arg='__ROCM_XIO_EMPTY_VM_ARG__'
+[ "${3-${empty_arg}}" != "${empty_arg}" ] && export CTEST_EXCLUDE_LABEL="$3"
+[ "${4-${empty_arg}}" != "${empty_arg}" ] && export TIMEOUT_SCALE="$4"
+[ "${5-${empty_arg}}" != "${empty_arg}" ] && export CTEST_EXCLUDE_REGEX="$5"
+[ "${6-${empty_arg}}" != "${empty_arg}" ] && export INCLUDE_VM_KNOWN_FAILS="$6"
+[ "${7-${empty_arg}}" != "${empty_arg}" ] && export BATCH_DEPTH="$7"
 exec ./rocm-xio/scripts/test/vm-guest-test.sh
 GUEST_TEST
 test_rc=$?
