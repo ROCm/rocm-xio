@@ -564,13 +564,7 @@ bool AnvilLib::connect(int srcDeviceId, int dstDeviceId, int numChannels,
   AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
   auto& channel_map = allocateOnHost ? host_sdma_channels_ : sdma_channels_;
 
-  const int selectedEngineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
-  if (selectedEngineId < 0) {
-    throw std::runtime_error("No valid SDMA engine found for GPU pair " +
-                             std::to_string(srcDeviceId) + " -> " +
-                             std::to_string(dstDeviceId));
-  }
-  const uint32_t engineId = static_cast<uint32_t>(selectedEngineId);
+  const uint32_t engineId = getSdmaEngineId(srcDeviceId, dstDeviceId);
   auto& queues = channel_map[key];
   const int existingChannels = static_cast<int>(queues.size());
 
@@ -654,7 +648,7 @@ hsa_agent_t& AnvilLib::getHsaAgent(int deviceId) {
   return hip_gpu_agents_[static_cast<size_t>(deviceId)];
 }
 
-int AnvilLib::getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+uint32_t AnvilLib::getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId) {
   int srcOamId = getOamId(srcDeviceId);
   int dstOamId = getOamId(dstDeviceId);
 
@@ -666,8 +660,15 @@ int AnvilLib::getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId) {
   return mi300xOamMap[srcOamId][dstOamId] * 2;
 }
 
-int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
-                                         int fallbackEngineId) {
+static std::string engineIdToString(std::optional<uint32_t> engineId) {
+  return engineId ? std::to_string(*engineId) : "none";
+}
+
+// HsaIoLinkProperties::RecSdmaEngIdMask is a uint32_t bitmask.
+static constexpr uint32_t kRecSdmaEngMaskBits = 32;
+
+std::optional<uint32_t> AnvilLib::getRecommendedSdmaEngineId(
+  int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId) {
   if (srcDeviceId == dstDeviceId) {
     return fallbackEngineId;
   }
@@ -683,7 +684,8 @@ int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
                 << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
                 << " status=" << status
                 << " numIOLinks=" << nodeProps.NumIOLinks
-                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+                << " fallbackEngineId=" << engineIdToString(fallbackEngineId)
+                << std::endl;
     }
     return fallbackEngineId;
   }
@@ -696,7 +698,8 @@ int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
       std::cout << "SDMA_DEBUG recommended_engine_iolink_query_failed"
                 << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
                 << " status=" << status
-                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+                << " fallbackEngineId=" << engineIdToString(fallbackEngineId)
+                << std::endl;
     }
     return fallbackEngineId;
   }
@@ -713,17 +716,18 @@ int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
                 << " ioLinkType=" << link.IoLinkType
                 << " weight=" << link.Weight << " recSdmaEngIdMask=0x"
                 << std::hex << mask << std::dec
-                << " fallbackEngineId=" << fallbackEngineId << std::endl;
+                << " fallbackEngineId=" << engineIdToString(fallbackEngineId)
+                << std::endl;
     }
 
     if (mask == 0) {
       return fallbackEngineId;
     }
-    if (fallbackEngineId >= 0 && fallbackEngineId < 32 &&
-        (mask & (1u << fallbackEngineId)) != 0) {
+    if (fallbackEngineId && *fallbackEngineId < kRecSdmaEngMaskBits &&
+        (mask & (1u << *fallbackEngineId)) != 0) {
       return fallbackEngineId;
     }
-    for (int engineId = 0; engineId < 32; ++engineId) {
+    for (uint32_t engineId = 0; engineId < kRecSdmaEngMaskBits; ++engineId) {
       if ((mask & (1u << engineId)) != 0) {
         return engineId;
       }
@@ -733,23 +737,26 @@ int AnvilLib::getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
   if (SdmaDebugEnabled()) {
     std::cout << "SDMA_DEBUG recommended_engine_no_matching_link"
               << " srcNodeId=" << srcNodeId << " dstNodeId=" << dstNodeId
-              << " fallbackEngineId=" << fallbackEngineId << std::endl;
+              << " fallbackEngineId=" << engineIdToString(fallbackEngineId)
+              << std::endl;
   }
   return fallbackEngineId;
 }
 
-int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
-  int fallbackEngineId = 0;
+uint32_t AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+  std::optional<uint32_t> fallbackEngineId;
   try {
     fallbackEngineId = getMappedSdmaEngineId(srcDeviceId, dstDeviceId);
   } catch (const std::runtime_error&) {
     // MI300X sysfs xgmi_physical_id may be absent on other ASICs; still allow
     // KFD RecSdmaEngIdMask to choose the engine. Same-GPU uses diagonal 0
     // from the legacy table, matching getMappedSdmaEngineId when sysfs works.
-    fallbackEngineId = (srcDeviceId == dstDeviceId) ? 0 : -1;
+    if (srcDeviceId == dstDeviceId) {
+      fallbackEngineId = 0;
+    }
   }
-  int engineId = getRecommendedSdmaEngineId(srcDeviceId, dstDeviceId,
-                                            fallbackEngineId);
+  std::optional<uint32_t> engineId =
+    getRecommendedSdmaEngineId(srcDeviceId, dstDeviceId, fallbackEngineId);
   if (SdmaDebugEnabled()) {
     int srcOamId = -1;
     int dstOamId = -1;
@@ -761,10 +768,15 @@ int AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
     std::cout << "SDMA_DEBUG map" << " srcDevice=" << srcDeviceId
               << " dstDevice=" << dstDeviceId << " srcOam=" << srcOamId
               << " dstOam=" << dstOamId
-              << " fallbackEngineId=" << fallbackEngineId
-              << " engineId=" << engineId << std::endl;
+              << " fallbackEngineId=" << engineIdToString(fallbackEngineId)
+              << " engineId=" << engineIdToString(engineId) << std::endl;
   }
-  return engineId;
+  if (!engineId) {
+    throw std::runtime_error("No valid SDMA engine found for GPU pair " +
+                             std::to_string(srcDeviceId) + " -> " +
+                             std::to_string(dstDeviceId));
+  }
+  return *engineId;
 }
 
 // ==================== Host API Methods ====================
