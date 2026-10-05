@@ -62,78 +62,99 @@ void register_sdma_ep(nb::module_& m) {
   // Host-initiated data transfer functions
   m.def(
     "put",
-    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t src,
-       uintptr_t dst, size_t size) {
+    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t dst,
+       uintptr_t src, size_t size) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
-      handle.put(reinterpret_cast<void*>(dst), reinterpret_cast<void*>(src),
-                 size);
+      handle.put(reinterpret_cast<void*>(dst),
+                 reinterpret_cast<const void*>(src), size);
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "src"_a, "dst"_a, "size"_a,
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst"_a, "src"_a, "size"_a,
     "Host-initiated 1D memory copy");
 
   m.def(
     "put_signal",
-    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t src,
-       uintptr_t dst, size_t size, uintptr_t flag_ptr, uint64_t flag_value,
+    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t dst,
+       uintptr_t src, size_t size, uintptr_t flag_ptr, uint64_t flag_value,
        int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
         handle.put_signal(reinterpret_cast<void*>(dst),
-                          reinterpret_cast<void*>(src), size,
+                          reinterpret_cast<const void*>(src), size,
                           reinterpret_cast<uint32_t*>(flag_ptr),
                           static_cast<uint32_t>(flag_value));
       } else if (flag_bits == 64) {
         handle.put_signal(reinterpret_cast<void*>(dst),
-                          reinterpret_cast<void*>(src), size,
+                          reinterpret_cast<const void*>(src), size,
                           reinterpret_cast<uint64_t*>(flag_ptr), flag_value);
       } else {
         throw std::invalid_argument("put_signal: flag_bits must be 32 or 64");
       }
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "src"_a, "dst"_a, "size"_a,
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst"_a, "src"_a, "size"_a,
     "flag_ptr"_a, "flag_value"_a, "flag_bits"_a = 64,
     "Host-initiated linear memory copy with atomic signal in one submission");
 
   m.def(
     "put_tile",
-    [](int srcDevice, int dstDevice, int channelIdx, const sdma_ep::Tile& tile,
-       uintptr_t dst_ptr, size_t dst_stride) {
+    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t dst_ptr,
+       uintptr_t src_ptr, size_t data_size, size_t tile_height,
+       size_t tile_width, size_t dst_stride, size_t src_stride) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
-      handle.put_tile(tile, reinterpret_cast<void*>(dst_ptr), dst_stride);
+      handle.put_tile(reinterpret_cast<void*>(dst_ptr),
+                      reinterpret_cast<const void*>(src_ptr), data_size,
+                      tile_height, tile_width, src_stride, dst_stride);
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "tile"_a, "dst_ptr"_a,
-    "dst_stride"_a, "Host-initiated 2D tile transfer using sub-window copy");
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst_addr"_a,
+    "global_addr"_a, "data_size"_a, "tile_height"_a, "tile_width"_a,
+    "dst_stride"_a, "src_stride"_a,
+    "Host-initiated 2D tile transfer using sub-window copy");
 
   m.def(
     "put_tiles",
     [](int srcDevice, int dstDevice, int channelIdx,
-       const std::vector<sdma_ep::Tile>& tiles,
        const std::vector<uintptr_t>& dst_ptrs_uintptr,
-       const std::vector<size_t>& dst_strides) {
+       const std::vector<uintptr_t>& src_ptrs_uintptr, size_t data_size,
+       const std::vector<size_t>& tile_heights,
+       const std::vector<size_t>& tile_widths,
+       const std::vector<size_t>& dst_strides,
+       const std::vector<size_t>& src_strides) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
+      std::vector<const void*> src_ptrs;
+      src_ptrs.reserve(src_ptrs_uintptr.size());
+      for (uintptr_t ptr : src_ptrs_uintptr) {
+        src_ptrs.push_back(reinterpret_cast<const void*>(ptr));
+      }
       std::vector<void*> dst_ptrs;
       dst_ptrs.reserve(dst_ptrs_uintptr.size());
       for (uintptr_t ptr : dst_ptrs_uintptr) {
         dst_ptrs.push_back(reinterpret_cast<void*>(ptr));
       }
-      handle.put_tiles(tiles, dst_ptrs, dst_strides);
+      handle.put_tiles(dst_ptrs, src_ptrs, data_size, tile_heights, tile_widths,
+                       src_strides, dst_strides);
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "tiles"_a, "dst_ptrs"_a,
-    "dst_strides"_a, "Host-initiated batched 2D tile transfers");
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst_addrs"_a,
+    "global_addrs"_a, "data_size"_a, "tile_heights"_a, "tile_widths"_a,
+    "dst_strides"_a, "src_strides"_a,
+    "Host-initiated batched 2D tile transfers");
 
   m.def(
     "put_tile_signal",
-    [](int srcDevice, int dstDevice, int channelIdx, const sdma_ep::Tile& tile,
-       uintptr_t dst_ptr, size_t dst_stride, uintptr_t flag_ptr,
-       uint64_t flag_value, int flag_bits) {
+    [](int srcDevice, int dstDevice, int channelIdx, uintptr_t dst_ptr,
+       uintptr_t src_ptr, size_t data_size, size_t tile_height,
+       size_t tile_width, size_t dst_stride, size_t src_stride,
+       uintptr_t flag_ptr, uint64_t flag_value, int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
-        handle.put_tile_signal(tile, reinterpret_cast<void*>(dst_ptr),
+        handle.put_tile_signal(reinterpret_cast<void*>(dst_ptr),
+                               reinterpret_cast<const void*>(src_ptr),
+                               data_size, tile_height, tile_width, src_stride,
                                dst_stride,
                                reinterpret_cast<uint32_t*>(flag_ptr),
                                static_cast<uint32_t>(flag_value));
       } else if (flag_bits == 64) {
-        handle.put_tile_signal(tile, reinterpret_cast<void*>(dst_ptr),
+        handle.put_tile_signal(reinterpret_cast<void*>(dst_ptr),
+                               reinterpret_cast<const void*>(src_ptr),
+                               data_size, tile_height, tile_width, src_stride,
                                dst_stride,
                                reinterpret_cast<uint64_t*>(flag_ptr),
                                flag_value);
@@ -142,29 +163,41 @@ void register_sdma_ep(nb::module_& m) {
           "put_tile_signal: flag_bits must be 32 or 64");
       }
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "tile"_a, "dst_ptr"_a,
-    "dst_stride"_a, "flag_ptr"_a, "flag_value"_a, "flag_bits"_a = 32,
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst_addr"_a,
+    "global_addr"_a, "data_size"_a, "tile_height"_a, "tile_width"_a,
+    "dst_stride"_a, "src_stride"_a, "flag_ptr"_a, "flag_value"_a,
+    "flag_bits"_a = 32,
     "Host-initiated 2D tile transfer with atomic signal in one submission");
 
   m.def(
     "put_tiles_signal",
     [](int srcDevice, int dstDevice, int channelIdx,
-       const std::vector<sdma_ep::Tile>& tiles,
        const std::vector<uintptr_t>& dst_ptrs_uintptr,
-       const std::vector<size_t>& dst_strides, uintptr_t flag_ptr,
+       const std::vector<uintptr_t>& src_ptrs_uintptr, size_t data_size,
+       const std::vector<size_t>& tile_heights,
+       const std::vector<size_t>& tile_widths,
+       const std::vector<size_t>& dst_strides,
+       const std::vector<size_t>& src_strides, uintptr_t flag_ptr,
        uint64_t flag_value, int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
+      std::vector<const void*> src_ptrs;
+      src_ptrs.reserve(src_ptrs_uintptr.size());
+      for (uintptr_t ptr : src_ptrs_uintptr) {
+        src_ptrs.push_back(reinterpret_cast<const void*>(ptr));
+      }
       std::vector<void*> dst_ptrs;
       dst_ptrs.reserve(dst_ptrs_uintptr.size());
       for (uintptr_t ptr : dst_ptrs_uintptr) {
         dst_ptrs.push_back(reinterpret_cast<void*>(ptr));
       }
       if (flag_bits == 32) {
-        handle.put_tiles_signal(tiles, dst_ptrs, dst_strides,
+        handle.put_tiles_signal(dst_ptrs, src_ptrs, data_size, tile_heights,
+                                tile_widths, src_strides, dst_strides,
                                 reinterpret_cast<uint32_t*>(flag_ptr),
                                 static_cast<uint32_t>(flag_value));
       } else if (flag_bits == 64) {
-        handle.put_tiles_signal(tiles, dst_ptrs, dst_strides,
+        handle.put_tiles_signal(dst_ptrs, src_ptrs, data_size, tile_heights,
+                                tile_widths, src_strides, dst_strides,
                                 reinterpret_cast<uint64_t*>(flag_ptr),
                                 flag_value);
       } else {
@@ -172,50 +205,54 @@ void register_sdma_ep(nb::module_& m) {
           "put_tiles_signal: flag_bits must be 32 or 64");
       }
     },
-    "src_device"_a, "dst_device"_a, "channel_idx"_a, "tiles"_a, "dst_ptrs"_a,
-    "dst_strides"_a, "flag_ptr"_a, "flag_value"_a, "flag_bits"_a = 32,
+    "src_device"_a, "dst_device"_a, "channel_idx"_a, "dst_addrs"_a,
+    "global_addrs"_a, "data_size"_a, "tile_heights"_a, "tile_widths"_a,
+    "dst_strides"_a, "src_strides"_a, "flag_ptr"_a, "flag_value"_a,
+    "flag_bits"_a = 32,
     "Host-initiated batched 2D tile transfers with atomic signal in one "
     "submission");
 
   m.def(
     "wait_flag_then_put",
     [](int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr,
-       uint32_t expected_value, uintptr_t src, uintptr_t dst, size_t size,
+       uint32_t expected_value, uintptr_t dst, uintptr_t src, size_t size,
        int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
-        // Python exposes (src, dst) like numpy/PyTorch; the C++ host
-        // queue mirrors hipMemcpy with (dst, src), so swap here.
         handle.wait_flag_then_put(reinterpret_cast<uint32_t*>(flag_ptr),
                                   expected_value, reinterpret_cast<void*>(dst),
-                                  reinterpret_cast<void*>(src), size);
+                                  reinterpret_cast<const void*>(src), size);
       } else {
         throw std::invalid_argument("wait_flag_then_put: flag_bits must be 32");
       }
     },
     "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a,
-    "expected_value"_a, "src"_a, "dst"_a, "size"_a, "flag_bits"_a = 32,
+    "expected_value"_a, "dst"_a, "src"_a, "size"_a, "flag_bits"_a = 32,
     "Host-initiated wait-on-flag then linear memory copy (POLL + COPY in one "
     "submission)");
 
   m.def(
     "wait_flag_then_put_tile",
     [](int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr,
-       uint32_t expected_value, const sdma_ep::Tile& tile, uintptr_t dst_ptr,
-       size_t dst_stride, int flag_bits) {
+       uint32_t expected_value, uintptr_t dst_ptr, uintptr_t src_ptr,
+       size_t data_size, size_t tile_height, size_t tile_width,
+       size_t dst_stride, size_t src_stride, int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
         handle.wait_flag_then_put_tile(reinterpret_cast<uint32_t*>(flag_ptr),
-                                       expected_value, tile,
+                                       expected_value,
                                        reinterpret_cast<void*>(dst_ptr),
-                                       dst_stride);
+                                       reinterpret_cast<const void*>(src_ptr),
+                                       data_size, tile_height, tile_width,
+                                       src_stride, dst_stride);
       } else {
         throw std::invalid_argument(
           "wait_flag_then_put_tile: flag_bits must be 32");
       }
     },
     "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a,
-    "expected_value"_a, "tile"_a, "dst_ptr"_a, "dst_stride"_a,
+    "expected_value"_a, "dst_addr"_a, "global_addr"_a, "data_size"_a,
+    "tile_height"_a, "tile_width"_a, "dst_stride"_a, "src_stride"_a,
     "flag_bits"_a = 32,
     "Host-initiated wait-on-flag then 2D tile transfer (POLL + SUB_WINDOW_COPY "
     "in one submission)");
@@ -223,26 +260,36 @@ void register_sdma_ep(nb::module_& m) {
   m.def(
     "wait_flag_then_put_tiles",
     [](int srcDevice, int dstDevice, int channelIdx, uintptr_t flag_ptr,
-       uint32_t expected_value, const std::vector<sdma_ep::Tile>& tiles,
-       const std::vector<uintptr_t>& dst_ptrs_uintptr,
-       const std::vector<size_t>& dst_strides, int flag_bits) {
+       uint32_t expected_value, const std::vector<uintptr_t>& dst_ptrs_uintptr,
+       const std::vector<uintptr_t>& src_ptrs_uintptr, size_t data_size,
+       const std::vector<size_t>& tile_heights,
+       const std::vector<size_t>& tile_widths,
+       const std::vector<size_t>& dst_strides,
+       const std::vector<size_t>& src_strides, int flag_bits) {
       auto handle = sdma_ep::getHostHandle(srcDevice, dstDevice, channelIdx);
       if (flag_bits == 32) {
+        std::vector<const void*> src_ptrs;
+        src_ptrs.reserve(src_ptrs_uintptr.size());
+        for (uintptr_t ptr : src_ptrs_uintptr) {
+          src_ptrs.push_back(reinterpret_cast<const void*>(ptr));
+        }
         std::vector<void*> dst_ptrs;
         dst_ptrs.reserve(dst_ptrs_uintptr.size());
         for (uintptr_t ptr : dst_ptrs_uintptr) {
           dst_ptrs.push_back(reinterpret_cast<void*>(ptr));
         }
         handle.wait_flag_then_put_tiles(reinterpret_cast<uint32_t*>(flag_ptr),
-                                        expected_value, tiles, dst_ptrs,
-                                        dst_strides);
+                                        expected_value, dst_ptrs, src_ptrs,
+                                        data_size, tile_heights, tile_widths,
+                                        src_strides, dst_strides);
       } else {
         throw std::invalid_argument(
           "wait_flag_then_put_tiles: flag_bits must be 32");
       }
     },
     "src_device"_a, "dst_device"_a, "channel_idx"_a, "flag_ptr"_a,
-    "expected_value"_a, "tiles"_a, "dst_ptrs"_a, "dst_strides"_a,
+    "expected_value"_a, "dst_addrs"_a, "global_addrs"_a, "data_size"_a,
+    "tile_heights"_a, "tile_widths"_a, "dst_strides"_a, "src_strides"_a,
     "flag_bits"_a = 32,
     "Host-initiated wait-on-flag then batched 2D tile transfers");
 
@@ -295,23 +342,6 @@ void register_sdma_ep(nb::module_& m) {
             "Cached write pointer")
     .def_rw("committed_wptr", &sdma_ep::SdmaQueuePythonDeviceCtx::committedWptr,
             "Committed write pointer");
-
-  // Tile class
-  nb::class_<sdma_ep::Tile>(m, "Tile")
-    .def(nb::init<>())
-    .def_rw("pid_m", &sdma_ep::Tile::pid_m, "Tile coordinate in M dimension")
-    .def_rw("pid_n", &sdma_ep::Tile::pid_n, "Tile coordinate in N dimension")
-    .def_rw("block_m", &sdma_ep::Tile::block_m, "Block size in M dimension")
-    .def_rw("block_n", &sdma_ep::Tile::block_n, "Block size in N dimension")
-    .def_rw("data", &sdma_ep::Tile::data, "Pointer to tile data (uintptr_t)")
-    .def_rw("elem_size", &sdma_ep::Tile::elem_size, "Element size in bytes")
-    .def_rw("src_stride", &sdma_ep::Tile::src_stride,
-            "Source row stride in bytes (0 = contiguous)")
-    .def("width_bytes", &sdma_ep::Tile::width_bytes, "Get tile width in bytes")
-    .def("height", &sdma_ep::Tile::height, "Get tile height")
-    .def("offset_m", &sdma_ep::Tile::offset_m, "Get M offset")
-    .def("offset_n", &sdma_ep::Tile::offset_n, "Get N offset")
-    .def("src_pitch", &sdma_ep::Tile::src_pitch, "Get source pitch");
 
   // Constants
   m.attr("QUEUE_DEVICE_CTX_SIZE") = kQueueDeviceCtxSize;

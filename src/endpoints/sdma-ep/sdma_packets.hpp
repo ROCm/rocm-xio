@@ -33,7 +33,7 @@ namespace packets {
 struct CopyLinearPacket {
   SDMA_PKT_COPY_LINEAR value{};
 
-  SDMA_HOST_DEVICE SDMA_FORCEINLINE explicit CopyLinearPacket(void* src,
+  SDMA_HOST_DEVICE SDMA_FORCEINLINE explicit CopyLinearPacket(const void* src,
                                                               void* dst,
                                                               size_t size) {
     assert(src != nullptr && dst != nullptr &&
@@ -95,7 +95,7 @@ struct LargeSubWindowCopyPacket {
   SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY value{};
 
   SDMA_HOST_DEVICE SDMA_FORCEINLINE LargeSubWindowCopyPacket(
-    void* srcBuf, void* dstBuf, uint32_t tile_width, uint32_t tile_height,
+    const void* srcBuf, void* dstBuf, uint32_t tile_width, uint32_t tile_height,
     uint32_t src_buffer_pitch, uint32_t dst_buffer_pitch, uint32_t src_x,
     uint32_t src_y, uint32_t dst_x, uint32_t dst_y) {
     assert(srcBuf != nullptr && dstBuf != nullptr &&

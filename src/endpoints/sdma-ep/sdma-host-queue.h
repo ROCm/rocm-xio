@@ -32,49 +32,66 @@ public:
   }
 
   // Host-initiated SDMA operations
-  void put(void* dst, void* src, size_t size);
+  void put(void* dst, const void* src, size_t size);
 
   template <typename T>
   void signal(T* ptr, T value);
 
   // Combined put + atomic_add in one SDMA submission (linear memory)
   template <typename T>
-  void put_signal(void* dst, void* src, size_t size, T* flag_ptr, T flag_value);
+  void put_signal(void* dst, const void* src, size_t size, T* flag_ptr,
+                  T flag_value);
 
-  void put_tile(const Tile& tile, void* dst_ptr, size_t dst_stride);
+  void put_tile(void* dst_ptr, const void* src_ptr, size_t data_size,
+                size_t tile_height, size_t tile_width, size_t src_stride,
+                size_t dst_stride);
 
-  void put_tiles(const std::vector<Tile>& tiles,
-                 const std::vector<void*>& dst_ptrs,
+  void put_tiles(const std::vector<void*>& dst_ptrs,
+                 const std::vector<const void*>& src_ptrs, size_t data_size,
+                 const std::vector<size_t>& tile_heights,
+                 const std::vector<size_t>& tile_widths,
+                 const std::vector<size_t>& src_strides,
                  const std::vector<size_t>& dst_strides);
 
   // Combined put_tile + atomic_add in one SDMA submission
   template <typename T>
-  void put_tile_signal(const Tile& tile, void* dst_ptr, size_t dst_stride,
-                       T* flag_ptr, T flag_value);
+  void put_tile_signal(void* dst_ptr, const void* src_ptr, size_t data_size,
+                       size_t tile_height, size_t tile_width, size_t src_stride,
+                       size_t dst_stride, T* flag_ptr, T flag_value);
 
   // Combined put_tiles + atomic_add in one SDMA submission
   template <typename T>
-  void put_tiles_signal(const std::vector<Tile>& tiles,
-                        const std::vector<void*>& dst_ptrs,
+  void put_tiles_signal(const std::vector<void*>& dst_ptrs,
+                        const std::vector<const void*>& src_ptrs,
+                        size_t data_size,
+                        const std::vector<size_t>& tile_heights,
+                        const std::vector<size_t>& tile_widths,
+                        const std::vector<size_t>& src_strides,
                         const std::vector<size_t>& dst_strides, T* flag_ptr,
                         T flag_value);
 
   // Wait on flag, then perform put (POLL + COPY in one submission)
   template <typename T>
-  void wait_flag_then_put(T* flag_ptr, T expected_value, void* dst, void* src,
-                          size_t size);
+  void wait_flag_then_put(T* flag_ptr, T expected_value, void* dst,
+                          const void* src, size_t size);
 
   // Wait on flag, then perform put_tile (POLL + SUB_WINDOW_COPY in one
   // submission)
   template <typename T>
-  void wait_flag_then_put_tile(T* flag_ptr, T expected_value, const Tile& tile,
-                               void* dst_ptr, size_t dst_stride);
+  void wait_flag_then_put_tile(T* flag_ptr, T expected_value, void* dst_ptr,
+                               const void* src_ptr, size_t data_size,
+                               size_t tile_height, size_t tile_width,
+                               size_t src_stride, size_t dst_stride);
 
   // Wait on flag, then perform many put_tile operations in one submission
   template <typename T>
   void wait_flag_then_put_tiles(T* flag_ptr, T expected_value,
-                                const std::vector<Tile>& tiles,
                                 const std::vector<void*>& dst_ptrs,
+                                const std::vector<const void*>& src_ptrs,
+                                size_t data_size,
+                                const std::vector<size_t>& tile_heights,
+                                const std::vector<size_t>& tile_widths,
+                                const std::vector<size_t>& src_strides,
                                 const std::vector<size_t>& dst_strides);
 
   // Wait for all submitted SDMA operations to complete

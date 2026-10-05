@@ -19,7 +19,7 @@ constexpr uint64_t kMaxSdmaDword = std::numeric_limits<uint32_t>::max();
 constexpr uint64_t kMaxLinearSize = 0x1'0000'0000ULL; // 32-bit count field ->
                                                       // size-1 fits in uint32_t
 
-inline void validate_linear_args(void* src, void* dst, size_t size,
+inline void validate_linear_args(const void* src, const void* dst, size_t size,
                                  const char* fn_name) {
   if (!src || !dst || size == 0) {
     throw std::invalid_argument(std::string(fn_name) +
@@ -31,61 +31,40 @@ inline void validate_linear_args(void* src, void* dst, size_t size,
   }
 }
 
-inline void validate_tile_geometry(const Tile& tile, const char* fn_name) {
-  if (!tile.data) {
-    throw std::invalid_argument(std::string(fn_name) + ": tile.data is null");
-  }
-  if (tile.block_m <= 0 || tile.block_n <= 0 || tile.elem_size == 0) {
-    throw std::invalid_argument(std::string(fn_name) +
-                                ": tile has invalid block or element size");
-  }
-  if (tile.pid_m < 0 || tile.pid_n < 0) {
-    throw std::invalid_argument(std::string(fn_name) +
-                                ": negative tile coordinates are unsupported");
-  }
-}
-
 inline packets::LargeSubWindowCopyPacket build_tile_packet(
-  const Tile& tile, void* dst_ptr, size_t dst_stride, const char* fn_name) {
-  validate_tile_geometry(tile, fn_name);
-  if (!dst_ptr) {
+  const void* src_ptr, void* dst_ptr, size_t data_size, size_t tile_height,
+  size_t tile_width, size_t src_stride, size_t dst_stride,
+  const char* fn_name) {
+  if (!src_ptr || !dst_ptr || data_size == 0 || tile_height == 0 ||
+      tile_width == 0) {
     throw std::invalid_argument(std::string(fn_name) +
-                                ": destination pointer is null");
+                                ": invalid pointer or tile geometry");
   }
-  if (dst_stride == 0 || dst_stride > kMaxSdmaDword) {
+  if (src_stride < tile_width || dst_stride < tile_width) {
     throw std::invalid_argument(std::string(fn_name) +
-                                ": destination stride exceeds SDMA limits");
+                                ": row stride is smaller than tile width");
+  }
+  if (data_size > kMaxSdmaDword || tile_width > kMaxSdmaDword / data_size ||
+      src_stride > kMaxSdmaDword / data_size ||
+      dst_stride > kMaxSdmaDword / data_size) {
+    throw std::invalid_argument(std::string(fn_name) +
+                                ": tile geometry exceeds SDMA limits");
   }
 
-  const size_t tile_width_bytes = tile.width_bytes();
-  const size_t tile_height = tile.height();
-  const size_t src_pitch = tile.src_pitch();
-  const uint64_t src_x = static_cast<uint64_t>(tile.offset_n()) *
-                         tile.elem_size;
-  const uint64_t src_y = static_cast<uint64_t>(tile.offset_m());
-
-  if (tile_width_bytes == 0 || tile_height == 0) {
+  const uint64_t tile_width_bytes = tile_width * data_size;
+  const uint64_t src_pitch = src_stride * data_size;
+  const uint64_t dst_pitch = dst_stride * data_size;
+  if (tile_width_bytes > kMaxSdmaDword || tile_height > kMaxSdmaDword ||
+      src_pitch == 0 || src_pitch > kMaxSdmaDword || dst_pitch == 0 ||
+      dst_pitch > kMaxSdmaDword) {
     throw std::invalid_argument(std::string(fn_name) +
-                                ": tile has zero extent");
-  }
-  if (tile_width_bytes > kMaxSdmaDword || tile_height > kMaxSdmaDword) {
-    throw std::invalid_argument(std::string(fn_name) +
-                                ": tile dimensions exceed SDMA limits");
-  }
-  if (src_pitch == 0 || src_pitch > kMaxSdmaDword) {
-    throw std::invalid_argument(std::string(fn_name) +
-                                ": source pitch exceeds SDMA limits");
-  }
-  if (src_x > kMaxSdmaDword || src_y > kMaxSdmaDword) {
-    throw std::invalid_argument(std::string(fn_name) +
-                                ": source offsets exceed SDMA limits");
+                                ": tile geometry exceeds SDMA limits");
   }
 
   return packets::LargeSubWindowCopyPacket(
-    tile.data, dst_ptr, static_cast<uint32_t>(tile_width_bytes),
+    src_ptr, dst_ptr, static_cast<uint32_t>(tile_width_bytes),
     static_cast<uint32_t>(tile_height), static_cast<uint32_t>(src_pitch),
-    static_cast<uint32_t>(dst_stride), static_cast<uint32_t>(src_x),
-    static_cast<uint32_t>(src_y), 0, 0);
+    static_cast<uint32_t>(dst_pitch), 0, 0, 0, 0);
 }
 
 template <typename T>
@@ -212,7 +191,7 @@ void SdmaQueueHostHandle::submitPacket(uint64_t base, uint64_t pending_wptr) {
   queue->hostCommittedWptr_.store(pending_wptr, std::memory_order_release);
 }
 
-void SdmaQueueHostHandle::put(void* dst, void* src, size_t size) {
+void SdmaQueueHostHandle::put(void* dst, const void* src, size_t size) {
   validate_linear_args(src, dst, size, "put");
   submit({packets::CopyLinearPacket(src, dst, size)});
 }
@@ -233,7 +212,7 @@ void SdmaQueueHostHandle::timestamp(uint64_t* timestamp_ptr) {
 }
 
 template <typename T>
-void SdmaQueueHostHandle::put_signal(void* dst, void* src, size_t size,
+void SdmaQueueHostHandle::put_signal(void* dst, const void* src, size_t size,
                                      T* flag_ptr, T flag_value) {
   validate_linear_args(src, dst, size, "put_signal");
 
@@ -241,60 +220,86 @@ void SdmaQueueHostHandle::put_signal(void* dst, void* src, size_t size,
           build_atomic_packet(flag_ptr, flag_value, "put_signal")});
 }
 
-void SdmaQueueHostHandle::put_tile(const Tile& tile, void* dst_ptr,
+void SdmaQueueHostHandle::put_tile(void* dst_ptr, const void* src_ptr,
+                                   size_t data_size, size_t tile_height,
+                                   size_t tile_width, size_t src_stride,
                                    size_t dst_stride) {
-  submit({build_tile_packet(tile, dst_ptr, dst_stride, "put_tile")});
+  submit({build_tile_packet(src_ptr, dst_ptr, data_size, tile_height,
+                            tile_width, src_stride, dst_stride, "put_tile")});
 }
 
-void SdmaQueueHostHandle::put_tiles(const std::vector<Tile>& tiles,
-                                    const std::vector<void*>& dst_ptrs,
+void SdmaQueueHostHandle::put_tiles(const std::vector<void*>& dst_ptrs,
+                                    const std::vector<const void*>& src_ptrs,
+                                    size_t data_size,
+                                    const std::vector<size_t>& tile_heights,
+                                    const std::vector<size_t>& tile_widths,
+                                    const std::vector<size_t>& src_strides,
                                     const std::vector<size_t>& dst_strides) {
-  if (tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size()) {
+  if (src_ptrs.size() != dst_ptrs.size() ||
+      src_ptrs.size() != tile_heights.size() ||
+      src_ptrs.size() != tile_widths.size() ||
+      src_ptrs.size() != src_strides.size() ||
+      src_ptrs.size() != dst_strides.size()) {
     throw std::invalid_argument(
-      "put_tiles: tiles, dst_ptrs, and dst_strides must have same size");
+      "put_tiles: transfer arrays must have the same size");
   }
-  if (tiles.empty()) {
+  if (src_ptrs.empty()) {
     return;
   }
 
   // Build all tile packets into one batch
   std::vector<SdmaPacket> packets;
-  packets.reserve(tiles.size());
+  packets.reserve(src_ptrs.size());
 
-  for (size_t i = 0; i < tiles.size(); ++i) {
-    packets.push_back(
-      build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i], "put_tiles"));
+  for (size_t i = 0; i < src_ptrs.size(); ++i) {
+    packets.push_back(build_tile_packet(src_ptrs[i], dst_ptrs[i], data_size,
+                                        tile_heights[i], tile_widths[i],
+                                        src_strides[i], dst_strides[i],
+                                        "put_tiles"));
   }
 
   submit(packets);
 }
 
 template <typename T>
-void SdmaQueueHostHandle::put_tile_signal(const Tile& tile, void* dst_ptr,
+void SdmaQueueHostHandle::put_tile_signal(void* dst_ptr, const void* src_ptr,
+                                          size_t data_size, size_t tile_height,
+                                          size_t tile_width, size_t src_stride,
                                           size_t dst_stride, T* flag_ptr,
                                           T flag_value) {
-  submit({build_tile_packet(tile, dst_ptr, dst_stride, "put_tile_signal"),
-          build_atomic_packet(flag_ptr, flag_value, "put_tile_signal")});
+  submit(
+    {build_tile_packet(src_ptr, dst_ptr, data_size, tile_height, tile_width,
+                       src_stride, dst_stride, "put_tile_signal"),
+     build_atomic_packet(flag_ptr, flag_value, "put_tile_signal")});
 }
 
 template <typename T>
 void SdmaQueueHostHandle::put_tiles_signal(
-  const std::vector<Tile>& tiles, const std::vector<void*>& dst_ptrs,
+  const std::vector<void*>& dst_ptrs, const std::vector<const void*>& src_ptrs,
+  size_t data_size, const std::vector<size_t>& tile_heights,
+  const std::vector<size_t>& tile_widths,
+  const std::vector<size_t>& src_strides,
   const std::vector<size_t>& dst_strides, T* flag_ptr, T flag_value) {
-  if (tiles.size() != dst_ptrs.size() || tiles.size() != dst_strides.size()) {
+  if (src_ptrs.size() != dst_ptrs.size() ||
+      src_ptrs.size() != tile_heights.size() ||
+      src_ptrs.size() != tile_widths.size() ||
+      src_ptrs.size() != src_strides.size() ||
+      src_ptrs.size() != dst_strides.size()) {
     throw std::invalid_argument(
-      "put_tiles_signal: tiles, dst_ptrs, and dst_strides must have same size");
+      "put_tiles_signal: transfer arrays must have the same size");
   }
-  if (tiles.empty()) {
+  if (src_ptrs.empty()) {
     return;
   }
 
   // Build all tile packets + final signal into one batch
   std::vector<SdmaPacket> packets;
-  packets.reserve(tiles.size() + 1);
+  packets.reserve(src_ptrs.size() + 1);
 
-  for (size_t i = 0; i < tiles.size(); ++i) {
-    packets.push_back(build_tile_packet(tiles[i], dst_ptrs[i], dst_strides[i],
+  for (size_t i = 0; i < src_ptrs.size(); ++i) {
+    packets.push_back(build_tile_packet(src_ptrs[i], dst_ptrs[i], data_size,
+                                        tile_heights[i], tile_widths[i],
+                                        src_strides[i], dst_strides[i],
                                         "put_tiles_signal"));
   }
   packets.push_back(
@@ -309,34 +314,44 @@ template void SdmaQueueHostHandle::signal<uint32_t>(uint32_t* ptr,
 template void SdmaQueueHostHandle::signal<uint64_t>(uint64_t* ptr,
                                                     uint64_t value);
 
-template void SdmaQueueHostHandle::put_signal<uint32_t>(void* dst, void* src,
+template void SdmaQueueHostHandle::put_signal<uint32_t>(void* dst,
+                                                        const void* src,
                                                         size_t size,
                                                         uint32_t* flag_ptr,
                                                         uint32_t flag_value);
-template void SdmaQueueHostHandle::put_signal<uint64_t>(void* dst, void* src,
+template void SdmaQueueHostHandle::put_signal<uint64_t>(void* dst,
+                                                        const void* src,
                                                         size_t size,
                                                         uint64_t* flag_ptr,
                                                         uint64_t flag_value);
 
 template void SdmaQueueHostHandle::put_tile_signal<uint32_t>(
-  const Tile& tile, void* dst_ptr, size_t dst_stride, uint32_t* flag_ptr,
+  void* dst_ptr, const void* src_ptr, size_t data_size, size_t tile_height,
+  size_t tile_width, size_t src_stride, size_t dst_stride, uint32_t* flag_ptr,
   uint32_t flag_value);
 template void SdmaQueueHostHandle::put_tile_signal<uint64_t>(
-  const Tile& tile, void* dst_ptr, size_t dst_stride, uint64_t* flag_ptr,
+  void* dst_ptr, const void* src_ptr, size_t data_size, size_t tile_height,
+  size_t tile_width, size_t src_stride, size_t dst_stride, uint64_t* flag_ptr,
   uint64_t flag_value);
 
 template void SdmaQueueHostHandle::put_tiles_signal<uint32_t>(
-  const std::vector<Tile>& tiles, const std::vector<void*>& dst_ptrs,
+  const std::vector<void*>& dst_ptrs, const std::vector<const void*>& src_ptrs,
+  size_t data_size, const std::vector<size_t>& tile_heights,
+  const std::vector<size_t>& tile_widths,
+  const std::vector<size_t>& src_strides,
   const std::vector<size_t>& dst_strides, uint32_t* flag_ptr,
   uint32_t flag_value);
 template void SdmaQueueHostHandle::put_tiles_signal<uint64_t>(
-  const std::vector<Tile>& tiles, const std::vector<void*>& dst_ptrs,
+  const std::vector<void*>& dst_ptrs, const std::vector<const void*>& src_ptrs,
+  size_t data_size, const std::vector<size_t>& tile_heights,
+  const std::vector<size_t>& tile_widths,
+  const std::vector<size_t>& src_strides,
   const std::vector<size_t>& dst_strides, uint64_t* flag_ptr,
   uint64_t flag_value);
 
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value,
-                                             void* dst, void* src,
+                                             void* dst, const void* src,
                                              size_t size) {
   validate_linear_args(src, dst, size, "wait_flag_then_put");
 
@@ -345,37 +360,46 @@ void SdmaQueueHostHandle::wait_flag_then_put(T* flag_ptr, T expected_value,
 }
 
 template <typename T>
-void SdmaQueueHostHandle::wait_flag_then_put_tile(T* flag_ptr, T expected_value,
-                                                  const Tile& tile,
-                                                  void* dst_ptr,
-                                                  size_t dst_stride) {
+void SdmaQueueHostHandle::wait_flag_then_put_tile(
+  T* flag_ptr, T expected_value, void* dst_ptr, const void* src_ptr,
+  size_t data_size, size_t tile_height, size_t tile_width, size_t src_stride,
+  size_t dst_stride) {
   submit(
     {build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tile"),
-     build_tile_packet(tile, dst_ptr, dst_stride, "wait_flag_then_put_tile")});
+     build_tile_packet(src_ptr, dst_ptr, data_size, tile_height, tile_width,
+                       src_stride, dst_stride, "wait_flag_then_put_tile")});
 }
 
 template <typename T>
 void SdmaQueueHostHandle::wait_flag_then_put_tiles(
-  T* flag_ptr, T expected_value, const std::vector<Tile>& tiles,
-  const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides) {
+  T* flag_ptr, T expected_value, const std::vector<void*>& dst_ptrs,
+  const std::vector<const void*>& src_ptrs, size_t data_size,
+  const std::vector<size_t>& tile_heights,
+  const std::vector<size_t>& tile_widths,
+  const std::vector<size_t>& src_strides,
+  const std::vector<size_t>& dst_strides) {
   static_assert(sizeof(T) == 4,
                 "wait_flag_then_put_tiles only supports 32-bit types");
 
-  if (tiles.empty() || tiles.size() != dst_ptrs.size() ||
-      tiles.size() != dst_strides.size()) {
+  if (src_ptrs.empty() || src_ptrs.size() != dst_ptrs.size() ||
+      src_ptrs.size() != tile_heights.size() ||
+      src_ptrs.size() != tile_widths.size() ||
+      src_ptrs.size() != src_strides.size() ||
+      src_ptrs.size() != dst_strides.size()) {
     throw std::invalid_argument(
       "Invalid wait_flag_then_put_tiles() parameters");
   }
 
   std::vector<SdmaPacket> packets;
-  packets.reserve(1 + tiles.size());
+  packets.reserve(1 + src_ptrs.size());
 
   packets.emplace_back(
     build_poll_packet(flag_ptr, expected_value, "wait_flag_then_put_tiles"));
 
-  for (size_t i = 0; i < tiles.size(); ++i) {
-    packets.emplace_back(build_tile_packet(tiles[i], dst_ptrs[i],
-                                           dst_strides[i],
+  for (size_t i = 0; i < src_ptrs.size(); ++i) {
+    packets.emplace_back(build_tile_packet(src_ptrs[i], dst_ptrs[i], data_size,
+                                           tile_heights[i], tile_widths[i],
+                                           src_strides[i], dst_strides[i],
                                            "wait_flag_then_put_tiles"));
   }
 
@@ -384,16 +408,21 @@ void SdmaQueueHostHandle::wait_flag_then_put_tiles(
 
 // Explicit template instantiations
 template void SdmaQueueHostHandle::wait_flag_then_put<uint32_t>(
-  uint32_t* flag_ptr, uint32_t expected_value, void* dst, void* src,
+  uint32_t* flag_ptr, uint32_t expected_value, void* dst, const void* src,
   size_t size);
 
 template void SdmaQueueHostHandle::wait_flag_then_put_tile<uint32_t>(
-  uint32_t* flag_ptr, uint32_t expected_value, const Tile& tile, void* dst_ptr,
-  size_t dst_stride);
+  uint32_t* flag_ptr, uint32_t expected_value, void* dst_ptr,
+  const void* src_ptr, size_t data_size, size_t tile_height, size_t tile_width,
+  size_t src_stride, size_t dst_stride);
 
 template void SdmaQueueHostHandle::wait_flag_then_put_tiles<uint32_t>(
-  uint32_t* flag_ptr, uint32_t expected_value, const std::vector<Tile>& tiles,
-  const std::vector<void*>& dst_ptrs, const std::vector<size_t>& dst_strides);
+  uint32_t* flag_ptr, uint32_t expected_value,
+  const std::vector<void*>& dst_ptrs, const std::vector<const void*>& src_ptrs,
+  size_t data_size, const std::vector<size_t>& tile_heights,
+  const std::vector<size_t>& tile_widths,
+  const std::vector<size_t>& src_strides,
+  const std::vector<size_t>& dst_strides);
 
 void SdmaQueueHostHandle::quiet() {
   // Get the committed write pointer (what's been submitted to hardware)

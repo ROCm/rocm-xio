@@ -55,38 +55,6 @@ struct SdmaQueueInfo {
 };
 
 /**
- * @brief Tile representation for 2D transfers.
- *
- * Describes a 2D tile within a larger buffer, used for
- * strided sub-window copy operations.
- */
-struct Tile {
-  int32_t pid_m;     /**< Tile coordinate in M dimension */
-  int32_t pid_n;     /**< Tile coordinate in N dimension */
-  int32_t block_m;   /**< Block size in M dimension */
-  int32_t block_n;   /**< Block size in N dimension */
-  void* data;        /**< Pointer to tile data */
-  size_t elem_size;  /**< Element size in bytes (e.g., 4 for float) */
-  size_t src_stride; /**< Source row stride in bytes (0 = contiguous) */
-
-  size_t width_bytes() const {
-    return block_n * elem_size;
-  }
-  size_t height() const {
-    return block_m;
-  }
-  size_t offset_m() const {
-    return static_cast<size_t>(pid_m) * static_cast<size_t>(block_m);
-  }
-  size_t offset_n() const {
-    return static_cast<size_t>(pid_n) * static_cast<size_t>(block_n);
-  }
-  size_t src_pitch() const {
-    return src_stride > 0 ? src_stride : width_bytes();
-  }
-};
-
-/**
  * @brief Python device context structure for SDMA queue.
  *
  * Contains device-accessible pointers encoded as uintptr_t

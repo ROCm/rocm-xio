@@ -9,7 +9,6 @@ from .sdma_ep_py import *
 
 __all__ = [
     'SdmaQueuePythonDeviceCtx',
-    'Tile',
     'QUEUE_DEVICE_CTX_SIZE',
     'COPY_LINEAR_COMMAND_BYTES',
     'COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES',
