@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -76,7 +77,11 @@ public:
   SdmaQueue* createSdmaQueue(int srcDeviceId, int dstDeviceId,
                              uint32_t engineId, int* channelIdx = nullptr,
                              bool isHostQueue = false);
-  int getSdmaEngineId(int srcDeviceId, int dstDeviceId);
+  /**
+   * @brief Select the SDMA engine for a GPU pair.
+   * @throws std::runtime_error if no engine can be determined.
+   */
+  uint32_t getSdmaEngineId(int srcDeviceId, int dstDeviceId);
   xio::sdma_ep::SdmaQueuePythonDeviceCtx getPythonDeviceCtx(int srcDeviceId,
                                                             int dstDeviceId);
   xio::sdma_ep::SdmaQueueHostHandle getHostHandle(int srcDeviceId,
@@ -90,15 +95,23 @@ private:
   uint32_t getKfdNodeId(int deviceId);
 
   /**
+   * @brief Return the HSA agent matching a HIP-visible device by PCI BDF.
+   */
+  hsa_agent_t& getHsaAgent(int deviceId);
+
+  /**
    * @brief Return the legacy OAM-table SDMA engine for a GPU pair.
    */
-  int getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId);
+  uint32_t getMappedSdmaEngineId(int srcDeviceId, int dstDeviceId);
 
   /**
    * @brief Prefer KFD's recommended SDMA engine mask for a GPU pair.
+   *
+   * Returns the fallback when KFD has no recommendation, and std::nullopt
+   * when neither KFD nor the fallback provides an engine.
    */
-  int getRecommendedSdmaEngineId(int srcDeviceId, int dstDeviceId,
-                                 int fallbackEngineId);
+  std::optional<uint32_t> getRecommendedSdmaEngineId(
+    int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId);
 
   using ChannelKey = std::pair<int, int>;
   struct ChannelKeyHash {
@@ -122,14 +135,15 @@ private:
    * 6        5  3  2  4  6  1  0  7
    * 7        3  6  4  2  1  5  7  0
    */
-  std::array<std::array<int, 8>, 8> mi300xOamMap = {{{0, 7, 6, 1, 2, 4, 5, 3},
-                                                     {7, 0, 1, 5, 4, 2, 3, 6},
-                                                     {5, 1, 0, 6, 7, 3, 2, 4},
-                                                     {1, 6, 5, 0, 3, 7, 4, 2},
-                                                     {2, 4, 7, 3, 0, 5, 6, 1},
-                                                     {4, 2, 3, 7, 6, 0, 1, 5},
-                                                     {5, 3, 2, 4, 6, 1, 0, 7},
-                                                     {3, 6, 4, 2, 1, 5, 7, 0}}};
+  std::array<std::array<uint32_t, 8>, 8> mi300xOamMap = {
+    {{0, 7, 6, 1, 2, 4, 5, 3},
+     {7, 0, 1, 5, 4, 2, 3, 6},
+     {5, 1, 0, 6, 7, 3, 2, 4},
+     {1, 6, 5, 0, 3, 7, 4, 2},
+     {2, 4, 7, 3, 0, 5, 6, 1},
+     {4, 2, 3, 7, 6, 0, 1, 5},
+     {5, 3, 2, 4, 6, 1, 0, 7},
+     {3, 6, 4, 2, 1, 5, 7, 0}}};
 
   int getOamId(int deviceId);
 
@@ -137,6 +151,9 @@ private:
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> sdma_channels_;
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash>
     host_sdma_channels_;
+  std::vector<hsa_agent_t> cpu_agents_;
+  std::vector<hsa_agent_t> gpu_agents_;
+  std::vector<hsa_agent_t> hip_gpu_agents_;
 };
 
 extern AnvilLib& anvil;
