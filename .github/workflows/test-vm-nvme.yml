@@ -82,26 +82,33 @@ env:
   # The component suffix is qemu-commit.libvfio-user-commit. Earlier tags named
   # the qemu *branch* instead, so two rebuilds could share a suffix and differ
   # in source; prefer commit-suffixed tags.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20260916.g2cc8e79-qemu.7794baa-vfu.8039244
-  # Stock rocJITsu cannot run this suite: five local patches are needed before
-  # the guest gets past bring-up, and the last of them is what makes GPU tests
-  # run at all -- without it the CP never asks a gfx12 runtime for scratch, and
-  # every dispatch that needs scratch hangs forever. This image carries all
-  # five; ci-images builds it from the vfio-rocjitsu patch series, so the
-  # binaries are identical to a local vfio-rocjitsu build of the same commit
-  # (verified by digest). NotesForRocjitsu.md in that tree documents each patch
-  # for the rocJITsu maintainers.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261007.g677e113-qemu.31e3d06-vfu.8039244
+  # The five local patches this suite used to need all landed upstream: the
+  # image is built unmodified from rocm-systems/develop, and its build asserts
+  # each behaviour is present in the checked-out source by the identifier it is
+  # implemented under. The last of those is what makes GPU tests run at all --
+  # without it the CP never asks a gfx12 runtime for scratch, and every
+  # dispatch that needs scratch hangs forever -- so a future head that
+  # regresses it fails the image build, not this suite.
   #
   # This also serves the gfx1250 firmware stubs. vfio_guest_firmware.py was
   # absent from the image for several tags, which forced a second pin held back
   # at rocjitsu.730bc62 purely to synthesise firmware; the generator is back, so
   # ROCJITSU_FIRMWARE_IMAGE now defaults to this image and the second pin is
-  # gone. The generator it carries emits a superset of the old one: the same
-  # header fixtures plus the two MES names, ip_discovery.bin and a manifest.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20260918.g7438e48-rocjitsu.20d4ce1
+  # gone. The generator it carries is the vendored gap-set one: it emits only
+  # what no driver release ships (gc_12_1_0_imu.bin, the mes/mes1 aliases and
+  # ip_discovery.bin) plus a manifest.json, and deliberately shares no
+  # filename with the packaged blobs, so a stub can no longer overwrite real
+  # microcode.
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261007.g677e113-rocjitsu.4c86d86
   # The "rocjitsu" flavour, not "basic": it already carries ROCm userspace,
   # amdgpu-dkms and rocm-xio's build dependencies, which is most of what
-  # provisioning used to do by hand.
+  # provisioning used to do by hand. The flavour is pinned to the 31.60 driver
+  # tree, whose amdgpu-dkms-firmware ships real gc_12_1_0 and sdma_7_1_0 blobs
+  # under /lib/firmware/updates/amdgpu -- the pairing upstream's qemu-vfio.md
+  # asks for, firmware from the same public driver release as the guest's
+  # amdgpu.ko. Only gc_12_1_0_imu.bin and ip_discovery.bin are still the
+  # consumer's job; the playbook synthesises those from the rocjitsu image.
   #
   # MUST be the resolute build, not noble. Both boot the same kernel,
   # 7.0.0-31-generic, but repo.radeon.com keys its apt suite off the release
@@ -115,7 +122,7 @@ env:
   # The unsuffixed tag, not the "-qcow2" one: this is the variant whose /output
   # holds batesste-ci-vm.qcow2, id_rsa and vm-info.json, which is what
   # run-vm-nvme.sh copies out.
-  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20260916.gab2a19a-vm.resolute-rocjitsu-qm.5d68689
+  QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-rocjitsu:20261007.g677e113-vm.resolute-rocjitsu-qm.a76e881
   VM_IMAGES_DIR: /var/lib/qemu-tool/images
   SSH_PORT: "2222"
 

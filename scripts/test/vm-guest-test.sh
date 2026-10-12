@@ -71,7 +71,13 @@ banner() {
 # --------------------------------------------------------------
 if [ "${SKIP_GPU}" != "1" ]; then
     banner "Loading amdgpu against the rocjitsu emulated device"
-    sudo /usr/local/bin/amdgpu-probe
+    # Bound the probe itself, not just what follows it. The probe's failure
+    # mode is a hang, not an error -- a device the driver cannot finish
+    # initialising wedges the modprobe -- and a wedged probe holds this ssh
+    # session with no output until the job-level timeout fires hours later,
+    # taking the diagnostics with it. The KFD wait loop below is already
+    # bounded; this is the one that was not.
+    sudo timeout 300 /usr/local/bin/amdgpu-probe
 
     # The emulator is slow; KFD topology does not appear the instant
     # modprobe returns.

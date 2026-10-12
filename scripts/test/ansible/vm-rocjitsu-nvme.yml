@@ -13,12 +13,17 @@
 # ubuntu-qcow2-gen/consumers/rocm-xio-rocjitsu.md in batesste-ci-images for the
 # contract. Only what that image deliberately leaves out is done here:
 #
-#   * gfx1250 firmware and ip_discovery.bin. The image omits both on purpose --
-#     ip_discovery.bin must match the *consumer's* rocjitsu pin, not the
-#     image's, and the firmware has no packaged source at all: no amdgpu
-#     release up to 31.50 ships gc_12_1_0 or sdma_7_1_0, and neither does
-#     upstream linux-firmware. Both are synthesised from the rocjitsu
-#     container, the same way qemu-minimal does it.
+#   * The two firmware files the image cannot carry: gc_12_1_0_imu.bin and
+#     ip_discovery.bin. Everything else the driver opens now comes from the
+#     image itself -- the flavour is pinned to the 31.60 driver tree, whose
+#     amdgpu-dkms-firmware ships real gc_12_1_0 mec/mec_1/rlc/rlc_1/uni_mes and
+#     sdma_7_1_0 blobs under /lib/firmware/updates/amdgpu, which is exactly
+#     the pairing upstream's qemu-vfio.md asks for. ip_discovery.bin must
+#     match the *consumer's* rocjitsu pin rather than the image's, and no
+#     driver release ships the imu blob, so both are synthesised from the
+#     rocjitsu container, the same way qemu-minimal does it. The generator's
+#     gap set deliberately shares no filename with the packaged blobs, so a
+#     stub can no longer overwrite real microcode.
 #   * The firmware inventory is then *asserted*, so a missing blob fails here
 #     with a list of what is missing rather than hanging the guest in
 #     gfx_v12_1_hw_init.
@@ -127,11 +132,14 @@
     # Without it amdgpu polls BAR registers for a completion bit rocjitsu
     # never sets and spins at 99% CPU in gfx_v12_1_hw_init.
     #
-    # The gfx1250 firmware blobs cannot come from a package: no amdgpu
-    # release up to 31.50 ships gc_12_1_0 or sdma_7_1_0, and neither does
-    # upstream linux-firmware. amdgpu-dkms-firmware, which amdgpu-dkms pulls
-    # in, stops at gc_12_0_1. So the stubs rocjitsu generates are the only
-    # source, which is what qemu-minimal's vm-rocjitsu.yml does too.
+    # Most of the gfx1250 firmware now comes from a package: the guest image
+    # is pinned to the 31.60 driver tree, whose amdgpu-dkms-firmware ships
+    # real gc_12_1_0 mec/mec_1/rlc/rlc_1/uni_mes and sdma_7_1_0 blobs under
+    # /lib/firmware/updates/amdgpu. What no release ships -- gc_12_1_0_imu.bin
+    # and ip_discovery.bin -- is synthesised here from the rocjitsu image,
+    # the same way qemu-minimal's vm-rocjitsu.yml does it. The generator's
+    # gap set deliberately shares no filename with the packaged blobs, so a
+    # stub can no longer overwrite real microcode.
     #
     # Both generators live in the rocjitsu image, but vfio_guest_firmware.py
     # was absent from it for several tags, so rocjitsu_firmware_image can still
@@ -155,6 +163,11 @@
       become: false
       changed_when: true
 
+    # ip_discovery.bin has to match the rocjitsu build that serves the device,
+    # not the one that synthesised the firmware, so it is generated again
+    # here from the serving image, overwriting the copy the generator wrote.
+    # The two are identical when rocjitsu_firmware_image is left at its
+    # default; the separate step is what keeps them distinct when it is not.
     - name: Generate ip_discovery.bin via the pinned rocjitsu image
       ansible.builtin.command:
         cmd: >-
@@ -184,15 +197,20 @@
       delegate_to: localhost
       become: false
 
-    # The generator emits five stubs, and the driver asks for names it does not
-    # cover. Copy the nearest stub over each missing name. They are all
-    # header-only fixtures with sentinel payloads rather than real microcode, so
-    # which one stands in for which matters only in that the header parses.
+    # The gap-set generator already emits the mes/mes1 aliases, and the real
+    # rlc/mec blobs arrive with the image's 31.60 firmware package, so on the
+    # current pins there is nothing to stand in for. These copies only fire
+    # when rocjitsu_firmware_image is overridden to a pre-31.60 tag whose
+    # generator still emitted the full stub set -- the bisect path run-vm-nvme.sh
+    # documents. They are all header-only fixtures with sentinel payloads
+    # rather than real microcode, so which one stands in for which matters
+    # only in that the header parses.
     #
     #   uni_mes -> mes, mes1   the gfx12.1 MES path asks for both older names
-    #   rlc_1   -> rlc         the generator emits only the _1 variant, which
-    #                          is what amdgpu-dkms asked for; the in-tree 7.0
-    #                          driver asks for the unsuffixed name as well
+    #                          when amdgpu_uni_mes=0
+    #   rlc_1   -> rlc         which of the bare and _1 spellings the driver
+    #                          requests turns on the die revision; the packaged
+    #                          firmware ships both, the old stub set did not
     #
     # Each copy is guarded by a stat, because which stubs a given rocjitsu tag
     # emits is not guaranteed and a missing source should surface as a named
@@ -227,8 +245,8 @@
     # Ask the module that will actually load what it wants, and check every
     # blob is present, so the failure names the missing files instead of
     # hanging the guest in gfx_v12_1_hw_init with nothing to go on. modinfo -n
-    # resolves to the in-tree driver here, which is the point: it is the one
-    # that names the gfx1250 blobs, where amdgpu-dkms names none of them.
+    # resolves to the DKMS-built module under updates/dkms -- the image's own
+    # checks assert exactly that -- which is the module whose probe will run.
     #
     # Two things this check has to get right, both learned the hard way:
     #   * firmware can live under /lib/firmware/updates/amdgpu as well as

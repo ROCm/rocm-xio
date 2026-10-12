@@ -69,9 +69,10 @@ KEEP=0
 RUN_TEST=1
 
 # CI runs 4 vCPU / 8 GiB because that is all a GitHub runner has. A storage
-# node has ~190 cores and 1.5 TiB, and the slow phases here -- the ROCm
-# install and the DKMS rebuild -- are CPU bound, so default bigger and let
-# --vcpus/--vmem dial it back to the CI shape when reproducing a CI failure.
+# node has ~190 cores and 1.5 TiB, and the slow phases here -- the in-guest
+# rocm-xio build and the emulated test run -- are CPU bound, so default bigger
+# and let --vcpus/--vmem dial it back to the CI shape when reproducing a CI
+# failure.
 VM_VCPUS=16
 VM_VMEM=32768
 
