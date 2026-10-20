@@ -45,6 +45,12 @@ gpu_bringup
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester
+
+banner "Building sdma-ep unit tests"
+cmake --build "${BUILD_DIR}" \
+    --target test-sdma-config test-sdma-packet-layout \
+    --parallel "$(nproc)"
+
 load_kernel_module
 
 # --------------------------------------------------------------
