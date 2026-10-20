@@ -38,12 +38,11 @@ VENDOR="${VENDOR:-ionic}"
 gpu_bringup
 
 # --------------------------------------------------------------
-# ionic DKMS + RDMA driver
+# ionic RDMA driver
+# The ernic-rocjitsu qcow2 ships with ionic and ionic_rdma pre-installed
+# via DKMS for its kernel.  Do not rebuild from source; just reload.
 # --------------------------------------------------------------
-banner "Building and loading ionic RDMA DKMS module"
-sudo bash "${SRC_DIR}/kernel/ionic/setup-ionic-eth-rdma-dkms.sh"
-
-banner "Reloading ionic drivers"
+banner "Loading ionic RDMA drivers"
 sudo modprobe -r ionic_rdma 2>/dev/null || true
 sudo modprobe -r ionic 2>/dev/null || true
 sudo modprobe ionic

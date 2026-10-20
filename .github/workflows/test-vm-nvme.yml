@@ -37,7 +37,7 @@ concurrency:
 
 env:
   # QEMU: standard upstream-compatible image is fine here — no pci-mmio-bridge.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g7cf462c-qemu.31e3d06-vfu.8039244
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g1750344-qemu.aa4344e-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
   ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b

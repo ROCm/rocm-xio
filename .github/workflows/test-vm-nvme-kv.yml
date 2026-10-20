@@ -52,13 +52,9 @@ env:
   SPDK_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:20261020.g7cf462c-spdk.18d1d8d
 
   # QEMU: MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
-  #
-  # BLOCKED: the Oct 20 image (qemu.31e3d06) predates the override-GPA feature
-  # (added in bd4ebe947a).  A new image is needed that includes bd4ebe947a plus
-  # the LO-as-commit fix to pci_mmio_bridge_config_write (one-line change to the
-  # if-condition at hw/pci/pci-mmio-bridge.c:545).  Until that image is
-  # published, this pin is held at the Oct 14 build which carries bd4ebe947a.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261014.geea0485-qemu.31e3d06-vfu.8039244
+  # aa4344e includes the vfio-user write path fix (memory_region_dispatch_write)
+  # and the LO-as-commit fix for pci_mmio_bridge_config_write.
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g1750344-qemu.aa4344e-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
   ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
