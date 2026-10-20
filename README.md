@@ -9,6 +9,7 @@
 [![VM NVMe](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme.yml)
 [![VM NVMe KV](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme-kv.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-nvme-kv.yml)
 [![VM RDMA](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-rdma.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-rdma.yml)
+[![VM SDMA](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-sdma.yml/badge.svg)](https://github.com/ROCm/rocm-xio/actions/workflows/test-vm-sdma.yml)
 
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](INSTALL.md)
 [![ROCm](https://img.shields.io/badge/ROCm-supported-green.svg)](https://rocm.docs.amd.com)
