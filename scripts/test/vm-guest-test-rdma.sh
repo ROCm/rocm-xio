@@ -38,21 +38,24 @@ VENDOR="${VENDOR:-ionic}"
 gpu_bringup
 
 # --------------------------------------------------------------
+# udev naming rules must be installed BEFORE loading ionic so the
+# rules fire on module load and rename the interface to rocm-ionic0.
+# --------------------------------------------------------------
+banner "Installing rocm-xio udev rules"
+sudo "${SRC_DIR}/udev/setup-udev-rules.sh" --install
+sudo udevadm control --reload-rules
+
+# --------------------------------------------------------------
 # ionic RDMA driver
 # The ernic-rocjitsu qcow2 ships with ionic and ionic_rdma pre-installed
 # via DKMS for its kernel.  Do not rebuild from source; just reload.
+# Unload first so udev fires the rename rules on re-load.
 # --------------------------------------------------------------
 banner "Loading ionic RDMA drivers"
 sudo modprobe -r ionic_rdma 2>/dev/null || true
 sudo modprobe -r ionic 2>/dev/null || true
 sudo modprobe ionic
 sudo modprobe ionic_rdma
-
-# --------------------------------------------------------------
-# udev naming rules + RDMA loopback setup
-# --------------------------------------------------------------
-banner "Installing rocm-xio udev rules"
-sudo "${SRC_DIR}/udev/setup-udev-rules.sh" --install
 sudo udevadm trigger
 
 banner "Waiting for rocm-ionic0 to appear"
