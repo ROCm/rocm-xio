@@ -96,7 +96,6 @@ timeout --kill-after=30 1000 \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
-    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
           --no-tests=error

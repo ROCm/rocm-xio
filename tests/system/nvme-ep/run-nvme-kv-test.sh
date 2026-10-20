@@ -75,15 +75,12 @@ KV_MAX_VALUE=65536
 # corrupting glibc's heap before the ring write reaches QEMU.  Jemalloc's
 # arena layout is resilient to this overflow for a single invocation.
 PCI_MMIO_BRIDGE_ARG=""
-JEMALLOC_PRELOAD=""
 if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
    [ "${USE_PCI_MMIO_BRIDGE:-0}" = "1" ]; then
     PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
-    JEMALLOC_PRELOAD="/usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
 fi
 
-exec env ${JEMALLOC_PRELOAD:+LD_PRELOAD="$JEMALLOC_PRELOAD"} \
-    "$XIO_TESTER" nvme-ep \
+exec "$XIO_TESTER" nvme-ep \
     --controller "$KV_CTRL" \
     --namespace  "$KV_NSID" \
     --value-size "$KV_MAX_VALUE" \
