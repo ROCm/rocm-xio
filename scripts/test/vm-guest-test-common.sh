@@ -111,13 +111,15 @@ build_xio_tester() {
     # RelWithDebInfo is not a preference: -O0 device code never completes a GPU
     # dispatch on the emulated rocjitsu target (codegen optimisations are
     # required for the GPU scheduler to make forward progress).
+    # CMAKE_EXTRA_FLAGS may be set by the caller to pass additional -D flags.
     cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
         ${HIP_CXX:+-DCMAKE_HIP_COMPILER="${HIP_CXX}"} \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
         -DROCM_PATH="${ROCM_PATH}" \
         -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
-        -DBUILD_TESTING=ON
+        -DBUILD_TESTING=ON \
+        ${CMAKE_EXTRA_FLAGS:-}
 
     banner "Building rocm-xio (xio-tester only)"
     cmake --build "${BUILD_DIR}" --target xio-tester --parallel "$(nproc)"

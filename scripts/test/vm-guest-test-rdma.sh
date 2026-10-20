@@ -74,7 +74,15 @@ sudo env VENDOR="${VENDOR}" \
 # Build + kernel module
 # --------------------------------------------------------------
 find_rocm
+# Enable the GDA ionic provider so the patched rdma-core is built and
+# the GDA RDMA tests can use direct-verbs doorbell access.
+CMAKE_EXTRA_FLAGS="-DGDA_IONIC=ON"
+export CMAKE_EXTRA_FLAGS
 build_xio_tester
+
+banner "Installing patched rdma-core (GDA ionic provider)"
+cmake --build "${BUILD_DIR}" --target install-rdma-core --parallel "$(nproc)"
+
 load_kernel_module
 
 # --------------------------------------------------------------
