@@ -96,19 +96,38 @@ runs:
         docker pull "${{ inputs.rocjitsu-image }}"
         docker pull "${{ inputs.qcow2-image }}"
 
+    - name: Prepare images directory
+      shell: bash
+      env:
+        IMAGES_DIR: ${{ inputs.images-dir }}
+      run: |
+        sudo mkdir -p "$IMAGES_DIR"
+        sudo chmod 777 "$IMAGES_DIR"
+
+    - name: Restore qcow2 cache
+      id: qcow2-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.images-dir }}
+        key: qcow2-${{ inputs.qcow2-image }}
+
     - name: Extract guest disk payload
       id: payload
       shell: bash
       env:
         IMAGES_DIR: ${{ inputs.images-dir }}
+        CACHE_HIT: ${{ steps.qcow2-cache.outputs.cache-hit }}
       run: |
         set -euo pipefail
-        sudo mkdir -p "$IMAGES_DIR"
-        sudo chmod 777 "$IMAGES_DIR"
 
-        cid=$(docker create "${{ inputs.qcow2-image }}")
-        trap 'docker rm -f "$cid" > /dev/null 2>&1 || true' EXIT
-        docker cp "$cid:/output/." "$IMAGES_DIR"
+        if [ "$CACHE_HIT" != "true" ]; then
+          cid=$(docker create "${{ inputs.qcow2-image }}")
+          trap 'docker rm -f "$cid" > /dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/output/." "$IMAGES_DIR"
+          echo "Extracted fresh qcow2 payload"
+        else
+          echo "Using cached qcow2 payload"
+        fi
 
         info="$IMAGES_DIR/vm-info.json"
         test -f "$info" || { echo "::error::no vm-info.json in payload"; exit 1; }
