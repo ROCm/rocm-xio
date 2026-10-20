@@ -3,6 +3,38 @@
 # Reduced from 918 to 311 terms (66% reduction) after doc cleanup
 
 # ===== Project Names =====
+rocjitsu
+spdk
+KvMem
+kvverify
+vfu
+
+# ===== Build / CMake / Compiler flags =====
+RelWithDebInfo
+Wno
+noinline
+toolchain
+
+# ===== Shell / SSH / system utilities =====
+ConnectTimeout
+StrictHostKeyChecking
+bytearray
+cid
+fcntl
+mktemp
+rsync
+rpc
+rsa
+scp
+testkey
+qm
+rf
+xc
+gc
+ce
+
+# ===== Misc abbreviations =====
+IIqq
 SPDX
 xio
 XIO
