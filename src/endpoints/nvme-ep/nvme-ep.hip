@@ -2947,19 +2947,22 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     if (is_rocjitsu_shadow) {
       /* The ring is mmap'd with a guard page before it to absorb any pre-ring
        * writes that rocjitsu's MAP_FIXED registration emits (which would
-       * otherwise land on an adjacent malloc chunk header and corrupt the heap).
-       * Register with HIP so rocjitsu creates the flat-aperture mapping at the
-       * CPU VA; hipHostGetDevicePointer then confirms GPU VA == CPU VA. */
-      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+       * otherwise land on an adjacent malloc chunk header and corrupt the
+       * heap). Register with HIP so rocjitsu creates the flat-aperture mapping
+       * at the CPU VA; hipHostGetDevicePointer then confirms GPU VA == CPU VA.
+       */
+      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
+                                                         shadow_size,
                                                          &shadow_gpu_ptr);
       if (ret_reg < 0) {
         ROCXIO_LOG_ERROR("Failed to register shadow ring with HIP.\n");
         return hipErrorInvalidValue;
       }
-      ROCXIO_LOG_INFO("rocjitsu: shadow ring cpu=%p gpu=%p\n",
-                      shadow_virt, shadow_gpu_ptr);
+      ROCXIO_LOG_INFO("rocjitsu: shadow ring cpu=%p gpu=%p\n", shadow_virt,
+                      shadow_gpu_ptr);
     } else {
-      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt, shadow_size,
+      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
+                                                         shadow_size,
                                                          &shadow_gpu_ptr);
       if (ret_reg < 0) {
         ROCXIO_LOG_ERROR("Failed to register PCI MMIO bridge shadow buffer.\n");
@@ -4073,8 +4076,8 @@ cleanup:
 
   if (is_rocjitsu_shadow && shadow_virt) {
     /* Zero the ring so QEMU sees producer_idx=0, then clear the override. */
-    auto* meta =
-      static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadow_virt);
+    auto* meta = static_cast<volatile struct pci_mmio_bridge_ring_meta*>(
+      shadow_virt);
     meta->producer_idx = 0;
     meta->consumer_idx = 0;
     writeBridgeOverrideGpa(nvmeConfig->doorbellParams.mmioBridgeBdf, 0);

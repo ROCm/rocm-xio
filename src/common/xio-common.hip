@@ -2034,20 +2034,21 @@ int loadKernelModule() {
 // Write a 64-bit guest physical address to the pci-mmio-bridge's override-GPA
 // register (config space offset 0x50-0x57).  When non-zero, QEMU polls that
 // GPA instead of its default E820-reserved shadow GPA.  Used on rocjitsu so
-// the shadow ring lives in normal guest RAM (flat GPU aperture: GPU VA == CPU VA).
+// the shadow ring lives in normal guest RAM (flat GPU aperture: GPU VA == CPU
+// VA).
 int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
   unsigned domain = (bridge_bdf >> 16) & 0xFFFF;
-  unsigned bus    = (bridge_bdf >>  8) & 0xFF;
-  unsigned dev    = (bridge_bdf >>  3) & 0x1F;
-  unsigned fn     =  bridge_bdf        & 0x7;
+  unsigned bus = (bridge_bdf >> 8) & 0xFF;
+  unsigned dev = (bridge_bdf >> 3) & 0x1F;
+  unsigned fn = bridge_bdf & 0x7;
   char path[256];
-  snprintf(path, sizeof(path),
-           "/sys/bus/pci/devices/%04x:%02x:%02x.%x/config",
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%04x:%02x:%02x.%x/config",
            domain, bus, dev, fn);
 
   int fd = open(path, O_RDWR);
   if (fd < 0) {
-    ROCXIO_LOG_WARN("Cannot open bridge config %s: %s\n", path, strerror(errno));
+    ROCXIO_LOG_WARN("Cannot open bridge config %s: %s\n", path,
+                    strerror(errno));
     return -errno;
   }
   uint32_t lo = (uint32_t)(gpa & 0xFFFFFFFFu);
@@ -2063,8 +2064,9 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
    *   4. Write LO=new_lo (trigger) → QEMU commits the full GPA.
    * This avoids the intermediate GPA = (old_HI<<32)|0 that hits kernel RAM. */
   if (pwrite(fd, &zero, 4, 0x54) != 4 || pwrite(fd, &zero, 4, 0x50) != 4 ||
-      pwrite(fd, &hi,   4, 0x54) != 4 || pwrite(fd, &lo,   4, 0x50) != 4) {
-    ROCXIO_LOG_WARN("pwrite to bridge config 0x50 failed: %s\n", strerror(errno));
+      pwrite(fd, &hi, 4, 0x54) != 4 || pwrite(fd, &lo, 4, 0x50) != 4) {
+    ROCXIO_LOG_WARN("pwrite to bridge config 0x50 failed: %s\n",
+                    strerror(errno));
     close(fd);
     return -EIO;
   }
@@ -2083,9 +2085,8 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
 // from rocjitsu lands safely in the pre-ring padding page.
 // The GPA from /proc/self/pagemap of an mmap'd anonymous page is a real guest
 // physical address that QEMU can find via address_space_read.
-int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf,
-                                                size_t size,
-                                                void** virt_addr) {
+int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
+                                        void** virt_addr) {
   /* Allocate size + one guard page before the ring */
   const size_t page = 4096;
   const size_t total = page + size;
@@ -2112,8 +2113,8 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf,
     munmap(raw, total);
     return -EINVAL;
   }
-  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p GPA=0x%llx\n",
-                  buf, (unsigned long long)gpa);
+  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p GPA=0x%llx\n", buf,
+                  (unsigned long long)gpa);
 
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
@@ -2129,8 +2130,8 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf,
     sizeof(struct pci_mmio_bridge_command));
   meta->producer_idx = 0;
   meta->consumer_idx = 0;
-  meta->queue_depth  = depth;
-  meta->reserved     = 0;
+  meta->queue_depth = depth;
+  meta->reserved = 0;
   ROCXIO_LOG_INFO("rocjitsu shadow ring initialized: depth=%u\n", depth);
 
   *virt_addr = buf;
@@ -2202,19 +2203,20 @@ int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr) {
   {
     volatile struct pci_mmio_bridge_ring_meta* meta =
       static_cast<volatile struct pci_mmio_bridge_ring_meta*>(mapped);
-    uint32_t ring_meta_size =
-      static_cast<uint32_t>(sizeof(struct pci_mmio_bridge_ring_meta));
-    uint32_t cmd_size =
-      static_cast<uint32_t>(sizeof(struct pci_mmio_bridge_command));
+    uint32_t ring_meta_size = static_cast<uint32_t>(
+      sizeof(struct pci_mmio_bridge_ring_meta));
+    uint32_t cmd_size = static_cast<uint32_t>(
+      sizeof(struct pci_mmio_bridge_command));
     uint32_t depth = (req.shadow_size > ring_meta_size)
                        ? (static_cast<uint32_t>(req.shadow_size) -
-                          ring_meta_size) / cmd_size
+                          ring_meta_size) /
+                           cmd_size
                        : 0u;
     if (meta->queue_depth == 0) {
       meta->producer_idx = 0;
       meta->consumer_idx = 0;
-      meta->queue_depth  = depth;
-      meta->reserved     = 0;
+      meta->queue_depth = depth;
+      meta->reserved = 0;
       ROCXIO_LOG_INFO("PCI MMIO bridge ring initialized: depth=%u\n", depth);
     } else {
       ROCXIO_LOG_INFO("PCI MMIO bridge ring already live: "

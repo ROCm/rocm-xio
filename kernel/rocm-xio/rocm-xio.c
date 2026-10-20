@@ -159,7 +159,8 @@ static void rocm_xio_move_notify(struct dma_buf_attachment* attach) {
 
 static const struct dma_buf_attach_ops rocm_xio_attach_ops = {
   .allow_peer2peer = true,
-  /* Linux 7.1 renamed .move_notify to .invalidate_mappings (commit ef246da8e63c). */
+/* Linux 7.1 renamed .move_notify to .invalidate_mappings (commit ef246da8e63c).
+ */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
   .invalidate_mappings = rocm_xio_move_notify,
 #else
