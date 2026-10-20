@@ -18,10 +18,10 @@
 [![sdma-ep](https://img.shields.io/badge/sdma--ep-supported-green.svg)][ep-sdma]
 [![test-ep](https://img.shields.io/badge/test--ep-supported-green.svg)][ep-test]
 
-[![QEMU](https://img.shields.io/badge/qemu-sbates--fork-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork)
-[![rocjitsu](https://img.shields.io/badge/rocjitsu-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu)
-[![SPDK](https://img.shields.io/badge/spdk-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user)
-[![ernic](https://img.shields.io/badge/ernic-20261020-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-ernic)
+[![QEMU](https://img.shields.io/badge/qemu-20261020.g1750344--qemu.aa4344e-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork)
+[![rocjitsu](https://img.shields.io/badge/rocjitsu-20261020.g7cf462c--rocjitsu.84fb06b-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu)
+[![SPDK](https://img.shields.io/badge/spdk-20261020.g7cf462c--spdk.18d1d8d-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user)
+[![ernic](https://img.shields.io/badge/ernic-20261020.g7cf462c--ernic.31d3114-blue.svg)](https://hub.docker.com/r/sbates130272/batesste-ci-images-ubuntu-rocm-ernic)
 
 > [!CAUTION]
 > This release is an *early-access* software technology preview. Running
