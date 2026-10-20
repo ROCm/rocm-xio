@@ -33,6 +33,10 @@ xc
 gc
 ce
 
+# ===== Shell variables and Python tokens =====
+FWDIR
+os
+
 # ===== Misc abbreviations =====
 IIqq
 SPDX
