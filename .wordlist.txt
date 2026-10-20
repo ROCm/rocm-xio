@@ -36,6 +36,11 @@ ce
 # ===== Shell variables and Python tokens =====
 FWDIR
 os
+OCI
+SHM
+SIGILL
+IOWR
+IIII
 
 # ===== Misc abbreviations =====
 IIqq
