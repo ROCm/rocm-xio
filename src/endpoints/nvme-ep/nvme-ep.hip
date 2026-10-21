@@ -1878,26 +1878,10 @@ __global__ void gpuKernelPersistent(
                       prpSlot, prpDma, phys_addrs, pageOff);
       }
 
-      uint64_t* prpSlot = nullptr;
-      uint64_t prpDma = 0;
-      if (bufParams.prpEntriesPerCmd > 0 &&
-          (bufParams.prpListPool || bufParams.prpListPoolDma)) {
-        /* prpListPool=nullptr means PRP list is pre-populated (by the
-         * rxio_prp_prefill setup kernel); skip GPU writes, just set PRP2. */
-        prpSlot = bufParams.prpListPool
-                    ? (bufParams.prpListPool +
-                       (size_t)slot * bufParams.prpEntriesPerCmd)
-                    : nullptr;
-        prpDma = prpListDmaForSlot(bufParams, slot);
-      }
-      uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
-      calculatePrps(base_addr, (size_t)lbas_op * ioParams.lbaSize, &sqeLocal,
-                    prpSlot, prpDma, phys_addrs, pageOff);
+      sqeSetup(&sqeLocal, lba, lbas_op);
+      nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
+      sq_tail = (sq_tail + 1) % ioParams.queueSize;
     }
-
-    sqeSetup(&sqeLocal, lba, lbas_op);
-    nvme_ep::sqeWrite(sqeLocal, &sqeAddr[sq_tail]);
-    sq_tail = (sq_tail + 1) % ioParams.queueSize;
 
     /* ── SQ doorbell ──────────────────────────────────── */
     /* Ensure PRP list writes to host-pinned memory are globally visible
