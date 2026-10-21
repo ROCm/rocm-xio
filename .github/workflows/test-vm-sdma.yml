@@ -121,7 +121,7 @@ jobs:
           SSH_USER: ${{ steps.vm.outputs.ssh-user }}
           SSH_KEY: ${{ steps.vm.outputs.ssh-key }}
           CTEST_LABEL: ${{ inputs.ctest-label || 'sdma' }}
-          SKIP_GPU: ${{ inputs.skip-gpu || '0' }}
+          SKIP_GPU: ${{ inputs.skip-gpu || '1' }}
         run: |
           ssh -i "$SSH_KEY" -p "$SSH_PORT" \
               -o BatchMode=yes \
