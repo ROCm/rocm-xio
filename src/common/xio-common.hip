@@ -1292,6 +1292,16 @@ __host__ int detectEmulatedNvme(const char* device_path,
     return -EINVAL;
   }
 
+  // Cache result to avoid repeated std::string heap allocs that corrupt glibc
+  // on some rocjitsu images when called more than once per process.
+  static std::string cached_path;
+  static bool cached_result = false;
+  static int cached_ret = 1; // 1 = not yet cached
+  if (cached_ret != 1 && cached_path == device_path) {
+    *is_emulated_out = cached_result;
+    return cached_ret;
+  }
+
   NvmeDevicePath nvme_path;
   int resolve_ret = resolveNvmeDevicePath(device_path, 1, &nvme_path);
   if (resolve_ret != 0)
@@ -1416,6 +1426,9 @@ __host__ int detectEmulatedNvme(const char* device_path,
             << ", DID=0x" << std::setw(4) << device_id << std::dec << " -> "
             << (is_emulated ? "EMULATED" : "PASSTHROUGH") << std::endl;
 
+  cached_path = device_path;
+  cached_result = is_emulated;
+  cached_ret = 0;
   return 0;
 }
 
