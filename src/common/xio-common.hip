@@ -3024,16 +3024,13 @@ __host__ hipError_t allocateGpuAccessibleBuffer(
     ROCXIO_LOG_INFO("  VRAM buffer virtual: %p\n", bufferInfo->hostPtr);
     ROCXIO_LOG_INFO("  Exporting as DMA-BUF...\n");
 
-    // Detect if device is emulated (needed for buffer registration flags)
-    bool is_emulated = false;
-    if (devicePath != nullptr) {
-      (void)detectEmulatedNvme(devicePath, &is_emulated);
-    }
-
     // Export VRAM as dmabuf and register with kernel module
+    // Use is_emulated_top (sysfs fast path) — calling detectEmulatedNvme here
+    // again corrupts the heap on some rocjitsu images (double std::string
+    // free).
     int ret = exportRegVramBuf(bufferInfo->hostPtr, size, targetBdf,
                                ROCM_XIO_DEVICE_PATH, &bufferInfo->dmaAddr,
-                               is_emulated);
+                               is_emulated_top);
     if (ret < 0) {
       ROCXIO_LOG_ERROR("DMA-BUF export failed for device memory: %s\n",
                        strerror(-ret));
