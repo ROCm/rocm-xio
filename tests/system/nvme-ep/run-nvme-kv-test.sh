@@ -80,9 +80,17 @@ if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
     PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
 fi
 
+# Probe: one-page queues on the emulated path. At the default queue length
+# the SQ/CQ are multi-page plain-malloc buffers sent with PC=1; the SPDK
+# vfio-user target zero-fills the whole PRP1 range at CREATE and wipes foreign
+# heap pages (malloc(): invalid size (unsorted)). 64 entries fit one page.
+# An explicit --queue-length in "$@" still wins (last occurrence).
+KV_QUEUE_LENGTH="${XIO_KV_QUEUE_LENGTH:-64}"
+
 exec "$XIO_TESTER" nvme-ep \
     --controller "$KV_CTRL" \
     --namespace  "$KV_NSID" \
+    --queue-length "$KV_QUEUE_LENGTH" \
     --value-size "$KV_MAX_VALUE" \
     --data-buffer-size "$KV_MAX_VALUE" \
     ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
