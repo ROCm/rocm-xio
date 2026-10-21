@@ -258,6 +258,25 @@
         state: link
         force: true
 
+    # amdgpu-probe: a thin wrapper that loads amdgpu with the ip_block_mask
+    # required for the rocjitsu emulated device (0x7f enables all IP blocks
+    # except MES, which is not fully emulated in some rocjitsu builds).
+    # Newer guest images ship this; install it here for images that omit it.
+    - name: Install amdgpu-probe wrapper if absent
+      ansible.builtin.copy:
+        dest: /usr/local/bin/amdgpu-probe
+        mode: '0755'
+        force: false
+        content: |
+          #!/bin/bash
+          # Load amdgpu with rocjitsu emulation parameters.
+          # 0x77 excludes PSP (bit 3) which rocjitsu does not fully emulate
+          # (psp_v15_0_8 ring creation times out). All other blocks enabled.
+          set -e
+          modprobe amdgpu ip_block_mask=0x77
+        owner: root
+        group: root
+
     - name: Allow the test user passwordless sudo
       ansible.builtin.copy:
         dest: /etc/sudoers.d/90-rocm-xio-ci

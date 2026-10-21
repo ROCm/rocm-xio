@@ -98,7 +98,7 @@ outputs:
     value: ${{ steps.spdk-nsid.outputs.lba-nsid }}
   compose-dir:
     description: Directory the compose stack was brought up from.
-    value: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+    value: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
 
 runs:
   using: composite
@@ -184,7 +184,7 @@ runs:
     # ps) picks up the same pins without the caller repeating them.
     - name: Write compose .env
       shell: bash
-      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      working-directory: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
       run: |
         cat > .env <<EOF
         SPDK_IMAGE=${{ inputs.spdk-image }}
@@ -203,12 +203,12 @@ runs:
 
     - name: Bring up SPDK + rocjitsu + QEMU stack
       shell: bash
-      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      working-directory: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
       run: docker compose up --detach
 
     - name: Wait for the rocjitsu GPU server to be healthy
       shell: bash
-      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      working-directory: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
       run: |
         set -uo pipefail
         for _ in $(seq 1 30); do
@@ -225,7 +225,7 @@ runs:
     - name: Wait for SPDK to be healthy and parse NSID map
       id: spdk-nsid
       shell: bash
-      working-directory: ${{ github.action_path }}/../../compose/spdk-kv-nvme-vm
+      working-directory: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
       run: |
         set -euo pipefail
 
@@ -282,6 +282,57 @@ runs:
         echo "lba-nsid=$lba_nsid" >> "$GITHUB_OUTPUT"
         echo "KV namespace device: $kv_nsid"
         echo "LBA namespace device: ${lba_nsid:-(none)}"
+
+    - name: Bring up guest network via QEMU guest agent
+      shell: bash
+      working-directory: ${{ github.workspace }}/.github/compose/spdk-kv-nvme-vm
+      run: |
+        set -uo pipefail
+        vm_name=$(python3 -c \
+          'import json,sys; print(json.load(open(sys.argv[1]))["vm_name"])' \
+          "${{ inputs.images-dir }}/vm-info.json")
+        QGA_SOCK="/tmp/qga-${vm_name}-${{ inputs.ssh-port }}.sock"
+        docker compose exec -T -e QGA_SOCK="$QGA_SOCK" qemu python3 - <<'EOF'
+        import socket, json, time, base64, sys, os
+        sock_path = os.environ['QGA_SOCK']
+        s = socket.socket(socket.AF_UNIX)
+        for _ in range(60):
+            try:
+                s.connect(sock_path)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                time.sleep(1)
+        else:
+            print("::error::QEMU guest agent socket not ready", file=sys.stderr)
+            sys.exit(1)
+        s.sendall(b'{"execute":"guest-sync","arguments":{"id":1}}\n')
+        time.sleep(0.2); s.recv(4096)
+        cmd = ('ip link set enp0s3 up 2>/dev/null || true; '
+               'ip addr show enp0s3 | grep -q "inet " || '
+               'ip addr add 10.0.2.15/24 dev enp0s3; '
+               'ip route show default | grep -q . || '
+               'ip route add default via 10.0.2.2 dev enp0s3; '
+               'resolvectl dns enp0s3 10.0.2.3 2>/dev/null || true; '
+               'resolvectl domain enp0s3 "~." 2>/dev/null || true; '
+               'echo NET_OK')
+        req = json.dumps({'execute':'guest-exec',
+                          'arguments':{'path':'/bin/sh','arg':['-c',cmd],
+                                       'capture-output':True}})
+        s.sendall((req+'\n').encode()); time.sleep(0.3); r1 = s.recv(4096)
+        pid = json.loads(r1)['return']['pid']
+        for _ in range(10):
+            time.sleep(1)
+            req2 = json.dumps({'execute':'guest-exec-status',
+                               'arguments':{'pid':pid}})
+            s.sendall((req2+'\n').encode()); time.sleep(0.2)
+            r2 = s.recv(65536)
+            r = json.loads(r2)
+            if r['return'].get('exited'):
+                out = base64.b64decode(r['return'].get('out-data','')).decode(errors='replace')
+                print(out)
+                break
+        s.close()
+        EOF
 
     - name: Wait for guest SSH
       shell: bash

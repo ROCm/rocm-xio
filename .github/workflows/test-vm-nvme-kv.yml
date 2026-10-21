@@ -54,15 +54,15 @@ env:
   # QEMU: MUST be the -sbates-fork repository: pci-mmio-bridge is not upstream.
   # aa4344e includes the vfio-user write path fix (memory_region_dispatch_write)
   # and the LO-as-commit fix for pci_mmio_bridge_config_write.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g1750344-qemu.aa4344e-vfu.8039244
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g0f1f43f-qemu.aa4344e-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   # Source of gfx1250 firmware blobs (vfio_guest_firmware.py). Used solely to
   # synthesise firmware, never to serve the device. Kept in sync with
   # ROCJITSU_IMAGE now that vfio_guest_firmware.py is present in the Oct 20 build.
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   # The "ernic-rocjitsu" flavour: carries ROCm userspace, amdgpu-dkms and
   # rocm-xio's build dependencies. MUST be the resolute build (see

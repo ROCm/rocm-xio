@@ -33,13 +33,13 @@ concurrency:
 
 env:
   # QEMU: standard image is fine — no pci-mmio-bridge needed for rdma-ep.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g1750344-qemu.aa4344e-vfu.8039244
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g0f1f43f-qemu.aa4344e-vfu.8039244
 
   # rocjitsu: emulated AMD GPU over vfio-user.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   # Firmware source for gfx1250 blobs.
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   # rocm-ernic: emulated Pensando ionic RDMA NIC over vfio-user, loopback mode.
   ERNIC_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261020.g7cf462c-ernic.31d3114-vfu.8039244

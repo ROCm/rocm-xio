@@ -1868,10 +1868,15 @@ __global__ void gpuKernelPersistent(
 
         uint64_t* prpSlot = nullptr;
         uint64_t prpDma = 0;
-        if (bufParams.prpListPool && bufParams.prpEntriesPerCmd > 0) {
-          prpSlot = bufParams.prpListPool +
-                    (size_t)slot * bufParams.prpEntriesPerCmd;
-          prpDma = bufParams.prpListPoolDma + (uint64_t)slot * NVME_PAGE_SIZE;
+        if (bufParams.prpEntriesPerCmd > 0 &&
+            (bufParams.prpListPool || bufParams.prpListPoolDma)) {
+          /* prpListPool=nullptr means PRP list is pre-populated (by the
+           * rxio_prp_prefill setup kernel); skip GPU writes, just set PRP2. */
+          prpSlot = bufParams.prpListPool
+                      ? (bufParams.prpListPool +
+                         (size_t)slot * bufParams.prpEntriesPerCmd)
+                      : nullptr;
+          prpDma = prpListDmaForSlot(bufParams, slot);
         }
         uint32_t pageOff = (uint32_t)(buf_off / NVME_PAGE_SIZE);
         calculatePrps(base_addr, (size_t)lbas_op * ioParams.lbaSize, &sqeLocal,

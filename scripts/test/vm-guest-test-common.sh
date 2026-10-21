@@ -122,7 +122,12 @@ build_xio_tester() {
         ${CMAKE_EXTRA_FLAGS:-}
 
     banner "Building rocm-xio (xio-tester only)"
-    cmake --build "${BUILD_DIR}" --target xio-tester --parallel "$(nproc)"
+    # Cap at 2 parallel jobs: the HIP device-code link step (ld.lld + clang
+    # offload bundler) consumes ~3-4 GiB per job and OOMs the 8 GiB VM with
+    # nproc=4.
+    local build_jobs
+    build_jobs=$(( $(nproc) > 2 ? 2 : $(nproc) ))
+    cmake --build "${BUILD_DIR}" --target xio-tester --parallel "${build_jobs}"
 }
 
 load_kernel_module() {

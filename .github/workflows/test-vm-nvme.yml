@@ -37,13 +37,13 @@ concurrency:
 
 env:
   # QEMU: standard upstream-compatible image is fine here — no pci-mmio-bridge.
-  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261020.g1750344-qemu.aa4344e-vfu.8039244
+  QEMU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g0f1f43f-qemu.aa4344e-vfu.8039244
 
   # rocjitsu: the emulated AMD GPU served over vfio-user.
-  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   # Firmware image (vfio_guest_firmware.py source of gfx1250 blobs).
-  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261020.g7cf462c-rocjitsu.84fb06b
+  ROCJITSU_FIRMWARE_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g0f1f43f-rocjitsu.84fb06b
 
   QCOW2_IMAGE: docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20261016.g9ef1ed8-vm.resolute-ernic-rocjitsu-qm.c5d51ce
 
