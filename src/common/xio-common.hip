@@ -2098,8 +2098,9 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
 int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
                                         void** virt_addr) {
   void* buf = nullptr;
-  hipError_t hip_err =
-    hipHostMalloc(&buf, size, hipHostMallocDefault | hipHostMallocMapped);
+  hipError_t hip_err = hipHostMalloc(&buf, size,
+                                     hipHostMallocDefault |
+                                       hipHostMallocMapped);
   if (hip_err != hipSuccess || !buf) {
     ROCXIO_LOG_WARN("hipHostMalloc for shadow ring: %s\n",
                     hipGetErrorString(hip_err));
@@ -2136,8 +2137,8 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
     hipHostFree(buf);
     return -EINVAL;
   }
-  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n",
-                  buf, gpu_ptr, (unsigned long long)gpa);
+  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n", buf,
+                  gpu_ptr, (unsigned long long)gpa);
 
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
