@@ -46,9 +46,12 @@ gpu_bringup
 find_rocm
 build_xio_tester
 
-banner "Building test-ep unit tests"
+banner "Building test-ep unit and system tests"
 cmake --build "${BUILD_DIR}" \
     --target test-ep-config test-ep-launch-cpu-threads \
+            test-ep-emulate test-ep-emulate-multithread \
+            test-ep-emulate-doorbell test-ep-emulate-timing \
+            test-ep-emulate-delay \
     --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
 
 load_kernel_module
