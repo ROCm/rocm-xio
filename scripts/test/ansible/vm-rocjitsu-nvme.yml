@@ -258,19 +258,6 @@
         state: link
         force: true
 
-    # ROCm 10.x hipHostRegister() overflows its internal tracking struct,
-    # corrupting adjacent allocator metadata.  Loading jemalloc via
-    # /etc/ld.so.preload applies it to every process including ctest's
-    # children spawned through sudo, which LD_PRELOAD in a shell wrapper
-    # cannot reach.  jemalloc's arena layout survives the overflow where
-    # glibc's unsorted-bin metadata does not.
-    - name: Preload jemalloc to work around ROCm 10.x hipHostRegister overflow
-      ansible.builtin.lineinfile:
-        path: /etc/ld.so.preload
-        line: /usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-        create: true
-        mode: '0644'
-
     - name: Allow the test user passwordless sudo
       ansible.builtin.copy:
         dest: /etc/sudoers.d/90-rocm-xio-ci

@@ -2945,17 +2945,19 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
     void* shadow_gpu_ptr = nullptr;
     if (is_rocjitsu_shadow) {
-      /* The ring is mmap'd with a guard page before it to absorb any pre-ring
-       * writes that rocjitsu's MAP_FIXED registration emits (which would
-       * otherwise land on an adjacent malloc chunk header and corrupt the
-       * heap). Register with HIP so rocjitsu creates the flat-aperture mapping
-       * at the CPU VA; hipHostGetDevicePointer then confirms GPU VA == CPU VA.
+      /* The ring was allocated via hipHostMalloc (in allocMmioBridgeShadowBufferRocjitsu).
+       * hipHostMalloc with hipHostMallocMapped guarantees GPU VA == CPU VA
+       * (flat aperture), and the GPA has already been written to QEMU's
+       * override register.  Retrieve the GPU VA via hipHostGetDevicePointer;
+       * allocMmioBridgeShadowBufferRocjitsu already validated that GPU VA ==
+       * CPU VA, so this is just a formality.  No additional hipHostRegister
+       * call is needed — the allocation is already GPU-visible.
        */
-      int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
-                                                         shadow_size,
-                                                         &shadow_gpu_ptr);
-      if (ret_reg < 0) {
-        ROCXIO_LOG_ERROR("Failed to register shadow ring with HIP.\n");
+      hipError_t gdp_err =
+        hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt, 0);
+      if (gdp_err != hipSuccess) {
+        ROCXIO_LOG_ERROR("hipHostGetDevicePointer for shadow ring: %s\n",
+                         hipGetErrorString(gdp_err));
         return hipErrorInvalidValue;
       }
       ROCXIO_LOG_INFO("rocjitsu: shadow ring cpu=%p gpu=%p\n", shadow_virt,
@@ -4081,11 +4083,8 @@ cleanup:
     meta->producer_idx = 0;
     meta->consumer_idx = 0;
     writeBridgeOverrideGpa(nvmeConfig->doorbellParams.mmioBridgeBdf, 0);
-    hipHostUnregister(shadow_virt);
-    munlock(shadow_virt, 8192);
-    /* shadow_virt = mmap_base + 4096 (guard page); release the full mapping */
-    void* mmap_base = static_cast<char*>(shadow_virt) - 4096;
-    munmap(mmap_base, 4096 + 8192);
+    /* hipHostMalloc — no munmap, no munlock needed */
+    hipHostFree(shadow_virt);
     shadow_virt = nullptr;
   }
 

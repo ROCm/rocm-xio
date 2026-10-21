@@ -2076,45 +2076,68 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
   return 0;
 }
 
-// On rocjitsu, allocate the shadow ring via mmap with 1 page of padding before
-// the ring.  hipHostRegister causes rocjitsu to mmap(ptr, size, MAP_FIXED, ...)
-// to create the flat-aperture mapping — if ptr is from glibc's heap, this
-// overwrites the malloc chunk header at ptr-8 (on the same page as the
-// allocation header for memalign), corrupting the heap.  With a mmap-based
-// allocation, there is no adjacent malloc metadata, and the MAP_FIXED write
-// from rocjitsu lands safely in the pre-ring padding page.
-// The GPA from /proc/self/pagemap of an mmap'd anonymous page is a real guest
-// physical address that QEMU can find via address_space_read.
+// On rocjitsu, allocate the shadow ring via hipHostMalloc so that the GPU
+// virtual address (from hipHostGetDevicePointer) equals the CPU virtual
+// address — i.e. the flat-aperture property holds.  This is essential for
+// two reasons:
+//
+//   1. The GPU kernel (a CPU thread in rocjitsu's process) writes ring
+//      commands to the GPU VA.  For those writes to be visible to QEMU's
+//      bridge poll loop the GPU VA must map to the same guest physical page
+//      (GPA) as the CPU VA that we pass to writeBridgeOverrideGpa.
+//
+//   2. With mmap()+hipHostRegister, the GPU VA returned by
+//      hipHostGetDevicePointer differs from the CPU VA and its pagemap entry
+//      is zero (the backing pages are in the GPU's HMM memory range, not in
+//      the QEMU guest RAM memfd).  QEMU cannot poll those pages.
+//
+// hipHostMalloc with hipHostMallocMapped allocates from the GPU-pinned host
+// memory pool where GPU VA == CPU VA and pagemap returns a valid guest
+// physical address inside the QEMU memfd that QEMU can poll via
+// address_space_read.
 int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
                                         void** virt_addr) {
-  /* Allocate size + one guard page before the ring */
-  const size_t page = 4096;
-  const size_t total = page + size;
-  void* raw = mmap(nullptr, total, PROT_READ | PROT_WRITE,
-                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-  if (raw == MAP_FAILED) {
-    ROCXIO_LOG_WARN("mmap for shadow ring: %s\n", strerror(errno));
+  void* buf = nullptr;
+  hipError_t hip_err =
+    hipHostMalloc(&buf, size, hipHostMallocDefault | hipHostMallocMapped);
+  if (hip_err != hipSuccess || !buf) {
+    ROCXIO_LOG_WARN("hipHostMalloc for shadow ring: %s\n",
+                    hipGetErrorString(hip_err));
     return -ENOMEM;
-  }
-  /* Ring starts one page in; this is where hipHostRegister maps, and any
-   * pre-ring writes from rocjitsu's MAP_FIXED go into the guard page. */
-  void* buf = static_cast<char*>(raw) + page;
-  if (mlock(buf, size) < 0) {
-    ROCXIO_LOG_WARN("mlock shadow ring: %s\n", strerror(errno));
-    munmap(raw, total);
-    return -errno;
   }
   memset(buf, 0, size);
 
-  uint64_t gpa = getPhysAddr(buf);
-  if (gpa == 0) {
-    ROCXIO_LOG_WARN("Cannot get GPA for rocjitsu shadow buffer\n");
-    munlock(buf, size);
-    munmap(raw, total);
+  // Verify flat aperture: GPU VA must equal CPU VA so that the GPU kernel
+  // writes to the same physical pages that QEMU polls.
+  void* gpu_ptr = nullptr;
+  hip_err = hipHostGetDevicePointer(&gpu_ptr, buf, 0);
+  if (hip_err != hipSuccess) {
+    ROCXIO_LOG_WARN("hipHostGetDevicePointer for shadow ring: %s\n",
+                    hipGetErrorString(hip_err));
+    hipHostFree(buf);
     return -EINVAL;
   }
-  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p GPA=0x%llx\n", buf,
-                  (unsigned long long)gpa);
+  if (gpu_ptr != buf) {
+    ROCXIO_LOG_WARN(
+      "shadow ring: GPU VA (%p) != CPU VA (%p) — flat aperture broken.\n"
+      "  The GPU kernel writes to the GPU VA but QEMU polls the GPA derived\n"
+      "  from the CPU VA; these map to different physical pages so ring\n"
+      "  commands will never reach QEMU.  Check HSA_FORCE_FINE_GRAIN_PCIE.\n",
+      gpu_ptr, buf);
+    hipHostFree(buf);
+    return -EINVAL;
+  }
+
+  // GPA must be derived from the GPU VA (== CPU VA here) so that both
+  // QEMU's bridge poll and the GPU kernel target the same physical page.
+  uint64_t gpa = getPhysAddr(gpu_ptr);
+  if (gpa == 0) {
+    ROCXIO_LOG_WARN("Cannot get GPA for rocjitsu shadow buffer\n");
+    hipHostFree(buf);
+    return -EINVAL;
+  }
+  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n",
+                  buf, gpu_ptr, (unsigned long long)gpa);
 
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
