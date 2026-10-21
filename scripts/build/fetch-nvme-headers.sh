@@ -5,7 +5,7 @@
 
 set -e
 
-KERNEL_REPO="https://raw.githubusercontent.com/torvalds/linux/master"
+KERNEL_REPO="https://raw.githubusercontent.com/torvalds/linux/v6.11"
 OUTPUT_DIR="$1"
 
 if [ -z "$OUTPUT_DIR" ]; then
@@ -19,11 +19,13 @@ echo "Fetching NVMe headers from Linux kernel repository..."
 
 # Download the main NVMe header with all structure definitions
 echo "  - Downloading include/linux/nvme.h..."
-curl -sS "${KERNEL_REPO}/include/linux/nvme.h" -o "${OUTPUT_DIR}/linux-nvme.h"
+curl -sSf "${KERNEL_REPO}/include/linux/nvme.h" -o "${OUTPUT_DIR}/linux-nvme.h"
+[ -s "${OUTPUT_DIR}/linux-nvme.h" ] || { echo "ERROR: linux-nvme.h is empty"; exit 1; }
 
 # Download the UAPI header with ioctl structures
 echo "  - Downloading include/uapi/linux/nvme_ioctl.h..."
-curl -sS "${KERNEL_REPO}/include/uapi/linux/nvme_ioctl.h" -o "${OUTPUT_DIR}/linux-nvme_ioctl.h"
+curl -sSf "${KERNEL_REPO}/include/uapi/linux/nvme_ioctl.h" -o "${OUTPUT_DIR}/linux-nvme_ioctl.h"
+[ -s "${OUTPUT_DIR}/linux-nvme_ioctl.h" ] || { echo "ERROR: linux-nvme_ioctl.h is empty"; exit 1; }
 
 echo "Successfully downloaded NVMe headers to ${OUTPUT_DIR}/"
 echo ""
