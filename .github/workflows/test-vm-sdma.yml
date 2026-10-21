@@ -160,6 +160,7 @@ jobs:
 
       - name: Collect compose logs
         if: always()
+        continue-on-error: true
         working-directory: ${{ steps.vm.outputs.compose-dir }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
@@ -176,5 +177,6 @@ jobs:
 
       - name: Tear down the stack
         if: always()
+        continue-on-error: true
         working-directory: ${{ steps.vm.outputs.compose-dir }}
         run: docker compose down --volumes --timeout 10 || true
