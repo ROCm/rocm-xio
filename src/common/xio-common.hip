@@ -2141,8 +2141,7 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
 
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
-    munlock(buf, size);
-    munmap(raw, total);
+    hipHostFree(buf);
     return r;
   }
 
