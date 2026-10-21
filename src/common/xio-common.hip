@@ -2111,9 +2111,11 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
 int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
                                         void** virt_addr) {
   void* buf = nullptr;
-  hipError_t hip_err = hipHostMalloc(&buf, size,
-                                     hipHostMallocDefault |
-                                       hipHostMallocMapped);
+  // hipHostMallocMapped triggers amdgpu_vm_make_compute in the guest kernel
+  // which crashes on the rocjitsu qcow2 image (amdgpu_vm.c:2729 BUG). Use
+  // hipHostMallocDefault only — on rocjitsu flat aperture (GPU VA == CPU VA)
+  // holds for default host allocations and pagemap returns a valid GPA.
+  hipError_t hip_err = hipHostMalloc(&buf, size, hipHostMallocDefault);
   if (hip_err != hipSuccess || !buf) {
     ROCXIO_LOG_WARN("hipHostMalloc for shadow ring: %s\n",
                     hipGetErrorString(hip_err));
