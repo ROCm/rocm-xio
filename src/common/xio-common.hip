@@ -2957,9 +2957,15 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
 #else
-  // On rocjitsu the kernel runs as a CPU thread; ensure 64-bit slot stores
-  // are ordered before the producer_idx increment that QEMU polls.
-  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  // On rocjitsu the kernel runs as a CPU thread. hipHostMalloc may back the
+  // ring with write-combining (WC) pages; MFENCE does not drain WC buffers.
+  // SFENCE drains the WC write buffer, then CLFLUSH pushes each dirty cache
+  // line to the guest RAM memfd page that QEMU polls via address_space_read.
+  __builtin_ia32_sfence();
+  __builtin_ia32_clflush((const void*)(dst + 0));
+  __builtin_ia32_clflush((const void*)(dst + 1));
+  __builtin_ia32_clflush((const void*)(dst + 2));
+  __builtin_ia32_sfence();
 #endif
   meta->producer_idx = meta->producer_idx + 1;
 }
