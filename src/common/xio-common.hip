@@ -2929,46 +2929,39 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   volatile struct pci_mmio_bridge_ring_meta* meta =
     static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
   uint32_t slot = meta->producer_idx % meta->queue_depth;
-  volatile uint8_t* dst = static_cast<volatile uint8_t*>(shadowBufferVirt) +
-                          sizeof(struct pci_mmio_bridge_ring_meta) +
-                          (slot * sizeof(struct pci_mmio_bridge_command));
-  // Write each field of the packed pci_mmio_bridge_command directly to the
-  // volatile destination to guarantee the values reach host-visible memory.
-  // Building a local struct and passing &cmd to XioComEnqueue causes the
-  // gfx1250 backend to keep the struct in GPU registers; on rocjitsu (GPU
-  // kernel running as CPU code) the uint64_t* cast then reads register-file
-  // garbage, producing command=0 in every ring slot.
-  dst[0] = (uint8_t)(targetBdf & 0xffu);
-  dst[1] = (uint8_t)(targetBdf >> 8u);
-  dst[2] = targetBar;
-  dst[3] = 0u;
-  dst[4] = (uint8_t)(offset & 0xffu);
-  dst[5] = (uint8_t)((offset >> 8u) & 0xffu);
-  dst[6] = (uint8_t)((offset >> 16u) & 0xffu);
-  dst[7] = (uint8_t)((offset >> 24u) & 0xffu);
-  dst[8] = (uint8_t)(value & 0xffu);
-  dst[9] = (uint8_t)((value >> 8u) & 0xffu);
-  dst[10] = (uint8_t)((value >> 16u) & 0xffu);
-  dst[11] = (uint8_t)((value >> 24u) & 0xffu);
-  dst[12] = (uint8_t)((value >> 32u) & 0xffu);
-  dst[13] = (uint8_t)((value >> 40u) & 0xffu);
-  dst[14] = (uint8_t)((value >> 48u) & 0xffu);
-  dst[15] = (uint8_t)((value >> 56u) & 0xffu);
-  dst[16] = command;
-  dst[17] = size;
-  dst[18] = PCI_MMIO_BRIDGE_STATUS_PENDING;
-  dst[19] = 0u;
-  dst[20] = (uint8_t)(slot & 0xffu);
-  dst[21] = (uint8_t)((slot >> 8u) & 0xffu);
-  dst[22] = (uint8_t)((slot >> 16u) & 0xffu);
-  dst[23] = (uint8_t)((slot >> 24u) & 0xffu);
+  volatile uint64_t* dst =
+    reinterpret_cast<volatile uint64_t*>(
+      static_cast<volatile uint8_t*>(shadowBufferVirt) +
+      sizeof(struct pci_mmio_bridge_ring_meta) +
+      (slot * sizeof(struct pci_mmio_bridge_command)));
+  // Write the 24-byte pci_mmio_bridge_command as three 64-bit words.
+  // On rocjitsu (GPU kernel as CPU thread) byte stores go through the WC
+  // buffer and never flush to the memfd that QEMU polls.  64-bit aligned
+  // stores (flat_store_b64) go through rocjitsu's GPU L1 cache but are
+  // flushed to the memfd by s_wait_storecnt together with the producer_idx
+  // store.  QEMU then sees valid data when it observes producer_idx.
+  //
+  // Word 0: target_bdf[15:0] | target_bar[23:16] | reserved[31:24] | offset[63:32]
+  uint64_t w0 = ((uint64_t)(uint16_t)targetBdf) |
+                ((uint64_t)targetBar << 16u) |
+                ((uint64_t)0u << 24u) |
+                ((uint64_t)offset << 32u);
+  // Word 1: value[63:0]
+  uint64_t w1 = value;
+  // Word 2: command[7:0] | size[15:8] | status[23:16] | reserved[31:24] | slot[63:32]
+  uint64_t w2 = ((uint64_t)command) |
+                ((uint64_t)size << 8u) |
+                ((uint64_t)PCI_MMIO_BRIDGE_STATUS_PENDING << 16u) |
+                ((uint64_t)0u << 24u) |
+                ((uint64_t)slot << 32u);
+  dst[0] = w0;
+  dst[1] = w1;
+  dst[2] = w2;
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
 #else
-  // On rocjitsu the kernel runs as a CPU thread (host code); without a
-  // compiler/hardware barrier the ring writes stay in L1 cache and QEMU's
-  // address_space_read sees stale zeros.  A sequentially-consistent atomic
-  // store on the last written byte (producer_idx) provides the needed fence.
+  // On rocjitsu the kernel runs as a CPU thread; ensure 64-bit slot stores
+  // are ordered before the producer_idx increment that QEMU polls.
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 #endif
   meta->producer_idx = meta->producer_idx + 1;

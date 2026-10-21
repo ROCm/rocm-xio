@@ -74,6 +74,29 @@ xio_add_script_test(
     "XIO_TESTER=${_xio_tester}"
 )
 
+# --- pci-mmio-bridge (rocjitsu VM) smoke tests -----------
+# Direct xio-tester invocations via the smoke wrapper; the full
+# data-verification script takes 5+ minutes on rocjitsu because
+# s_sleep(1) in the GPU kernel translates to ~1ms nanosleep, making
+# each NVMe I/O slow.  These smoke tests confirm the doorbell path is
+# functional without exercising the verification pipeline.
+
+xio_add_script_test(
+  NAME nvme-smoke-host-mem-pci-mmio-bridge
+  SCRIPT ${_smoke_wrapper}
+  LABELS hardware nvme smoke rocjitsu
+  TIMEOUT 120
+  ARGS
+    --memory-mode 0
+    --read-io 1
+    --batch-size 0
+    --access-pattern sequential
+    --lbas-per-io 1
+  ENVIRONMENT
+    "USE_PCI_MMIO_BRIDGE=1"
+    "XIO_TESTER=${_xio_tester}"
+)
+
 # --- Random write verification --------------------------
 
 xio_add_script_test(

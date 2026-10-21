@@ -62,6 +62,8 @@ services:
       # Rocjitsu emulated GPU.
       - --vfio-userdev
       - /run/vfu/rocjitsu.sock
+      # PCI MMIO bridge: relays GPU doorbell writes to the NVMe BAR0.
+      - --pci-mmio-bridge
       # One QEMU-emulated NVMe disk; appears as /dev/nvme0n1 in the guest.
       - --nvme
       - "${VM_NVME_COUNT:-1}"

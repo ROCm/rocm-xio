@@ -270,10 +270,11 @@
         content: |
           #!/bin/bash
           # Load amdgpu with rocjitsu emulation parameters.
-          # 0x77 excludes PSP (bit 3) which rocjitsu does not fully emulate
-          # (psp_v15_0_8 ring creation times out). All other blocks enabled.
+          # ip_block_mask=0x7f enables all IP blocks including MES (index 6
+          # in this DKMS build, which adds ras_v1_0 at index 5). MES is
+          # required for gfx_v12_1 CP ring bringup.
           set -e
-          modprobe amdgpu ip_block_mask=0x77
+          modprobe amdgpu emu_mode=1 fw_load_type=0 discovery=2 ip_block_mask=0x7f vm_update_mode=3 gpu_recovery=0 vramlimit=1024
         owner: root
         group: root
 
