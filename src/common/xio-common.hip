@@ -2964,6 +2964,12 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   dst[23] = (uint8_t)((slot >> 24u) & 0xffu);
 #ifdef __HIP_DEVICE_COMPILE__
   __threadfence_system();
+#else
+  // On rocjitsu the kernel runs as a CPU thread (host code); without a
+  // compiler/hardware barrier the ring writes stay in L1 cache and QEMU's
+  // address_space_read sees stale zeros.  A sequentially-consistent atomic
+  // store on the last written byte (producer_idx) provides the needed fence.
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
 #endif
   meta->producer_idx = meta->producer_idx + 1;
 }
