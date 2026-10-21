@@ -108,13 +108,14 @@ build_xio_tester() {
         echo "WARNING: no amdclang++/hipcc found under ${ROCM_PATH}" >&2
     fi
 
-    # RelWithDebInfo is not a preference: -O0 device code never completes a GPU
-    # dispatch on the emulated rocjitsu target (codegen optimisations are
-    # required for the GPU scheduler to make forward progress).
+    # Release (not RelWithDebInfo): debug info inflates the HIP device-code
+    # link step beyond 7 GiB, causing ld.lld to abort on standard GitHub
+    # runners.  Optimisation level is unchanged (-O2/-O3), so GPU dispatch
+    # still completes on the rocjitsu emulated target.
     # CMAKE_EXTRA_FLAGS may be set by the caller to pass additional -D flags.
     cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
         ${HIP_CXX:+-DCMAKE_HIP_COMPILER="${HIP_CXX}"} \
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_BUILD_TYPE=Release \
         -DOFFLOAD_ARCH="${OFFLOAD_ARCH}" \
         -DROCM_PATH="${ROCM_PATH}" \
         -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \

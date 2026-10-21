@@ -49,7 +49,7 @@ build_xio_tester
 banner "Building sdma-ep unit tests"
 cmake --build "${BUILD_DIR}" \
     --target test-sdma-config test-sdma-packet-layout \
-    --parallel "$(nproc)"
+    --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
 
 load_kernel_module
 

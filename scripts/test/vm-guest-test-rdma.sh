@@ -84,7 +84,7 @@ export CMAKE_EXTRA_FLAGS
 build_xio_tester
 
 banner "Installing patched rdma-core (GDA ionic provider)"
-cmake --build "${BUILD_DIR}" --target install-rdma-core --parallel "$(nproc)"
+cmake --build "${BUILD_DIR}" --target install-rdma-core --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
 
 load_kernel_module
 
