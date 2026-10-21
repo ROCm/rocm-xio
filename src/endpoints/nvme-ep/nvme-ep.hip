@@ -1884,11 +1884,6 @@ __global__ void gpuKernelPersistent(
     }
 
     /* ── SQ doorbell ──────────────────────────────────── */
-    /* Ensure PRP list writes to host-pinned memory are globally visible
-     * (NVMe controller-visible) before the doorbell write to BAR0 MMIO.
-     * Without this fence, write ordering between PCIe and MMIO is not
-     * guaranteed on RDNA/GCN, causing the controller to read stale PRP data. */
-    __builtin_amdgcn_s_waitcnt(0 /* vmcnt=0, expcnt=0, lgkmcnt=0 */);
     nvme_ep::ringDoorbell(sq_tail, doorbellParams);
 
     /* ── Poll n CQEs ─────────────────────────────────── */
