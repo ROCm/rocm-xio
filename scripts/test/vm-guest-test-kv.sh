@@ -72,6 +72,7 @@ sudo nvme id-ctrl "${KV_CTRL}" 2>/dev/null | grep -E "^mn|^sn" | head -4 || true
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester
+cmake --build "${BUILD_DIR}" --target test-nvme-kv-helpers --parallel "$(nproc)"
 load_kernel_module
 
 # --------------------------------------------------------------
