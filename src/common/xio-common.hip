@@ -2146,12 +2146,15 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
   // QEMU's bridge poll and the GPU kernel target the same physical page.
   uint64_t gpa = getPhysAddr(gpu_ptr);
   if (gpa == 0) {
-    ROCXIO_LOG_WARN("Cannot get GPA for rocjitsu shadow buffer\n");
+    ROCXIO_LOG_ERROR("rocjitsu shadow buffer: GPA=0 for cpu=%p gpu=%p — "
+                     "pagemap returned no entry; hipHostMalloc not backed "
+                     "by QEMU guest RAM\n",
+                     buf, gpu_ptr);
     hipHostFree(buf);
     return -EINVAL;
   }
-  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n", buf,
-                  gpu_ptr, (unsigned long long)gpa);
+  ROCXIO_LOG_ERROR("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n", buf,
+                   gpu_ptr, (unsigned long long)gpa);
 
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
