@@ -2929,11 +2929,10 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   volatile struct pci_mmio_bridge_ring_meta* meta =
     static_cast<volatile struct pci_mmio_bridge_ring_meta*>(shadowBufferVirt);
   uint32_t slot = meta->producer_idx % meta->queue_depth;
-  volatile uint64_t* dst =
-    reinterpret_cast<volatile uint64_t*>(
-      static_cast<volatile uint8_t*>(shadowBufferVirt) +
-      sizeof(struct pci_mmio_bridge_ring_meta) +
-      (slot * sizeof(struct pci_mmio_bridge_command)));
+  volatile uint64_t* dst = reinterpret_cast<volatile uint64_t*>(
+    static_cast<volatile uint8_t*>(shadowBufferVirt) +
+    sizeof(struct pci_mmio_bridge_ring_meta) +
+    (slot * sizeof(struct pci_mmio_bridge_command)));
   // Write the 24-byte pci_mmio_bridge_command as three 64-bit words.
   // On rocjitsu (GPU kernel as CPU thread) byte stores go through the WC
   // buffer and never flush to the memfd that QEMU polls.  64-bit aligned
@@ -2941,19 +2940,17 @@ __host__ __device__ void genPciMmioBridgeCmd(void* shadowBufferVirt,
   // flushed to the memfd by s_wait_storecnt together with the producer_idx
   // store.  QEMU then sees valid data when it observes producer_idx.
   //
-  // Word 0: target_bdf[15:0] | target_bar[23:16] | reserved[31:24] | offset[63:32]
-  uint64_t w0 = ((uint64_t)(uint16_t)targetBdf) |
-                ((uint64_t)targetBar << 16u) |
-                ((uint64_t)0u << 24u) |
-                ((uint64_t)offset << 32u);
+  // Word 0: target_bdf[15:0] | target_bar[23:16] | reserved[31:24] |
+  // offset[63:32]
+  uint64_t w0 = ((uint64_t)(uint16_t)targetBdf) | ((uint64_t)targetBar << 16u) |
+                ((uint64_t)0u << 24u) | ((uint64_t)offset << 32u);
   // Word 1: value[63:0]
   uint64_t w1 = value;
-  // Word 2: command[7:0] | size[15:8] | status[23:16] | reserved[31:24] | slot[63:32]
-  uint64_t w2 = ((uint64_t)command) |
-                ((uint64_t)size << 8u) |
+  // Word 2: command[7:0] | size[15:8] | status[23:16] | reserved[31:24] |
+  // slot[63:32]
+  uint64_t w2 = ((uint64_t)command) | ((uint64_t)size << 8u) |
                 ((uint64_t)PCI_MMIO_BRIDGE_STATUS_PENDING << 16u) |
-                ((uint64_t)0u << 24u) |
-                ((uint64_t)slot << 32u);
+                ((uint64_t)0u << 24u) | ((uint64_t)slot << 32u);
   dst[0] = w0;
   dst[1] = w1;
   dst[2] = w2;
