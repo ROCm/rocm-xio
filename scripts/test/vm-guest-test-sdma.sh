@@ -46,10 +46,11 @@ gpu_bringup
 find_rocm
 build_xio_tester
 
-banner "Building sdma-ep unit tests"
+banner "Building sdma-ep unit tests and integration examples"
 cmake --build "${BUILD_DIR}" \
     --target test-sdma-config test-sdma-packet-layout \
     --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
+
 
 load_kernel_module
 
@@ -92,5 +93,17 @@ timeout --kill-after=30 120 \
         --iterations 10 \
         --verify \
         --verbose
+
+# --------------------------------------------------------------
+# Integration: sdma-ep-p2p (build + skip-if-no-P2P run via ctest)
+# --------------------------------------------------------------
+banner "Running sdma-ep-p2p integration example (P2P skip expected)"
+
+timeout --kill-after=30 120 \
+    sudo env \
+    HSA_FORCE_FINE_GRAIN_PCIE=1 \
+    ctest --test-dir "${BUILD_DIR}" \
+          --tests-regex "example-install-rocm-xio|example-sdma-ep-p2p" \
+          --output-on-failure || true
 
 banner "Done"
