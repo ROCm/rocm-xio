@@ -160,13 +160,12 @@ public:
    */
   int register_data_buffer(void* buf, size_t size);
 
-#if defined(GDA_IONIC)
   /**
    * @brief CPU-side ibverbs RDMA WRITE loopback for rocjitsu emulated GPU.
+   * Only available when GDA_IONIC is enabled (requires libibverbs-dev).
    * Uses ibv_post_send + ibv_poll_cq without any GPU kernel involvement.
    */
   int cpu_loopback_smoke_test(int iterations, int transfer_size);
-#endif
 
   /**
    * @brief Connect the QP to a remote peer in non-loopback mode.
