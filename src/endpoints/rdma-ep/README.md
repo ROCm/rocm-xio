@@ -99,6 +99,17 @@ cmake -DGDA_BNXT=ON -DGDA_MLX5=ON -DGDA_IONIC=OFF ..
   -n 1000
 ```
 
+## Embedding the endpoint
+
+`rdma-ep-host.h` exposes `rdma_ep::Endpoint`, which wraps the backend so a
+host program or a Python binding can bootstrap peers its own way: create the
+endpoint, register a buffer (GPU memory is registered through a dmabuf),
+exchange connection info, then `connect`. `put` has the GPU post an RDMA
+WRITE, and `putSignal` follows it with an atomic add on the same QP.
+`deviceContext()` returns the mlx5 queue state so a kernel can build WQEs and
+ring the doorbell itself. The Python module is `xio.rdma_ep` (built with
+`-DXIO_BUILD_PYTHON=ON`).
+
 ## Relationship to ROCm/rocSHMEM
 
 This code is derived from the GDA (GPU-Direct Access) backend in

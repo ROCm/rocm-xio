@@ -48,3 +48,24 @@ add_dependencies(sdma_ep_py rocm-xio)
 install(TARGETS sdma_ep_py
   LIBRARY DESTINATION xio/sdma_ep
 )
+
+# Python bindings for the RDMA endpoint (GPU-initiated RDMA). Needs a compiled-in
+# provider (GDA_MLX5, GDA_BNXT, ...). Unlike sdma_ep_py this module launches GPU
+# kernels that live in the -fgpu-rdc rocm-xio library, so it is compiled and linked
+# as HIP with -fgpu-rdc (device linking happens here, as for the tests).
+if(GDA_BNXT OR GDA_MLX5 OR GDA_IONIC OR GDA_ERNIC)
+  nanobind_add_module(rdma_ep_py rdma_ep_py.cpp)
+  set_source_files_properties(rdma_ep_py.cpp PROPERTIES LANGUAGE HIP)
+  set_target_properties(rdma_ep_py PROPERTIES LINKER_LANGUAGE HIP)
+  target_compile_options(rdma_ep_py PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-fgpu-rdc>)
+  target_link_options(rdma_ep_py PRIVATE -fgpu-rdc --hip-link)
+  target_include_directories(rdma_ep_py PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+    ${CMAKE_SOURCE_DIR}/src/common
+    ${HIP_INCLUDE_DIRS}
+  )
+  target_link_libraries(rdma_ep_py PRIVATE rocm-xio hip::host hip::device)
+  add_dependencies(rdma_ep_py rocm-xio)
+  install(TARGETS rdma_ep_py LIBRARY DESTINATION xio/rdma_ep)
+endif()

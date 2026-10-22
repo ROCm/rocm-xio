@@ -139,6 +139,22 @@ public:
   struct ibv_mr* reg_mr(struct ibv_pd* pd, void* addr, size_t length,
                         int access);
   /**
+   * @brief Register a range that is already exported as a dmabuf fd.
+   *
+   * The fd can come from any exporter (HIP's hipMemGetHandleForAddressRange
+   * handles VMM-mapped memory that HSA's export rejects). The MR holds its
+   * own reference, so the caller may close the fd afterwards.
+   *
+   * @param pd Protection domain for the MR.
+   * @param addr Base address of the range (used as the IOVA).
+   * @param length Range size in bytes.
+   * @param fd dmabuf file descriptor for the range.
+   * @param access Verbs access flags.
+   * @return Registered memory region, or nullptr on failure.
+   */
+  struct ibv_mr* reg_dmabuf_fd(struct ibv_pd* pd, void* addr, size_t length,
+                               int fd, int access);
+  /**
    * @brief Register host memory with stable IOVA semantics.
    * @param pd Protection domain for the MR.
    * @param addr Buffer base address.

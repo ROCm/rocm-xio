@@ -161,6 +161,19 @@ public:
   int register_data_buffer(void* buf, size_t size);
 
   /**
+   * @brief Register GPU memory (VRAM) as the RDMA data buffer.
+   *
+   * Like register_data_buffer(), but registers through the verbs wrapper's
+   * dmabuf path, which is what GPU memory needs: plain ibv_reg_mr() on VRAM
+   * fails without a peer-memory driver.
+   *
+   * @param buf Device pointer (hipMalloc or mapped VMM memory).
+   * @param size Size of the range in bytes.
+   * @return 0 on success, -1 on failure.
+   */
+  int register_device_buffer(void* buf, size_t size);
+
+  /**
    * @brief Connect the QP to a remote peer in non-loopback mode.
    * @param remote Remote peer connection information.
    * @return 0 on success, -1 on failure.
@@ -207,6 +220,7 @@ private:
 
   void* dv_handle_{nullptr};
 
+  int register_buffer(void* buf, size_t size, bool device);
   void open_dv_libs();
   void close_dv_libs();
   void open_ib_device();

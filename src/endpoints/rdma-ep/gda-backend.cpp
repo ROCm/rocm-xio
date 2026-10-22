@@ -627,6 +627,14 @@ int Backend::set_remote_rkey(uint32_t remote_rkey) {
 }
 
 int Backend::register_data_buffer(void* buf, size_t size) {
+  return register_buffer(buf, size, /*device=*/false);
+}
+
+int Backend::register_device_buffer(void* buf, size_t size) {
+  return register_buffer(buf, size, /*device=*/true);
+}
+
+int Backend::register_buffer(void* buf, size_t size, bool device) {
   if (!buf || size == 0 || !host_qp_ || !gpu_qp_) {
     fprintf(stderr, "rdma_ep: register_data_buffer: invalid args\n");
     return -1;
@@ -643,7 +651,24 @@ int Backend::register_data_buffer(void* buf, size_t size) {
   }
 
   struct ibv_pd* mr_pd = pd_parent_ ? pd_parent_ : pd_;
-  heap_mr_ = ibv.reg_mr_host(mr_pd, buf, size, access);
+  if (device) {
+    // HIP's export handles VMM-mapped memory (Iris vmem heaps), which HSA's
+    // export used by ibv.reg_mr() rejects; keep that as the fallback.
+    int fd = -1;
+    if (ibv.is_dmabuf_supported() &&
+        hipMemGetHandleForAddressRange(&fd,
+                                       reinterpret_cast<hipDeviceptr_t>(buf),
+                                       size, hipMemRangeHandleTypeDmaBufFd,
+                                       0) == hipSuccess &&
+        fd >= 0) {
+      heap_mr_ = ibv.reg_dmabuf_fd(mr_pd, buf, size, fd, access);
+      close(fd); // the MR keeps its own reference
+    }
+    if (!heap_mr_)
+      heap_mr_ = ibv.reg_mr(mr_pd, buf, size, access);
+  } else {
+    heap_mr_ = ibv.reg_mr_host(mr_pd, buf, size, access);
+  }
   if (!heap_mr_) {
     fprintf(stderr, "rdma_ep: ibv_reg_mr failed "
                     "for data buffer\n");
