@@ -27,6 +27,7 @@ namespace xio {
 namespace rdma_ep {
 
 class QueuePair;
+struct Mlx5DevxState;
 
 /** @brief Queue-pair connection parameters exchanged between RDMA peers. */
 struct DestInfo {
@@ -262,6 +263,15 @@ private:
 #endif
 
 #if defined(GDA_MLX5)
+  // Queues in GPU memory through DevX (mlx5-devx.cpp), used when
+  // BackendConfig::queue_mem is DEVICE_VRAM
+  Mlx5DevxState* devx_{nullptr};
+  bool devx_queues_{false};
+  int mlx5_devx_create_queues();
+  int mlx5_devx_connect(const DestInfo& remote);
+  uint32_t mlx5_devx_qpn() const;
+  void mlx5_devx_initialize_gpu_qp();
+  void mlx5_devx_cleanup();
   void* mlx5dv_handle_{nullptr};
   void* mlx5_registered_sq_{nullptr};
   void* mlx5_registered_cq_{nullptr};

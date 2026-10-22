@@ -57,9 +57,11 @@ public:
    * @param gpu HIP device index the QP's doorbell/queues are mapped for.
    * @param sqDepth Send-queue depth in WQEs.
    * @param cqDepth Completion-queue depth in CQEs.
+   * @param deviceQueues Put the send and completion queues in GPU memory (mlx5,
+   * through DevX) instead of host memory.
    */
   Endpoint(const std::string& provider, const std::string& device, int gpu,
-           int sqDepth = 256, int cqDepth = 256);
+           int sqDepth = 256, int cqDepth = 256, bool deviceQueues = false);
   ~Endpoint();
   Endpoint(const Endpoint&) = delete;
   Endpoint& operator=(const Endpoint&) = delete;

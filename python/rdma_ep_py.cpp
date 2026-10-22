@@ -46,10 +46,12 @@ EndpointInfo infoFromDict(nb::dict d) {
 void register_rdma_ep(nb::module_& m) {
   nb::class_<Endpoint>(m, "Endpoint",
                        "One reliable-connected RDMA QP driven from the GPU.")
-    .def(nb::init<const std::string&, const std::string&, int, int, int>(),
-         "provider"_a = "mlx5", "device"_a = "", "gpu"_a = 0,
-         "sq_depth"_a = 256, "cq_depth"_a = 256,
-         "Open the device and create the QP and CQ.")
+    .def(
+      nb::init<const std::string&, const std::string&, int, int, int, bool>(),
+      "provider"_a = "mlx5", "device"_a = "", "gpu"_a = 0, "sq_depth"_a = 256,
+      "cq_depth"_a = 256, "device_queues"_a = false,
+      "Open the device and create the QP and CQ (device_queues=True: in GPU "
+      "memory, mlx5 only).")
     .def(
       "register_buffer",
       [](Endpoint& e, uintptr_t ptr, size_t size, bool device) {

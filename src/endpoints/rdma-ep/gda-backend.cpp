@@ -58,14 +58,37 @@ int Backend::init() {
 
   open_dv_libs();
   open_ib_device();
+#if defined(GDA_MLX5)
+  devx_queues_ = provider_ == Provider::MLX5 &&
+                 config_.queue_mem == QueueMemMode::DEVICE_VRAM;
+  if (devx_queues_ && port_attr_.link_layer == IBV_LINK_LAYER_ETHERNET) {
+    // The DevX path has no RoCE addressing; keep the host-memory queues
+    fprintf(stderr, "rdma_ep: mlx5 queues in GPU memory need an InfiniBand "
+                    "port; using host-memory queues.\n");
+    devx_queues_ = false;
+  }
+#endif
   create_queues();
 
-  if (!qp_) {
+  bool have_qp = qp_ != nullptr;
+#if defined(GDA_MLX5)
+  have_qp = have_qp || devx_ != nullptr;
+#endif
+  if (!have_qp) {
     fprintf(stderr, "rdma_ep: QP creation failed.\n");
     return -1;
   }
 
   if (config_.loopback) {
+#if defined(GDA_MLX5)
+    if (devx_) {
+      DestInfo self = get_local_dest_info();
+      if (mlx5_devx_connect(self) != 0)
+        return -1;
+      setup_gpu_qp();
+      return 0;
+    }
+#endif
     setup_qp_loopback();
 
 #if defined(GDA_MLX5)
@@ -94,8 +117,10 @@ void Backend::shutdown() {
 #endif
 
 #if defined(GDA_MLX5)
-  if (provider_ == Provider::MLX5)
+  if (provider_ == Provider::MLX5) {
+    mlx5_devx_cleanup();
     mlx5_cleanup();
+  }
 #endif
 
   if (qp_) {
@@ -279,6 +304,14 @@ void Backend::create_queues() {
   int ncqes = config_.cq_depth;
   if (provider_ == Provider::IONIC && ncqes < 8192)
     ncqes = 8192;
+
+#if defined(GDA_MLX5)
+  if (provider_ == Provider::MLX5 && devx_queues_) {
+    if (mlx5_devx_create_queues() != 0)
+      mlx5_devx_cleanup(); // leaves devx_ null: init() reports the failure
+    return;
+  }
+#endif
 
 #if defined(GDA_BNXT)
   if (provider_ == Provider::BNXT) {
@@ -587,6 +620,16 @@ void Backend::setup_gpu_qp() {
 }
 
 int Backend::connect_to_peer(const DestInfo& remote) {
+#if defined(GDA_MLX5)
+  if (devx_) {
+    if (mlx5_devx_connect(remote) != 0)
+      return -1;
+    fprintf(stderr,
+            "rdma_ep: Connected to peer (QPN=%u) with queues in GPU memory\n",
+            remote.qpn);
+    return 0;
+  }
+#endif
   if (!qp_) {
     fprintf(stderr, "rdma_ep: connect_to_peer: no QP\n");
     return -1;
@@ -607,6 +650,10 @@ DestInfo Backend::get_local_dest_info() const {
   DestInfo info{};
   info.lid = port_attr_.lid;
   info.qpn = qp_ ? qp_->qp_num : 0;
+#if defined(GDA_MLX5)
+  if (devx_)
+    info.qpn = mlx5_devx_qpn();
+#endif
   info.psn = 0;
   info.gid = local_gid_;
   return info;
@@ -714,6 +761,10 @@ void Backend::initialize_gpu_qp() {
 
 #if defined(GDA_MLX5)
   if (provider_ == Provider::MLX5) {
+    if (devx_) {
+      mlx5_devx_initialize_gpu_qp();
+      return;
+    }
     mlx5_initialize_gpu_qp();
     return;
   }
