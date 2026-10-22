@@ -187,6 +187,94 @@ std::vector<uint64_t> Endpoint::deviceContext() {
 #endif
 }
 
+#if defined(GDA_MLX5)
+namespace {
+uint64_t checkedSlot(int64_t slot, const char* what) {
+  if (slot < 0)
+    throw std::runtime_error(std::string(what) +
+                             ": needs an endpoint with deviceQueues=true and "
+                             "room in the send queue");
+  return static_cast<uint64_t>(slot);
+}
+} // namespace
+#endif
+
+uint64_t Endpoint::hostPostWrite(uint64_t remoteAddr, const void* local,
+                                 size_t bytes, bool signaled) {
+#if defined(GDA_MLX5)
+  return checkedSlot(backend_->devx_host_post_write(
+                       remoteAddr, reinterpret_cast<uint64_t>(local),
+                       static_cast<uint32_t>(bytes), signaled),
+                     "hostPostWrite");
+#else
+  throw std::runtime_error("built without GDA_MLX5");
+#endif
+}
+
+uint64_t Endpoint::hostPostAtomicAdd(uint64_t remoteAddr, int64_t value,
+                                     bool signaled) {
+#if defined(GDA_MLX5)
+  return checkedSlot(backend_->devx_host_post_atomic_add(remoteAddr, value,
+                                                         signaled),
+                     "hostPostAtomicAdd");
+#else
+  throw std::runtime_error("built without GDA_MLX5");
+#endif
+}
+
+void Endpoint::hostRing() {
+#if defined(GDA_MLX5)
+  if (backend_->devx_host_ring() != 0)
+    throw std::runtime_error("hostRing: nothing posted, or not a device-queue "
+                             "endpoint");
+#else
+  throw std::runtime_error("built without GDA_MLX5");
+#endif
+}
+
+void Endpoint::hostFlush() {
+#if defined(GDA_MLX5)
+  if (backend_->devx_host_flush() != 0)
+    throw std::runtime_error("hostFlush: not a device-queue endpoint");
+#else
+  throw std::runtime_error("built without GDA_MLX5");
+#endif
+}
+
+void Endpoint::hostStaged(uint32_t* dbrecBe, uint64_t* doorbellVal) const {
+#if defined(GDA_MLX5)
+  backend_->devx_host_staged(dbrecBe, doorbellVal);
+#endif
+}
+
+void Endpoint::hostAddresses(uint64_t* dbrec, uint64_t* gpuDoorbell,
+                             uint64_t* cpuDoorbell) const {
+#if defined(GDA_MLX5)
+  backend_->devx_host_addresses(dbrec, gpuDoorbell, cpuDoorbell);
+#endif
+}
+
+unsigned Endpoint::hostPoll(unsigned max) {
+#if defined(GDA_MLX5)
+  uint32_t syndrome = 0;
+  int n = backend_->devx_host_poll(max, &syndrome);
+  if (n < 0)
+    throw std::runtime_error("error completion, syndrome 0x" +
+                             std::to_string(syndrome));
+  return static_cast<unsigned>(n);
+#else
+  throw std::runtime_error("built without GDA_MLX5");
+#endif
+}
+
+uint64_t Endpoint::hostOutstanding() const {
+#if defined(GDA_MLX5)
+  return backend_->devx_host_outstanding();
+#else
+  return 0;
+#endif
+}
+
 QueuePair* Endpoint::gpuQueuePair() const {
   return backend_->get_gpu_qp();
 }

@@ -17,6 +17,11 @@
   in GPU memory (`QueueMemMode::DEVICE_VRAM`, `Endpoint(device_queues=True)`),
   created through DevX on an InfiniBand port. Other ports keep host-memory
   queues.
+- rdma-ep (mlx5): the CPU can post work requests into GPU-memory queues
+  (`Endpoint::hostPostWrite`, `hostPostAtomicAdd`), leave them dormant, and ring
+  the doorbell with `hostRing()`, which first drains the CPU's writes through the
+  GPU's HDP flush register (`hostFlush()` does the drain alone, for a DMA engine
+  that rings later). `hostPoll()` consumes completions from the CPU.
 
 ### Changed
 

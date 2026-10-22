@@ -128,6 +128,38 @@ public:
    */
   std::vector<uint64_t> deviceContext();
 
+  /**
+   * @name CPU posting on device-memory queues (Endpoint built with deviceQueues
+   * = true, mlx5)
+   *
+   * The CPU writes work requests into the GPU-memory send queue. hostPost*
+   * leave them dormant; hostRing() makes everything posted so far visible to
+   * the NIC (doorbell record, HDP flush, doorbell). One poster per QP: not
+   * together with put()/putSignal() or kernels on the same endpoint.
+   * @{
+   */
+  /** @return the work request's slot index. */
+  uint64_t hostPostWrite(uint64_t remoteAddr, const void* local, size_t bytes,
+                         bool signaled = true);
+  uint64_t hostPostAtomicAdd(uint64_t remoteAddr, int64_t value,
+                             bool signaled = true);
+  void hostRing();
+  /** @brief Drain the CPU's writes into the queues to the device (HDP flush);
+   * call before arming a DMA engine to ring. */
+  void hostFlush();
+  /** @brief Doorbell record (big-endian) and control header that would ring
+   * everything posted so far. */
+  void hostStaged(uint32_t* dbrecBe, uint64_t* doorbellVal) const;
+  /** @brief Addresses a DMA engine needs to ring it: SQ doorbell record, GPU
+   * alias and CPU alias of the doorbell. */
+  void hostAddresses(uint64_t* dbrec, uint64_t* gpuDoorbell,
+                     uint64_t* cpuDoorbell) const;
+  /** @brief Consume up to max completions; throws on an error completion.
+   * @return how many. */
+  unsigned hostPoll(unsigned max);
+  uint64_t hostOutstanding() const;
+  /** @} */
+
   /** @brief The device-side QueuePair, for kernels that post directly. */
   QueuePair* gpuQueuePair() const;
 

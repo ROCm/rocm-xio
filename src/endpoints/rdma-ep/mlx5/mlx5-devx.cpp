@@ -32,8 +32,10 @@
 #include <hip/hip_version.h>
 
 #include <dlfcn.h>
+#include <endian.h>
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
+#include <immintrin.h>
 #include <unistd.h>
 
 extern "C" {
@@ -118,6 +120,14 @@ struct Mlx5DevxState {
   struct mlx5dv_devx_obj* cq_obj = nullptr;
   struct mlx5dv_devx_obj* qp_obj = nullptr;
   uint32_t pdn = 0, eqn = 0, cqn = 0, qpn = 0;
+
+  // CPU posting (devx_host_*): producer index, completions seen, CQ consumer
+  // index, last control header
+  volatile uint32_t* hdp_flush = nullptr;
+  uint64_t host_pi = 0;
+  uint64_t host_completed = 0;
+  uint32_t host_cq_ci = 0;
+  uint64_t last_ctrl = 0;
 };
 
 namespace {
@@ -187,6 +197,73 @@ void free_slab(Mlx5DevxState& s) {
   s.slab = nullptr;
   s.mapped = false;
   s.handle = {};
+}
+
+/** The CPU can only post into the queues when the slab was mapped for host
+ * access. */
+bool host_can_post(const Mlx5DevxState* s) {
+  if (s && s->host_access)
+    return true;
+  fprintf(stderr, "rdma_ep::mlx5: devx: the queue slab has no host mapping; "
+                  "CPU posting is unavailable\n");
+  return false;
+}
+
+/** The GPU's HDP flush register, found by matching the HIP device's PCI address
+ * to an HSA agent. */
+volatile uint32_t* resolve_hdp_flush(int hip_device) {
+  char bus_id[32] = {};
+  if (hipDeviceGetPCIBusId(bus_id, sizeof(bus_id), hip_device) != hipSuccess)
+    return nullptr;
+  unsigned domain = 0, bus = 0, dev = 0, fn = 0;
+  if (sscanf(bus_id, "%x:%x:%x.%x", &domain, &bus, &dev, &fn) != 4)
+    return nullptr;
+  const uint32_t want_bdf = (bus << 8) | (dev << 3) | fn;
+
+  struct Find {
+    uint32_t bdf, domain;
+    volatile uint32_t* reg;
+  } find{want_bdf, domain, nullptr};
+  hsa_iterate_agents(
+    [](hsa_agent_t agent, void* data) -> hsa_status_t {
+      auto* f = static_cast<Find*>(data);
+      hsa_device_type_t type;
+      if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &type) !=
+            HSA_STATUS_SUCCESS ||
+          type != HSA_DEVICE_TYPE_GPU)
+        return HSA_STATUS_SUCCESS;
+      uint32_t bdf = 0, dom = 0;
+      hsa_agent_get_info(
+        agent, static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_BDFID), &bdf);
+      hsa_agent_get_info(
+        agent, static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_DOMAIN), &dom);
+      if (bdf != f->bdf || dom != f->domain)
+        return HSA_STATUS_SUCCESS;
+      hsa_amd_hdp_flush_t flush{};
+      if (hsa_agent_get_info(
+            agent, static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_HDP_FLUSH),
+            &flush) == HSA_STATUS_SUCCESS)
+        f->reg = flush.HDP_MEM_FLUSH_CNTL;
+      return HSA_STATUS_INFO_BREAK;
+    },
+    &find);
+  return find.reg;
+}
+
+/**
+ * Drain CPU writes into GPU memory out to the device before a signal the device
+ * will act on (the doorbell): sfence drains the write-combining buffer, the
+ * full fence keeps the HDP store behind the payload stores, the store to
+ * HDP_MEM_FLUSH_CNTL flushes the host data path, and the read-back (non-posted)
+ * returns only once the flush has reached the device.
+ */
+void drain_host_writes(volatile uint32_t* hdp) {
+  _mm_sfence();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (hdp) {
+    *hdp = 1u;
+    (void)*hdp;
+  }
 }
 
 } // namespace
@@ -383,6 +460,17 @@ int Backend::mlx5_devx_create_queues() {
     }
   }
 
+  s->hdp_flush = resolve_hdp_flush(config_.gpu_device_id);
+  if (!s->hdp_flush) {
+    // CPU writes into GPU-memory queues are only visible to the NIC after the
+    // HDP flush: without the register the queues cannot be used safely, so this
+    // is an error, not a degraded mode
+    fprintf(stderr,
+            "rdma_ep::mlx5: devx: no HDP flush register for GPU %d; refusing "
+            "to create queues the CPU would write without flushing\n",
+            config_.gpu_device_id);
+    return -1;
+  }
   fprintf(stderr,
           "rdma_ep::mlx5: devx: QP num=%u CQ num=%u in GPU memory "
           "(slab %p, %zu bytes, host access %s), SQ %u WQEBBs, CQ %u CQEs\n",
@@ -553,6 +641,183 @@ void Backend::mlx5_devx_initialize_gpu_qp() {
           static_cast<void*>(cq_buf), s->cq_cqe_cnt,
           static_cast<void*>(slab + s->sq_off), s->sq_wqe_cnt, s->uar->reg_addr,
           gpu_bf);
+}
+
+namespace {
+
+constexpr uint8_t kCqUpdate = 0x08;
+
+/** One 64-byte WQE slot, built on the host: control, remote address, then data
+ * (WRITE) or atomic + result (fetch-add). */
+struct HostWqe {
+  uint8_t b[64] = {};
+  void ctrl(uint16_t idx, uint8_t opcode, uint32_t qpn, uint8_t ds,
+            bool signaled) {
+    uint32_t w0 = htobe32((uint32_t(idx) << 8) | opcode);
+    uint32_t w1 = htobe32((qpn << 8) | (ds & 0x3F));
+    memcpy(b + 0, &w0, 4);
+    memcpy(b + 4, &w1, 4);
+    b[11] = signaled ? kCqUpdate : 0;
+  }
+  void raddr(uint64_t addr, uint32_t rkey_be) {
+    uint64_t a = htobe64(addr);
+    memcpy(b + 16, &a, 8);
+    memcpy(b + 24, &rkey_be, 4);
+  }
+  void data(uint32_t bytes, uint32_t lkey_be, uint64_t addr, size_t off) {
+    uint32_t n = htobe32(bytes);
+    uint64_t a = htobe64(addr);
+    memcpy(b + off, &n, 4);
+    memcpy(b + off + 4, &lkey_be, 4);
+    memcpy(b + off + 8, &a, 8);
+  }
+  void atomic(uint64_t add, uint64_t cmp) {
+    uint64_t a = htobe64(add), c = htobe64(cmp);
+    memcpy(b + 32, &a, 8);
+    memcpy(b + 40, &c, 8);
+  }
+};
+
+} // namespace
+
+int64_t Backend::mlx5_devx_host_post(const uint8_t* wqe, uint8_t) {
+  Mlx5DevxState* s = devx_;
+  if (!host_can_post(s) || !host_qp_)
+    return -1;
+  if (s->host_pi - s->host_completed >= s->sq_wqe_cnt) {
+    fprintf(stderr, "rdma_ep::mlx5: devx: send queue full (%u slots)\n",
+            s->sq_wqe_cnt);
+    return -1;
+  }
+  uint64_t idx = s->host_pi;
+  auto* slot = static_cast<uint8_t*>(s->slab) + s->sq_off +
+               (idx % s->sq_wqe_cnt) * kWqebb;
+  memcpy(slot, wqe, kWqebb);
+  memcpy(&s->last_ctrl, wqe, 8);
+  s->host_pi = idx + 1;
+  return static_cast<int64_t>(idx);
+}
+
+int64_t Backend::devx_host_post_write(uint64_t raddr, uint64_t laddr,
+                                      uint32_t bytes, bool signaled) {
+  Mlx5DevxState* s = devx_;
+  if (!s || !host_qp_)
+    return -1;
+  HostWqe w;
+  w.ctrl(static_cast<uint16_t>(s->host_pi), host_qp_->op_rdma_write_, s->qpn, 3,
+         signaled);
+  w.raddr(raddr, host_qp_->rkey_);
+  w.data(bytes, host_qp_->lkey_, laddr, 32);
+  return mlx5_devx_host_post(w.b, 3);
+}
+
+int64_t Backend::devx_host_post_atomic_add(uint64_t raddr, int64_t value,
+                                           bool signaled) {
+  Mlx5DevxState* s = devx_;
+  if (!s || !host_qp_)
+    return -1;
+  HostWqe w;
+  w.ctrl(static_cast<uint16_t>(s->host_pi), host_qp_->op_atomic_fa_, s->qpn, 4,
+         signaled);
+  w.raddr(raddr, host_qp_->rkey_);
+  w.atomic(static_cast<uint64_t>(value), 0);
+  w.data(8, host_qp_->nonfetching_atomic_lkey_,
+         reinterpret_cast<uintptr_t>(host_qp_->nonfetching_atomic_), 48);
+  return mlx5_devx_host_post(w.b, 4);
+}
+
+void Backend::devx_host_staged(uint32_t* dbrec_be,
+                               uint64_t* doorbell_val) const {
+  const Mlx5DevxState* s = devx_;
+  if (!s)
+    return;
+  if (dbrec_be)
+    *dbrec_be = htobe32(static_cast<uint32_t>(s->host_pi & 0xFFFF));
+  if (doorbell_val)
+    *doorbell_val = s->last_ctrl;
+}
+
+void Backend::devx_host_addresses(uint64_t* dbrec, uint64_t* gpu_doorbell,
+                                  uint64_t* cpu_doorbell) const {
+  const Mlx5DevxState* s = devx_;
+  if (!s)
+    return;
+  if (dbrec)
+    *dbrec = reinterpret_cast<uint64_t>(static_cast<char*>(s->slab) +
+                                        s->dbr_off + kQpDbrecOff + 4);
+  if (gpu_doorbell)
+    *gpu_doorbell = reinterpret_cast<uint64_t>(s->gpu_doorbell);
+  if (cpu_doorbell)
+    *cpu_doorbell = reinterpret_cast<uint64_t>(s->uar ? s->uar->reg_addr
+                                                      : nullptr);
+}
+
+int Backend::devx_host_ring() {
+  Mlx5DevxState* s = devx_;
+  if (!host_can_post(s) || s->host_pi == 0)
+    return -1;
+  auto* dbrec = reinterpret_cast<volatile uint32_t*>(
+    static_cast<char*>(s->slab) + s->dbr_off + kQpDbrecOff + 4);
+  *dbrec = htobe32(static_cast<uint32_t>(s->host_pi & 0xFFFF));
+  // WQEs and the record are in GPU memory: flush them out before the NIC is
+  // told
+  drain_host_writes(s->hdp_flush);
+  *reinterpret_cast<volatile uint64_t*>(s->uar->reg_addr) = s->last_ctrl;
+  _mm_sfence();
+  return 0;
+}
+
+int Backend::devx_host_flush() {
+  Mlx5DevxState* s = devx_;
+  if (!host_can_post(s))
+    return -1;
+  // Work requests and staged values the CPU wrote into GPU memory must reach
+  // the device before anything that can act on them (a doorbell, a DMA engine
+  // armed to ring it)
+  drain_host_writes(s->hdp_flush);
+  return 0;
+}
+
+uint64_t Backend::devx_host_outstanding() const {
+  return devx_ ? devx_->host_pi - devx_->host_completed : 0;
+}
+
+int Backend::devx_host_poll(uint32_t max, uint32_t* err) {
+  Mlx5DevxState* s = devx_;
+  if (!host_can_post(s))
+    return -1;
+  if (err)
+    *err = 0;
+  auto* cq = reinterpret_cast<volatile uint8_t*>(static_cast<char*>(s->slab) +
+                                                 s->cq_off);
+  auto* cq_dbrec = reinterpret_cast<volatile uint32_t*>(
+    static_cast<char*>(s->slab) + s->dbr_off + kCqDbrecOff);
+  int done = 0;
+  while (static_cast<uint32_t>(done) < max) {
+    uint32_t ci = s->host_cq_ci;
+    volatile uint8_t* cqe = cq + size_t(ci % s->cq_cqe_cnt) * kCqe;
+    uint8_t op_own = cqe[63];
+    uint8_t opcode = op_own >> 4;
+    if ((op_own & 1) != ((ci / s->cq_cqe_cnt) & 1) || opcode == 0xF)
+      break;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    uint16_t counter = static_cast<uint16_t>((cqe[60] << 8) | cqe[61]);
+    if (opcode == 13) { // request error
+      if (err)
+        *err = cqe[55];
+      s->host_cq_ci = ci + 1;
+      *cq_dbrec = htobe32((ci + 1) & 0xFFFFFF);
+      return -1;
+    }
+    // widen the 16-bit slot index of the completed WQE from the running count
+    uint64_t done16 = (uint64_t(counter) + 1) & 0xFFFF;
+    s->host_completed += (done16 + 0x10000 - (s->host_completed & 0xFFFF)) &
+                         0xFFFF;
+    s->host_cq_ci = ci + 1;
+    *cq_dbrec = htobe32((ci + 1) & 0xFFFFFF);
+    done++;
+  }
+  return done;
 }
 
 void Backend::mlx5_devx_cleanup() {

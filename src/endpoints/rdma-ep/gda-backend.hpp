@@ -174,6 +174,43 @@ public:
    */
   int register_device_buffer(void* buf, size_t size);
 
+#if defined(GDA_MLX5)
+  /** @name CPU posting on device-memory queues (DevX path only)
+   *
+   * The CPU writes work requests straight into the GPU-memory send queue, with
+   * an HDP flush before anything may observe them. One poster per QP: do not
+   * mix with GPU kernels posting on the same QP.
+   * @{ */
+  /** Post an RDMA WRITE without ringing the doorbell (the work is dormant).
+   * @return slot index or -1. */
+  int64_t devx_host_post_write(uint64_t raddr, uint64_t laddr, uint32_t bytes,
+                               bool signaled);
+  /** Post an RDMA atomic fetch-add without ringing. @return slot index or -1.
+   */
+  int64_t devx_host_post_atomic_add(uint64_t raddr, int64_t value,
+                                    bool signaled);
+  /** Make everything posted so far visible to the NIC: doorbell record, HDP
+   * flush, doorbell. */
+  int devx_host_ring();
+  /** Drain the CPU's writes into the queues out to the device (HDP flush): call
+   * after posting, before anything that can ring the doorbell on the CPU's
+   * behalf (a DMA engine) is armed. */
+  int devx_host_flush();
+  /** The two values that would ring the doorbell for everything posted so far
+   * (big-endian record, control header). */
+  void devx_host_staged(uint32_t* dbrec_be, uint64_t* doorbell_val) const;
+  /** Addresses a DMA engine needs to ring the doorbell: record, GPU alias of
+   * the doorbell register, CPU alias. */
+  void devx_host_addresses(uint64_t* dbrec, uint64_t* gpu_doorbell,
+                           uint64_t* cpu_doorbell) const;
+  /** Consume up to @p max completions. @return count, or -1 on an error CQE
+   * (syndrome in @p err). */
+  int devx_host_poll(uint32_t max, uint32_t* err);
+  /** Slots posted but not yet completed. */
+  uint64_t devx_host_outstanding() const;
+  /** @} */
+#endif
+
   /**
    * @brief Connect the QP to a remote peer in non-loopback mode.
    * @param remote Remote peer connection information.
@@ -268,6 +305,7 @@ private:
   Mlx5DevxState* devx_{nullptr};
   bool devx_queues_{false};
   int mlx5_devx_create_queues();
+  int64_t mlx5_devx_host_post(const uint8_t* wqe, uint8_t ds_unused);
   int mlx5_devx_connect(const DestInfo& remote);
   uint32_t mlx5_devx_qpn() const;
   void mlx5_devx_initialize_gpu_qp();
