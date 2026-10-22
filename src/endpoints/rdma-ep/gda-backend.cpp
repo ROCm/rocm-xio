@@ -731,5 +731,16 @@ void Backend::initialize_gpu_qp() {
 #undef XIO_CHECK_ZERO
 #undef XIO_CHECK_NNULL
 
+#if !defined(GDA_IONIC)
+// Stub for non-ionic builds: cpu-loopback.hip is not compiled without
+// GDA_IONIC so provide a no-op definition to satisfy the linker.
+int Backend::cpu_loopback_smoke_test(int /*iterations*/,
+                                     int /*transfer_size*/) {
+  fprintf(stderr, "rdma_ep: cpu_loopback_smoke_test: "
+                  "not available (GDA_IONIC not enabled)\n");
+  return -1;
+}
+#endif
+
 } // namespace rdma_ep
 } // namespace xio
