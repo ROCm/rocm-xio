@@ -100,12 +100,12 @@ for i in $(seq $(( ${#KEYS[@]} - 1 )) -1 0); do
         --queue-length "${XIO_KV_QUEUE_LENGTH:-64}" \
         ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
         --less-timing 2>&1)
-    if echo "$result" | grep -E "Verify Failed:[[:space:]]+[^0]" > /dev/null; then
+    if echo "$result" | grep -E "Verify Failed:[[:space:]]+0*[1-9]" > /dev/null; then
         echo "  FAIL: data mismatch for key=$key"
         echo "$result"
         exit 1
     fi
-    if ! echo "$result" | grep -E "Verify Passed:[[:space:]]+[1-9]" > /dev/null; then
+    if ! echo "$result" | grep -E "Verify Passed:[[:space:]]+0*[1-9]" > /dev/null; then
         echo "  FAIL: verify did not pass for key=$key (no passing verifications reported)"
         echo "$result"
         exit 1
