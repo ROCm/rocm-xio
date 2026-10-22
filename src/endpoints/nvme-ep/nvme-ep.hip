@@ -2714,18 +2714,32 @@ __host__ std::string validateConfig(nvmeEpConfig* config) {
   // by queueSize - 1 (max in-flight SQEs).  It may span
   // multiple wavefronts within one thread block.
   if (config->ioParams.batchSize > 1) {
-    int deviceId = 0;
-    hipError_t hip_err = hipGetDevice(&deviceId);
-    if (hip_err != hipSuccess) {
-      return "Failed to query current HIP device";
+    // Skip GPU device queries on rocjitsu emulated GPU: hipGetDevice triggers
+    // lazy hipInit → amdgpu_vm_make_compute WARN_ON → page cache corruption.
+    // The CPU-only kmod relay path doesn't use GPU kernels so the waveSize and
+    // maxBlockSize constraints don't apply; use safe sentinel values instead.
+    uint32_t waveSize = 64;
+    uint32_t maxBlockSize = 1024;
+    {
+      int emu_mode = 0;
+      FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+      if (f) {
+        (void)fscanf(f, "%d", &emu_mode);
+        fclose(f);
+      }
+      if (!emu_mode) {
+        int deviceId = 0;
+        hipError_t hip_err = hipGetDevice(&deviceId);
+        if (hip_err != hipSuccess)
+          return "Failed to query current HIP device";
+        hipDeviceProp_t deviceProp;
+        hip_err = hipGetDeviceProperties(&deviceProp, deviceId);
+        if (hip_err != hipSuccess)
+          return "Failed to query HIP device properties";
+        waveSize = (uint32_t)deviceProp.warpSize;
+        maxBlockSize = (uint32_t)deviceProp.maxThreadsPerBlock;
+      }
     }
-    hipDeviceProp_t deviceProp;
-    hip_err = hipGetDeviceProperties(&deviceProp, deviceId);
-    if (hip_err != hipSuccess) {
-      return "Failed to query HIP device properties";
-    }
-    uint32_t waveSize = (uint32_t)deviceProp.warpSize;
-    uint32_t maxBlockSize = (uint32_t)deviceProp.maxThreadsPerBlock;
 
     // batch_size + 1 threads must fit in one block
     if (config->ioParams.batchSize + 1 > maxBlockSize) {

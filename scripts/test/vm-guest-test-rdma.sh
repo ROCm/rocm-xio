@@ -41,8 +41,12 @@ VENDOR="${VENDOR:-ionic}"
 # --------------------------------------------------------------
 if lsmod | grep -q '^amdgpu'; then
     banner "Unloading amdgpu before build (will reload via amdgpu-probe after)"
-    sudo rmmod rocm_xio 2>/dev/null || true
-    sudo rmmod amdgpu 2>/dev/null || true
+    # Unload all modules that depend on amdgpu so rmmod amdgpu can succeed.
+    # The provisioning step may have loaded ionic/ionic_rdma which hold KFD.
+    sudo modprobe -r ionic_rdma 2>/dev/null || true
+    sudo modprobe -r ionic 2>/dev/null || true
+    sudo modprobe -r rocm_xio 2>/dev/null || true
+    sudo modprobe -r amdgpu 2>/dev/null || true
 fi
 find_rocm
 # Enable the GDA ionic provider so the patched rdma-core is built and
