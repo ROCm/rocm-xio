@@ -124,6 +124,7 @@ timeout --kill-after=30 1000 \
     VENDOR="${VENDOR}" \
     ROCXIO_RDMA_DEVICE="${RDMA_DEVICE}" \
     PROVIDER="${VENDOR}" \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \

@@ -72,6 +72,7 @@ cd "${BUILD_DIR}"
 # syscalls that ignore SIGTERM.
 timeout --kill-after=30 300 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
@@ -93,6 +94,7 @@ XIO_TESTER="${BUILD_DIR}/xio-tester"
 # -n 10:      10 transfers; -v: verbose; --verify: LFSR data check.
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     "${XIO_TESTER}" sdma-ep p2p \
         --to-host \
@@ -107,6 +109,7 @@ banner "Running sdma-ep-p2p integration example (P2P skip expected)"
 
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --test-dir "${BUILD_DIR}" \
           --tests-regex "example-install-rocm-xio|example-sdma-ep-p2p" \

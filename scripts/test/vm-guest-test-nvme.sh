@@ -84,6 +84,7 @@ timeout --kill-after=30 1000 \
     sudo env \
     ROCXIO_NVME_DEVICE="${ROCXIO_NVME_DEVICE}" \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \

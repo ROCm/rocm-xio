@@ -103,6 +103,7 @@ timeout --kill-after=30 1000 \
     ROCXIO_NVME_KV_CTRL="${KV_CTRL}" \
     ROCXIO_NVME_KV_NSID="${KV_NSID}" \
     XIO_FORCE_PCI_MMIO_BRIDGE=1 \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \

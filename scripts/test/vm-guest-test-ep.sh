@@ -64,6 +64,7 @@ cd "${BUILD_DIR}"
 
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --label-regex "${CTEST_LABEL}" \
           --output-on-failure \
@@ -84,6 +85,7 @@ XIO_TESTER="${BUILD_DIR}/xio-tester"
 # Basic: 32 iterations, single thread, verbose, verify correctness.
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     "${XIO_TESTER}" test-ep \
         -n 32 \
@@ -94,6 +96,7 @@ timeout --kill-after=30 120 \
 # Multi-thread: exercises per-thread SQ/CQ indexing.
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     "${XIO_TESTER}" test-ep \
         -n 32 \
@@ -111,6 +114,7 @@ banner "Running sdma-ep-p2p integration example (P2P skip expected)"
 # installed (e.g. build without install step).
 timeout --kill-after=30 120 \
     sudo env \
+    ROCXIO_ROCJITSU=1 \
     HSA_FORCE_FINE_GRAIN_PCIE=1 \
     ctest --test-dir "${BUILD_DIR}" \
           --tests-regex "example-install-rocm-xio|example-sdma-ep-p2p" \
