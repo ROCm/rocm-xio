@@ -138,20 +138,34 @@ int initQueue(int srcDeviceId, int dstDeviceId) {
 }
 
 int initHostQueue(int srcDeviceId, int dstDeviceId) {
+  return initHostQueue(srcDeviceId, dstDeviceId, 1);
+}
+
+int initHostQueue(int srcDeviceId, int dstDeviceId, int numChannels) {
   if (!s_initialized) {
     std::cerr << "sdma_ep::initHostQueue: call initEndpoint() first"
               << std::endl;
     return -1;
   }
+  if (numChannels <= 0) {
+    std::cerr << "sdma_ep::initHostQueue: numChannels must be positive"
+              << std::endl;
+    return -1;
+  }
   try {
     bool success = ::anvil::AnvilLib::getInstance().connect(srcDeviceId,
-                                                            dstDeviceId, 1,
-                                                            true);
+                                                            dstDeviceId,
+                                                            numChannels, true);
     return success ? 0 : -1;
   } catch (const std::exception& e) {
     std::cerr << "sdma_ep::initHostQueue: " << e.what() << std::endl;
     return -1;
   }
+}
+
+int getHostChannelCount(int srcDeviceId, int dstDeviceId) {
+  return ::anvil::AnvilLib::getInstance().getHostChannelCount(srcDeviceId,
+                                                              dstDeviceId);
 }
 
 } // namespace sdma_ep

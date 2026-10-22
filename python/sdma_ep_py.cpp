@@ -40,16 +40,32 @@ void register_sdma_ep(nb::module_& m) {
 
   m.def(
     "create_host_queue",
-    [](int srcDevice, int dstDevice) {
-      // Use idempotent init for Python path
-      int rc = sdma_ep::initHostQueue(srcDevice, dstDevice);
+    [](int srcDevice, int dstDevice, int numChannels) {
+      if (numChannels <= 0) {
+        throw std::invalid_argument(
+          "create_host_queue: num_channels must be positive");
+      }
+      // Use idempotent init for Python path: grows the pair to at least
+      // numChannels queues and never removes any
+      int rc = sdma_ep::initHostQueue(srcDevice, dstDevice, numChannels);
       if (rc != 0) {
         throw std::runtime_error("initHostQueue failed");
       }
-      return 0; // Always channel 0 for Python
+      // Highest channel index: 0 for the default single channel
+      return sdma_ep::getHostChannelCount(srcDevice, dstDevice) - 1;
+    },
+    "src_device"_a, "dst_device"_a, "num_channels"_a = 1,
+    "Create host-initiated SDMA queues (idempotent): ensures the pair has at "
+    "least num_channels independent ordered channels, indexed 0 to "
+    "get_host_channel_count() - 1, and returns the highest channel index");
+
+  m.def(
+    "get_host_channel_count",
+    [](int srcDevice, int dstDevice) {
+      return sdma_ep::getHostChannelCount(srcDevice, dstDevice);
     },
     "src_device"_a, "dst_device"_a,
-    "Create host-initiated SDMA queue (idempotent)");
+    "Number of host-initiated SDMA channels for the pair (0 if none)");
 
   m.def(
     "get_queue_device_ctx",

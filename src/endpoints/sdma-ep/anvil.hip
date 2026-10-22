@@ -833,4 +833,13 @@ xio::sdma_ep::SdmaQueueHostHandle AnvilLib::getHostHandle(int srcDeviceId,
   throw std::runtime_error("getHostHandle: queue not found");
 }
 
+int AnvilLib::getHostChannelCount(int srcDeviceId, int dstDeviceId) const {
+  AnvilLib::ChannelKey key{srcDeviceId, dstDeviceId};
+  auto it = host_sdma_channels_.find(key);
+  if (it == host_sdma_channels_.end()) {
+    return 0;
+  }
+  return static_cast<int>(it->second.size());
+}
+
 } // namespace anvil

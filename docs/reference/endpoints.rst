@@ -437,6 +437,27 @@ setup API:
 See the :doc:`api` page for full function signatures and cleanup
 semantics.
 
+Host-initiated channels
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Host-initiated SDMA queues are ordered: a packet that waits on a flag holds
+back everything behind it on the same queue. A GPU pair can have several
+independent host channels so that unrelated work does not wait on it. Channels
+of one pair normally share one physical SDMA engine, so they remove
+head-of-line blocking but add no bandwidth. A channel here is only the index
+of a queue within a GPU pair, not a route as in some collective libraries.
+
+.. code-block:: cpp
+
+   // Ensure the pair has at least 4 host channels (idempotent)
+   sdma_ep::initHostQueue(0, 1, 4);
+   int n = sdma_ep::getHostChannelCount(0, 1);   // 4
+   auto handle = sdma_ep::getHostHandle(0, 1, 3); // channel 3
+
+The Python binding offers ``create_host_queue(src, dst, num_channels=1)`` and
+``get_host_channel_count(src, dst)``. See the SDMA endpoint README for details
+and limits.
+
 Device-side operations (Kernel API)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

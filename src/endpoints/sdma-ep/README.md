@@ -72,6 +72,47 @@ bool success = anvil::AnvilLib::getInstance().connect(
 );
 ```
 
+### Host-Initiated Channels
+
+A host-initiated queue is an ordered SDMA queue that the host fills and the
+engine drains. Work on one queue runs strictly in submission order, so a
+packet that waits on a flag (`wait_flag_then_put`) holds back every packet
+behind it. A GPU pair can have several such queues, called channels, and
+channels make progress independently of each other. Use one channel per
+independent stream of work that must not wait on another.
+
+Here a channel is only the index of a queue within a GPU pair. It is not a
+route or a share of a collective's tiles, which is what the word means in
+some collective libraries; there, a queue like this is called a lane.
+
+Channels of one GPU pair normally share the same physical SDMA engine, so
+extra channels remove head-of-line blocking but add no bandwidth. Each channel
+has its own ring buffer and one hsakmt queue, so the driver limits how many
+a process can create.
+
+```cpp
+// Make sure the pair has at least 4 host channels (idempotent; never removes)
+xio::sdma_ep::initHostQueue(srcDeviceId, dstDeviceId, 4);
+
+int n = xio::sdma_ep::getHostChannelCount(srcDeviceId, dstDeviceId);  // >= 4
+auto handle = xio::sdma_ep::getHostHandle(srcDeviceId, dstDeviceId, 3);
+```
+
+`createHostQueue()` also adds one channel per call. The Python binding exposes
+the same controls:
+
+```python
+from xio import sdma_ep
+
+sdma_ep.init()
+last = sdma_ep.create_host_queue(0, 1, num_channels=4)  # highest index: 3
+sdma_ep.get_host_channel_count(0, 1)                    # 4
+sdma_ep.put(0, 1, 3, dst, src, size)                    # channel_idx = 3
+```
+
+`create_host_queue(src, dst)` with no count keeps the single channel it always
+created. A channel index at or beyond the count raises `RuntimeError`.
+
 ### Device-Side SDMA Operations
 
 ```cpp
