@@ -183,6 +183,15 @@ public:
     }
     return 0;
   }
+
+  // On rocjitsu emulated GPU, hipInit() triggers amdgpu_vm_make_compute
+  // WARN_ON which corrupts the process ELF loader state (manifests as
+  // "unsupported version 0 of Verneed record" from libhsa).  The NVMe
+  // CPU-only relay path never launches a GPU kernel, so defer hipInit()
+  // to avoid the corruption window.
+  __host__ bool deferGpuInit() const override {
+    return true;
+  }
 };
 
 class RdmaEndpoint : public XioEndpoint {
