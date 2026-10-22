@@ -318,8 +318,14 @@ list(APPEND LIB_SOURCES
 # Add GDA backend for rdma-ep
 list(APPEND LIB_SOURCES
   ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
-  ${ENDPOINTS_DIR}/rdma-ep/cpu-loopback.hip
 )
+# cpu-loopback.hip uses infiniband/verbs.h directly and requires libibverbs-dev.
+# Only compile it when GDA_IONIC is enabled (which already depends on libibverbs).
+if(GDA_IONIC)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/cpu-loopback.hip
+  )
+endif()
 
 # Add BNXT vendor backend (always compiled, conditionally active via GDA_BNXT)
 if(GDA_BNXT)

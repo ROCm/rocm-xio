@@ -426,6 +426,7 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
       // on the first queue — ibv_post_send rings the ionic doorbell through the
       // kernel driver → QEMU → rocm-ernic without any GPU involvement.
       if (q == 0) {
+#if defined(GDA_IONIC)
         int cpu_ret = queues[q].backend->cpu_loopback_smoke_test(
           (int)cfg->iterations, (int)xfer);
         if (cpu_ret != 0) {
@@ -438,6 +439,10 @@ static hipError_t rdma_ep_loopback(xio::XioEndpointConfig* config,
                   "Test completed successfully!\n");
           result = hipSuccess;
         }
+#else
+        ROCXIO_LOG_INFO("rdma-ep: No GPU QP, no ionic provider — skipping\n");
+        result = hipSuccess;
+#endif
       }
       goto cleanup;
     }
