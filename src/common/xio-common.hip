@@ -2138,7 +2138,8 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
   uint64_t gpa = getPhysAddr(buf);
   if (gpa == 0) {
     ROCXIO_LOG_ERROR("rocjitsu shadow ring: GPA=0 for cpu=%p — "
-                     "pagemap returned no entry\n", buf);
+                     "pagemap returned no entry\n",
+                     buf);
     free(buf);
     return -EINVAL;
   }
@@ -2159,8 +2160,9 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
   // Write override GPA to pci-mmio-bridge (backup if kmod relay unavailable).
   int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
   if (r < 0) {
-    ROCXIO_LOG_WARN("writeBridgeOverrideGpa failed: %s — kmod relay still active\n",
-                    strerror(-r));
+    ROCXIO_LOG_WARN(
+      "writeBridgeOverrideGpa failed: %s — kmod relay still active\n",
+      strerror(-r));
     // Non-fatal: kmod relay doesn't need the override GPA.
   }
 
@@ -2178,7 +2180,8 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
  * RAM pages the GPU writes to, and kernel ioremap writes to NVMe BAR0 are
  * deterministic (~1µs vs 3-30s for QEMU's address_space_read path).
  *
- * @ring_gpa:  GPA of the 4096-byte ring buffer (from allocMmioBridgeShadowBufferRocjitsu).
+ * @ring_gpa:  GPA of the 4096-byte ring buffer (from
+ * allocMmioBridgeShadowBufferRocjitsu).
  * @nvme_bdf:  NVMe PCI device BDF (ROCM_XIO_BDF encoding).
  * @returns 0 on success, negative errno on failure.
  */
@@ -2207,7 +2210,8 @@ __host__ int startKmodNvmeRelay(uint64_t ring_gpa, uint32_t nvme_bdf) {
 
 __host__ void stopKmodNvmeRelay(void) {
   int kfd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
-  if (kfd < 0) return;
+  if (kfd < 0)
+    return;
   ioctl(kfd, ROCM_XIO_TEARDOWN_NVME_RELAY, 0);
   close(kfd);
   ROCXIO_LOG_INFO("kmod NVMe relay stopped\n");

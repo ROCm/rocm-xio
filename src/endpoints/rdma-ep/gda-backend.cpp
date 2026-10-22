@@ -94,8 +94,10 @@ int Backend::init() {
       fclose(f);
     }
     if (emu_mode != 0) {
-      fprintf(stderr, "rdma_ep: rocjitsu emulated GPU detected"
-                      " (emu_mode=%d) — skipping GPU QP setup\n", emu_mode);
+      fprintf(stderr,
+              "rdma_ep: rocjitsu emulated GPU detected"
+              " (emu_mode=%d) — skipping GPU QP setup\n",
+              emu_mode);
       return 0;
     }
   }

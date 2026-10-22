@@ -94,8 +94,8 @@ extern "C" {
  * rocjitsu emulated GPUs where GPU stores reach guest RAM but not QEMU's
  * address_space_read path fast enough.
  *
- * @ring_gpa:   Guest physical address of the ring buffer (4096 bytes).
- * @nvme_bdf:   NVMe controller BDF in ROCM_XIO_BDF encoding.
+ * @param ring_gpa  Guest physical address of the ring buffer (4096 bytes).
+ * @param nvme_bdf  NVMe controller BDF in ROCM_XIO_BDF encoding.
  */
 #define ROCM_XIO_SETUP_NVME_RELAY                                              \
   _IOW(ROCM_XIO_IOC_MAGIC, 17, struct rocm_xio_nvme_relay_req)
@@ -103,8 +103,8 @@ extern "C" {
 #define ROCM_XIO_TEARDOWN_NVME_RELAY _IO(ROCM_XIO_IOC_MAGIC, 18)
 
 struct rocm_xio_nvme_relay_req {
-  __u64 ring_gpa;  /**< Guest PA of the 4096-byte ring buffer. */
-  __u32 nvme_bdf;  /**< NVMe BDF (ROCM_XIO_BDF encoding). */
+  __u64 ring_gpa; /**< Guest PA of the 4096-byte ring buffer. */
+  __u32 nvme_bdf; /**< NVMe BDF (ROCM_XIO_BDF encoding). */
   __u32 reserved;
 };
 /**

@@ -10,14 +10,14 @@
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
-#include <atomic>
-#include <thread>
 #include <errno.h>
 #include <limits.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include <fcntl.h>
 #include <linux/nvme_ioctl.h>
@@ -182,16 +182,18 @@ __host__ __device__ void ringDoorbell(uint16_t value,
       uint32_t slot = tail % NVME_RELAY_DEPTH;
       volatile nvmePendingRelay* r = &doorbellParams.relayRing[slot];
       // Wait for slot to be free (CPU relay has consumed previous entry).
-      while (r->ready != 0u) { /* spin */ }
+      while (r->ready != 0u) { /* spin */
+      }
       r->offset = offset;
-      r->value  = (uint32_t)value;
+      r->value = (uint32_t)value;
       __threadfence_system();
-      r->ready  = 1u;
+      r->ready = 1u;
       __threadfence_system();
       *doorbellParams.relayTail = tail + 1u;
       __threadfence_system();
       // Wait for CPU relay to acknowledge (ready goes back to 0).
-      while (r->ready != 0u) { /* spin */ }
+      while (r->ready != 0u) { /* spin */
+      }
     } else {
       genPciMmioBridgeCmd(doorbellParams.shadowBufferVirt,
                           doorbellParams.nvmeTargetBdf, 0, offset, value,
@@ -1656,15 +1658,15 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
  * deferred GPU stores to the memfd that QEMU polls.
  */
 __global__ void gpuSubmitOneSqe(volatile sqeType* sq, uint32_t sq_tail,
-                                 uint32_t queue_size, nvmeIoParams ioParams,
-                                 nvmeBufferParams bufferParams,
-                                 nvmeDoorbellParams doorbellParams) {
+                                uint32_t queue_size, nvmeIoParams ioParams,
+                                nvmeBufferParams bufferParams,
+                                nvmeDoorbellParams doorbellParams) {
   uint32_t slot = sq_tail % queue_size;
   volatile sqeType* entry = &sq[slot];
 
   sqeType sqe = {};
-  sqe.opcode     = 0x02; // NVMe read
-  sqe.nsid       = ioParams.nsid;
+  sqe.opcode = 0x02; // NVMe read
+  sqe.nsid = ioParams.nsid;
   sqe.command_id = (uint16_t)(sq_tail & 0xFFFFu);
 
   const uint64_t slba = (uint64_t)ioParams.baseLba +
@@ -1688,7 +1690,7 @@ __global__ void gpuSubmitOneSqe(volatile sqeType* sq, uint32_t sq_tail,
  * Rings the CQ head doorbell then exits so stores reach QEMU.
  */
 __global__ void gpuAckOneCqe(uint32_t cq_head, uint32_t queue_size,
-                               nvmeDoorbellParams doorbellParams) {
+                             nvmeDoorbellParams doorbellParams) {
   nvme_ep::ringDoorbell((uint16_t)(cq_head + 1u), doorbellParams,
                         doorbellParams.doorbellOffset +
                           nvme_ep::doorBellStride);
@@ -3006,8 +3008,9 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         int relay_ret = startKmodNvmeRelay(
           ring_gpa, nvmeConfig->doorbellParams.nvmeTargetBdf);
         if (relay_ret < 0) {
-          ROCXIO_LOG_WARN("kmod relay unavailable (err %d); falling back to QEMU bridge\n",
-                          relay_ret);
+          ROCXIO_LOG_WARN(
+            "kmod relay unavailable (err %d); falling back to QEMU bridge\n",
+            relay_ret);
         }
       }
     } else {
@@ -3750,7 +3753,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     // normal CPU stores which DO update the memfd immediately.
     if (usePciMmioBridge) {
       auto* relay = static_cast<nvme_ep::nvmePendingRelay*>(
-        std::aligned_alloc(64, NVME_RELAY_DEPTH * sizeof(nvme_ep::nvmePendingRelay)));
+        std::aligned_alloc(64, NVME_RELAY_DEPTH *
+                                 sizeof(nvme_ep::nvmePendingRelay)));
       auto* head = new uint32_t(0);
       auto* tail = new uint32_t(0);
       if (relay && head && tail) {
@@ -3895,8 +3899,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   // for CQEs that QEMU cannot see.  Instead the CPU writes SQEs and rings the
   // SQ doorbell via the kmod relay; it then polls the CQ until the NVMe device
   // posts a completion and rings the CQ head doorbell.
-  if (numLanes == 1 &&
-      pendingDoorbell[0].usePciMmioBridge &&
+  if (numLanes == 1 && pendingDoorbell[0].usePciMmioBridge &&
       pendingDoorbell[0].shadowBufferVirt != nullptr) {
     result = [&]() -> hipError_t {
       const nvmeIoParams& io = targetIoParams[lanes[0].target];
@@ -3913,7 +3916,8 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       // CPU-side SQ base pointer (posix_memalign → guest RAM → memfd-backed)
       // CPU writes go directly to guest physical pages that QEMU DMA-reads.
       auto* sq_cpu = static_cast<nvme_ep::sqeType*>(cfg.submissionQueue);
-      auto* cq_cpu = static_cast<volatile nvme_ep::cqeType*>(cfg.completionQueue);
+      auto* cq_cpu = static_cast<volatile nvme_ep::cqeType*>(
+        cfg.completionQueue);
 
       const bool is_kv = (io.kvOpcode != 0);
 
@@ -3922,7 +3926,7 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         // CPU stores go to guest RAM (memfd-backed posix_memalign memory).
         // QEMU's NVMe device DMA-reads the SQE from those pages immediately.
         nvme_ep::sqeType sqe = {};
-        sqe.nsid       = io.nsid;
+        sqe.nsid = io.nsid;
         sqe.command_id = (uint16_t)(sq_tail & 0xFFFFu);
 
         if (is_kv) {
@@ -3947,9 +3951,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         __sync_synchronize(); // CPU fence before ring command
         sq_tail++;
 
-        // Write ring command from CPU — CPU store goes to guest RAM that kmod reads.
-        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf,
-                            0, db.doorbellOffset, (uint64_t)sq_tail,
+        // Write ring command from CPU — CPU store goes to guest RAM that kmod
+        // reads.
+        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf, 0,
+                            db.doorbellOffset, (uint64_t)sq_tail,
                             PCI_MMIO_BRIDGE_CMD_WRITE, 4);
         __sync_synchronize();
 
@@ -3969,13 +3974,13 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         // Clear the consumed CQE slot to avoid stale phase bits on next run.
         cq_cpu[cq_head % qsize].status = 0;
         cq_head++;
-        if (cq_head % qsize == 0) expected_phase ^= 1;
+        if (cq_head % qsize == 0)
+          expected_phase ^= 1;
 
         // CPU writes CQ head doorbell via kmod relay ring.
-        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf,
-                            0, db.doorbellOffset + nvme_ep::doorBellStride,
-                            (uint64_t)cq_head,
-                            PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf, 0,
+                            db.doorbellOffset + nvme_ep::doorBellStride,
+                            (uint64_t)cq_head, PCI_MMIO_BRIDGE_CMD_WRITE, 4);
         __sync_synchronize();
       }
       return hipSuccess;
@@ -4033,28 +4038,35 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     std::vector<std::atomic<bool>> relayStop(numLanes);
     for (size_t q = 0; q < numLanes; q++) {
       relayStop[q].store(false);
-      if (!pendingDoorbell[q].relayRing) continue;
-      auto* ring  = pendingDoorbell[q].relayRing;
-      auto* head  = pendingDoorbell[q].relayHead;
-      auto* tail  = pendingDoorbell[q].relayTail;
-      auto* sbuf  = pendingDoorbell[q].shadowBufferVirt;
+      if (!pendingDoorbell[q].relayRing)
+        continue;
+      auto* ring = pendingDoorbell[q].relayRing;
+      auto* head = pendingDoorbell[q].relayHead;
+      auto* tail = pendingDoorbell[q].relayTail;
+      auto* sbuf = pendingDoorbell[q].shadowBufferVirt;
       uint32_t bdf = pendingDoorbell[q].nvmeTargetBdf;
-      relayThreads[q] = std::thread([ring, head, tail, sbuf, bdf, &relayStop, q]() {
+      relayThreads[q] = std::thread([ring, head, tail, sbuf, bdf, &relayStop,
+                                     q]() {
         while (!relayStop[q].load(std::memory_order_relaxed)) {
           uint32_t h = *head;
           uint32_t t = __atomic_load_n(tail, __ATOMIC_ACQUIRE);
-          if (h == t) { sched_yield(); continue; }
+          if (h == t) {
+            sched_yield();
+            continue;
+          }
           uint32_t slot = h % NVME_RELAY_DEPTH;
           volatile nvme_ep::nvmePendingRelay* r = &ring[slot];
           // Wait for GPU to fill this slot
-          while (__atomic_load_n((const uint32_t*)&r->ready, __ATOMIC_ACQUIRE) == 0u) {
-            if (relayStop[q].load(std::memory_order_relaxed)) return;
+          while (__atomic_load_n((const uint32_t*)&r->ready,
+                                 __ATOMIC_ACQUIRE) == 0u) {
+            if (relayStop[q].load(std::memory_order_relaxed))
+              return;
             sched_yield();
           }
-          // CPU store to bridge ring — immediately reaches QEMU's address_space_read
-          genPciMmioBridgeCmd(sbuf, (uint16_t)bdf, 0,
-                              r->offset, (uint64_t)r->value,
-                              PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+          // CPU store to bridge ring — immediately reaches QEMU's
+          // address_space_read
+          genPciMmioBridgeCmd(sbuf, (uint16_t)bdf, 0, r->offset,
+                              (uint64_t)r->value, PCI_MMIO_BRIDGE_CMD_WRITE, 4);
           // Acknowledge: clear ready so GPU can reuse the slot
           __atomic_store_n((uint32_t*)&r->ready, 0u, __ATOMIC_RELEASE);
           *head = h + 1u;
@@ -4067,8 +4079,10 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       result = xio::syncHipKernel("nvme-ep", "gpuKernel", lanes[q].queueId,
                                   streams[q]);
       relayStop[q].store(true, std::memory_order_relaxed);
-      if (relayThreads[q].joinable()) relayThreads[q].join();
-      if (result != hipSuccess) goto cleanup;
+      if (relayThreads[q].joinable())
+        relayThreads[q].join();
+      if (result != hipSuccess)
+        goto cleanup;
     }
   }
 

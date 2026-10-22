@@ -103,9 +103,10 @@ struct nvmeIoParams {
  * reaches the memfd that QEMU polls).
  */
 struct nvmePendingRelay {
-  volatile uint32_t offset;  /**< BAR0 register offset (e.g. 0x1008 = SQ1TDBL). */
-  volatile uint32_t value;   /**< New doorbell value. */
-  volatile uint32_t ready;   /**< 1 = GPU filled this slot, 0 = consumed. */
+  volatile uint32_t offset; /**< BAR0 register offset (e.g. 0x1008 = SQ1TDBL).
+                             */
+  volatile uint32_t value;  /**< New doorbell value. */
+  volatile uint32_t ready;  /**< 1 = GPU filled this slot, 0 = consumed. */
   volatile uint32_t _pad;
 };
 
@@ -119,9 +120,12 @@ struct nvmeDoorbellParams {
   void* nvmeBar0Gpu;       /**< GPU-accessible BAR0 pointer. */
   bool usePciMmioBridge;   /**< Use bridge mode instead of direct BAR0. */
   /** CPU relay ring: GPU posts here; CPU relay thread drains it. */
-  nvmePendingRelay* relayRing; /**< NVME_RELAY_DEPTH entries (posix_memalign). */
-  volatile uint32_t* relayHead; /**< CPU-side consumer index (posix_memalign). */
-  volatile uint32_t* relayTail; /**< GPU-side producer index (posix_memalign). */
+  nvmePendingRelay* relayRing;  /**< NVME_RELAY_DEPTH entries (posix_memalign).
+                                 */
+  volatile uint32_t* relayHead; /**< CPU-side consumer index (posix_memalign).
+                                 */
+  volatile uint32_t* relayTail; /**< GPU-side producer index (posix_memalign).
+                                 */
 };
 
 /**

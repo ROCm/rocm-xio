@@ -161,9 +161,9 @@ static DEFINE_MUTEX(mmio_bridge_lock);
  * producer_idx at ~100µs intervals.  When a CMD_WRITE command appears it
  * executes writel() to the BAR0 directly — no QEMU round-trip needed.
  */
-#include <linux/kthread.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/kthread.h>
 
 /* pci_mmio_bridge_ring_meta + pci_mmio_bridge_command layout (from xio.h) */
 struct kmod_ring_meta {
@@ -175,49 +175,47 @@ struct kmod_ring_meta {
 
 struct kmod_ring_cmd {
   __u16 target_bdf;
-  __u8  target_bar;
-  __u8  reserved1;
+  __u8 target_bar;
+  __u8 reserved1;
   __u32 offset;
   __u64 value;
-  __u8  command; /* 1=WRITE */
-  __u8  size;
-  __u8  status;  /* 0=PENDING 1=COMPLETE */
-  __u8  reserved2;
+  __u8 command; /* 1=WRITE */
+  __u8 size;
+  __u8 status; /* 0=PENDING 1=COMPLETE */
+  __u8 reserved2;
   __u32 sequence;
 } __packed;
 
-#define RELAY_POLL_US 100  /* poll interval microseconds */
+#define RELAY_POLL_US 100 /* poll interval microseconds */
 #define RELAY_RING_CMD_WRITE 1
 
 struct nvme_relay_state {
-  struct task_struct *thread;
-  void __iomem      *bar0;     /* ioremap of NVMe BAR0 */
-  volatile void     *ring;     /* memremap of ring GPA */
-  __u32              queue_depth;
-  __u32              head;     /* consumer index */
-  bool               active;
+  struct task_struct* thread;
+  void __iomem* bar0;  /* ioremap of NVMe BAR0 */
+  volatile void* ring; /* memremap of ring GPA */
+  __u32 queue_depth;
+  __u32 head; /* consumer index */
+  bool active;
 };
 
 static struct nvme_relay_state relay_state;
 static DEFINE_MUTEX(relay_lock);
 
-static int nvme_relay_thread(void *data)
-{
-  struct nvme_relay_state *rs = &relay_state;
+static int nvme_relay_thread(void* data) {
+  struct nvme_relay_state* rs = &relay_state;
 
   pr_info("rocm-xio: NVMe relay thread started\n");
 
   while (!kthread_should_stop()) {
-    const struct kmod_ring_meta *meta =
-        (const struct kmod_ring_meta *)rs->ring;
+    const struct kmod_ring_meta* meta = (const struct kmod_ring_meta*)rs->ring;
     __u32 producer = READ_ONCE(meta->producer_idx);
 
     while (rs->head != producer) {
       __u32 slot = rs->head % rs->queue_depth;
-      volatile struct kmod_ring_cmd *cmd =
-          (volatile struct kmod_ring_cmd *)
-          ((char *)rs->ring + sizeof(struct kmod_ring_meta) +
-           slot * sizeof(struct kmod_ring_cmd));
+      volatile struct kmod_ring_cmd* cmd =
+        (volatile struct kmod_ring_cmd*)((char*)rs->ring +
+                                         sizeof(struct kmod_ring_meta) +
+                                         slot * sizeof(struct kmod_ring_cmd));
 
       /* Wait for PENDING status */
       if (READ_ONCE(cmd->status) != 0) {
@@ -233,7 +231,7 @@ static int nvme_relay_thread(void *data)
       /* Execute MMIO write to NVMe BAR0 */
       u32 off = READ_ONCE(cmd->offset);
       u64 val = READ_ONCE(cmd->value);
-      u8  sz  = READ_ONCE(cmd->size);
+      u8 sz = READ_ONCE(cmd->size);
       if (sz == 4)
         writel((u32)val, rs->bar0 + off);
       else if (sz == 8)
@@ -253,12 +251,11 @@ static int nvme_relay_thread(void *data)
   return 0;
 }
 
-static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
-{
-  struct nvme_relay_state *rs = &relay_state;
-  struct pci_dev *nvme_dev = NULL;
-  void __iomem *bar0 = NULL;
-  void *ring = NULL;
+static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req* req) {
+  struct nvme_relay_state* rs = &relay_state;
+  struct pci_dev* nvme_dev = NULL;
+  void __iomem* bar0 = NULL;
+  void* ring = NULL;
   __u8 bus, devfn;
   int ret = 0;
 
@@ -278,10 +275,10 @@ static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
   }
 
   /* Find the NVMe PCI device by BDF */
-  bus   = (req->nvme_bdf >> 8) & 0xFF;
+  bus = (req->nvme_bdf >> 8) & 0xFF;
   devfn = PCI_DEVFN((req->nvme_bdf >> 3) & 0x1F, req->nvme_bdf & 0x7);
-  nvme_dev = pci_get_domain_bus_and_slot(
-      (req->nvme_bdf >> 16) & 0xFFFF, bus, devfn);
+  nvme_dev = pci_get_domain_bus_and_slot((req->nvme_bdf >> 16) & 0xFFFF, bus,
+                                         devfn);
   if (!nvme_dev) {
     pr_err("rocm-xio: NVMe device %04x not found\n", req->nvme_bdf);
     ret = -ENODEV;
@@ -298,7 +295,7 @@ static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
   pci_dev_put(nvme_dev);
 
   /* Read queue_depth from ring metadata */
-  const struct kmod_ring_meta *meta = (const struct kmod_ring_meta *)ring;
+  const struct kmod_ring_meta* meta = (const struct kmod_ring_meta*)ring;
   __u32 qdepth = READ_ONCE(meta->queue_depth);
   if (qdepth == 0) {
     /* Default: (4096 - 16) / 24 = 340 */
@@ -306,11 +303,11 @@ static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
              sizeof(struct kmod_ring_cmd);
   }
 
-  rs->bar0        = bar0;
-  rs->ring        = ring;
+  rs->bar0 = bar0;
+  rs->ring = ring;
   rs->queue_depth = qdepth;
-  rs->head        = 0;
-  rs->active      = true;
+  rs->head = 0;
+  rs->active = true;
 
   rs->thread = kthread_run(nvme_relay_thread, rs, "rocm-xio-relay");
   if (IS_ERR(rs->thread)) {
@@ -321,8 +318,9 @@ static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
     goto out_unmap_ring;
   }
 
-  pr_info("rocm-xio: NVMe relay started ring_gpa=0x%llx nvme_bdf=0x%04x qdepth=%u\n",
-          req->ring_gpa, req->nvme_bdf, qdepth);
+  pr_info(
+    "rocm-xio: NVMe relay started ring_gpa=0x%llx nvme_bdf=0x%04x qdepth=%u\n",
+    req->ring_gpa, req->nvme_bdf, qdepth);
   goto out;
 
 out_put_dev:
@@ -334,9 +332,8 @@ out:
   return ret;
 }
 
-static void teardown_nvme_relay(void)
-{
-  struct nvme_relay_state *rs = &relay_state;
+static void teardown_nvme_relay(void) {
+  struct nvme_relay_state* rs = &relay_state;
 
   mutex_lock(&relay_lock);
   if (!rs->active) {
@@ -353,7 +350,7 @@ static void teardown_nvme_relay(void)
     rs->bar0 = NULL;
   }
   if (rs->ring) {
-    memunmap((void *)rs->ring);
+    memunmap((void*)rs->ring);
     rs->ring = NULL;
   }
   mutex_unlock(&relay_lock);
