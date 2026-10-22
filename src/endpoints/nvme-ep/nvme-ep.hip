@@ -2922,11 +2922,14 @@ static hipError_t oneShotFillPattern(const struct xioBufferInfo& buf,
     return hipErrorOutOfMemory;
   xio::DataPatternParams pp{staging, bytes, 0, blockSize, seed, nullptr};
   xio::dataPattern(false, pp);
+  // Host-mode buffers (memory mode without XIO_MEM_MODE_DATA_DEVICE) set
+  // gpuPtr == hostPtr; hipMemcpy rejects that pointer on rocjitsu, so branch
+  // on isDeviceMemory, not on gpuPtr.
   hipError_t err = hipSuccess;
-  if (buf.gpuPtr) {
+  if (buf.isDeviceMemory && buf.gpuPtr) {
     err = hipMemcpy(buf.gpuPtr, staging, bytes, hipMemcpyHostToDevice);
   } else {
-    memcpy(buf.hostPtr, staging, bytes);
+    memcpy(buf.hostPtr ? buf.hostPtr : buf.gpuPtr, staging, bytes);
   }
   __sync_synchronize();
   free(staging);
@@ -2942,14 +2945,14 @@ static bool oneShotVerifyPattern(const struct xioBufferInfo& buf,
   if (!staging)
     return false;
   __sync_synchronize();
-  if (buf.gpuPtr) {
+  if (buf.isDeviceMemory && buf.gpuPtr) {
     if (hipMemcpy(staging, buf.gpuPtr, bytes, hipMemcpyDeviceToHost) !=
         hipSuccess) {
       free(staging);
       return false;
     }
   } else {
-    memcpy(staging, buf.hostPtr, bytes);
+    memcpy(staging, buf.hostPtr ? buf.hostPtr : buf.gpuPtr, bytes);
   }
   xio::DataPatternParams vp{staging, bytes, 0, blockSize, seed, errorOffset};
   const bool ok = xio::dataPattern(true, vp);
