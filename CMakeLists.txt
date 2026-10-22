@@ -305,6 +305,12 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 # Filter out vendor backend files (they are added conditionally based on GDA_* options)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-backend\\.cpp")
+# Filter out cpu-loopback.hip unless GDA_IONIC is enabled: it requires
+# libibverbs-dev (infiniband/verbs.h) which is not present in non-ionic builds.
+if(NOT GDA_IONIC)
+  list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+    "${ENDPOINTS_DIR}/rdma-ep/cpu-loopback\\.hip")
+endif()
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
