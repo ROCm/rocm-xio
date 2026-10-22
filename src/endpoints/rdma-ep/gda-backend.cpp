@@ -81,6 +81,24 @@ int Backend::init() {
 #endif
   }
 
+  // On rocjitsu emulated GPU, hipMalloc (called by setup_gpu_qp) triggers
+  // amdgpu_vm_make_compute WARN_ON which corrupts the process heap.
+  // Detect emulated GPU via sysfs (emu_mode=1) without calling any HIP
+  // functions that could trigger the compute VM path.
+  // Skip GPU QP setup; the loopback path handles null gpu_qp gracefully.
+  {
+    int emu_mode = 0;
+    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+    if (f) {
+      (void)fscanf(f, "%d", &emu_mode);
+      fclose(f);
+    }
+    if (emu_mode != 0) {
+      fprintf(stderr, "rdma_ep: rocjitsu emulated GPU detected"
+                      " (emu_mode=%d) — skipping GPU QP setup\n", emu_mode);
+      return 0;
+    }
+  }
   setup_gpu_qp();
   return 0;
 }

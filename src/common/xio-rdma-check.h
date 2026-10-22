@@ -94,7 +94,12 @@ void dlsym_load_prefixed_optional(FuncPtr& out, void* handle,
 inline void* dv_dlopen(const char* lib_name, const char* vendor_tag,
                        const char* const* extra_paths = nullptr,
                        int n_extra = 0) {
-  constexpr int flags = RTLD_LAZY | RTLD_DEEPBIND;
+  // RTLD_DEEPBIND loads an isolated second copy of the library with its own
+  // global allocator state separate from the ibverbs provider already loaded by
+  // libibverbs (e.g. libionic-rdmav59.so).  Cross-library pointer frees then
+  // produce "free(): invalid size".  Use RTLD_GLOBAL instead so the loaded
+  // library shares the global symbol namespace and malloc state.
+  constexpr int flags = RTLD_LAZY | RTLD_GLOBAL;
   void* handle = nullptr;
 
 #ifdef RDMA_CORE_LIB_DIR
