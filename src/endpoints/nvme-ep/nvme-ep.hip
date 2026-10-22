@@ -2906,6 +2906,57 @@ static __host__ void dumpNvmeDataPrpIfRequested(
  * @param config Base endpoint configuration
  * @return hipSuccess on success, error code on failure
  */
+
+// ---- One-shot (CPU-driven) path: host-side pattern fill and verify ----
+// The one-shot path launches no kernel, so the LFSR fill that normally runs
+// inside driveEndpoint* never touches the write buffer, and the function
+// returns before the verify block.  These helpers close both gaps so a
+// store/retrieve pair over the CPU doorbell can be checked end to end.
+static hipError_t oneShotFillPattern(const struct xioBufferInfo& buf,
+                                     size_t bytes, uint32_t blockSize,
+                                     uint32_t seed) {
+  if (bytes == 0 || (!buf.gpuPtr && !buf.hostPtr))
+    return hipSuccess;
+  uint8_t* staging = static_cast<uint8_t*>(malloc(bytes));
+  if (!staging)
+    return hipErrorOutOfMemory;
+  xio::DataPatternParams pp{staging, bytes, 0, blockSize, seed, nullptr};
+  xio::dataPattern(false, pp);
+  hipError_t err = hipSuccess;
+  if (buf.gpuPtr) {
+    err = hipMemcpy(buf.gpuPtr, staging, bytes, hipMemcpyHostToDevice);
+  } else {
+    memcpy(buf.hostPtr, staging, bytes);
+  }
+  __sync_synchronize();
+  free(staging);
+  return err;
+}
+
+static bool oneShotVerifyPattern(const struct xioBufferInfo& buf,
+                                 size_t bytes, uint32_t blockSize,
+                                 uint32_t seed, size_t* errorOffset) {
+  if (bytes == 0 || (!buf.gpuPtr && !buf.hostPtr))
+    return false;
+  uint8_t* staging = static_cast<uint8_t*>(malloc(bytes));
+  if (!staging)
+    return false;
+  __sync_synchronize();
+  if (buf.gpuPtr) {
+    if (hipMemcpy(staging, buf.gpuPtr, bytes, hipMemcpyDeviceToHost) !=
+        hipSuccess) {
+      free(staging);
+      return false;
+    }
+  } else {
+    memcpy(staging, buf.hostPtr, bytes);
+  }
+  xio::DataPatternParams vp{staging, bytes, 0, blockSize, seed, errorOffset};
+  const bool ok = xio::dataPattern(true, vp);
+  free(staging);
+  return ok;
+}
+
 __host__ hipError_t run(XioEndpointConfig* config) {
   if (!config || !config->endpointConfig) {
     ROCXIO_LOG_ERROR("nvme-ep requires endpoint "
@@ -3934,6 +3985,26 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         cfg.completionQueue);
 
       const bool is_kv = (io.kvOpcode != 0);
+      const bool kv_store = is_kv && io.kvOpcode == nvme_kv_cmd_store;
+      const bool kv_retrieve = is_kv && !kv_store;
+      size_t xfer_bytes = is_kv ? (size_t)io.kvValueLen
+                                : (size_t)io.lbasPerIo * io.lbaSize;
+      if (xfer_bytes > nvmeConfig->bufferParams.bufferSize)
+        xfer_bytes = nvmeConfig->bufferParams.bufferSize;
+
+      // Seed the write buffer with the LFSR pattern (the kernel normally does
+      // this; the one-shot path has no kernel).
+      if (kv_store) {
+        hipError_t fill_err = oneShotFillPattern(
+          writeBufs[0], xfer_bytes, io.lbaSize, io.lfsrSeed);
+        if (fill_err != hipSuccess) {
+          ROCXIO_LOG_ERROR("one-shot: pattern fill failed: %s\n",
+                           hipGetErrorString(fill_err));
+          return fill_err;
+        }
+        ROCXIO_LOG_INFO("one-shot: filled %zu bytes with LFSR seed 0x%x\n",
+                        xfer_bytes, io.lfsrSeed);
+      }
 
       for (int op = 0; op < num_ops; op++) {
         // Write SQE from CPU thread (not GPU kernel).
@@ -3984,6 +4055,30 @@ __host__ hipError_t run(XioEndpointConfig* config) {
         if (!got_cqe) {
           ROCXIO_LOG_ERROR("CQE timeout on op %d (10s)\n", op);
           return hipErrorUnknown;
+        }
+        // Report the completion status code (bits 15:1), not just the phase.
+        const uint16_t cqe_status = cq_cpu[cq_head % qsize].status;
+        const uint16_t status_code = (uint16_t)(cqe_status >> 1);
+        if (status_code != 0) {
+          ROCXIO_LOG_ERROR("one-shot: op %d CQE status 0x%04x (sct/sc 0x%x)\n",
+                           op, cqe_status, status_code);
+        }
+        // Verify the retrieved bytes against the LFSR pattern the store used.
+        if (kv_retrieve && nvmeConfig->verify) {
+          size_t err_off = 0;
+          const bool ok = (status_code == 0) &&
+                          oneShotVerifyPattern(readBufs[0], xfer_bytes,
+                                               io.lbaSize, io.lfsrSeed,
+                                               &err_off);
+          if (ok) {
+            config->verifyPass += 1u;
+            ROCXIO_LOG_INFO("one-shot: verify passed (%zu bytes)\n",
+                            xfer_bytes);
+          } else {
+            config->verifyFail += 1u;
+            ROCXIO_LOG_ERROR("one-shot: verify FAILED at byte %zu of %zu\n",
+                             err_off, xfer_bytes);
+          }
         }
         // Clear the consumed CQE slot to avoid stale phase bits on next run.
         cq_cpu[cq_head % qsize].status = 0;
