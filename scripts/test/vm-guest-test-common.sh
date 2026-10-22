@@ -103,6 +103,14 @@ find_rocm() {
 }
 
 build_xio_tester() {
+    # Patch amdgpu DKMS source to suppress WARN_ONs that corrupt the guest
+    # page cache on rocjitsu emulated GPU.  Must run before loading amdgpu.
+    if ls /usr/src/amdgpu-* > /dev/null 2>&1; then
+        banner "Patching amdgpu DKMS for rocjitsu compatibility"
+        "${SRC_DIR}/scripts/test/patch-amdgpu-rocjitsu.sh" || \
+            echo "WARNING: amdgpu patch failed; WARN_ONs may corrupt page cache" >&2
+    fi
+
     banner "Configuring rocm-xio"
 
     HIP_CXX=""
