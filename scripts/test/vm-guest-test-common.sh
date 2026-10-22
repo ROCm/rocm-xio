@@ -55,7 +55,11 @@ gpu_bringup() {
         grep -E '^(gfx_target_version|simd_count|vendor_id|device_id) ' \
             "${node}/properties" || true
     done
-    if command -v rocminfo > /dev/null; then
+    # Skip rocminfo on rocjitsu: it triggers amdgpu_vm_make_compute WARN_ON
+    # which corrupts the guest page cache and causes all subsequent test
+    # invocations to segfault in libhsa/libdrm/libc.
+    if command -v rocminfo > /dev/null && \
+       [ "$(cat /sys/module/amdgpu/parameters/emu_mode 2>/dev/null || echo 0)" = "0" ]; then
         rocminfo | grep -E 'Name:|gfx' || true
     fi
 }
