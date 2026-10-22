@@ -65,9 +65,17 @@ with open("$AMDGPU_VM", "w") as f:
 print(f"Total: {count} patch(es) applied")
 PYEOF
 
-# Rebuild and install
+# Rebuild and install — only if ofa_kernel (OFED) symvers are present.
+# Without them the DKMS Makefile aborts after ~30 minutes, wasting CI time.
 KVER=$(uname -r)
 DKMS_VER=$(basename "$DKMS_SRC" | sed 's/amdgpu-//')
+OFA_SYMVERS=$(ls /usr/src/ofa_kernel*/x86_64/"$KVER"/Module.symvers 2>/dev/null | head -1)
+if [ -z "$OFA_SYMVERS" ]; then
+    echo "WARNING: ofa_kernel Module.symvers not found for kernel $KVER" >&2
+    echo "  amdgpu DKMS rebuild skipped — WARN_ONs will not be suppressed." >&2
+    echo "  To fix: ensure rdma-core/OFED dev headers are installed before running this script." >&2
+    exit 1
+fi
 echo "Rebuilding amdgpu/$DKMS_VER for kernel $KVER..."
 sudo dkms build -m amdgpu -v "$DKMS_VER" -k "$KVER" --force 2>&1 | tail -5
 sudo dkms install -m amdgpu -v "$DKMS_VER" -k "$KVER" --force 2>&1 | tail -3
