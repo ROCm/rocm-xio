@@ -776,6 +776,22 @@ void freeHostMemory(void* ptr, unsigned flags) {
   if (!ptr)
     return;
 
+  // Mirror the alloc-side emu_mode redirect: if we allocated with
+  // posix_memalign (because emu_mode was set), free with free() not
+  // hipHostFree().
+  if (!(flags & XIO_HOST_MEM_PLAIN)) {
+    int emu_mode = 0;
+    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+    if (f) {
+      (void)fscanf(f, "%d", &emu_mode);
+      fclose(f);
+    }
+    if (emu_mode != 0)
+      flags = (flags & ~(XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT |
+                         XIO_HOST_MEM_DEFAULT | XIO_HOST_MEM_PINNED)) |
+              XIO_HOST_MEM_PLAIN;
+  }
+
   if (flags & XIO_HOST_MEM_PLAIN) {
     free(ptr);
     return;
@@ -3295,21 +3311,35 @@ __host__ void freeGpuAccessibleBuffer(struct xioBufferInfo* bufferInfo) {
     return;
   }
 
+  // On rocjitsu (emu_mode=1) all host buffers were allocated via posix_memalign
+  // by allocateGpuAccessibleBuffer — use free() not hipHostFree().
+  int emu_mode = 0;
+  {
+    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+    if (f) {
+      (void)fscanf(f, "%d", &emu_mode);
+      fclose(f);
+    }
+  }
+
   if (bufferInfo->isDeviceMemory) {
     freeDeviceMemory(bufferInfo->hostPtr, XIO_DEVICE_MEM_UNCACHED);
+  } else if (emu_mode != 0) {
+    free(bufferInfo->hostPtr);
   } else {
-    // Try hipHostFree first; fall back to free() for plain-malloc allocations
-    // (rocjitsu path) where hipHostFree would return an error.
     hipError_t ferr = hipHostFree(bufferInfo->hostPtr);
     if (ferr != hipSuccess)
       free(bufferInfo->hostPtr);
   }
 
   if (bufferInfo->pagePhysAddrs) {
-    // May be posix_memalign'd (rocjitsu) or hipHostMalloc'd.
-    hipError_t pferr = hipHostFree(bufferInfo->pagePhysAddrs);
-    if (pferr != hipSuccess)
+    if (emu_mode != 0) {
       free(bufferInfo->pagePhysAddrs);
+    } else {
+      hipError_t pferr = hipHostFree(bufferInfo->pagePhysAddrs);
+      if (pferr != hipSuccess)
+        free(bufferInfo->pagePhysAddrs);
+    }
   }
 
   bufferInfo->hostPtr = nullptr;
