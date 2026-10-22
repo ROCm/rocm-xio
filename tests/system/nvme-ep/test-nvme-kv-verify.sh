@@ -75,6 +75,7 @@ for i in "${!KEYS[@]}"; do
         --write-io 1 --batch-size 1 \
         --value-size "$VALUE_SIZE" --data-buffer-size "$VALUE_SIZE" \
         --lfsr-seed "$seed" \
+        --queue-length "${XIO_KV_QUEUE_LENGTH:-64}" \
         ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
         --less-timing > /dev/null
     echo "  stored key=$key seed=$seed"
@@ -96,6 +97,7 @@ for i in $(seq $(( ${#KEYS[@]} - 1 )) -1 0); do
         --read-io 1 --batch-size 1 \
         --value-size "$VALUE_SIZE" --data-buffer-size "$VALUE_SIZE" \
         --lfsr-seed "$seed" --verify \
+        --queue-length "${XIO_KV_QUEUE_LENGTH:-64}" \
         ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \
         --less-timing 2>&1)
     if echo "$result" | grep -E "Verify Failed:[[:space:]]+[^0]" > /dev/null; then
