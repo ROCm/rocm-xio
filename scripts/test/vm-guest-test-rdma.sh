@@ -33,7 +33,31 @@ VENDOR="${VENDOR:-ionic}"
 . "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
-# GPU bring-up
+# Build BEFORE loading amdgpu — loading amdgpu with wrong params
+# (which triggers a reload) can corrupt amdclang++ inside the guest.
+# The build only needs ROCm tools, not a running GPU.
+# --------------------------------------------------------------
+find_rocm
+# Enable the GDA ionic provider so the patched rdma-core is built and
+# the GDA RDMA tests can use direct-verbs doorbell access.
+CMAKE_EXTRA_FLAGS="-DGDA_IONIC=ON"
+export CMAKE_EXTRA_FLAGS
+build_xio_tester
+
+banner "Installing patched rdma-core (GDA ionic provider)"
+cmake --build "${BUILD_DIR}" --target install-rdma-core --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
+
+# Register patched libionic so dlopen("libionic.so") picks the GDA version.
+# The system libionic lacks ionic_dv_qp_set_gda; without this ldconfig step
+# dlopen resolves the system lib via /etc/ld.so.cache and DV init fails.
+RDMA_LIB="${BUILD_DIR}/_deps/rdma-core/install/lib"
+echo "${RDMA_LIB}" | sudo tee /etc/ld.so.conf.d/rocm-xio-rdma-core.conf > /dev/null
+sudo ldconfig
+
+load_kernel_module
+
+# --------------------------------------------------------------
+# GPU bring-up (after build to avoid compiler corruption)
 # --------------------------------------------------------------
 gpu_bringup
 
@@ -72,21 +96,6 @@ done
 banner "Configuring ionic loopback"
 sudo env VENDOR="${VENDOR}" \
     "${SRC_DIR}/scripts/test/setup-rdma-loopback.sh"
-
-# --------------------------------------------------------------
-# Build + kernel module
-# --------------------------------------------------------------
-find_rocm
-# Enable the GDA ionic provider so the patched rdma-core is built and
-# the GDA RDMA tests can use direct-verbs doorbell access.
-CMAKE_EXTRA_FLAGS="-DGDA_IONIC=ON"
-export CMAKE_EXTRA_FLAGS
-build_xio_tester
-
-banner "Installing patched rdma-core (GDA ionic provider)"
-cmake --build "${BUILD_DIR}" --target install-rdma-core --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
-
-load_kernel_module
 
 # --------------------------------------------------------------
 # Tests

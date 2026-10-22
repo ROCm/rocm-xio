@@ -35,11 +35,6 @@ ROCXIO_NVME_DEVICE="${ROCXIO_NVME_DEVICE:-/dev/nvme0n1}"
 . "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
-# GPU bring-up
-# --------------------------------------------------------------
-gpu_bringup
-
-# --------------------------------------------------------------
 # Verify NVMe block device
 # --------------------------------------------------------------
 banner "Verifying NVMe block device ${ROCXIO_NVME_DEVICE}"
@@ -57,11 +52,16 @@ sudo nvme id-ctrl "${ctrl}" 2>/dev/null | grep -E "^mn|^sn" | head -4 || true
 echo "NVMe device: ${ROCXIO_NVME_DEVICE}"
 
 # --------------------------------------------------------------
-# Build + kernel module
+# Build BEFORE loading amdgpu — amdgpu reload can corrupt amdclang++.
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester
 load_kernel_module
+
+# --------------------------------------------------------------
+# GPU bring-up (after build to avoid compiler corruption)
+# --------------------------------------------------------------
+gpu_bringup
 
 # --------------------------------------------------------------
 # Tests

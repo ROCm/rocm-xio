@@ -492,16 +492,15 @@ void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
                                     uint64_t resource_type) {
   (void)pd;
   (void)pd_context;
-  (void)alignment;
   (void)resource_type;
+  // hipHostMalloc (any flags) triggers amdgpu_vm_make_compute on the rocjitsu
+  // emulated GPU which fires a kernel WARN_ON and corrupts the process heap.
+  // Use posix_memalign instead: the memory is guest memfd-backed and accessible
+  // to the ionic vfio-user RDMA device via QEMU's DMA path.
   void* host_ptr = nullptr;
-  hipError_t err = hipHostMalloc(&host_ptr, size,
-                                 hipHostMallocMapped | hipHostMallocCoherent);
-  if (err != hipSuccess) {
-    fprintf(stderr, "rdma_ep: hipHostMalloc failed: %s\n",
-            hipGetErrorString(err));
+  size_t align = (alignment > 0) ? alignment : 64;
+  if (posix_memalign(&host_ptr, align, size) != 0 || !host_ptr)
     return nullptr;
-  }
   memset(host_ptr, 0, size);
   return host_ptr;
 }
@@ -520,7 +519,7 @@ void Backend::pd_release_host(struct ibv_pd* pd, void* pd_context, void* ptr,
   (void)pd;
   (void)pd_context;
   (void)resource_type;
-  (void)hipHostFree(ptr);
+  free(ptr);
 }
 
 void Backend::create_parent_domain() {

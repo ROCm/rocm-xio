@@ -39,11 +39,6 @@ KV_NSID="${KV_NSID:?KV_NSID must be set to the integer NSID of the KV namespace 
 . "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
-# GPU bring-up
-# --------------------------------------------------------------
-gpu_bringup
-
-# --------------------------------------------------------------
 # Locate the NVMe controller
 # --------------------------------------------------------------
 banner "Locating NVMe controller for SPDK KV namespace (NSID ${KV_NSID})"
@@ -68,12 +63,17 @@ echo "NVMe controller: ${KV_CTRL}  KV NSID: ${KV_NSID}"
 sudo nvme id-ctrl "${KV_CTRL}" 2>/dev/null | grep -E "^mn|^sn" | head -4 || true
 
 # --------------------------------------------------------------
-# Build + kernel module
+# Build BEFORE loading amdgpu — amdgpu reload can corrupt amdclang++.
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester
 cmake --build "${BUILD_DIR}" --target test-nvme-kv-helpers --parallel "$(nproc)"
 load_kernel_module
+
+# --------------------------------------------------------------
+# GPU bring-up (after build to avoid compiler corruption)
+# --------------------------------------------------------------
+gpu_bringup
 
 # --------------------------------------------------------------
 # Tests

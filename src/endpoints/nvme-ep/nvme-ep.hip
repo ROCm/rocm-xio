@@ -10,6 +10,8 @@
 
 // Host-only includes for IOCTL and file operations
 #ifndef __HIP_DEVICE_COMPILE__
+#include <atomic>
+#include <thread>
 #include <errno.h>
 #include <limits.h>
 
@@ -169,9 +171,38 @@ __host__ __device__ void ringDoorbell(uint16_t value,
                       : doorbellParams.doorbellOffset;
   if (doorbellParams.usePciMmioBridge &&
       doorbellParams.shadowBufferVirt != nullptr) {
+#ifdef __HIP_DEVICE_COMPILE__
+    // GPU device path (rocjitsu): GPU kernel stores don't reach the memfd
+    // that QEMU polls via address_space_read.  Post the doorbell request to
+    // the relay ring instead; the CPU relay thread drains it using CPU stores
+    // which immediately update the memfd and are visible to QEMU.
+    if (doorbellParams.relayRing != nullptr &&
+        doorbellParams.relayTail != nullptr) {
+      uint32_t tail = *doorbellParams.relayTail;
+      uint32_t slot = tail % NVME_RELAY_DEPTH;
+      volatile nvmePendingRelay* r = &doorbellParams.relayRing[slot];
+      // Wait for slot to be free (CPU relay has consumed previous entry).
+      while (r->ready != 0u) { /* spin */ }
+      r->offset = offset;
+      r->value  = (uint32_t)value;
+      __threadfence_system();
+      r->ready  = 1u;
+      __threadfence_system();
+      *doorbellParams.relayTail = tail + 1u;
+      __threadfence_system();
+      // Wait for CPU relay to acknowledge (ready goes back to 0).
+      while (r->ready != 0u) { /* spin */ }
+    } else {
+      genPciMmioBridgeCmd(doorbellParams.shadowBufferVirt,
+                          doorbellParams.nvmeTargetBdf, 0, offset, value,
+                          PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+    }
+#else
+    // Host path: CPU store directly to ring — immediately visible to QEMU.
     genPciMmioBridgeCmd(doorbellParams.shadowBufferVirt,
                         doorbellParams.nvmeTargetBdf, 0, offset, value,
                         PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+#endif
   } else {
     xio::ringDoorbell(doorbellParams.nvmeBar0Gpu, offset, value);
   }
@@ -1619,6 +1650,51 @@ __global__ void gpuKernel(XioEndpointConfig config, nvmeIoParams ioParams,
 }
 
 /**
+ * One-shot SQE submit kernel for pci-mmio-bridge (rocjitsu emulated GPU).
+ * Writes ONE NVMe read SQE to the SQ and rings the SQ tail doorbell via the
+ * bridge ring.  The kernel then EXITS so hipDeviceSynchronize() flushes all
+ * deferred GPU stores to the memfd that QEMU polls.
+ */
+__global__ void gpuSubmitOneSqe(volatile sqeType* sq, uint32_t sq_tail,
+                                 uint32_t queue_size, nvmeIoParams ioParams,
+                                 nvmeBufferParams bufferParams,
+                                 nvmeDoorbellParams doorbellParams) {
+  uint32_t slot = sq_tail % queue_size;
+  volatile sqeType* entry = &sq[slot];
+
+  sqeType sqe = {};
+  sqe.opcode     = 0x02; // NVMe read
+  sqe.nsid       = ioParams.nsid;
+  sqe.command_id = (uint16_t)(sq_tail & 0xFFFFu);
+
+  const uint64_t slba = (uint64_t)ioParams.baseLba +
+                        (uint64_t)sq_tail * (uint64_t)ioParams.lbasPerIo;
+  nvme_ep::sqeSetup(&sqe, slba, ioParams.lbasPerIo);
+
+  if (bufferParams.readBufferDma) {
+    sqe.dptr.prp.prp1 = bufferParams.readBufferDma;
+  }
+
+  nvme_ep::sqeWrite(sqe, entry);
+  __threadfence_system();
+
+  // Ring SQ tail doorbell via bridge — kernel exits after this so
+  // hipDeviceSynchronize() will flush the ring command to the memfd.
+  nvme_ep::ringDoorbell((uint16_t)(sq_tail + 1u), doorbellParams, UINT32_MAX);
+}
+
+/**
+ * One-shot CQ head doorbell kernel for pci-mmio-bridge.
+ * Rings the CQ head doorbell then exits so stores reach QEMU.
+ */
+__global__ void gpuAckOneCqe(uint32_t cq_head, uint32_t queue_size,
+                               nvmeDoorbellParams doorbellParams) {
+  nvme_ep::ringDoorbell((uint16_t)(cq_head + 1u), doorbellParams,
+                        doorbellParams.doorbellOffset +
+                          nvme_ep::doorBellStride);
+}
+
+/**
  * Stateful multi-op kernel — submit N NVMe commands per call, preserving
  * queue state across calls.
  *
@@ -1808,6 +1884,7 @@ __global__ void gpuKernelPersistent(
         if (*stop_flag)
           goto done;
         if (++spin > NVME_EP_MAX_POLLS_BEFORE_BACKOFF) {
+          __threadfence_system();
           __builtin_amdgcn_s_sleep(1);
           spin = 0;
         }
@@ -1902,8 +1979,13 @@ __global__ void gpuKernelPersistent(
         if (NVME_CQE_STATUS_PHASE(cqe.status) == expected_phase)
           break;
         poll_count++;
-        if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0)
+        if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0) {
+          // On rocjitsu, QEMU writes CQEs to memfd but the GPU L1 may hold
+          // stale zeros. global_inv (from __threadfence_system) flushes the
+          // L1 so the next cqeRead sees the fresh CQE written by QEMU.
+          __threadfence_system();
           __builtin_amdgcn_s_sleep(1);
+        }
       }
       cq_head = (cq_head + 1) % ioParams.queueSize;
       if (cq_head == 0)
@@ -2002,6 +2084,7 @@ __global__ void gpuKernelMultiQueuePersistent(
         if (*stop_flag)
           goto done;
         if (++spin > NVME_EP_MAX_POLLS_BEFORE_BACKOFF) {
+          __threadfence_system();
           __builtin_amdgcn_s_sleep(1);
           spin = 0;
         }
@@ -2084,8 +2167,13 @@ __global__ void gpuKernelMultiQueuePersistent(
         if (NVME_CQE_STATUS_PHASE(cqe.status) == expected_phase)
           break;
         poll_count++;
-        if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0)
+        if (poll_count % NVME_EP_MAX_POLLS_BEFORE_BACKOFF == 0) {
+          // On rocjitsu, QEMU writes CQEs to memfd but the GPU L1 may hold
+          // stale zeros. global_inv (from __threadfence_system) flushes the
+          // L1 so the next cqeRead sees the fresh CQE written by QEMU.
+          __threadfence_system();
           __builtin_amdgcn_s_sleep(1);
+        }
       }
       cq_head = (cq_head + 1) % ioParams.queueSize;
       if (cq_head == 0)
@@ -2899,12 +2987,6 @@ __host__ hipError_t run(XioEndpointConfig* config) {
   if (nvmeConfig->doorbellParams.usePciMmioBridge) {
     const size_t shadow_size = 8192;
 
-    // On rocjitsu the GPU kernel executes as a CPU thread in the host process.
-    // Pfnmap pages (from remap_pfn_range) give GPU VA != CPU VA, and rocjitsu
-    // cannot resolve those GPU VAs to a host address.  Allocate the shadow ring
-    // from normal heap pages instead: GPU VA == CPU VA == rocjitsu host VA.
-    // The GPA is written to QEMU's writable override register (config 0x50) so
-    // QEMU polls the same pages.
     bool is_emulated_top = false;
     if (!nvmeConfig->controllers.empty()) {
       detectEmulatedNvme(nvmeConfig->controllers[0].c_str(), &is_emulated_top);
@@ -2916,6 +2998,17 @@ __host__ hipError_t run(XioEndpointConfig* config) {
       if (ret_alloc < 0) {
         ROCXIO_LOG_ERROR("Failed to allocate rocjitsu shadow buffer.\n");
         return hipErrorInvalidValue;
+      }
+      // Start kmod relay: polls the ring from guest kernel space and writes
+      // NVMe doorbell via ioremap — bypasses rocjitsu's deferred store delay.
+      uint64_t ring_gpa = getPhysAddr(shadow_virt);
+      if (ring_gpa) {
+        int relay_ret = startKmodNvmeRelay(
+          ring_gpa, nvmeConfig->doorbellParams.nvmeTargetBdf);
+        if (relay_ret < 0) {
+          ROCXIO_LOG_WARN("kmod relay unavailable (err %d); falling back to QEMU bridge\n",
+                          relay_ret);
+        }
       }
     } else {
       int ret_shadow = mapMmioBridgeShadowBuffer(
@@ -2929,24 +3022,13 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
     void* shadow_gpu_ptr = nullptr;
     if (is_rocjitsu_shadow) {
-      /* The ring was allocated via hipHostMalloc (in
-       * allocMmioBridgeShadowBufferRocjitsu). hipHostMalloc with
-       * hipHostMallocMapped guarantees GPU VA == CPU VA (flat aperture), and
-       * the GPA has already been written to QEMU's override register.  Retrieve
-       * the GPU VA via hipHostGetDevicePointer;
-       * allocMmioBridgeShadowBufferRocjitsu already validated that GPU VA ==
-       * CPU VA, so this is just a formality.  No additional hipHostRegister
-       * call is needed — the allocation is already GPU-visible.
-       */
-      hipError_t gdp_err = hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt,
-                                                   0);
-      if (gdp_err != hipSuccess) {
-        ROCXIO_LOG_ERROR("hipHostGetDevicePointer for shadow ring: %s\n",
-                         hipGetErrorString(gdp_err));
-        return hipErrorInvalidValue;
-      }
-      ROCXIO_LOG_INFO("rocjitsu: shadow ring cpu=%p gpu=%p\n", shadow_virt,
-                      shadow_gpu_ptr);
+      // Ring buffer is posix_memalign (guest memfd-backed guest RAM).
+      // CPU writes go to the memfd pages → kmod relay sees them immediately.
+      // The GPU ptr is the same VA for CPU use; the GPU kernel doesn't write
+      // to the ring in the CPU-only one-shot path.
+      shadow_gpu_ptr = shadow_virt;
+      ROCXIO_LOG_INFO("rocjitsu: shadow ring at cpu=%p (posix_memalign)\n",
+                      shadow_virt);
     } else {
       int ret_reg = registerMmioBridgeShadowBufferForGpu(shadow_virt,
                                                          shadow_size,
@@ -3658,6 +3740,27 @@ __host__ hipError_t run(XioEndpointConfig* config) {
     qDoorbellParams.shadowBufferVirt = shadowBufferVirt;
     qDoorbellParams.nvmeBar0Gpu = target.bar0Gpu;
     qDoorbellParams.usePciMmioBridge = usePciMmioBridge;
+    qDoorbellParams.relayRing = nullptr;
+    qDoorbellParams.relayHead = nullptr;
+    qDoorbellParams.relayTail = nullptr;
+
+    // Allocate CPU relay ring when pci-mmio-bridge is active.  GPU kernel
+    // stores (flat_store via rocjitsu) don't reach the memfd that QEMU polls;
+    // the relay ring lets the GPU post requests for the CPU to write using
+    // normal CPU stores which DO update the memfd immediately.
+    if (usePciMmioBridge) {
+      auto* relay = static_cast<nvme_ep::nvmePendingRelay*>(
+        std::aligned_alloc(64, NVME_RELAY_DEPTH * sizeof(nvme_ep::nvmePendingRelay)));
+      auto* head = new uint32_t(0);
+      auto* tail = new uint32_t(0);
+      if (relay && head && tail) {
+        memset(relay, 0, NVME_RELAY_DEPTH * sizeof(nvme_ep::nvmePendingRelay));
+        qDoorbellParams.relayRing = relay;
+        qDoorbellParams.relayHead = head;
+        qDoorbellParams.relayTail = tail;
+        ROCXIO_LOG_INFO("CPU relay ring allocated for queue %u\n", qid);
+      }
+    }
 
     nvme_ep::nvmeBufferParams qBufParams = {};
     qBufParams.readBuffer = readBufs[q].gpuPtr
@@ -3786,6 +3889,113 @@ __host__ hipError_t run(XioEndpointConfig* config) {
 
   // All allocation is done; no further implicit device sync can occur between
   // launches, so the lanes now actually run concurrently.
+  // CPU-side NVMe I/O path for pci-mmio-bridge (rocjitsu emulated GPU).
+  // rocjitsu's deferred store model means GPU ring writes only flush to the
+  // guest memfd after kernel exit.  The persistent kernel would stall waiting
+  // for CQEs that QEMU cannot see.  Instead the CPU writes SQEs and rings the
+  // SQ doorbell via the kmod relay; it then polls the CQ until the NVMe device
+  // posts a completion and rings the CQ head doorbell.
+  if (numLanes == 1 &&
+      pendingDoorbell[0].usePciMmioBridge &&
+      pendingDoorbell[0].shadowBufferVirt != nullptr) {
+    result = [&]() -> hipError_t {
+      const nvmeIoParams& io = targetIoParams[lanes[0].target];
+      const nvmeDoorbellParams& db = pendingDoorbell[0];
+      const nvmeBufferParams& bp = pendingBufParams[0];
+      const XioEndpointConfig& cfg = pendingKernelConfig[0];
+      const uint32_t qsize = (uint32_t)io.queueSize;
+      const int num_ops = (io.readIo > 0) ? (int)io.readIo : (int)io.writeIo;
+
+      uint32_t sq_tail = 0;
+      uint32_t cq_head = 0;
+      uint8_t expected_phase = 1;
+
+      // CPU-side SQ base pointer (posix_memalign → guest RAM → memfd-backed)
+      // CPU writes go directly to guest physical pages that QEMU DMA-reads.
+      auto* sq_cpu = static_cast<nvme_ep::sqeType*>(cfg.submissionQueue);
+      auto* cq_cpu = static_cast<volatile nvme_ep::cqeType*>(cfg.completionQueue);
+
+      const bool is_kv = (io.kvOpcode != 0);
+
+      for (int op = 0; op < num_ops; op++) {
+        // Write SQE from CPU thread (not GPU kernel).
+        // CPU stores go to guest RAM (memfd-backed posix_memalign memory).
+        // QEMU's NVMe device DMA-reads the SQE from those pages immediately.
+        nvme_ep::sqeType sqe = {};
+        sqe.nsid       = io.nsid;
+        sqe.command_id = (uint16_t)(sq_tail & 0xFFFFu);
+
+        if (is_kv) {
+          // KV store (0x81) or retrieve (0x82): build KV-specific SQE.
+          sqe.opcode = io.kvOpcode;
+          const uint32_t value_len = (uint32_t)io.kvValueLen;
+          kvSqeSetup(&sqe, io.kvKey, io.kvKeyLen, value_len);
+          if (io.kvOpcode == nvme_kv_cmd_store && bp.writeBufferDma)
+            sqe.dptr.prp.prp1 = bp.writeBufferDma;
+          else if (io.kvOpcode != nvme_kv_cmd_store && bp.readBufferDma)
+            sqe.dptr.prp.prp1 = bp.readBufferDma;
+        } else {
+          // LBA read
+          sqe.opcode = 0x02;
+          const uint64_t slba = (uint64_t)io.baseLba +
+                                (uint64_t)sq_tail * (uint64_t)io.lbasPerIo;
+          nvme_ep::sqeSetup(&sqe, slba, io.lbasPerIo);
+          if (bp.readBufferDma)
+            sqe.dptr.prp.prp1 = bp.readBufferDma;
+        }
+        sq_cpu[sq_tail % qsize] = sqe;
+        __sync_synchronize(); // CPU fence before ring command
+        sq_tail++;
+
+        // Write ring command from CPU — CPU store goes to guest RAM that kmod reads.
+        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf,
+                            0, db.doorbellOffset, (uint64_t)sq_tail,
+                            PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+        __sync_synchronize();
+
+        // CPU polls CQ until kmod-relayed NVMe CQE arrives (max 10s).
+        bool got_cqe = false;
+        for (int w = 0; w < 10000; w++) {
+          usleep(1000); // 1ms
+          if ((cq_cpu[cq_head % qsize].status & 0x1u) == expected_phase) {
+            got_cqe = true;
+            break;
+          }
+        }
+        if (!got_cqe) {
+          ROCXIO_LOG_ERROR("CQE timeout on op %d (10s)\n", op);
+          return hipErrorUnknown;
+        }
+        // Clear the consumed CQE slot to avoid stale phase bits on next run.
+        cq_cpu[cq_head % qsize].status = 0;
+        cq_head++;
+        if (cq_head % qsize == 0) expected_phase ^= 1;
+
+        // CPU writes CQ head doorbell via kmod relay ring.
+        genPciMmioBridgeCmd(db.shadowBufferVirt, (uint16_t)db.nvmeTargetBdf,
+                            0, db.doorbellOffset + nvme_ep::doorBellStride,
+                            (uint64_t)cq_head,
+                            PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+        __sync_synchronize();
+      }
+      return hipSuccess;
+    }();
+    launchedLanes = 1;
+    // One-shot path complete.  Clean up relay and return directly — no
+    // normal kernel launch, sync, or verify needed.
+    stopKmodNvmeRelay();
+    if (nvmeConfig->doorbellParams.usePciMmioBridge && shadow_virt) {
+      writeBridgeOverrideGpa(nvmeConfig->doorbellParams.mmioBridgeBdf, 0);
+      free(shadow_virt); // posix_memalign, not hipHostMalloc
+      shadow_virt = nullptr;
+    }
+    for (size_t qi = 0; qi < numLanes; qi++) {
+      freeGpuAccessibleBuffer(&readBufs[qi]);
+      freeGpuAccessibleBuffer(&writeBufs[qi]);
+    }
+    return result;
+  }
+
   for (size_t q = 0; q < numLanes; q++) {
     const uint16_t qid = lanes[q].queueId;
 
@@ -3815,14 +4025,50 @@ __host__ hipError_t run(XioEndpointConfig* config) {
                   numLanes > 1 ? "s" : "", numTargets,
                   numTargets > 1 ? "s" : "");
 
-  // Wait for all GPU kernels to complete.  Stream-specific sync gives a
-  // precise queue id in multi-queue mode while preserving default-stream
-  // behavior for the single-queue path.
-  for (size_t q = 0; q < numLanes; q++) {
-    result = xio::syncHipKernel("nvme-ep", "gpuKernel", lanes[q].queueId,
-                                streams[q]);
-    if (result != hipSuccess) {
-      goto cleanup;
+  // Start CPU relay threads for queues that use the pci-mmio-bridge relay.
+  // Each thread drains the relayRing posted by the GPU kernel and writes the
+  // doorbell to the bridge ring using CPU stores (immediately visible to QEMU).
+  {
+    std::vector<std::thread> relayThreads(numLanes);
+    std::vector<std::atomic<bool>> relayStop(numLanes);
+    for (size_t q = 0; q < numLanes; q++) {
+      relayStop[q].store(false);
+      if (!pendingDoorbell[q].relayRing) continue;
+      auto* ring  = pendingDoorbell[q].relayRing;
+      auto* head  = pendingDoorbell[q].relayHead;
+      auto* tail  = pendingDoorbell[q].relayTail;
+      auto* sbuf  = pendingDoorbell[q].shadowBufferVirt;
+      uint32_t bdf = pendingDoorbell[q].nvmeTargetBdf;
+      relayThreads[q] = std::thread([ring, head, tail, sbuf, bdf, &relayStop, q]() {
+        while (!relayStop[q].load(std::memory_order_relaxed)) {
+          uint32_t h = *head;
+          uint32_t t = __atomic_load_n(tail, __ATOMIC_ACQUIRE);
+          if (h == t) { sched_yield(); continue; }
+          uint32_t slot = h % NVME_RELAY_DEPTH;
+          volatile nvme_ep::nvmePendingRelay* r = &ring[slot];
+          // Wait for GPU to fill this slot
+          while (__atomic_load_n((const uint32_t*)&r->ready, __ATOMIC_ACQUIRE) == 0u) {
+            if (relayStop[q].load(std::memory_order_relaxed)) return;
+            sched_yield();
+          }
+          // CPU store to bridge ring — immediately reaches QEMU's address_space_read
+          genPciMmioBridgeCmd(sbuf, (uint16_t)bdf, 0,
+                              r->offset, (uint64_t)r->value,
+                              PCI_MMIO_BRIDGE_CMD_WRITE, 4);
+          // Acknowledge: clear ready so GPU can reuse the slot
+          __atomic_store_n((uint32_t*)&r->ready, 0u, __ATOMIC_RELEASE);
+          *head = h + 1u;
+        }
+      });
+    }
+
+    // Wait for all GPU kernels to complete, then stop relay threads.
+    for (size_t q = 0; q < numLanes; q++) {
+      result = xio::syncHipKernel("nvme-ep", "gpuKernel", lanes[q].queueId,
+                                  streams[q]);
+      relayStop[q].store(true, std::memory_order_relaxed);
+      if (relayThreads[q].joinable()) relayThreads[q].join();
+      if (result != hipSuccess) goto cleanup;
     }
   }
 
@@ -4067,6 +4313,7 @@ cleanup:
       shadow_virt);
     meta->producer_idx = 0;
     meta->consumer_idx = 0;
+    stopKmodNvmeRelay();
     writeBridgeOverrideGpa(nvmeConfig->doorbellParams.mmioBridgeBdf, 0);
     /* hipHostMalloc — no munmap, no munlock needed */
     hipHostFree(shadow_virt);

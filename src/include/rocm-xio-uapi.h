@@ -86,6 +86,28 @@ extern "C" {
 #define ROCM_XIO_GET_BUFFER_PAGES                                              \
   _IOWR(ROCM_XIO_IOC_MAGIC, 16, struct rocm_xio_get_buffer_pages_req)
 /**
+ * @brief Start the in-kernel NVMe doorbell relay thread.
+ *
+ * The relay thread polls the GPU-written ring buffer (ring_gpa, same format as
+ * the pci-mmio-bridge ring) and writes NVMe doorbell values directly to the
+ * target device BAR0 via ioremap.  This replaces the QEMU pci-mmio-bridge for
+ * rocjitsu emulated GPUs where GPU stores reach guest RAM but not QEMU's
+ * address_space_read path fast enough.
+ *
+ * @ring_gpa:   Guest physical address of the ring buffer (4096 bytes).
+ * @nvme_bdf:   NVMe controller BDF in ROCM_XIO_BDF encoding.
+ */
+#define ROCM_XIO_SETUP_NVME_RELAY                                              \
+  _IOW(ROCM_XIO_IOC_MAGIC, 17, struct rocm_xio_nvme_relay_req)
+/** @brief Stop the in-kernel NVMe doorbell relay thread. */
+#define ROCM_XIO_TEARDOWN_NVME_RELAY _IO(ROCM_XIO_IOC_MAGIC, 18)
+
+struct rocm_xio_nvme_relay_req {
+  __u64 ring_gpa;  /**< Guest PA of the 4096-byte ring buffer. */
+  __u32 nvme_bdf;  /**< NVMe BDF (ROCM_XIO_BDF encoding). */
+  __u32 reserved;
+};
+/**
  * @brief Quiesce I/O on an NVMe namespace request_queue while a
  *        rocm-xio-owned NVMe I/O queue pair is being created and
  *        used.

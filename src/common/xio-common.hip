@@ -2110,61 +2110,42 @@ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa) {
 // address_space_read.
 int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
                                         void** virt_addr) {
+  // Teardown any leftover relay from a previous (possibly killed) run.
+  stopKmodNvmeRelay();
   void* buf = nullptr;
-  // hipHostMallocMapped triggers amdgpu_vm_make_compute in the guest kernel
-  // which crashes on the rocjitsu qcow2 image (amdgpu_vm.c:2729 BUG). Use
-  // hipHostMallocDefault only — on rocjitsu flat aperture (GPU VA == CPU VA)
-  // holds for default host allocations and pagemap returns a valid GPA.
-  hipError_t hip_err = hipHostMalloc(&buf, size, hipHostMallocDefault);
-  if (hip_err != hipSuccess || !buf) {
-    ROCXIO_LOG_WARN("hipHostMalloc for shadow ring: %s\n",
-                    hipGetErrorString(hip_err));
+  // Use posix_memalign for the ring buffer (not hipHostMalloc).
+  // hipHostMalloc in rocjitsu allocates from rocjitsu's private anonymous
+  // memory — NOT from the mem-vfio-user memfd that backs guest RAM.  CPU
+  // writes from xio-tester (guest process) to hipHostMalloc VA go to the
+  // guest memfd pages, but genPciMmioBridgeCmd writes to the VA which maps
+  // to rocjitsu's private pages.  The kmod relay (reading guest RAM) and QEMU
+  // (reading via address_space_read) both read from the guest memfd — they
+  // never see hipHostMalloc writes.
+  //
+  // posix_memalign allocates from the guest heap which is backed by
+  // mem-vfio-user memfd pages.  CPU writes from xio-tester guest process
+  // go to those memfd pages.  The kmod relay reads from the same pages via
+  // memremap(GPA) and sees the writes immediately.
+  if (posix_memalign(&buf, 4096, size) != 0 || !buf) {
+    ROCXIO_LOG_WARN("posix_memalign for shadow ring failed\n");
     return -ENOMEM;
   }
   memset(buf, 0, size);
 
-  // Verify flat aperture: GPU VA must equal CPU VA so that the GPU kernel
-  // writes to the same physical pages that QEMU polls.
-  void* gpu_ptr = nullptr;
-  hip_err = hipHostGetDevicePointer(&gpu_ptr, buf, 0);
-  if (hip_err != hipSuccess) {
-    ROCXIO_LOG_WARN("hipHostGetDevicePointer for shadow ring: %s\n",
-                    hipGetErrorString(hip_err));
-    hipHostFree(buf);
-    return -EINVAL;
-  }
-  if (gpu_ptr != buf) {
-    ROCXIO_LOG_WARN(
-      "shadow ring: GPU VA (%p) != CPU VA (%p) — flat aperture broken.\n"
-      "  The GPU kernel writes to the GPU VA but QEMU polls the GPA derived\n"
-      "  from the CPU VA; these map to different physical pages so ring\n"
-      "  commands will never reach QEMU.  Check HSA_FORCE_FINE_GRAIN_PCIE.\n",
-      gpu_ptr, buf);
-    hipHostFree(buf);
-    return -EINVAL;
-  }
-
-  // GPA must be derived from the GPU VA (== CPU VA here) so that both
-  // QEMU's bridge poll and the GPU kernel target the same physical page.
-  uint64_t gpa = getPhysAddr(gpu_ptr);
+  // posix_memalign gives guest RAM (memfd-backed). CPU writes to this ptr
+  // go directly to the guest memfd pages → kmod relay sees them immediately.
+  // No GPU VA needed — the CPU-only one-shot path writes the ring.
+  uint64_t gpa = getPhysAddr(buf);
   if (gpa == 0) {
-    ROCXIO_LOG_ERROR("rocjitsu shadow buffer: GPA=0 for cpu=%p gpu=%p — "
-                     "pagemap returned no entry; hipHostMalloc not backed "
-                     "by QEMU guest RAM\n",
-                     buf, gpu_ptr);
-    hipHostFree(buf);
+    ROCXIO_LOG_ERROR("rocjitsu shadow ring: GPA=0 for cpu=%p — "
+                     "pagemap returned no entry\n", buf);
+    free(buf);
     return -EINVAL;
   }
-  ROCXIO_LOG_ERROR("rocjitsu shadow buffer: cpu=%p gpu=%p GPA=0x%llx\n", buf,
-                   gpu_ptr, (unsigned long long)gpa);
+  ROCXIO_LOG_INFO("rocjitsu shadow buffer: cpu=%p GPA=0x%llx\n", buf,
+                  (unsigned long long)gpa);
 
-  int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
-  if (r < 0) {
-    hipHostFree(buf);
-    return r;
-  }
-
-  // Initialize ring metadata
+  // Initialize ring metadata BEFORE starting any relay.
   auto* meta = static_cast<volatile struct pci_mmio_bridge_ring_meta*>(buf);
   uint32_t depth = static_cast<uint32_t>(
     (size - sizeof(struct pci_mmio_bridge_ring_meta)) /
@@ -2175,8 +2156,61 @@ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf, size_t size,
   meta->reserved = 0;
   ROCXIO_LOG_INFO("rocjitsu shadow ring initialized: depth=%u\n", depth);
 
+  // Write override GPA to pci-mmio-bridge (backup if kmod relay unavailable).
+  int r = writeBridgeOverrideGpa(bridge_bdf, gpa);
+  if (r < 0) {
+    ROCXIO_LOG_WARN("writeBridgeOverrideGpa failed: %s — kmod relay still active\n",
+                    strerror(-r));
+    // Non-fatal: kmod relay doesn't need the override GPA.
+  }
+
   *virt_addr = buf;
   return 0;
+}
+
+/**
+ * Start the in-kernel NVMe doorbell relay thread.
+ *
+ * The relay polls the hipHostMalloc ring buffer (ring_gpa) from guest kernel
+ * space and writes NVMe doorbell values directly to the target device BAR0 via
+ * ioremap + writel.  This bypasses both QEMU's pci-mmio-bridge poll and the
+ * rocjitsu deferred store problem: the guest kernel reads from the same guest
+ * RAM pages the GPU writes to, and kernel ioremap writes to NVMe BAR0 are
+ * deterministic (~1µs vs 3-30s for QEMU's address_space_read path).
+ *
+ * @ring_gpa:  GPA of the 4096-byte ring buffer (from allocMmioBridgeShadowBufferRocjitsu).
+ * @nvme_bdf:  NVMe PCI device BDF (ROCM_XIO_BDF encoding).
+ * @returns 0 on success, negative errno on failure.
+ */
+__host__ int startKmodNvmeRelay(uint64_t ring_gpa, uint32_t nvme_bdf) {
+  int kfd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+  if (kfd < 0) {
+    ROCXIO_LOG_WARN("Cannot open %s for relay setup: %s\n",
+                    ROCM_XIO_DEVICE_PATH, strerror(errno));
+    return -errno;
+  }
+  struct rocm_xio_nvme_relay_req req = {};
+  req.ring_gpa = ring_gpa;
+  req.nvme_bdf = nvme_bdf;
+  int ret = ioctl(kfd, ROCM_XIO_SETUP_NVME_RELAY, &req);
+  if (ret < 0) {
+    ROCXIO_LOG_WARN("ROCM_XIO_SETUP_NVME_RELAY ioctl failed: %s\n",
+                    strerror(errno));
+    close(kfd);
+    return -errno;
+  }
+  close(kfd);
+  ROCXIO_LOG_INFO("kmod NVMe relay started: ring_gpa=0x%llx nvme_bdf=0x%04x\n",
+                  (unsigned long long)ring_gpa, nvme_bdf);
+  return 0;
+}
+
+__host__ void stopKmodNvmeRelay(void) {
+  int kfd = open(ROCM_XIO_DEVICE_PATH, O_RDWR);
+  if (kfd < 0) return;
+  ioctl(kfd, ROCM_XIO_TEARDOWN_NVME_RELAY, 0);
+  close(kfd);
+  ROCXIO_LOG_INFO("kmod NVMe relay stopped\n");
 }
 
 int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr) {
@@ -2276,38 +2310,17 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
     return -EINVAL;
   }
 
-  // Step 1: Register with HIP for GPU access
-  hipError_t hip_err = hipHostRegister(shadow_virt, shadow_size,
-                                       hipHostRegisterMapped);
-  if (hip_err != hipSuccess) {
-    ROCXIO_LOG_WARN("Failed to register shadow buffer "
-                    "with HIP: %s\n",
-                    hipGetErrorString(hip_err));
-    ROCXIO_LOG_ERROR("Disabling PCI MMIO bridge mode - GPU kernel "
-                     "will skip doorbell.\n");
-    munmap(shadow_virt, shadow_size);
-    *gpu_ptr_out = nullptr;
-    return -1;
-  }
-
-  ROCXIO_LOG_INFO("Shadow buffer registered with HIP for GPU "
-                  "access\n");
-
-  // Step 2: Get GPU pointer
-  void* shadow_gpu_ptr = nullptr;
-  hipError_t gpu_ptr_err = hipHostGetDevicePointer(&shadow_gpu_ptr, shadow_virt,
-                                                   0);
-  if (gpu_ptr_err != hipSuccess) {
-    ROCXIO_LOG_WARN("hipHostGetDevicePointer failed: "
-                    "%s\n",
-                    hipGetErrorString(gpu_ptr_err));
-    ROCXIO_LOG_ERROR("Disabling PCI MMIO bridge mode - GPU kernel "
-                     "will skip doorbell.\n");
-    (void)hipHostUnregister(shadow_virt);
-    munmap(shadow_virt, shadow_size);
-    *gpu_ptr_out = nullptr;
-    return -1;
-  }
+  // The shadow buffer is mmap'd from the kmod (which maps QEMU's shadow_mr
+  // memfd via remap_pfn_range).  hipHostRegister on pfnmap pages hangs in
+  // rocjitsu because pin_user_pages fails for pfnmap memory.
+  //
+  // Rocjitsu's flat aperture: any CPU VA in a DMA_MAP'd region is also a
+  // valid GPU VA — the GPU kernel can write to shadow_virt directly.
+  // QEMU received the same memfd via DMA_MAP and reads via shadow_hva; both
+  // point to the same physical pages so writes are immediately visible.
+  //
+  // Skip hipHostRegister entirely and use shadow_virt as the GPU VA.
+  void* shadow_gpu_ptr = shadow_virt;
 
   ROCXIO_LOG_INFO("Shadow buffer GPU pointer obtained: %p "
                   "(host: %p)\n",

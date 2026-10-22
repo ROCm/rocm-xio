@@ -1078,6 +1078,11 @@ __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
                                                   size_t shadow_size,
                                                   void** gpu_ptr_out);
 
+/** @brief Start the in-kernel NVMe doorbell relay (bypasses QEMU bridge). */
+__host__ int startKmodNvmeRelay(uint64_t ring_gpa, uint32_t nvme_bdf);
+/** @brief Stop the in-kernel NVMe doorbell relay. */
+__host__ void stopKmodNvmeRelay(void);
+
 /**
  * @brief Map a PCI BAR for GPU access.
  * @param pci_bdf PCI device BDF in ROCM_XIO_BDF encoding.

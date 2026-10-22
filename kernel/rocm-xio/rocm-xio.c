@@ -149,6 +149,218 @@ static __u64 mmio_bridge_shadow_size = 0;
 static DEFINE_MUTEX(mmio_bridge_lock);
 
 /*
+ * In-kernel NVMe doorbell relay.
+ *
+ * Replaces the QEMU pci-mmio-bridge for rocjitsu emulated GPUs.  The GPU
+ * kernel writes ring commands to a hipHostMalloc buffer (guest RAM).  QEMU
+ * polls at 1ms intervals but rocjitsu's deferred store model means commands
+ * only reach the memfd after the background flush thread runs (3-30s).
+ *
+ * The relay runs as a kernel thread inside the guest.  It maps the ring
+ * buffer GPA (same guest RAM) and an NVMe BAR0 via ioremap, then polls
+ * producer_idx at ~100µs intervals.  When a CMD_WRITE command appears it
+ * executes writel() to the BAR0 directly — no QEMU round-trip needed.
+ */
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+
+/* pci_mmio_bridge_ring_meta + pci_mmio_bridge_command layout (from xio.h) */
+struct kmod_ring_meta {
+  __u32 producer_idx;
+  __u32 consumer_idx;
+  __u32 queue_depth;
+  __u32 reserved;
+};
+
+struct kmod_ring_cmd {
+  __u16 target_bdf;
+  __u8  target_bar;
+  __u8  reserved1;
+  __u32 offset;
+  __u64 value;
+  __u8  command; /* 1=WRITE */
+  __u8  size;
+  __u8  status;  /* 0=PENDING 1=COMPLETE */
+  __u8  reserved2;
+  __u32 sequence;
+} __packed;
+
+#define RELAY_POLL_US 100  /* poll interval microseconds */
+#define RELAY_RING_CMD_WRITE 1
+
+struct nvme_relay_state {
+  struct task_struct *thread;
+  void __iomem      *bar0;     /* ioremap of NVMe BAR0 */
+  volatile void     *ring;     /* memremap of ring GPA */
+  __u32              queue_depth;
+  __u32              head;     /* consumer index */
+  bool               active;
+};
+
+static struct nvme_relay_state relay_state;
+static DEFINE_MUTEX(relay_lock);
+
+static int nvme_relay_thread(void *data)
+{
+  struct nvme_relay_state *rs = &relay_state;
+
+  pr_info("rocm-xio: NVMe relay thread started\n");
+
+  while (!kthread_should_stop()) {
+    const struct kmod_ring_meta *meta =
+        (const struct kmod_ring_meta *)rs->ring;
+    __u32 producer = READ_ONCE(meta->producer_idx);
+
+    while (rs->head != producer) {
+      __u32 slot = rs->head % rs->queue_depth;
+      volatile struct kmod_ring_cmd *cmd =
+          (volatile struct kmod_ring_cmd *)
+          ((char *)rs->ring + sizeof(struct kmod_ring_meta) +
+           slot * sizeof(struct kmod_ring_cmd));
+
+      /* Wait for PENDING status */
+      if (READ_ONCE(cmd->status) != 0) {
+        rs->head++;
+        continue;
+      }
+      if (READ_ONCE(cmd->command) != RELAY_RING_CMD_WRITE) {
+        WRITE_ONCE(cmd->status, 2); /* ERROR */
+        rs->head++;
+        continue;
+      }
+
+      /* Execute MMIO write to NVMe BAR0 */
+      u32 off = READ_ONCE(cmd->offset);
+      u64 val = READ_ONCE(cmd->value);
+      u8  sz  = READ_ONCE(cmd->size);
+      if (sz == 4)
+        writel((u32)val, rs->bar0 + off);
+      else if (sz == 8)
+        writeq(val, rs->bar0 + off);
+
+      WRITE_ONCE(cmd->status, 1); /* COMPLETE */
+      rs->head++;
+
+      /* Re-read producer for next iteration */
+      producer = READ_ONCE(meta->producer_idx);
+    }
+
+    usleep_range(RELAY_POLL_US, RELAY_POLL_US * 2);
+  }
+
+  pr_info("rocm-xio: NVMe relay thread stopped\n");
+  return 0;
+}
+
+static int setup_nvme_relay(const struct rocm_xio_nvme_relay_req *req)
+{
+  struct nvme_relay_state *rs = &relay_state;
+  struct pci_dev *nvme_dev = NULL;
+  void __iomem *bar0 = NULL;
+  void *ring = NULL;
+  __u8 bus, devfn;
+  int ret = 0;
+
+  mutex_lock(&relay_lock);
+  if (rs->active) {
+    pr_warn("rocm-xio: relay already active; tear down first\n");
+    ret = -EBUSY;
+    goto out;
+  }
+
+  /* Map the ring buffer GPA → kernel virtual address */
+  ring = memremap(req->ring_gpa, 4096, MEMREMAP_WB);
+  if (!ring) {
+    pr_err("rocm-xio: memremap ring GPA 0x%llx failed\n", req->ring_gpa);
+    ret = -ENOMEM;
+    goto out;
+  }
+
+  /* Find the NVMe PCI device by BDF */
+  bus   = (req->nvme_bdf >> 8) & 0xFF;
+  devfn = PCI_DEVFN((req->nvme_bdf >> 3) & 0x1F, req->nvme_bdf & 0x7);
+  nvme_dev = pci_get_domain_bus_and_slot(
+      (req->nvme_bdf >> 16) & 0xFFFF, bus, devfn);
+  if (!nvme_dev) {
+    pr_err("rocm-xio: NVMe device %04x not found\n", req->nvme_bdf);
+    ret = -ENODEV;
+    goto out_unmap_ring;
+  }
+
+  /* Map NVMe BAR0 */
+  bar0 = pci_iomap(nvme_dev, 0, 0);
+  if (!bar0) {
+    pr_err("rocm-xio: pci_iomap BAR0 failed\n");
+    ret = -ENOMEM;
+    goto out_put_dev;
+  }
+  pci_dev_put(nvme_dev);
+
+  /* Read queue_depth from ring metadata */
+  const struct kmod_ring_meta *meta = (const struct kmod_ring_meta *)ring;
+  __u32 qdepth = READ_ONCE(meta->queue_depth);
+  if (qdepth == 0) {
+    /* Default: (4096 - 16) / 24 = 340 */
+    qdepth = (4096 - sizeof(struct kmod_ring_meta)) /
+             sizeof(struct kmod_ring_cmd);
+  }
+
+  rs->bar0        = bar0;
+  rs->ring        = ring;
+  rs->queue_depth = qdepth;
+  rs->head        = 0;
+  rs->active      = true;
+
+  rs->thread = kthread_run(nvme_relay_thread, rs, "rocm-xio-relay");
+  if (IS_ERR(rs->thread)) {
+    ret = PTR_ERR(rs->thread);
+    rs->thread = NULL;
+    rs->active = false;
+    pci_iounmap(nvme_dev, bar0);
+    goto out_unmap_ring;
+  }
+
+  pr_info("rocm-xio: NVMe relay started ring_gpa=0x%llx nvme_bdf=0x%04x qdepth=%u\n",
+          req->ring_gpa, req->nvme_bdf, qdepth);
+  goto out;
+
+out_put_dev:
+  pci_dev_put(nvme_dev);
+out_unmap_ring:
+  memunmap(ring);
+out:
+  mutex_unlock(&relay_lock);
+  return ret;
+}
+
+static void teardown_nvme_relay(void)
+{
+  struct nvme_relay_state *rs = &relay_state;
+
+  mutex_lock(&relay_lock);
+  if (!rs->active) {
+    mutex_unlock(&relay_lock);
+    return;
+  }
+  rs->active = false;
+  if (rs->thread) {
+    kthread_stop(rs->thread);
+    rs->thread = NULL;
+  }
+  if (rs->bar0) {
+    iounmap(rs->bar0);
+    rs->bar0 = NULL;
+  }
+  if (rs->ring) {
+    memunmap((void *)rs->ring);
+    rs->ring = NULL;
+  }
+  mutex_unlock(&relay_lock);
+  pr_info("rocm-xio: NVMe relay stopped\n");
+}
+
+/*
  * DMA-BUF attach ops for P2P support.
  * We pin the buffer, so move_notify should never be called.
  */
@@ -1505,6 +1717,17 @@ static long rocm_xio_ioctl(struct file* file, unsigned int cmd,
       return 0;
     }
 
+    case ROCM_XIO_SETUP_NVME_RELAY: {
+      struct rocm_xio_nvme_relay_req req;
+      if (copy_from_user(&req, (void __user*)arg, sizeof(req)))
+        return -EFAULT;
+      return setup_nvme_relay(&req);
+    }
+
+    case ROCM_XIO_TEARDOWN_NVME_RELAY:
+      teardown_nvme_relay();
+      return 0;
+
     default:
       return -ENOTTY;
   }
@@ -1712,6 +1935,9 @@ static int __init rocm_xio_init(void) {
 static void __exit rocm_xio_exit(void) {
   struct queue_addr_entry *qentry, *qtmp;
   struct vram_buffer_entry *entry, *tmp;
+
+  /* Stop NVMe relay thread if active */
+  teardown_nvme_relay();
 
   /* Unregister kprobe */
   if (inject_enabled) {

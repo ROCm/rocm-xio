@@ -251,6 +251,12 @@ public:
     }
     return rdmaConfig_.iterations;
   }
+
+  // Defer hipInit() past backend setup: on rocjitsu emulated GPU, hipInit()
+  // triggers amdgpu_vm_make_compute WARN_ON which corrupts the process heap.
+  // The RDMA backend calls ibv_alloc_parent_domain (heavy heap user) before
+  // any GPU kernel launch, so the WARN_ON must not fire before that point.
+  __host__ bool deferGpuInit() const override { return true; }
 };
 
 class SdmaEndpoint : public XioEndpoint {
@@ -329,6 +335,10 @@ unsigned XioEndpoint::getIterations(void* endpointConfig) const {
 }
 
 bool XioEndpoint::isEmulateMode() const {
+  return false;
+}
+
+bool XioEndpoint::deferGpuInit() const {
   return false;
 }
 

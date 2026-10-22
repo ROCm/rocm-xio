@@ -26,8 +26,8 @@ namespace xio::nvme_ep {
 /**
  * Polling limits for completion queue operations
  */
-/** @brief Maximum completion-queue polls before an NVMe timeout. */
-#define NVME_EP_MAX_POLLS 10000000U
+/** @brief Maximum completion-queue polls before an NVMe timeout (GPU path). */
+#define NVME_EP_MAX_POLLS 1000000000U
 /** @brief Completion polls before issuing a GPU sleep backoff. */
 #define NVME_EP_MAX_POLLS_BEFORE_BACKOFF 1000U
 
@@ -96,12 +96,32 @@ struct nvmeIoParams {
  * Contains doorbell configuration supporting both PCI MMIO bridge mode
  * and direct BAR0 access. At least one mode must be configured.
  */
+/**
+ * One pending doorbell request posted by the GPU kernel for the CPU relay.
+ * The GPU writes this from device code; the CPU relay thread reads it and
+ * writes to the pci-mmio-bridge ring using a CPU store (which immediately
+ * reaches the memfd that QEMU polls).
+ */
+struct nvmePendingRelay {
+  volatile uint32_t offset;  /**< BAR0 register offset (e.g. 0x1008 = SQ1TDBL). */
+  volatile uint32_t value;   /**< New doorbell value. */
+  volatile uint32_t ready;   /**< 1 = GPU filled this slot, 0 = consumed. */
+  volatile uint32_t _pad;
+};
+
+/** Depth of the pending relay ring (must be power of two). */
+#define NVME_RELAY_DEPTH 64U
+
 struct nvmeDoorbellParams {
   uint32_t doorbellOffset; /**< Doorbell register offset within BAR0. */
   uint32_t nvmeTargetBdf;  /**< NVMe target device in ROCM_XIO_BDF encoding. */
   void* shadowBufferVirt;  /**< PCI MMIO bridge shadow buffer pointer. */
   void* nvmeBar0Gpu;       /**< GPU-accessible BAR0 pointer. */
   bool usePciMmioBridge;   /**< Use bridge mode instead of direct BAR0. */
+  /** CPU relay ring: GPU posts here; CPU relay thread drains it. */
+  nvmePendingRelay* relayRing; /**< NVME_RELAY_DEPTH entries (posix_memalign). */
+  volatile uint32_t* relayHead; /**< CPU-side consumer index (posix_memalign). */
+  volatile uint32_t* relayTail; /**< GPU-side producer index (posix_memalign). */
 };
 
 /**

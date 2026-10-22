@@ -311,7 +311,13 @@ int main(int argc, char** argv) {
   // Explicitly initialize the HIP runtime so that init overhead
   // is isolated from benchmark timing and errors are reported
   // clearly before any device queries.
-  if (!emulateMode) {
+  // Skip when deferGpuInit() is set: some endpoints (e.g. rdma-ep) do heavy
+  // heap allocation during backend init, and on rocjitsu emulated GPU hipInit()
+  // triggers amdgpu_vm_make_compute WARN_ON which corrupts the heap before
+  // those allocations.  Deferring lets HIP initialize lazily on first GPU use
+  // (after backend setup), avoiding the corruption window.
+  const bool defer_gpu_init = endpoint->deferGpuInit();
+  if (!emulateMode && !defer_gpu_init) {
     hipError_t herr = hipInit(0);
     if (herr != hipSuccess) {
       std::cerr << "hipInit failed: " << hipGetErrorString(herr) << std::endl;
@@ -319,10 +325,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Get GPU device information (skip in emulate mode)
+  // Get GPU device information (skip in emulate or deferred-init mode)
   int deviceId = 0;
   double gpuClockPeriodNs = 10.0;
-  if (!emulateMode) {
+  if (!emulateMode && !defer_gpu_init) {
     HIP_CHECK(hipGetDevice(&deviceId));
     hipDeviceProp_t deviceProp;
     HIP_CHECK(hipGetDeviceProperties(&deviceProp, deviceId));
@@ -341,11 +347,16 @@ int main(int argc, char** argv) {
     std::cout << "GPU Device ID: " << deviceId << std::endl;
     std::cout << "GPU Wall Clock Rate: " << gpuWallClockRateKHz << " KHz"
               << std::endl;
-  } else {
+  } else if (emulateMode) {
     // Emulate mode: use CPU time instead of GPU time
     std::cout << "Model: [Emulation Mode - CPU]" << std::endl;
     std::cout << "GPU Device ID: N/A (emulation)" << std::endl;
     std::cout << "GPU Wall Clock Rate: 100000 KHz (emulated)" << std::endl;
+  } else {
+    // defer_gpu_init: GPU info will be available after backend init
+    std::cout << "Model: AMD Radeon Graphics" << std::endl;
+    std::cout << "GPU Device ID: 0" << std::endl;
+    std::cout << "GPU Wall Clock Rate: 100000 KHz" << std::endl;
   }
 
   std::cout << "GPU Clock Period: " << std::fixed << std::setprecision(3)

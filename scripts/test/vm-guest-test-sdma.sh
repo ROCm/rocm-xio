@@ -36,12 +36,7 @@ SKIP_GPU="${SKIP_GPU:-0}"
 . "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
-# GPU bring-up
-# --------------------------------------------------------------
-gpu_bringup
-
-# --------------------------------------------------------------
-# Build + kernel module
+# Build BEFORE loading amdgpu — amdgpu reload can corrupt amdclang++.
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester
@@ -51,8 +46,12 @@ cmake --build "${BUILD_DIR}" \
     --target test-sdma-config test-sdma-packet-layout \
     --parallel "$(( $(nproc) > 2 ? 2 : $(nproc) ))"
 
-
 load_kernel_module
+
+# --------------------------------------------------------------
+# GPU bring-up (after build to avoid compiler corruption)
+# --------------------------------------------------------------
+gpu_bringup
 
 # --------------------------------------------------------------
 # Tests
