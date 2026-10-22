@@ -64,6 +64,11 @@ sudo nvme id-ctrl "${KV_CTRL}" 2>/dev/null | grep -E "^mn|^sn" | head -4 || true
 
 # --------------------------------------------------------------
 # Build BEFORE loading amdgpu — amdgpu reload can corrupt amdclang++.
+if lsmod | grep -q '^amdgpu'; then
+    banner "Unloading amdgpu before build (will reload via amdgpu-probe after)"
+    sudo rmmod rocm_xio 2>/dev/null || true
+    sudo rmmod amdgpu 2>/dev/null || true
+fi
 # --------------------------------------------------------------
 find_rocm
 build_xio_tester

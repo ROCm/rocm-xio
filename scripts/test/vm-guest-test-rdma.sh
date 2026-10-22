@@ -33,10 +33,17 @@ VENDOR="${VENDOR:-ionic}"
 . "$(dirname "${BASH_SOURCE[0]}")/vm-guest-test-common.sh"
 
 # --------------------------------------------------------------
-# Build BEFORE loading amdgpu — loading amdgpu with wrong params
-# (which triggers a reload) can corrupt amdclang++ inside the guest.
-# The build only needs ROCm tools, not a running GPU.
+# Build BEFORE loading amdgpu — cmake's rocm_agent_enumerator calls rocminfo
+# which triggers amdgpu_vm_make_compute WARN_ON if amdgpu is already loaded,
+# corrupting the compiler or the ELF loader state for the binary produced.
+# Unload amdgpu first if the provisioning step loaded it, then build, then
+# reload via amdgpu-probe with the correct emu_mode=1 parameters.
 # --------------------------------------------------------------
+if lsmod | grep -q '^amdgpu'; then
+    banner "Unloading amdgpu before build (will reload via amdgpu-probe after)"
+    sudo rmmod rocm_xio 2>/dev/null || true
+    sudo rmmod amdgpu 2>/dev/null || true
+fi
 find_rocm
 # Enable the GDA ionic provider so the patched rdma-core is built and
 # the GDA RDMA tests can use direct-verbs doorbell access.
