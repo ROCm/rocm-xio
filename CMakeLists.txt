@@ -318,6 +318,7 @@ list(APPEND LIB_SOURCES
 # Add GDA backend for rdma-ep
 list(APPEND LIB_SOURCES
   ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
+  ${ENDPOINTS_DIR}/rdma-ep/cpu-loopback.hip
 )
 
 # Add BNXT vendor backend (always compiled, conditionally active via GDA_BNXT)

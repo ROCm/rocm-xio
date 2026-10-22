@@ -673,6 +673,22 @@ void freeDeviceMemoryPair(void* host_ptr, void* device_ptr) {
   freeDeviceMemory(device_ptr, XIO_DEVICE_MEM_HIP);
 }
 
+// Returns true when running inside a rocjitsu emulated GPU guest.
+// Checks the amdgpu emu_mode sysfs parameter AND the ROCXIO_ROCJITSU env var.
+// Set ROCXIO_ROCJITSU=1 in the guest environment as a reliable fallback when
+// sysfs is unreadable (e.g. different kernel or permission issues).
+static bool is_rocjitsu() {
+  if (getenv("ROCXIO_ROCJITSU") != nullptr)
+    return true;
+  int emu_mode = 0;
+  FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+  if (f) {
+    (void)fscanf(f, "%d", &emu_mode);
+    fclose(f);
+  }
+  return emu_mode != 0;
+}
+
 hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
                            unsigned flags) {
   if (!ptr || size == 0) {
@@ -686,13 +702,7 @@ hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
   // Redirect all HIP-backed host allocations to posix_memalign (PLAIN) which
   // uses guest heap memory (memfd-backed) without touching the HIP/KFD paths.
   if (!(flags & XIO_HOST_MEM_PLAIN)) {
-    int emu_mode = 0;
-    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
-    if (f) {
-      (void)fscanf(f, "%d", &emu_mode);
-      fclose(f);
-    }
-    if (emu_mode != 0)
+    if (is_rocjitsu())
       flags = (flags & ~(XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT |
                          XIO_HOST_MEM_DEFAULT | XIO_HOST_MEM_PINNED)) |
               XIO_HOST_MEM_PLAIN;
@@ -780,13 +790,7 @@ void freeHostMemory(void* ptr, unsigned flags) {
   // posix_memalign (because emu_mode was set), free with free() not
   // hipHostFree().
   if (!(flags & XIO_HOST_MEM_PLAIN)) {
-    int emu_mode = 0;
-    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
-    if (f) {
-      (void)fscanf(f, "%d", &emu_mode);
-      fclose(f);
-    }
-    if (emu_mode != 0)
+    if (is_rocjitsu())
       flags = (flags & ~(XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT |
                          XIO_HOST_MEM_DEFAULT | XIO_HOST_MEM_PINNED)) |
               XIO_HOST_MEM_PLAIN;

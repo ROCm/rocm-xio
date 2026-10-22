@@ -161,6 +161,12 @@ public:
   int register_data_buffer(void* buf, size_t size);
 
   /**
+   * @brief CPU-side ibverbs RDMA WRITE loopback for rocjitsu emulated GPU.
+   * Uses ibv_post_send + ibv_poll_cq without any GPU kernel involvement.
+   */
+  int cpu_loopback_smoke_test(int iterations, int transfer_size);
+
+  /**
    * @brief Connect the QP to a remote peer in non-loopback mode.
    * @param remote Remote peer connection information.
    * @return 0 on success, -1 on failure.
