@@ -80,3 +80,12 @@ xio_add_test(
   LABELS unit common
   TIMEOUT 30
 )
+
+# GPU test: verify hipHostMalloc gives flat aperture (GPU VA == CPU VA).
+# Requires a KFD agent; skips automatically when no GPU is present.
+xio_add_test(
+  NAME test-hip-flat-aperture
+  SOURCE test-hip-flat-aperture.hip
+  LABELS unit common gpu
+  TIMEOUT 30
+)

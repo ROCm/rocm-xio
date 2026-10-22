@@ -65,7 +65,7 @@ else()
 endif()
 
 # Add cmake/ to the module search path (all modes need this)
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 if(NOT XIO_DOCS_ONLY)
 
@@ -233,11 +233,11 @@ option(XIO_SDMA_OSS7
   ${_XIO_SDMA_OSS7_DEFAULT})
 
 # Project directories
-set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/src/include)
-set(ENDPOINTS_DIR ${PROJECT_SOURCE_DIR}/src/endpoints)
-set(ENDPOINTS_COMMON_DIR ${PROJECT_SOURCE_DIR}/src/endpoints/common)
-set(COMMON_DIR ${PROJECT_SOURCE_DIR}/src/common)
-set(TESTER_DIR ${PROJECT_SOURCE_DIR}/src/tester)
+set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/src/include)
+set(ENDPOINTS_DIR ${CMAKE_SOURCE_DIR}/src/endpoints)
+set(ENDPOINTS_COMMON_DIR ${CMAKE_SOURCE_DIR}/src/endpoints/common)
+set(COMMON_DIR ${CMAKE_SOURCE_DIR}/src/common)
+set(TESTER_DIR ${CMAKE_SOURCE_DIR}/src/tester)
 set(EXTERNAL_HEADERS_DIR ${INCLUDE_DIR}/external)
 set(RDMA_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/rdma)
 set(NVME_HEADERS_DIR ${EXTERNAL_HEADERS_DIR}/nvme)
@@ -305,6 +305,12 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 # Filter out vendor backend files (they are added conditionally based on GDA_* options)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-backend\\.cpp")
+# Filter out cpu-loopback.hip unless GDA_IONIC is enabled: it requires
+# libibverbs-dev (infiniband/verbs.h) which is not present in non-ionic builds.
+if(NOT GDA_IONIC)
+  list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+    "${ENDPOINTS_DIR}/rdma-ep/cpu-loopback\\.hip")
+endif()
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
@@ -319,6 +325,13 @@ list(APPEND LIB_SOURCES
 list(APPEND LIB_SOURCES
   ${ENDPOINTS_DIR}/rdma-ep/gda-backend.cpp
 )
+# cpu-loopback.hip uses infiniband/verbs.h directly and requires libibverbs-dev.
+# Only compile it when GDA_IONIC is enabled (which already depends on libibverbs).
+if(GDA_IONIC)
+  list(APPEND LIB_SOURCES
+    ${ENDPOINTS_DIR}/rdma-ep/cpu-loopback.hip
+  )
+endif()
 
 # Add BNXT vendor backend (always compiled, conditionally active via GDA_BNXT)
 if(GDA_BNXT)
@@ -619,6 +632,7 @@ install(FILES
     ${INCLUDE_DIR}/xio-export.h
     ${INCLUDE_DIR}/rocm-xio-uapi.h
     ${INCLUDE_DIR}/xio-endpoint-registry.h
+    ${INCLUDE_DIR}/nvme-kv.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/rocm-xio
     COMPONENT rocm-xio
 )
@@ -681,7 +695,7 @@ include(CMakePackageConfigHelpers)
 
 # configure_package_config_file will automatically get version from project()
 configure_package_config_file(
-    ${PROJECT_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
+    ${CMAKE_SOURCE_DIR}/cmake/rocm-xio-config.cmake.in
     ${CMAKE_BINARY_DIR}/rocm-xio-config.cmake
     INSTALL_DESTINATION ${ROCM_XIO_CONFIG_INSTALL_DIR}
     PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR
