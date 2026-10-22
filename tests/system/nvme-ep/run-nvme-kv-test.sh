@@ -62,7 +62,10 @@ fi
 # Prepend value-size and data-buffer-size caps. An explicit --value-size
 # or --data-buffer-size in "$@" overrides these because xio-tester uses
 # the last occurrence of a flag.
-KV_MAX_VALUE=65536
+# Probe: 4 KiB values. The CPU one-shot path sets PRP1 only (nvme-ep.hip
+# one-shot SQE build), so SPDK rejects any transfer that needs PRP2 with
+# "no PRP2, 61440 remaining". One page fits PRP1. XIO_KV_MAX_VALUE overrides.
+KV_MAX_VALUE="${XIO_KV_MAX_VALUE:-4096}"
 
 # Add --pci-mmio-bridge when the rocjitsu/vfio-user CI environment sets
 # XIO_FORCE_PCI_MMIO_BRIDGE=1 (or USE_PCI_MMIO_BRIDGE=1). On rocjitsu,
@@ -80,9 +83,17 @@ if [ "${XIO_FORCE_PCI_MMIO_BRIDGE:-0}" = "1" ] || \
     PCI_MMIO_BRIDGE_ARG="--pci-mmio-bridge"
 fi
 
+# Probe: one-page queues on the emulated path. At the default queue length
+# the SQ/CQ are multi-page plain-malloc buffers sent with PC=1; the SPDK
+# vfio-user target zero-fills the whole PRP1 range at CREATE and wipes foreign
+# heap pages (malloc(): invalid size (unsorted)). 64 entries fit one page.
+# An explicit --queue-length in "$@" still wins (last occurrence).
+KV_QUEUE_LENGTH="${XIO_KV_QUEUE_LENGTH:-64}"
+
 exec "$XIO_TESTER" nvme-ep \
     --controller "$KV_CTRL" \
     --namespace  "$KV_NSID" \
+    --queue-length "$KV_QUEUE_LENGTH" \
     --value-size "$KV_MAX_VALUE" \
     --data-buffer-size "$KV_MAX_VALUE" \
     ${PCI_MMIO_BRIDGE_ARG:+"$PCI_MMIO_BRIDGE_ARG"} \

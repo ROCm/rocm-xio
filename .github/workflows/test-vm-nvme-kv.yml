@@ -171,6 +171,8 @@ jobs:
                ./rocm-xio/scripts/test/vm-guest-test-kv.sh"
 
       - name: Cross-check SPDK stored the KV keys (host-side)
+        # Probe: run even when ctest failed, so a partial store set is still checked.
+        if: always()
         working-directory: .github/compose/spdk-kv-nvme-vm
         env:
           SPDK_CONTAINER: spdk-kv-nvme-vm-spdk-nvme-1
@@ -180,7 +182,8 @@ jobs:
           # confirms the KV commands actually reached SPDK rather than
           # producing false-positive completions on the guest side.
           SPDK_CONTAINER="$SPDK_CONTAINER" \
-            ../../../scripts/test/spdk-kv-check.sh
+            ../../../scripts/test/spdk-kv-check.sh \
+              kvverify0 kvverify1 kvverify2 kvverify3 testkey0
 
       - name: Collect guest diagnostics
         if: always()
