@@ -681,6 +681,23 @@ hipError_t allocHostMemory(size_t size, void** ptr, const char* label,
     return hipErrorInvalidValue;
   }
 
+  // On rocjitsu emulated GPU, any hipHostMalloc call triggers lazy hipInit
+  // → amdgpu_vm_make_compute WARN_ON → guest page cache corruption.
+  // Redirect all HIP-backed host allocations to posix_memalign (PLAIN) which
+  // uses guest heap memory (memfd-backed) without touching the HIP/KFD paths.
+  if (!(flags & XIO_HOST_MEM_PLAIN)) {
+    int emu_mode = 0;
+    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+    if (f) {
+      (void)fscanf(f, "%d", &emu_mode);
+      fclose(f);
+    }
+    if (emu_mode != 0)
+      flags = (flags & ~(XIO_HOST_MEM_MAPPED | XIO_HOST_MEM_COHERENT |
+                         XIO_HOST_MEM_DEFAULT | XIO_HOST_MEM_PINNED)) |
+              XIO_HOST_MEM_PLAIN;
+  }
+
   if (flags & XIO_HOST_MEM_PLAIN) {
     // Page-align: NVMe PRP entries require page-aligned addresses so that
     // getPhysAddr() returns a GPA with zero page offset for correct PRP list
