@@ -62,7 +62,10 @@ fi
 # Prepend value-size and data-buffer-size caps. An explicit --value-size
 # or --data-buffer-size in "$@" overrides these because xio-tester uses
 # the last occurrence of a flag.
-KV_MAX_VALUE=65536
+# Probe: 4 KiB values. The CPU one-shot path sets PRP1 only (nvme-ep.hip
+# one-shot SQE build), so SPDK rejects any transfer that needs PRP2 with
+# "no PRP2, 61440 remaining". One page fits PRP1. XIO_KV_MAX_VALUE overrides.
+KV_MAX_VALUE="${XIO_KV_MAX_VALUE:-4096}"
 
 # Add --pci-mmio-bridge when the rocjitsu/vfio-user CI environment sets
 # XIO_FORCE_PCI_MMIO_BRIDGE=1 (or USE_PCI_MMIO_BRIDGE=1). On rocjitsu,
