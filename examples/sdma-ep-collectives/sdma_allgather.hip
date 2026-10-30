@@ -175,7 +175,7 @@ public:
 
         // Wait for trigger to reach expected value, then transfer data
         hostHandles_[peer].wait_flag_then_put(&args.triggerFlags[0],
-                                              expectedTrigger, src, dst, bytes);
+                                              expectedTrigger, dst, src, bytes);
 
         // Signal completion to peer
         hostHandles_[peer].signal(args.remoteSdmaSignals[peerIdx], signalValue);
