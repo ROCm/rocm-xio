@@ -1145,7 +1145,12 @@ __global__ void gpuKernelPersistent(
      * (NVMe controller-visible) before the doorbell write to BAR0 MMIO.
      * Without this fence, write ordering between PCIe and MMIO is not
      * guaranteed on RDNA/GCN, causing the controller to read stale PRP data. */
+#if defined(__GFX12__)
+    /* gfx12 has no s_waitcnt; wait for the stores with s_wait_storecnt. */
+    __asm__ __volatile__("s_wait_storecnt 0x0" ::: "memory");
+#else
     __builtin_amdgcn_s_waitcnt(0 /* vmcnt=0, expcnt=0, lgkmcnt=0 */);
+#endif
     nvme_ep::ringDoorbell(sq_tail, doorbellParams);
 
     /* ── Poll CQE ─────────────────────────────────────── */
