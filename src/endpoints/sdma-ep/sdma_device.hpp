@@ -26,6 +26,19 @@ struct XioEndpointConfig;
 
 namespace sdma_ep {
 
+/**
+ * Wait until this thread's earlier stores have landed.
+ *
+ * gfx12 has no s_waitcnt; its store counter is s_wait_storecnt.
+ */
+__device__ __forceinline__ void waitForStores() {
+#if defined(__GFX12__)
+  __asm__ __volatile__("s_wait_storecnt 0x0" ::: "memory");
+#else
+  __builtin_amdgcn_s_waitcnt(0);
+#endif
+}
+
 /** Maximum spin-poll iterations before assert. */
 constexpr int MAX_RETRIES = 1 << 30;
 
@@ -435,17 +448,17 @@ struct SdmaQueueHandle {
         }
       }
     }
-    __builtin_amdgcn_s_waitcnt(0);
+    waitForStores();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(wptr, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_AGENT);
-    __builtin_amdgcn_s_waitcnt(0);
+    waitForStores();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(doorbell, pendingWptr, __ATOMIC_RELAXED,
                        __HIP_MEMORY_SCOPE_SYSTEM);
-    __builtin_amdgcn_s_waitcnt(0);
+    waitForStores();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     __hip_atomic_store(committedWptr, pendingWptr, __ATOMIC_RELAXED,
@@ -563,7 +576,7 @@ struct SdmaQueueSingleProducerHandle : SdmaQueueHandle {
   __device__ __forceinline__ void submitPacket(uint64_t base,
                                                uint64_t pendingWptr) const {
     *wptr = pendingWptr;
-    __builtin_amdgcn_s_waitcnt(0);
+    waitForStores();
     __builtin_amdgcn_wave_barrier();
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     *doorbell = pendingWptr;
