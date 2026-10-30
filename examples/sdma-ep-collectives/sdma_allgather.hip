@@ -47,6 +47,10 @@ __global__ void sdmaAllgatherKernel(AllgatherArgs args, int nBlocks,
   const int warpId = threadIdx.x / WARP_SIZE;
   const int nPeer = nranks - 1;
 
+  // Start every iteration together: no rank copies before all ranks arrived.
+  crossGpuBarrier(args.remoteBarrierSignals, args.localBarrierSignals,
+                  blockIdx.x, nPeer, expectedSignal);
+
   // Only use warpId < nPeer (7 warps for 8 ranks)
   if (warpId >= nPeer)
     return;
