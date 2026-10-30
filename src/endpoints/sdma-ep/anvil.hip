@@ -698,7 +698,8 @@ static std::string engineIdToString(std::optional<uint32_t> engineId) {
 static constexpr uint32_t kRecSdmaEngMaskBits = 32;
 
 std::optional<uint32_t> AnvilLib::getRecommendedSdmaEngineId(
-  int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId) {
+  int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId,
+  uint32_t avoidMask) {
   if (srcDeviceId == dstDeviceId) {
     return fallbackEngineId;
   }
@@ -753,6 +754,11 @@ std::optional<uint32_t> AnvilLib::getRecommendedSdmaEngineId(
     if (mask == 0) {
       return fallbackEngineId;
     }
+    // Take an engine no other peer of this GPU uses, unless the
+    // recommendation has none left.
+    if ((mask & ~avoidMask) != 0) {
+      mask &= ~avoidMask;
+    }
     if (fallbackEngineId && *fallbackEngineId < kRecSdmaEngMaskBits &&
         (mask & (1u << *fallbackEngineId)) != 0) {
       return fallbackEngineId;
@@ -774,6 +780,12 @@ std::optional<uint32_t> AnvilLib::getRecommendedSdmaEngineId(
 }
 
 uint32_t AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
+  // A pair keeps its engine, so extra channels of one connection share it.
+  const ChannelKey pairKey{srcDeviceId, dstDeviceId};
+  const auto cached = sdma_engine_by_pair_.find(pairKey);
+  if (cached != sdma_engine_by_pair_.end()) {
+    return cached->second;
+  }
   std::optional<uint32_t> fallbackEngineId;
   try {
     fallbackEngineId = getMappedSdmaEngineId(srcDeviceId, dstDeviceId);
@@ -785,8 +797,12 @@ uint32_t AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
       fallbackEngineId = 0;
     }
   }
+  // Engine 0 stays with same-GPU copies, whose queue always takes it.
+  const uint32_t inUse =
+    sdma_engines_in_use_.try_emplace(srcDeviceId, 1u).first->second;
   std::optional<uint32_t> engineId =
-    getRecommendedSdmaEngineId(srcDeviceId, dstDeviceId, fallbackEngineId);
+    getRecommendedSdmaEngineId(srcDeviceId, dstDeviceId, fallbackEngineId,
+                               inUse);
   if (SdmaDebugEnabled()) {
     int srcOamId = -1;
     int dstOamId = -1;
@@ -805,6 +821,10 @@ uint32_t AnvilLib::getSdmaEngineId(int srcDeviceId, int dstDeviceId) {
     throw std::runtime_error("No valid SDMA engine found for GPU pair " +
                              std::to_string(srcDeviceId) + " -> " +
                              std::to_string(dstDeviceId));
+  }
+  sdma_engine_by_pair_[pairKey] = *engineId;
+  if (*engineId < kRecSdmaEngMaskBits) {
+    sdma_engines_in_use_[srcDeviceId] |= 1u << *engineId;
   }
   return *engineId;
 }

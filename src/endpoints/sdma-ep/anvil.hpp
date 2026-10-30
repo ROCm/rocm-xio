@@ -111,10 +111,12 @@ private:
    * @brief Prefer KFD's recommended SDMA engine mask for a GPU pair.
    *
    * Returns the fallback when KFD has no recommendation, and std::nullopt
-   * when neither KFD nor the fallback provides an engine.
+   * when neither KFD nor the fallback provides an engine. Engines in
+   * |avoidMask| are skipped while the recommendation has others.
    */
   std::optional<uint32_t> getRecommendedSdmaEngineId(
-    int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId);
+    int srcDeviceId, int dstDeviceId, std::optional<uint32_t> fallbackEngineId,
+    uint32_t avoidMask = 0);
 
   using ChannelKey = std::pair<int, int>;
   struct ChannelKeyHash {
@@ -151,6 +153,11 @@ private:
   int getOamId(int deviceId);
 
   std::once_flag init_flag;
+  // The engine each GPU pair uses, and the engines each source GPU has handed
+  // out, so that the peers of one GPU get different engines.
+  std::unordered_map<ChannelKey, uint32_t, ChannelKeyHash> sdma_engine_by_pair_;
+  std::unordered_map<int, uint32_t> sdma_engines_in_use_;
+
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash> sdma_channels_;
   std::unordered_map<ChannelKey, ChannelVector, ChannelKeyHash>
     host_sdma_channels_;
