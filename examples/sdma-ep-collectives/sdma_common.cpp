@@ -189,20 +189,21 @@ void SdmaTestEngine::bootstrapMPI() {
     exit(1);
   }
 
-  if (nranks_ != MAX_GPUS) {
-    if (rank_ == 0) {
-      fprintf(
-        stderr,
-        "sdma-ep-collectives currently supports exactly %d ranks; got %d\n",
-        MAX_GPUS, nranks_);
-    }
+  if (nranks_ > MAX_GPUS) {
+    if (rank_ == 0)
+      fprintf(stderr, "Max supported ranks: %d (got %d)\n", MAX_GPUS, nranks_);
     MPI_Finalize();
     exit(1);
   }
 
-  if (nranks_ > MAX_GPUS) {
-    if (rank_ == 0)
-      fprintf(stderr, "Max supported ranks: %d\n", MAX_GPUS);
+  // Rank i drives GPU i.
+  int numDevices = 0;
+  HIP_CHECK(hipGetDeviceCount(&numDevices));
+  if (nranks_ > numDevices) {
+    if (rank_ == 0) {
+      fprintf(stderr, "%d ranks need %d GPUs, but only %d are visible\n",
+              nranks_, nranks_, numDevices);
+    }
     MPI_Finalize();
     exit(1);
   }

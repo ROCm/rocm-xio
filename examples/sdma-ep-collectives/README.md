@@ -49,6 +49,9 @@ mpirun -n 8 sdma-ep-alltoall
 mpirun -n 8 sdma-ep-alltoall --device-triggered
 ```
 
+Run with one rank per GPU: any number of ranks from 2 to 8 (`MAX_GPUS`), rank
+*i* drives GPU *i*. Sizes are rounded down to a multiple of the rank count.
+
 ### Common Options
 - `-w <warmup>`: Number of warmup iterations (default: 5)
 - `-n <iters>`: Number of benchmark iterations (default: 20)
