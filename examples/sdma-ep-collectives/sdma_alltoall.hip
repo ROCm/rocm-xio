@@ -50,6 +50,10 @@ __global__ void sdmaAlltoallKernel(AlltoallArgs args, int nBlocks,
   const int warpId = threadIdx.x / WARP_SIZE;
   const int nPeer = nranks - 1;
 
+  // Start every iteration together: no rank copies before all ranks arrived.
+  crossGpuBarrier(args.remoteBarrierSignals, args.localBarrierSignals,
+                  blockIdx.x, nPeer, expectedSignal);
+
   // Warps 0..nPeer-1 service peers; warp nPeer handles the self-copy.
   // Any extra warps from rounding the launch geometry exit early.
   if (warpId > nPeer)
@@ -101,6 +105,11 @@ __global__ void alltoallTriggerKernel(AlltoallArgs args, int nBlocks,
                                       uint64_t expectedSignal) {
   const int nPeer = args.nranks - 1;
   const int tid = threadIdx.x;
+
+  // Same start barrier as the device-initiated kernel: no rank releases its
+  // preprogrammed copies before all ranks have arrived.
+  crossGpuBarrier(args.remoteBarrierSignals, args.localBarrierSignals,
+                  blockIdx.x, nPeer, expectedSignal);
 
   // Single thread increments the trigger flag to signal host-programmed SDMA
   if (tid == 0) {
