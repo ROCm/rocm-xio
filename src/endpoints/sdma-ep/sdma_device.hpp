@@ -184,6 +184,7 @@ CreateCopyWaitSignalPacketMI4(void* srcBuf, void* dstBuf,
 
   if (enableWait && waitAddr != nullptr) {
     pkt.WAIT_CTRL_UNION.wait_function = SDMA_WAIT_FUNC_GEQ_MI4;
+    pkt.WAIT_CTRL_UNION.wait_scope = SDMA_MEMORY_SCOPE_SYS_MI4;
     pkt.WAIT_ADDR_LO_UNION.wait_addr_31_3 = (uint32_t)((uintptr_t)waitAddr >>
                                                        3);
     pkt.WAIT_ADDR_HI_UNION.wait_addr_63_32 = (uint32_t)((uintptr_t)waitAddr >>
@@ -195,6 +196,9 @@ CreateCopyWaitSignalPacketMI4(void* srcBuf, void* dstBuf,
   }
 
   pkt.COPY_COUNT_UNION.copy_count = (uint32_t)(packetSize - 1);
+  // System scope, so the copy's data is visible to other GPUs and the host.
+  pkt.COPY_PARAM_UNION.dst_scope = SDMA_MEMORY_SCOPE_SYS_MI4;
+  pkt.COPY_PARAM_UNION.src_scope = SDMA_MEMORY_SCOPE_SYS_MI4;
 
   pkt.SRC_ADDR_LO_UNION.src_addr_31_0 = (uint32_t)(uintptr_t)srcBuf;
   pkt.SRC_ADDR_HI_UNION.src_addr_63_32 = (uint32_t)((uintptr_t)srcBuf >> 32);
@@ -203,6 +207,7 @@ CreateCopyWaitSignalPacketMI4(void* srcBuf, void* dstBuf,
 
   if (signalAddr != nullptr) {
     pkt.SIGNAL_CTRL_UNION.signal_operation = SDMA_SIGNAL_OP_ADD64_MI4;
+    pkt.SIGNAL_CTRL_UNION.signal_scope = SDMA_MEMORY_SCOPE_SYS_MI4;
     pkt.SIGNAL_ADDR_LO_UNION.signal_addr_31_3 =
       (uint32_t)((uintptr_t)signalAddr >> 3);
     pkt.SIGNAL_ADDR_HI_UNION.signal_addr_63_32 =
@@ -212,6 +217,38 @@ CreateCopyWaitSignalPacketMI4(void* srcBuf, void* dstBuf,
   }
 
   return pkt;
+}
+
+/**
+ * @brief Pack a COPY_LINEAR_WAIT_SIGNAL_MI4 into the stream the engine reads.
+ *
+ * The engine takes the header's wait and signal bits as the sections that
+ * follow: the 7-DWORD wait block (DW1-7) only when wait is set, the 6-DWORD
+ * copy (DW8-13) always, the 5-DWORD signal block (DW14-18) only when signal is
+ * set. Sending the full 19 DWORDs with an unused wait block in the middle makes
+ * the engine read that block as the copy. The fixed 19-DWORD struct is only the
+ * layout the builder fills in.
+ *
+ * @param pkt Packet filled in by CreateCopyWaitSignalPacketMI4.
+ * @param out Receives the packed DWORDs.
+ * @return Number of DWORDs written to |out| (7, 12, 14 or 19).
+ */
+__device__ __forceinline__ uint32_t CompactCopyWaitSignalMI4(
+  const SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4& pkt, uint32_t (&out)[19]) {
+  const uint32_t* dw = reinterpret_cast<const uint32_t*>(&pkt);
+  uint32_t n = 0;
+  out[n++] = dw[0];
+  if (pkt.HEADER_UNION.wait) {
+    for (uint32_t i = 1; i <= 7; ++i)
+      out[n++] = dw[i];
+  }
+  for (uint32_t i = 8; i <= 13; ++i)
+    out[n++] = dw[i];
+  if (pkt.HEADER_UNION.signal) {
+    for (uint32_t i = 14; i <= 18; ++i)
+      out[n++] = dw[i];
+  }
+  return n;
 }
 #endif // XIO_SDMA_OSS7
 
@@ -393,9 +430,21 @@ struct SdmaQueueHandle {
                                               uint64_t& pendingWptr,
                                               uint64_t offset) const {
     static_assert(sizeof(PacketType) / sizeof(uint32_t) <= 64);
+    placeDwords(reinterpret_cast<const uint32_t*>(&packet),
+                sizeof(PacketType) / sizeof(uint32_t), pendingWptr, offset);
+  }
+
+  /**
+   * @brief Place |numDwords| DWORDs, after |offset| bytes of NOP padding.
+   *
+   * For packets whose length is only known at run time. Advances pendingWptr
+   * past the padding and the DWORDs.
+   */
+  __device__ __forceinline__ void placeDwords(const uint32_t* dwords,
+                                              uint32_t numDwords,
+                                              uint64_t& pendingWptr,
+                                              uint64_t offset) const {
     const uint32_t numOffsetDwords = offset / sizeof(uint32_t);
-    const uint32_t numDwords = sizeof(PacketType) / sizeof(uint32_t);
-    uint32_t* packetPtr = reinterpret_cast<uint32_t*>(&packet);
     uint64_t base_idx = WrapIntoRing(pendingWptr) / sizeof(uint32_t);
 
     // Place NOP padding if needed
@@ -414,10 +463,10 @@ struct SdmaQueueHandle {
 
     // Place packet data
     for (uint32_t i = 0; i < numDwords; i++) {
-      __hip_atomic_store(queueBuf + base_idx + i, packetPtr[i],
-                         __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+      __hip_atomic_store(queueBuf + base_idx + i, dwords[i], __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_AGENT);
     }
-    pendingWptr += sizeof(PacketType);
+    pendingWptr += numDwords * sizeof(uint32_t);
   }
 
   /**
@@ -618,8 +667,9 @@ __device__ __forceinline__ void put_signal_counter_impl(
    */
   if constexpr (PUT_EN && (SIGNAL_EN || COUNTER_EN)) {
     constexpr bool both = SIGNAL_EN && COUNTER_EN;
-    constexpr size_t space_required = sizeof(
-                                        SDMA_PKT_COPY_LINEAR_WAIT_SIGNAL_MI4) +
+    // Header, copy and signal: 12 DWORDs, no wait block.
+    constexpr size_t fused_bytes = (1 + 6 + 5) * sizeof(uint32_t);
+    constexpr size_t space_required = fused_bytes +
                                       ((both) ? sizeof(SDMA_PKT_ATOMIC) : 0);
     uint64_t offset = 0;
     auto base = handle.ReserveQueueSpace(space_required, offset);
@@ -628,7 +678,9 @@ __device__ __forceinline__ void put_signal_counter_impl(
     uint64_t* fused_addr = SIGNAL_EN ? signal : counter;
     auto ws_pkt = CreateCopyWaitSignalPacketMI4(src, dst, size, fused_addr, 1,
                                                 false, nullptr, 0, 0);
-    handle.placePacket(ws_pkt, pendingWptr, offset);
+    uint32_t fused_dwords[19];
+    const uint32_t num_fused = CompactCopyWaitSignalMI4(ws_pkt, fused_dwords);
+    handle.placeDwords(fused_dwords, num_fused, pendingWptr, offset);
     offset = 0;
 
     if constexpr (both) {
