@@ -91,6 +91,11 @@ __global__ void allgatherTriggerKernel(AllgatherArgs args, int nBlocks,
   const int nPeer = args.nranks - 1;
   const int tid = threadIdx.x;
 
+  // Same start barrier as the device-initiated kernel: no rank releases its
+  // preprogrammed copies before all ranks have arrived.
+  crossGpuBarrier(args.remoteBarrierSignals, args.localBarrierSignals,
+                  blockIdx.x, nPeer, expectedSignal);
+
   // Single thread increments the trigger flag to signal host-programmed SDMA
   if (tid == 0) {
     // Atomically increment trigger to release this iteration's SDMA operations
