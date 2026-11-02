@@ -75,6 +75,24 @@ build/sdma-ep-rate --mode poll-only
 build/sdma-ep-rate --mode atomic-only --atomic-memory local
 ```
 
+Add `--fused` to a mode that has a copy to submit each command as one OSS7
+`COPY_LINEAR_WAIT_SIGNAL` packet instead of separate poll, copy and atomic
+packets: the poll becomes the packet's wait, the atomic its signal (an add of 1),
+so a command is one packet whatever the mode. The CSV gains a final `Fused`
+column (the other columns keep their positions), and the packet rate counts one
+packet per fused command.
+
+```bash
+build/sdma-ep-rate --mode poll-copy-atomic --atomic-memory remote --fused
+```
+
+`--fused` needs a build with `-DXIO_SDMA_OSS7=ON` (this CMake option puts
+`XIO_SDMA_OSS7=1` on every benchmark, and it has to match the rocm-xio library,
+which turns it on by itself for gfx1250), and a GPU whose SDMA decodes the fused
+packet. Without the define the tool stops with a message; on a part that does
+not decode the packet, such as MI300X, the engine misreads it, so do not run it
+there.
+
 The packet-rate sweep runs one mode while varying queue counts. Select the mode
 with `MODE`:
 
@@ -88,6 +106,9 @@ remote atomic targets:
 ```bash
 scripts/bench-packet-rate-isolated.sh
 ```
+
+`FUSED=1 scripts/bench-packet-rate-isolated.sh` also runs the fused variant of
+each mode that has a copy.
 
 The isolated runner creates one CSV per mode, `summary.tsv`, `summary.md`, and
 `benchmark.log`. The queue sweep additionally writes `summary.csv` containing

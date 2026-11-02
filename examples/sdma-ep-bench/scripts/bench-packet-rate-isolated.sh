@@ -42,6 +42,12 @@ run_mode() {
     copy-atomic-remote) label="copy+atomic remote" ;;
     poll-copy-atomic-local) label="poll+copy+atomic local" ;;
     poll-copy-atomic-remote) label="poll+copy+atomic remote" ;;
+    fused-copy) label="fused copy" ;;
+    fused-poll-copy) label="fused poll+copy" ;;
+    fused-copy-atomic-local) label="fused copy+atomic local" ;;
+    fused-copy-atomic-remote) label="fused copy+atomic remote" ;;
+    fused-poll-copy-atomic-local) label="fused poll+copy+atomic local" ;;
+    fused-poll-copy-atomic-remote) label="fused poll+copy+atomic remote" ;;
   esac
   awk -F, -v label="${label}" -v tsv="${summary}" \
     -v markdown="${summary_markdown}" \
@@ -61,6 +67,18 @@ run_mode copy-atomic-local --mode copy-atomic --atomic-memory local
 run_mode copy-atomic-remote --mode copy-atomic --atomic-memory remote
 run_mode poll-copy-atomic-local --mode poll-copy-atomic --atomic-memory local
 run_mode poll-copy-atomic-remote --mode poll-copy-atomic --atomic-memory remote
+
+# FUSED=1 also runs each mode that has a copy as one OSS7 COPY_LINEAR_WAIT_SIGNAL packet per
+# command. It needs a build with -DXIO_SDMA_OSS7=ON, on a GPU whose SDMA understands it.
+if [[ "${FUSED:-0}" == "1" ]]; then
+  echo "Running OSS7 fused commands with one queue"
+  run_mode fused-copy --mode copy --fused
+  run_mode fused-poll-copy --mode poll-copy --fused
+  run_mode fused-copy-atomic-local --mode copy-atomic --atomic-memory local --fused
+  run_mode fused-copy-atomic-remote --mode copy-atomic --atomic-memory remote --fused
+  run_mode fused-poll-copy-atomic-local --mode poll-copy-atomic --atomic-memory local --fused
+  run_mode fused-poll-copy-atomic-remote --mode poll-copy-atomic --atomic-memory remote --fused
+fi
 
 echo "Results: ${output_dir}"
 echo "Summary: ${summary}"

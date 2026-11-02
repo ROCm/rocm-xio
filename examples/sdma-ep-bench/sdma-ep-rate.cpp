@@ -56,6 +56,7 @@ struct Params {
   bool skipVerification = false;
   std::string mode = "copy";
   std::string atomicMemory = "local";
+  bool fused = false;
   bool verbose = false;
   std::string outputFile = "packet_rate.csv";
 };
@@ -140,15 +141,20 @@ void run(const Params& params) {
     throw std::runtime_error("transfer size exceeds addressable memory");
   }
   const size_t pollBytes = sizeof(anvil::packets::PollRegmemPacket<uint32_t>);
+  const bool fused = params.fused && hasCopy;
   size_t commandBytes = 0;
-  if (hasPoll) {
-    commandBytes += sizeof(SDMA_PKT_POLL_REGMEM);
-  }
-  if (hasCopy) {
-    commandBytes += sizeof(SDMA_PKT_COPY_LINEAR);
-  }
-  if (hasAtomic) {
-    commandBytes += sizeof(SDMA_PKT_ATOMIC);
+  if (fused) {
+    commandBytes = fusedCommandBytes(hasPoll, hasAtomic);
+  } else {
+    if (hasPoll) {
+      commandBytes += sizeof(SDMA_PKT_POLL_REGMEM);
+    }
+    if (hasCopy) {
+      commandBytes += sizeof(SDMA_PKT_COPY_LINEAR);
+    }
+    if (hasAtomic) {
+      commandBytes += sizeof(SDMA_PKT_ATOMIC);
+    }
   }
 
   const size_t requiredQueueBytes = params.numCommands * commandBytes +
@@ -229,10 +235,12 @@ void run(const Params& params) {
   uint64_t** atomicTargets = nullptr;
   std::vector<uint64_t*> atomicTargetHost(params.numQueues);
   if (hasPoll) {
+    // 8 bytes: the fused wait polls a 64-bit word, the separate poll the first
+    // 4 bytes.
     CHECK_HIP_ERROR(hipExtMallocWithFlags(reinterpret_cast<void**>(&trigger),
-                                          sizeof(uint32_t),
+                                          sizeof(uint64_t),
                                           hipDeviceMallocUncached));
-    CHECK_HIP_ERROR(hipMemset(trigger, 1, sizeof(uint32_t)));
+    CHECK_HIP_ERROR(hipMemset(trigger, 1, sizeof(uint64_t)));
   }
   if (hasAtomic) {
     int targetGpu = params.atomicMemory == "remote" ? params.dstGpu
@@ -270,7 +278,13 @@ void run(const Params& params) {
     "Host Command Rate [MPPS]",
     "Command Time [ns/command]",
     "SDMA Time [ns/packet]",
+    "Fused",
   });
+  std::cout
+    << "Packet format: "
+    << (fused ? "OSS7 fused COPY_LINEAR_WAIT_SIGNAL (one packet per command)"
+              : "separate poll, copy and atomic packets")
+    << "\n";
   std::cout
     << "CopySize  Queues  Device(us)  Host(us)  Device(MPPS)  Host(MPPS)\n";
 
@@ -282,7 +296,7 @@ void run(const Params& params) {
                                  params.numQueues;
     CHECK_HIP_ERROR(hipMemset(signals, 0, params.numQueues * sizeof(uint64_t)));
     if (trigger)
-      CHECK_HIP_ERROR(hipMemset(trigger, hasPoll ? 1 : 0, sizeof(uint32_t)));
+      CHECK_HIP_ERROR(hipMemset(trigger, hasPoll ? 1 : 0, sizeof(uint64_t)));
     if (hasAtomic) {
       int targetGpu = params.atomicMemory == "remote" ? params.dstGpu
                                                       : params.srcGpu;
@@ -306,7 +320,8 @@ void run(const Params& params) {
                           copySize,
                           params.numCommands,
                           expectedSignal,
-                          rateMode};
+                          rateMode,
+                          fused};
       sdmaRateKernel<<<grid, block>>>(args);
       expectedSignal++;
     };
@@ -360,9 +375,9 @@ void run(const Params& params) {
     auto [hostMean, hostStd] = averageAndStd(hostUs);
     const double copyMpps = (params.numQueues * params.numCommands) /
                             deviceMean;
-    const size_t measuredPackets = params.numCommands *
-                                     (hasPoll + hasCopy + hasAtomic) +
-                                   1;
+    const size_t packetsPerCommand = fused ? 1
+                                           : (hasPoll + hasCopy + hasAtomic);
+    const size_t measuredPackets = params.numCommands * packetsPerCommand + 1;
     const double sdmaMpps = params.numQueues * measuredPackets / deviceMean;
     const double hostMpps = (params.numQueues * params.numCommands) / hostMean;
     const double copyTimeNs = 1000.0 / copyMpps;
@@ -383,7 +398,7 @@ void run(const Params& params) {
     output.writeRow(modeName, params.srcGpu, 1, params.numQueues, 1, block.x,
                     copySize, params.numCommands, deviceMean, hostMean,
                     deviceGbps, hostGbps, copyMpps, sdmaMpps, hostMpps,
-                    copyTimeNs, sdmaTimeNs);
+                    copyTimeNs, sdmaTimeNs, fused ? 1 : 0);
   }
 
   CHECK_HIP_ERROR(hipFree(startDevice));
@@ -434,6 +449,9 @@ int main(int argc, char** argv) {
                  "poll-only, or atomic-only");
   app.add_option("--atomic-memory", params.atomicMemory,
                  "Atomic target memory: local or remote");
+  app.add_flag("--fused", params.fused,
+               "Pack each command's poll, copy and atomic into one OSS7 "
+               "COPY_LINEAR_WAIT_SIGNAL packet (needs XIO_SDMA_OSS7)");
   app.add_flag("-v,--verbose", params.verbose, "Verbose output");
   CLI11_PARSE(app, argc, argv);
 
@@ -442,6 +460,14 @@ int main(int argc, char** argv) {
        mode == RateMode::PollCopyAtomic) &&
       params.atomicMemory != "local" && params.atomicMemory != "remote")
     throw std::runtime_error("atomic-memory must be local or remote");
+
+  if (params.fused) {
+    if (!kFusedSupported)
+      throw std::runtime_error("--fused needs a build with XIO_SDMA_OSS7: "
+                               "configure with -DXIO_SDMA_OSS7=ON");
+    if (mode == RateMode::PollOnly || mode == RateMode::AtomicOnly)
+      throw std::runtime_error("--fused needs a mode with a copy");
+  }
 
   if (params.minCopySize == 0 || params.maxCopySize < params.minCopySize ||
       params.numCommands == 0 || params.numQueues == 0 ||

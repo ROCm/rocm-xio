@@ -16,6 +16,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# The SDMA device code lives in headers that each benchmark compiles itself, and its packet format
+# depends on this define. It has to match the rocm-xio library, which turns it on for gfx1250.
+option(XIO_SDMA_OSS7 "Build the benchmarks with the OSS7 SDMA packets (match the rocm-xio library)" OFF)
+if(XIO_SDMA_OSS7)
+  message(STATUS "sdma-ep-bench: OSS7 SDMA packets enabled")
+endif()
+
 find_package(rocm-xio REQUIRED)
 find_package(hsa-runtime64 CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
@@ -27,6 +34,9 @@ add_executable(sdma-ep-bw
   sdma-ep-bw.cpp
   sdma_bw_kernel.hip)
 function(link_sdma_benchmark target)
+  if(XIO_SDMA_OSS7)
+    target_compile_definitions(${target} PRIVATE XIO_SDMA_OSS7=1)
+  endif()
   target_link_libraries(${target} PRIVATE
     rocm-xio::rocm-xio
     hsa-runtime64::hsa-runtime64

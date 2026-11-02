@@ -36,15 +36,21 @@ __global__ void sdmaRateKernel(const RateKernelArgs args) {
                          args.mode == RateMode::PollCopyAtomic ||
                          args.mode == RateMode::AtomicOnly;
 
+  const bool fusedCommand = kFusedSupported && args.fused && hasCopy;
+
   size_t commandBytes = 0;
-  if (hasPoll) {
-    commandBytes += sizeof(SDMA_PKT_POLL_REGMEM);
-  }
-  if (hasCopy) {
-    commandBytes += sizeof(SDMA_PKT_COPY_LINEAR);
-  }
-  if (hasAtomic) {
-    commandBytes += sizeof(SDMA_PKT_ATOMIC);
+  if (fusedCommand) {
+    commandBytes = fusedCommandBytes(hasPoll, hasAtomic);
+  } else {
+    if (hasPoll) {
+      commandBytes += sizeof(SDMA_PKT_POLL_REGMEM);
+    }
+    if (hasCopy) {
+      commandBytes += sizeof(SDMA_PKT_COPY_LINEAR);
+    }
+    if (hasAtomic) {
+      commandBytes += sizeof(SDMA_PKT_ATOMIC);
+    }
   }
 
   for (size_t c = 0; c < args.numCommands; ++c) {
@@ -55,21 +61,37 @@ __global__ void sdmaRateKernel(const RateKernelArgs args) {
     }
     pendingWptr = base;
 
-    if (hasPoll) {
-      auto packet = xio::sdma_ep::CreatePollPacket(args.pollFlag);
-      handle.placePacket(packet, pendingWptr, padding);
+    if (fusedCommand) {
+#if XIO_SDMA_OSS7
+      // One packet: wait until the flag reaches 1, copy, then add 1 to the target.
+      auto packet = xio::sdma_ep::CreateCopyWaitSignalPacketMI4(
+        src, dst, static_cast<long long>(args.copySize),
+        hasAtomic ? args.atomicTargets[warpId] : nullptr, 1, hasPoll,
+        hasPoll ? reinterpret_cast<uint64_t*>(args.pollFlag) : nullptr, 1,
+        ~0ull);
+      uint32_t dwords[19];
+      const uint32_t numDwords =
+        xio::sdma_ep::CompactCopyWaitSignalMI4(packet, dwords);
+      handle.placeDwords(dwords, numDwords, pendingWptr, padding);
       padding = 0;
-    }
+#endif
+    } else {
+      if (hasPoll) {
+        auto packet = xio::sdma_ep::CreatePollPacket(args.pollFlag);
+        handle.placePacket(packet, pendingWptr, padding);
+        padding = 0;
+      }
 
-    if (hasCopy) {
-      auto packet = xio::sdma_ep::CreateCopyPacket(src, dst, args.copySize);
-      handle.placePacket(packet, pendingWptr, padding);
-      padding = 0;
-    }
-    if (hasAtomic) {
-      auto packet = xio::sdma_ep::CreateAtomicIncPacket(
-        args.atomicTargets[warpId]);
-      handle.placePacket(packet, pendingWptr, padding);
+      if (hasCopy) {
+        auto packet = xio::sdma_ep::CreateCopyPacket(src, dst, args.copySize);
+        handle.placePacket(packet, pendingWptr, padding);
+        padding = 0;
+      }
+      if (hasAtomic) {
+        auto packet = xio::sdma_ep::CreateAtomicIncPacket(
+          args.atomicTargets[warpId]);
+        handle.placePacket(packet, pendingWptr, padding);
+      }
     }
 
     src += args.copySize;
