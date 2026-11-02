@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -292,7 +292,7 @@ jobs:
 
     steps:
       - name: Check out code (with result commit)
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@v7.0.1
         with:
           ref: main   # pick up the result commit just pushed
 
@@ -311,10 +311,10 @@ jobs:
           cmake --build build-docs --target sphinx-html
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: build-docs/docs/html
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -37,7 +37,7 @@ jobs:
       LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     steps:
     - name: Check out code.
-      uses: actions/checkout@v5.0.0
+      uses: actions/checkout@v7.0.1
     - name: Install additional dependencies
       run: |
         apt-get update
@@ -58,7 +58,7 @@ jobs:
       env:
         CLANGXX: /opt/rocm/llvm/bin/clang++
     - name: Perform clang linting.
-      uses: DoozyX/clang-format-lint-action@v0.18.2
+      uses: DoozyX/clang-format-lint-action@v0.20
       with:
         source: '.'
         exclude: './build ./src/include/external'
@@ -124,7 +124,7 @@ jobs:
       LD_LIBRARY_PATH: /opt/rocm/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     steps:
     - name: Check out code.
-      uses: actions/checkout@v5.0.0
+      uses: actions/checkout@v7.0.1
     - name: Install additional dependencies
       run: |
         apt-get update
