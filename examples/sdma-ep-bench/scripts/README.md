@@ -89,9 +89,10 @@ build/sdma-ep-rate --mode poll-copy-atomic --atomic-memory remote --fused
 `--fused` needs a build with `-DXIO_SDMA_OSS7=ON` (this CMake option puts
 `XIO_SDMA_OSS7=1` on every benchmark, and it has to match the rocm-xio library,
 which turns it on by itself for gfx1250), and a GPU whose SDMA decodes the fused
-packet. Without the define the tool stops with a message; on a part that does
-not decode the packet, such as MI300X, the engine misreads it, so do not run it
-there.
+packet. The tool refuses `--fused` without the define, and also on any GPU
+that is not gfx1250 (it checks both the source and the destination), because
+on a part that does not decode the packet, such as MI300X, the engine misreads
+it.
 
 The packet-rate sweep runs one mode while varying queue counts. Select the mode
 with `MODE`:

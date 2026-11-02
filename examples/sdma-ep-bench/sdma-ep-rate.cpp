@@ -121,6 +121,16 @@ void verifyData(const std::vector<uint32_t>& expected, void* dst,
   }
 }
 
+// The fused packet is an OSS7 SDMA packet. Any other part misreads it, so check
+// the GPU, not just the build. This list mirrors _SDMA_OSS7_TARGETS in the root
+// CMakeLists.txt.
+bool gpuDecodesFusedPacket(int device, std::string* archName) {
+  hipDeviceProp_t properties;
+  CHECK_HIP_ERROR(hipGetDeviceProperties(&properties, device));
+  *archName = properties.gcnArchName;
+  return archName->rfind("gfx1250", 0) == 0;
+}
+
 void run(const Params& params) {
   const RateMode rateMode = parseRateMode(params.mode);
   const bool hasPoll = rateMode == RateMode::PollCopy ||
@@ -168,6 +178,16 @@ void run(const Params& params) {
   if (params.srcGpu < 0 || params.dstGpu < 0 || params.srcGpu >= deviceCount ||
       params.dstGpu >= deviceCount || params.srcGpu == params.dstGpu) {
     throw std::runtime_error("source and destination GPU IDs are invalid");
+  }
+  if (fused) {
+    for (int device : {params.srcGpu, params.dstGpu}) {
+      std::string archName;
+      if (!gpuDecodesFusedPacket(device, &archName)) {
+        throw std::runtime_error(
+          "--fused needs gfx1250 GPUs (the OSS7 SDMA packet); GPU " +
+          std::to_string(device) + " is " + archName);
+      }
+    }
   }
 
   int warpSize = 0;
