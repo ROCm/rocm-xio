@@ -49,7 +49,7 @@ jobs:
       HSA_FORCE_FINE_GRAIN_PCIE: '1'
     steps:
       - name: Check out code
-        uses: actions/checkout@v5.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install dependencies
         run: |

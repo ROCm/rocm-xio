@@ -31,7 +31,7 @@ jobs:
 
     steps:
     - name: Check out code
-      uses: actions/checkout@v5.0.0
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
@@ -84,7 +84,7 @@ jobs:
         cp ../*.deb ../*.buildinfo ../*.changes built-debs/
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
       with:
         body_path: debian/generated-release-notes.md
         generate_release_notes: false
