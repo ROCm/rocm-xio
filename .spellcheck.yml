@@ -9,6 +9,12 @@ matrix:
   - 'scripts/**/*.md'
   pipeline:
   - pyspelling.filters.markdown
+  - pyspelling.filters.html:
+      comments: false
+      attributes: []
+      ignores:
+      - code
+      - pre
   dictionary:
     wordlists:
     - .wordlist.txt

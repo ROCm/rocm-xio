@@ -157,6 +157,40 @@ int test_nvme_cli_rejects_non_power_of_two_queue_length() {
   return 0;
 }
 
+int test_nvme_cli_kv_options() {
+  xio::nvme_ep::nvmeEpConfig cfg;
+  CLI::App app{"nvme"};
+  registerNvmeEpCliOptions(app, &cfg);
+
+  parse_app(app, {"--controller", "/dev/null", "--kv-op", "retrieve", "--key",
+                  "gpukey01", "--keys", "shard0", "shard1", "shard2",
+                  "--value-size", "8192"});
+
+  ASSERT_STREQ(cfg.ioParams.kvOp.c_str(), "retrieve");
+  ASSERT_STREQ(cfg.ioParams.kvKey.c_str(), "gpukey01");
+  ASSERT_EQ(cfg.ioParams.kvValueLen, 8192u);
+  ASSERT_EQ(cfg.ioParams.kvKeys.size(), static_cast<size_t>(3));
+  ASSERT_STREQ(cfg.ioParams.kvKeys[0].c_str(), "shard0");
+  ASSERT_STREQ(cfg.ioParams.kvKeys[2].c_str(), "shard2");
+  return 0;
+}
+
+int test_nvme_cli_rejects_invalid_kv_op() {
+  xio::nvme_ep::nvmeEpConfig cfg;
+  CLI::App app{"nvme"};
+  registerNvmeEpCliOptions(app, &cfg);
+
+  bool threw = false;
+  try {
+    parse_app(app, {"--controller", "/dev/null", "--kv-op", "delete"});
+  } catch (const CLI::ParseError&) {
+    threw = true;
+  }
+
+  ASSERT_TRUE(threw);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += test_transfer_size_transform_plain_and_suffixes();
@@ -166,6 +200,8 @@ int main() {
   failures += test_test_ep_cli_options();
   failures += test_rdma_cli_provider_alias_and_2node_fields();
   failures += test_nvme_cli_rejects_non_power_of_two_queue_length();
+  failures += test_nvme_cli_kv_options();
+  failures += test_nvme_cli_rejects_invalid_kv_op();
 
   if (failures == 0) {
     printf("All xio-cli-options tests passed.\n");

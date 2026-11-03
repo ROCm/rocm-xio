@@ -211,6 +211,19 @@ public:
   __host__ virtual bool isEmulateMode() const;
 
   /**
+   * @brief Whether to defer hipInit() past backend setup.
+   *
+   * Endpoints that do heavy heap allocation during init (e.g. RDMA via
+   * ibv_alloc_parent_domain) can return true to avoid calling hipInit()
+   * before those allocations.  On rocjitsu emulated GPU, hipInit() triggers
+   * amdgpu_vm_make_compute WARN_ON which corrupts the process heap; deferring
+   * means the warning fires after backend init, avoiding the crash window.
+   *
+   * Default: false (hipInit is called before device queries, as before).
+   */
+  __host__ virtual bool deferGpuInit() const;
+
+  /**
    * @brief Get doorbell queue length.
    * @return Doorbell queue length, or 0 if disabled.
    */

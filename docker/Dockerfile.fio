@@ -192,6 +192,7 @@ ARG KERNEL_VERSION=7.0.0-28-generic
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nvme-cli \
         libaio1 \
+        libaio-dev \
         kmod \
         libdrm2 \
         libdrm-amdgpu1 \

@@ -1061,6 +1061,11 @@ struct pci_mmio_bridge_command {
  * @return 0 on success, negative error code on failure.
  */
 __host__ int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr);
+/** @brief Allocate shadow ring from heap for rocjitsu (flat GPU aperture). */
+__host__ int allocMmioBridgeShadowBufferRocjitsu(uint32_t bridge_bdf,
+                                                 size_t size, void** virt_addr);
+/** @brief Write the override GPA to the bridge's config register. */
+__host__ int writeBridgeOverrideGpa(uint32_t bridge_bdf, uint64_t gpa);
 
 /**
  * @brief Register shadow buffer for GPU access.
@@ -1072,6 +1077,11 @@ __host__ int mapMmioBridgeShadowBuffer(uint32_t bridge_bdf, void** virt_addr);
 __host__ int registerMmioBridgeShadowBufferForGpu(void* shadow_virt,
                                                   size_t shadow_size,
                                                   void** gpu_ptr_out);
+
+/** @brief Start the in-kernel NVMe doorbell relay (bypasses QEMU bridge). */
+__host__ int startKmodNvmeRelay(uint64_t ring_gpa, uint32_t nvme_bdf);
+/** @brief Stop the in-kernel NVMe doorbell relay. */
+__host__ void stopKmodNvmeRelay(void);
 
 /**
  * @brief Map a PCI BAR for GPU access.

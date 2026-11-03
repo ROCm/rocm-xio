@@ -439,21 +439,48 @@ hipError_t run(XioEndpointConfig* config) {
   } else {
     std::cout << "SDMA P2P transfer: GPU " << srcGpu << " -> GPU " << dstGpu
               << std::endl;
-    int canAccess = 0;
-    err = hipDeviceCanAccessPeer(&canAccess, srcGpu, dstGpu);
-    if (err != hipSuccess) {
-      std::cerr << "hipDeviceCanAccessPeer failed: " << hipGetErrorString(err)
-                << std::endl;
-      return err;
+    // On rocjitsu emulated GPU, hipDeviceCanAccessPeer returns false because
+    // the KFD io_link topology has no XGMI/PCIe P2P type declared.  However
+    // the sbates-fork QEMU routes DMA writes between vfio-user devices via the
+    // same mechanism used for NVMe P2PDMA into GPU VRAM.  Attempt
+    // hipDeviceEnablePeerAccess directly; if the kernel allows it the DMA will
+    // work even without the canAccessPeer check passing.
+    {
+      int emu_mode = 0;
+      FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+      if (f) {
+        (void)fscanf(f, "%d", &emu_mode);
+        fclose(f);
+      }
+      if (emu_mode != 0) {
+        (void)hipSetDevice(srcGpu);
+        hipError_t peer_err = hipDeviceEnablePeerAccess(dstGpu, 0);
+        if (peer_err != hipSuccess) {
+          std::cerr << "sdma-ep: rocjitsu: hipDeviceEnablePeerAccess(" << dstGpu
+                    << ") failed: " << hipGetErrorString(peer_err)
+                    << " — QEMU may still route the DMA; attempting transfer\n";
+        }
+        goto peer_access_done;
+      }
     }
-    if (canAccess == 0) {
-      std::cerr << "P2P not available: GPU " << srcGpu << " cannot access GPU "
-                << dstGpu << std::endl;
-      return hipErrorInvalidDevice;
+    {
+      int canAccess = 0;
+      err = hipDeviceCanAccessPeer(&canAccess, srcGpu, dstGpu);
+      if (err != hipSuccess) {
+        std::cerr << "hipDeviceCanAccessPeer failed: " << hipGetErrorString(err)
+                  << std::endl;
+        return err;
+      }
+      if (canAccess == 0) {
+        std::cerr << "P2P not available: GPU " << srcGpu
+                  << " cannot access GPU " << dstGpu << std::endl;
+        return hipErrorInvalidDevice;
+      }
     }
 
     // Enable peer access from source to destination
     enablePeerAccess(srcGpu, dstGpu);
+  peer_access_done:;
 
     if (testType == "buffer-reuse" || testType == "ping-pong") {
       int canAccessReverse = 0;
