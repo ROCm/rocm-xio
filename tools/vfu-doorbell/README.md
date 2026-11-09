@@ -8,9 +8,9 @@ call chain an emulated GPU uses, and to read back exactly what arrived.
 
 | Piece | What it is |
 |---|---|
-| `vfu-doorbell --role target` | A vfio-user PCI device whose BAR0 carries doorbell **overlays**: byte ranges with a semantic model, a slot width and a stride. It decodes every write and keeps per-key state the guest can read. It is the thing being rung. |
+| `vfu-doorbell --role ringee` | A vfio-user PCI device whose BAR0 carries doorbell **overlays**: byte ranges with a semantic model, a slot width and a stride. It decodes every write and keeps per-key state the guest can read. It is the thing being rung. |
 | `vfu-doorbell --role ringer` | A vfio-user PCI device the guest programs to write a pattern of values to any guest physical address. It is the thing doing the ringing. |
-| `xio-doorbell` | A guest userspace tool. It maps both BARs through sysfs, configures the overlays, rings from the CPU or through the ringer, and checks the target's counters. |
+| `xio-doorbell` | A guest userspace tool. It maps both BARs through sysfs, configures the overlays, rings from the CPU or through the ringer, and checks the ringee's counters. |
 
 There is no guest kernel driver. Run `xio-doorbell` as root; it maps
 `resource0` of each device and reads physical addresses with pagemap.
@@ -19,7 +19,7 @@ There is no guest kernel driver. Run `xio-doorbell` as root; it maps
 
 The write itself is not special: a doorbell is a write to a register. The rig
 tests the delivery chain (`vfu_mmio_write` into QEMU's `vfio_user_dma_write`,
-into the target's BAR callback) and, because the target models the register
+into the ringee's BAR callback) and, because the ringee models the register
 semantics, how a doorbell interaction behaves under different write patterns:
 bursts, several writers on one register, repeated or backwards values, mixed
 sizes. It does not model a real GPU's hardware, only the two kinds of writer:
@@ -32,7 +32,7 @@ sizes. It does not model a real GPU's hardware, only the two kinds of writer:
 
 ## Doorbell overlays
 
-Each region of the target is one overlay. Slot `n` of a region starts at
+Each region of the ringee is one overlay. Slot `n` of a region starts at
 `base + n * stride`; a write must be exactly `width` bytes on a slot boundary.
 
 | Model | Value layout | Key | Resembles |
@@ -42,7 +42,7 @@ Each region of the target is one overlay. Slot `n` of a region starts at
 | `event` | any | slot | a register where each write counts |
 
 With the `seq` flag the writer puts a per-key sequence number above the index
-(bits [31:16] for width 4, [63:48] for width 8). The target uses it to count
+(bits [31:16] for width 4, [63:48] for width 8). The ringee uses it to count
 sequence numbers it never saw (`seq_gaps`, lost writes) and ones that arrived
 late (`seq_ooo`). It also counts an index that went backwards (`regress`).
 
@@ -77,9 +77,9 @@ Start one server per device on its own socket and attach both to a QEMU guest
 with `vfio-user-pci`, for example with qemu-tool:
 
 ```bash
-vfu-doorbell --role target --socket /run/vfu/target.sock &
+vfu-doorbell --role ringee --socket /run/vfu/ringee.sock &
 vfu-doorbell --role ringer --socket /run/vfu/ringer.sock &
-qemu-tool run-vm ... --vfio-userdev /run/vfu/target.sock,/run/vfu/ringer.sock
+qemu-tool run-vm ... --vfio-userdev /run/vfu/ringee.sock,/run/vfu/ringer.sock
 ```
 
 qemu-minimal carries this rig as the named stack `vfu-doorbell-vm`, with a
@@ -105,7 +105,7 @@ sudo xio-doorbell dump                 # per-region counters
 sudo xio-doorbell log 16               # the last 16 writes, in arrival order
 ```
 
-`ring` and `cpu-ring` print what was sent and what the target saw. For a
+`ring` and `cpu-ring` print what was sent and what the ringee saw. For a
 synchronous delivery path expect `arrived` to equal the count, with zero
 `seq_gaps`, `seq_ooo` and `regress`. A delivery path that coalesces writes, as
 a polled doorbell page does, shows up as fewer arrivals or sequence gaps; an
@@ -119,21 +119,21 @@ Options: `--size`, `--nslots`, `--qids`, `--qid0`, `--ring`, `--step`,
 ## Server logs
 
 Both servers log to stderr (`docker logs` for the containers). A successful
-write is not logged by default; the target counts it, and the guest reads the
+write is not logged by default; the ringee counts it, and the guest reads the
 counters and the write log back with `xio-doorbell dump` and `log`. What is
 logged:
 
 * At startup and attach: `serving on`, `client attached`, one `DMA map` line per
   guest memory region, resets, and `client disconnected`.
-* Target: each region configured (`region N: index base=...`) and each reset,
+* Ringee: each region configured (`region N: index base=...`) and each reset,
   with the writes and bad writes counted since the last one.
 * Ringer: one line when a job starts (address, count, size, slots, mode) and one
   when it ends (sent, errors, `errno`, elapsed time, slowest write).
 * Errors and warnings from libvfio-user, such as the one-time `twin_socket`
   warning on the first ringer write.
 
-`--trace N` on the target also logs the first N individual writes after each
-reset (region, offset, size, value). Add it to the target's `command:` in the
+`--trace N` on the ringee also logs the first N individual writes after each
+reset (region, offset, size, value). Add it to the ringee's `command:` in the
 compose file. `-v` turns on libvfio-user's own debug logging, one line per
 protocol message, which is very noisy.
 
@@ -181,4 +181,4 @@ socket.
 * The PCI vendor ID `0x1de0` is not allocated to this rig; pci.ids happens to
   label it "Groq". The guest tool matches vendor and device together.
 * Not implemented yet: a posted (no-reply) write mode, which needs a
-  libvfio-user API, and a shared-memory doorbell target that a poller watches.
+  libvfio-user API, and a shared-memory doorbell ringee that a poller watches.

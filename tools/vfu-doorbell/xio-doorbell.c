@@ -2,12 +2,12 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * xio-doorbell: guest-side driver for the vfu-doorbell target and ringer.
+ * xio-doorbell: guest-side driver for the vfu-doorbell ringee and ringer.
  *
  * It maps each device's BAR0 through sysfs, so it needs root and no kernel
- * driver. It can configure the target's doorbell overlays, ring them from the
+ * driver. It can configure the ringee's doorbell overlays, ring them from the
  * CPU (the trapped, known-good path), ask the ringer to ring them through the
- * vfio-user server, and read back what the target saw.
+ * vfio-user server, and read back what the ringee saw.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -33,7 +33,7 @@ struct dev {
   bool present;
 };
 
-static struct dev target;
+static struct dev ringee;
 static struct dev ringer;
 
 static uint64_t now_ns(void) {
@@ -192,10 +192,10 @@ static void wrw(const struct dev* d, uint64_t off, unsigned width, uint64_t v) {
   }
 }
 
-static bool need_target(void) {
-  if (!target.present)
-    fprintf(stderr, "xio-doorbell: no vfu-doorbell target device found\n");
-  return target.present;
+static bool need_ringee(void) {
+  if (!ringee.present)
+    fprintf(stderr, "xio-doorbell: no vfu-doorbell ringee device found\n");
+  return ringee.present;
 }
 
 static bool need_ringer(void) {
@@ -205,7 +205,7 @@ static bool need_ringer(void) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Target access                                                           */
+/* Ringee access                                                           */
 /* ---------------------------------------------------------------------- */
 
 struct region_cfg {
@@ -232,40 +232,40 @@ struct key_state {
 };
 
 static void t_region(unsigned r, struct region_cfg* c) {
-  uint64_t p = VFU_DB_T_REGION_TABLE + (uint64_t)r * VFU_DB_T_REGION_STRIDE;
-  c->model = rd32(&target, p + VFU_DB_T_RG_MODEL);
-  c->flags = rd32(&target, p + VFU_DB_T_RG_FLAGS);
-  c->base = rd64(&target, p + VFU_DB_T_RG_BASE);
-  c->size = rd64(&target, p + VFU_DB_T_RG_SIZE);
-  c->width = rd32(&target, p + VFU_DB_T_RG_WIDTH);
-  c->stride = rd32(&target, p + VFU_DB_T_RG_STRIDE);
-  c->writes = rd64(&target, p + VFU_DB_T_RG_WRITES);
-  c->bad = rd64(&target, p + VFU_DB_T_RG_BAD);
-  c->gaps = rd64(&target, p + VFU_DB_T_RG_GAPS);
-  c->ooo = rd64(&target, p + VFU_DB_T_RG_OOO);
+  uint64_t p = VFU_DB_RE_REGION_TABLE + (uint64_t)r * VFU_DB_RE_REGION_STRIDE;
+  c->model = rd32(&ringee, p + VFU_DB_RE_RG_MODEL);
+  c->flags = rd32(&ringee, p + VFU_DB_RE_RG_FLAGS);
+  c->base = rd64(&ringee, p + VFU_DB_RE_RG_BASE);
+  c->size = rd64(&ringee, p + VFU_DB_RE_RG_SIZE);
+  c->width = rd32(&ringee, p + VFU_DB_RE_RG_WIDTH);
+  c->stride = rd32(&ringee, p + VFU_DB_RE_RG_STRIDE);
+  c->writes = rd64(&ringee, p + VFU_DB_RE_RG_WRITES);
+  c->bad = rd64(&ringee, p + VFU_DB_RE_RG_BAD);
+  c->gaps = rd64(&ringee, p + VFU_DB_RE_RG_GAPS);
+  c->ooo = rd64(&ringee, p + VFU_DB_RE_RG_OOO);
 }
 
 static void t_config(unsigned r, unsigned model, unsigned flags, uint64_t base,
                      uint64_t size, unsigned width, unsigned stride) {
-  uint64_t p = VFU_DB_T_REGION_TABLE + (uint64_t)r * VFU_DB_T_REGION_STRIDE;
-  wr32(&target, p + VFU_DB_T_RG_FLAGS, flags);
-  wr64(&target, p + VFU_DB_T_RG_BASE, base);
-  wr64(&target, p + VFU_DB_T_RG_SIZE, size);
-  wr32(&target, p + VFU_DB_T_RG_WIDTH, width);
-  wr32(&target, p + VFU_DB_T_RG_STRIDE, stride);
-  wr32(&target, p + VFU_DB_T_RG_MODEL, model); /* last: validates */
+  uint64_t p = VFU_DB_RE_REGION_TABLE + (uint64_t)r * VFU_DB_RE_REGION_STRIDE;
+  wr32(&ringee, p + VFU_DB_RE_RG_FLAGS, flags);
+  wr64(&ringee, p + VFU_DB_RE_RG_BASE, base);
+  wr64(&ringee, p + VFU_DB_RE_RG_SIZE, size);
+  wr32(&ringee, p + VFU_DB_RE_RG_WIDTH, width);
+  wr32(&ringee, p + VFU_DB_RE_RG_STRIDE, stride);
+  wr32(&ringee, p + VFU_DB_RE_RG_MODEL, model); /* last: validates */
 }
 
 static void t_key(unsigned r, unsigned key, struct key_state* k) {
-  wr32(&target, VFU_DB_T_STATE_REGION, r);
-  wr32(&target, VFU_DB_T_STATE_KEY, key);
-  k->last = rd64(&target, VFU_DB_T_ST_LAST);
-  k->count = rd64(&target, VFU_DB_T_ST_COUNT);
-  k->head = rd64(&target, VFU_DB_T_ST_HEAD);
-  k->regress = rd64(&target, VFU_DB_T_ST_REGRESS);
-  k->gaps = rd64(&target, VFU_DB_T_ST_SEQ_GAPS);
-  k->ooo = rd64(&target, VFU_DB_T_ST_SEQ_OOO);
-  k->last_seq = rd64(&target, VFU_DB_T_ST_LAST_SEQ);
+  wr32(&ringee, VFU_DB_RE_STATE_REGION, r);
+  wr32(&ringee, VFU_DB_RE_STATE_KEY, key);
+  k->last = rd64(&ringee, VFU_DB_RE_ST_LAST);
+  k->count = rd64(&ringee, VFU_DB_RE_ST_COUNT);
+  k->head = rd64(&ringee, VFU_DB_RE_ST_HEAD);
+  k->regress = rd64(&ringee, VFU_DB_RE_ST_REGRESS);
+  k->gaps = rd64(&ringee, VFU_DB_RE_ST_SEQ_GAPS);
+  k->ooo = rd64(&ringee, VFU_DB_RE_ST_SEQ_OOO);
+  k->last_seq = rd64(&ringee, VFU_DB_RE_ST_LAST_SEQ);
 }
 
 static const char* model_name(uint32_t m) {
@@ -412,7 +412,7 @@ static void cpu_ring(const struct region_cfg* c, uint32_t count,
     uint32_t seq = o->seq ? seqs[key]++ : 0;
     uint64_t v = vfu_db_pack(o->size, o->keyed, idx, o->ring, o->qid0 + qi, seq,
                              o->seq);
-    wrw(&target, c->base + (uint64_t)slot * o->stride, o->size, v);
+    wrw(&ringee, c->base + (uint64_t)slot * o->stride, o->size, v);
     if (o->delay_ns) {
       struct timespec ts = {.tv_sec = o->delay_ns / 1000000000u,
                             .tv_nsec = o->delay_ns % 1000000000u};
@@ -482,7 +482,7 @@ static struct ring_result ringer_run(const struct region_cfg* c, uint32_t count,
     flags |= VFU_DB_RF_INLINE;
   if (o->posted)
     flags |= VFU_DB_RF_POSTED;
-  wr64(&ringer, VFU_DB_R_GPA, target.gpa + c->base);
+  wr64(&ringer, VFU_DB_R_GPA, ringee.gpa + c->base);
   wr64(&ringer, VFU_DB_R_VALUE, o->value);
   wr64(&ringer, VFU_DB_R_STEP, (uint64_t)o->step);
   wr64(&ringer, VFU_DB_R_STRIDE, o->stride);
@@ -574,22 +574,22 @@ static void print_region(unsigned r, const struct region_cfg* c) {
 }
 
 static int cmd_info(void) {
-  if (target.present) {
-    printf("target: %s BAR0 gpa=0x%llx size=0x%zx magic=0x%08x\n", target.bdf,
-           (unsigned long long)target.gpa, target.size,
-           rd32(&target, VFU_DB_T_MAGIC));
+  if (ringee.present) {
+    printf("ringee: %s BAR0 gpa=0x%llx size=0x%zx magic=0x%08x\n", ringee.bdf,
+           (unsigned long long)ringee.gpa, ringee.size,
+           rd32(&ringee, VFU_DB_RE_MAGIC));
     printf("  total writes=%llu bad=%llu logged=%llu\n",
-           (unsigned long long)rd64(&target, VFU_DB_T_TOTAL_WRITES),
-           (unsigned long long)rd64(&target, VFU_DB_T_TOTAL_BAD),
-           (unsigned long long)rd64(&target, VFU_DB_T_LOG_COUNT));
-    for (unsigned r = 0; r < VFU_DB_T_MAX_REGIONS; r++) {
+           (unsigned long long)rd64(&ringee, VFU_DB_RE_TOTAL_WRITES),
+           (unsigned long long)rd64(&ringee, VFU_DB_RE_TOTAL_BAD),
+           (unsigned long long)rd64(&ringee, VFU_DB_RE_LOG_COUNT));
+    for (unsigned r = 0; r < VFU_DB_RE_MAX_REGIONS; r++) {
       struct region_cfg c;
       t_region(r, &c);
       if (c.model != VFU_DB_MODEL_OFF)
         print_region(r, &c);
     }
   } else {
-    printf("target: not found\n");
+    printf("ringee: not found\n");
   }
   if (ringer.present)
     printf("ringer: %s BAR0 gpa=0x%llx size=0x%zx magic=0x%08x\n", ringer.bdf,
@@ -597,30 +597,30 @@ static int cmd_info(void) {
            rd32(&ringer, VFU_DB_R_MAGIC));
   else
     printf("ringer: not found\n");
-  return (target.present ? 0 : 1);
+  return (ringee.present ? 0 : 1);
 }
 
 static int cmd_log(int argc, char** argv) {
   unsigned n = argc > 0 ? (unsigned)strtoul(argv[0], NULL, 0) : 16;
   uint64_t total;
-  if (!need_target())
+  if (!need_ringee())
     return 1;
-  total = rd64(&target, VFU_DB_T_LOG_COUNT);
-  if (n > VFU_DB_T_LOG_ENTRIES)
-    n = VFU_DB_T_LOG_ENTRIES;
+  total = rd64(&ringee, VFU_DB_RE_LOG_COUNT);
+  if (n > VFU_DB_RE_LOG_ENTRIES)
+    n = VFU_DB_RE_LOG_ENTRIES;
   if (n > total)
     n = (unsigned)total;
   for (uint64_t a = total - n + 1; a <= total && n; a++) {
-    uint64_t base = VFU_DB_T_LOG_BASE + ((a - 1) % VFU_DB_T_LOG_ENTRIES) *
-                                          sizeof(struct vfu_db_log_entry);
+    uint64_t base = VFU_DB_RE_LOG_BASE + ((a - 1) % VFU_DB_RE_LOG_ENTRIES) *
+                                           sizeof(struct vfu_db_log_entry);
     struct vfu_db_log_entry e;
-    e.arrival = rd64(&target, base);
-    e.value = rd64(&target, base + 8);
-    uint64_t w = rd64(&target, base + 16);
+    e.arrival = rd64(&ringee, base);
+    e.value = rd64(&ringee, base + 8);
+    uint64_t w = rd64(&ringee, base + 16);
     e.offset = (uint32_t)w;
     e.size = (uint16_t)(w >> 32);
     e.region = (uint16_t)(w >> 48);
-    e.time_ns = rd64(&target, base + 24);
+    e.time_ns = rd64(&ringee, base + 24);
     printf("#%llu region=%u off=0x%x size=%u value=0x%llx t=%llu\n",
            (unsigned long long)e.arrival, e.region, e.offset, e.size,
            (unsigned long long)e.value, (unsigned long long)e.time_ns);
@@ -629,7 +629,7 @@ static int cmd_log(int argc, char** argv) {
 }
 
 static int cmd_dump(int argc, char** argv) {
-  if (!need_target())
+  if (!need_ringee())
     return 1;
   if (argc > 0) {
     unsigned r = (unsigned)strtoul(argv[0], NULL, 0);
@@ -638,7 +638,7 @@ static int cmd_dump(int argc, char** argv) {
     print_region(r, &c);
     return 0;
   }
-  for (unsigned r = 0; r < VFU_DB_T_MAX_REGIONS; r++) {
+  for (unsigned r = 0; r < VFU_DB_RE_MAX_REGIONS; r++) {
     struct region_cfg c;
     t_region(r, &c);
     if (c.model != VFU_DB_MODEL_OFF)
@@ -648,7 +648,7 @@ static int cmd_dump(int argc, char** argv) {
 }
 
 static int cmd_config(int argc, char** argv) {
-  if (!need_target())
+  if (!need_ringee())
     return 1;
   if (argc < 6) {
     fprintf(stderr, "config <r> <index|keyed|event> <base> <size> <width> "
@@ -672,7 +672,7 @@ static int cmd_config(int argc, char** argv) {
 
 /* Shared by cpu-ring and ring: run, wait, and print a verdict. */
 static int do_ring(bool via_ringer, int argc, char** argv) {
-  if (!need_target() || (via_ringer && !need_ringer()))
+  if (!need_ringee() || (via_ringer && !need_ringer()))
     return 1;
   if (argc < 2) {
     fprintf(stderr, "%s <region> <count> [options]\n",
@@ -712,7 +712,7 @@ static int do_ring(bool via_ringer, int argc, char** argv) {
       res.status, (unsigned long long)res.sent, (unsigned long long)res.errors,
       res.err_no, (double)res.max_lat_ns / 1e3,
       res.timed_out ? "  TIMEOUT (possible deadlock)" : "");
-  printf("target: arrived=%llu bad=%llu seq_gaps=%llu seq_ooo=%llu "
+  printf("ringee: arrived=%llu bad=%llu seq_gaps=%llu seq_ooo=%llu "
          "regress=%llu\n",
          (unsigned long long)arrived,
          (unsigned long long)(after.bad - before.bad),
@@ -751,7 +751,7 @@ static struct delta scenario(bool via_ringer, unsigned r, uint32_t count,
   struct region_cfg after;
   struct opts o;
   /* Clear per-key state so each run's sequence numbers start from zero. */
-  wr32(&target, VFU_DB_T_CTRL, 1);
+  wr32(&ringee, VFU_DB_RE_CTRL, 1);
   t_region(r, &before);
   opts_for_region(&before, &o);
   o.nslots = 4;
@@ -795,13 +795,13 @@ static void expect_clean(const char* name, const struct delta* d,
 }
 
 static int cmd_selftest(void) {
-  if (!need_target())
+  if (!need_ringee())
     return 1;
   const uint32_t n = 1000;
-  wr32(&target, VFU_DB_T_CTRL, 1);
+  wr32(&ringee, VFU_DB_RE_CTRL, 1);
   /* The default overlays are re-applied by resetting regions to the table the
    * server started with; reconfigure explicitly so the test is self-contained
-   * even against a --no-defaults target. */
+   * even against a --no-defaults ringee. */
   t_config(0, VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4);
   t_config(1, VFU_DB_MODEL_KEYED, VFU_DB_FLAG_SEQ, 0x3000, 0x1000, 8, 8);
   t_config(2, VFU_DB_MODEL_EVENT, VFU_DB_FLAG_SEQ, 0x4000, 0x1000, 4, 4);
@@ -838,7 +838,7 @@ static void usage(void) {
     stderr,
     "usage: xio-doorbell <command> [args]\n"
     "  info                      show devices and configured regions\n"
-    "  reset                     reset target counters, state and log\n"
+    "  reset                     reset ringee counters, state and log\n"
     "  config <r> <index|keyed|event> <base> <size> <width> <stride>"
     " [seq]\n"
     "  dump [r]                  show region counters\n"
@@ -858,15 +858,15 @@ int main(int argc, char** argv) {
     usage();
     return 2;
   }
-  find_device(VFU_DB_PCI_VENDOR, VFU_DB_PCI_DEV_TARGET, &target);
+  find_device(VFU_DB_PCI_VENDOR, VFU_DB_PCI_DEV_RINGEE, &ringee);
   find_device(VFU_DB_PCI_VENDOR, VFU_DB_PCI_DEV_RINGER, &ringer);
   const char* cmd = argv[1];
   if (!strcmp(cmd, "info"))
     return cmd_info();
   if (!strcmp(cmd, "reset")) {
-    if (!need_target())
+    if (!need_ringee())
       return 1;
-    wr32(&target, VFU_DB_T_CTRL, 1);
+    wr32(&ringee, VFU_DB_RE_CTRL, 1);
     return 0;
   }
   if (!strcmp(cmd, "config"))

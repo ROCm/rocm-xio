@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * vfu-doorbell: register layout and value encoding shared by the vfio-user
- * "target" and "ringer" test devices and the guest-side xio-doorbell tool.
+ * "ringee" and "ringer" test devices and the guest-side xio-doorbell tool.
  *
  * Both devices are plain PCI devices with a single BAR0 of little-endian
  * registers; there is no guest driver. The guest tool maps BAR0 through
@@ -16,13 +16,13 @@
 /* PCI identity. Not an allocated vendor ID: both devices exist only inside a
  * test VM, and the guest tool matches on vendor and device together. */
 #define VFU_DB_PCI_VENDOR 0x1de0u
-#define VFU_DB_PCI_DEV_TARGET 0x0001u
+#define VFU_DB_PCI_DEV_RINGEE 0x0001u
 #define VFU_DB_PCI_DEV_RINGER 0x0002u
 
 #define VFU_DB_PAGE 0x1000u
 
 /* ------------------------------------------------------------------------ */
-/* Target device                                                             */
+/* Ringee device                                                             */
 /* ------------------------------------------------------------------------ */
 
 /*
@@ -34,51 +34,51 @@
  * A doorbell window is an overlay: a byte range of BAR0 given a semantic
  * model, a slot width and a stride. A write inside a window is decoded
  * according to the model and recorded in per-key state that the guest can read
- * back through the state window (VFU_DB_T_STATE_*).
+ * back through the state window (VFU_DB_RE_STATE_*).
  */
-#define VFU_DB_T_BAR_SIZE 0x10000u
-#define VFU_DB_T_MAX_REGIONS 8u
-#define VFU_DB_T_WINDOW_BASE 0x2000u
-#define VFU_DB_T_LOG_ENTRIES 128u
-#define VFU_DB_T_MAGIC_VALUE 0x47544244u /* "DBTG" */
-#define VFU_DB_T_VERSION_VALUE 1u
+#define VFU_DB_RE_BAR_SIZE 0x10000u
+#define VFU_DB_RE_MAX_REGIONS 8u
+#define VFU_DB_RE_WINDOW_BASE 0x2000u
+#define VFU_DB_RE_LOG_ENTRIES 128u
+#define VFU_DB_RE_MAGIC_VALUE 0x45524244u /* "DBRE" */
+#define VFU_DB_RE_VERSION_VALUE 1u
 
 /* Control page registers. u32 unless noted. */
-#define VFU_DB_T_MAGIC 0x000u
-#define VFU_DB_T_VERSION 0x004u
-#define VFU_DB_T_NREGIONS 0x008u
-#define VFU_DB_T_LOG_ENTRIES_REG 0x00cu
-#define VFU_DB_T_CTRL 0x010u /* write bit0: reset counters, state, log */
-#define VFU_DB_T_TOTAL_WRITES 0x018u /* u64: writes that matched a slot */
-#define VFU_DB_T_TOTAL_BAD 0x020u    /* u64: writes that matched no slot */
-#define VFU_DB_T_LOG_COUNT 0x028u    /* u64: entries ever logged */
+#define VFU_DB_RE_MAGIC 0x000u
+#define VFU_DB_RE_VERSION 0x004u
+#define VFU_DB_RE_NREGIONS 0x008u
+#define VFU_DB_RE_LOG_ENTRIES_REG 0x00cu
+#define VFU_DB_RE_CTRL 0x010u /* write bit0: reset counters, state, log */
+#define VFU_DB_RE_TOTAL_WRITES 0x018u /* u64: writes that matched a slot */
+#define VFU_DB_RE_TOTAL_BAD 0x020u    /* u64: writes that matched no slot */
+#define VFU_DB_RE_LOG_COUNT 0x028u    /* u64: entries ever logged */
 
 /* State window: select a region and a key, then read the key's state. */
-#define VFU_DB_T_STATE_REGION 0x040u /* u32 */
-#define VFU_DB_T_STATE_KEY 0x044u    /* u32 */
-#define VFU_DB_T_ST_LAST 0x048u      /* u64: last value written */
-#define VFU_DB_T_ST_COUNT 0x050u     /* u64: writes seen for this key */
-#define VFU_DB_T_ST_HEAD 0x058u      /* u64: index after the last write */
-#define VFU_DB_T_ST_REGRESS 0x060u   /* u64: index went backwards */
-#define VFU_DB_T_ST_SEQ_GAPS 0x068u  /* u64: sequence numbers never seen */
-#define VFU_DB_T_ST_SEQ_OOO 0x070u   /* u64: late or duplicate sequence */
-#define VFU_DB_T_ST_LAST_SEQ 0x078u  /* u64: last in-order sequence */
+#define VFU_DB_RE_STATE_REGION 0x040u /* u32 */
+#define VFU_DB_RE_STATE_KEY 0x044u    /* u32 */
+#define VFU_DB_RE_ST_LAST 0x048u      /* u64: last value written */
+#define VFU_DB_RE_ST_COUNT 0x050u     /* u64: writes seen for this key */
+#define VFU_DB_RE_ST_HEAD 0x058u      /* u64: index after the last write */
+#define VFU_DB_RE_ST_REGRESS 0x060u   /* u64: index went backwards */
+#define VFU_DB_RE_ST_SEQ_GAPS 0x068u  /* u64: sequence numbers never seen */
+#define VFU_DB_RE_ST_SEQ_OOO 0x070u   /* u64: late or duplicate sequence */
+#define VFU_DB_RE_ST_LAST_SEQ 0x078u  /* u64: last in-order sequence */
 
-/* Region table: VFU_DB_T_REGION_TABLE + region * VFU_DB_T_REGION_STRIDE. */
-#define VFU_DB_T_REGION_TABLE 0x100u
-#define VFU_DB_T_REGION_STRIDE 0x40u
-#define VFU_DB_T_RG_MODEL 0x00u  /* u32: VFU_DB_MODEL_*; write last */
-#define VFU_DB_T_RG_FLAGS 0x04u  /* u32: VFU_DB_FLAG_* */
-#define VFU_DB_T_RG_BASE 0x08u   /* u64: BAR0 offset of the window */
-#define VFU_DB_T_RG_SIZE 0x10u   /* u64: window size in bytes */
-#define VFU_DB_T_RG_WIDTH 0x18u  /* u32: slot width: 1, 2, 4 or 8 */
-#define VFU_DB_T_RG_STRIDE 0x1cu /* u32: bytes between slot starts */
-#define VFU_DB_T_RG_WRITES 0x20u /* u64, read-only */
-#define VFU_DB_T_RG_BAD 0x28u    /* u64, read-only */
-#define VFU_DB_T_RG_GAPS 0x30u   /* u64, read-only: sum over keys */
-#define VFU_DB_T_RG_OOO 0x38u    /* u64, read-only: sum over keys */
+/* Region table: VFU_DB_RE_REGION_TABLE + region * VFU_DB_RE_REGION_STRIDE. */
+#define VFU_DB_RE_REGION_TABLE 0x100u
+#define VFU_DB_RE_REGION_STRIDE 0x40u
+#define VFU_DB_RE_RG_MODEL 0x00u  /* u32: VFU_DB_MODEL_*; write last */
+#define VFU_DB_RE_RG_FLAGS 0x04u  /* u32: VFU_DB_FLAG_* */
+#define VFU_DB_RE_RG_BASE 0x08u   /* u64: BAR0 offset of the window */
+#define VFU_DB_RE_RG_SIZE 0x10u   /* u64: window size in bytes */
+#define VFU_DB_RE_RG_WIDTH 0x18u  /* u32: slot width: 1, 2, 4 or 8 */
+#define VFU_DB_RE_RG_STRIDE 0x1cu /* u32: bytes between slot starts */
+#define VFU_DB_RE_RG_WRITES 0x20u /* u64, read-only */
+#define VFU_DB_RE_RG_BAD 0x28u    /* u64, read-only */
+#define VFU_DB_RE_RG_GAPS 0x30u   /* u64, read-only: sum over keys */
+#define VFU_DB_RE_RG_OOO 0x38u    /* u64, read-only: sum over keys */
 
-#define VFU_DB_T_LOG_BASE 0x1000u
+#define VFU_DB_RE_LOG_BASE 0x1000u
 
 /*
  * Doorbell semantic models.
@@ -98,7 +98,7 @@
 #define VFU_DB_MODEL_EVENT 3u
 
 /* Region flag: the writer puts a per-key sequence number in the bits above the
- * index so the target can count lost and reordered writes. Width 4: bits
+ * index so the ringee can count lost and reordered writes. Width 4: bits
  * [31:16]. Width 8: bits [63:48]. Not available for widths 1 and 2. */
 #define VFU_DB_FLAG_SEQ (1u << 0)
 

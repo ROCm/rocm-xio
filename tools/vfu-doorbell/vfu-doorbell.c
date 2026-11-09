@@ -4,7 +4,7 @@
  *
  * vfu-doorbell: a small vfio-user server with two roles.
  *
- *   target  A PCI device whose BAR0 carries doorbell "overlays": byte ranges
+ *   ringee  A PCI device whose BAR0 carries doorbell "overlays": byte ranges
  *           with a semantic model (index, keyed, event), a slot width and a
  *           stride. Every write is decoded and recorded per key so a guest
  *           can read back what arrived: counts, order, lost and reordered
@@ -68,7 +68,7 @@ static void log_cb(vfu_ctx_t* ctx, int level, const char* msg) {
 }
 
 /* ------------------------------------------------------------------------ */
-/* Target                                                                    */
+/* Ringee                                                                    */
 /* ------------------------------------------------------------------------ */
 
 struct key_state {
@@ -97,17 +97,17 @@ struct region {
   size_t nkeys;
 };
 
-struct target {
-  struct region regions[VFU_DB_T_MAX_REGIONS];
+struct ringee {
+  struct region regions[VFU_DB_RE_MAX_REGIONS];
   uint64_t total_writes;
   uint64_t total_bad;
   uint64_t arrivals;
   uint32_t state_region;
   uint32_t state_key;
-  struct vfu_db_log_entry log[VFU_DB_T_LOG_ENTRIES];
+  struct vfu_db_log_entry log[VFU_DB_RE_LOG_ENTRIES];
 };
 
-static struct target tgt;
+static struct ringee ree;
 
 /* --trace N: log the first N individual writes after each reset. */
 static unsigned trace_writes_arg;
@@ -153,8 +153,8 @@ static void region_reconfigure(struct region* r) {
   bool ok = r->model <= VFU_DB_MODEL_EVENT;
   ok = ok && (r->width == 1 || r->width == 2 || r->width == 4 || r->width == 8);
   ok = ok && r->stride >= r->width && (r->stride % r->width) == 0;
-  ok = ok && r->base >= VFU_DB_T_WINDOW_BASE && (r->base % 4) == 0;
-  ok = ok && r->size >= r->stride && r->base + r->size <= VFU_DB_T_BAR_SIZE;
+  ok = ok && r->base >= VFU_DB_RE_WINDOW_BASE && (r->base % 4) == 0;
+  ok = ok && r->size >= r->stride && r->base + r->size <= VFU_DB_RE_BAR_SIZE;
   ok = ok && (r->model != VFU_DB_MODEL_KEYED || r->width == 8);
   if (!ok) {
     fprintf(stderr, "%s: rejecting invalid region configuration\n", role_name);
@@ -177,21 +177,21 @@ static void region_reconfigure(struct region* r) {
   r->nkeys = nkeys;
 }
 
-static void target_reset_state(struct target* t) {
+static void ringee_reset_state(struct ringee* t) {
   fprintf(stderr, "%s: reset: %llu writes, %llu bad since the last reset\n",
           role_name, (unsigned long long)t->total_writes,
           (unsigned long long)t->total_bad);
   trace_writes_left = trace_writes_arg;
-  for (unsigned i = 0; i < VFU_DB_T_MAX_REGIONS; i++)
+  for (unsigned i = 0; i < VFU_DB_RE_MAX_REGIONS; i++)
     region_reconfigure(&t->regions[i]);
   t->total_writes = t->total_bad = t->arrivals = 0;
   memset(t->log, 0, sizeof(t->log));
 }
 
-static void log_write(struct target* t, unsigned region, uint64_t off,
+static void log_write(struct ringee* t, unsigned region, uint64_t off,
                       uint64_t value, size_t size) {
   uint64_t arrival = ++t->arrivals;
-  struct vfu_db_log_entry* e = &t->log[(arrival - 1) % VFU_DB_T_LOG_ENTRIES];
+  struct vfu_db_log_entry* e = &t->log[(arrival - 1) % VFU_DB_RE_LOG_ENTRIES];
   e->arrival = arrival;
   e->value = value;
   e->offset = (uint32_t)off;
@@ -221,7 +221,7 @@ static void track_seq(struct region* r, struct key_state* k, uint16_t seq) {
 }
 
 /* Apply one write that landed in a region window. */
-static void region_write(struct target* t, unsigned ri, uint64_t off,
+static void region_write(struct ringee* t, unsigned ri, uint64_t off,
                          size_t count, const char* buf) {
   struct region* r = &t->regions[ri];
   uint64_t rel = off - r->base;
@@ -286,8 +286,8 @@ static void region_write(struct target* t, unsigned ri, uint64_t off,
 
 static const struct key_state zero_key;
 
-static const struct key_state* state_lookup(const struct target* t) {
-  if (t->state_region >= VFU_DB_T_MAX_REGIONS)
+static const struct key_state* state_lookup(const struct ringee* t) {
+  if (t->state_region >= VFU_DB_RE_MAX_REGIONS)
     return &zero_key;
   const struct region* r = &t->regions[t->state_region];
   if (!r->keys || t->state_key >= r->nkeys)
@@ -297,84 +297,84 @@ static const struct key_state* state_lookup(const struct target* t) {
 
 /* Build the control page as the guest sees it. Rebuilt on every read so that
  * any access width works. */
-static void render_ctrl(const struct target* t, uint8_t* page) {
+static void render_ctrl(const struct ringee* t, uint8_t* page) {
   memset(page, 0, VFU_DB_PAGE);
-  store_le(page + VFU_DB_T_MAGIC, 4, VFU_DB_T_MAGIC_VALUE);
-  store_le(page + VFU_DB_T_VERSION, 4, VFU_DB_T_VERSION_VALUE);
-  store_le(page + VFU_DB_T_NREGIONS, 4, VFU_DB_T_MAX_REGIONS);
-  store_le(page + VFU_DB_T_LOG_ENTRIES_REG, 4, VFU_DB_T_LOG_ENTRIES);
-  store_le(page + VFU_DB_T_TOTAL_WRITES, 8, t->total_writes);
-  store_le(page + VFU_DB_T_TOTAL_BAD, 8, t->total_bad);
-  store_le(page + VFU_DB_T_LOG_COUNT, 8, t->arrivals);
-  store_le(page + VFU_DB_T_STATE_REGION, 4, t->state_region);
-  store_le(page + VFU_DB_T_STATE_KEY, 4, t->state_key);
+  store_le(page + VFU_DB_RE_MAGIC, 4, VFU_DB_RE_MAGIC_VALUE);
+  store_le(page + VFU_DB_RE_VERSION, 4, VFU_DB_RE_VERSION_VALUE);
+  store_le(page + VFU_DB_RE_NREGIONS, 4, VFU_DB_RE_MAX_REGIONS);
+  store_le(page + VFU_DB_RE_LOG_ENTRIES_REG, 4, VFU_DB_RE_LOG_ENTRIES);
+  store_le(page + VFU_DB_RE_TOTAL_WRITES, 8, t->total_writes);
+  store_le(page + VFU_DB_RE_TOTAL_BAD, 8, t->total_bad);
+  store_le(page + VFU_DB_RE_LOG_COUNT, 8, t->arrivals);
+  store_le(page + VFU_DB_RE_STATE_REGION, 4, t->state_region);
+  store_le(page + VFU_DB_RE_STATE_KEY, 4, t->state_key);
   const struct key_state* k = state_lookup(t);
-  store_le(page + VFU_DB_T_ST_LAST, 8, k->last);
-  store_le(page + VFU_DB_T_ST_COUNT, 8, k->count);
-  store_le(page + VFU_DB_T_ST_HEAD, 8, k->head);
-  store_le(page + VFU_DB_T_ST_REGRESS, 8, k->regress);
-  store_le(page + VFU_DB_T_ST_SEQ_GAPS, 8, k->gaps);
-  store_le(page + VFU_DB_T_ST_SEQ_OOO, 8, k->ooo);
-  store_le(page + VFU_DB_T_ST_LAST_SEQ, 8, k->last_seq);
-  for (unsigned i = 0; i < VFU_DB_T_MAX_REGIONS; i++) {
+  store_le(page + VFU_DB_RE_ST_LAST, 8, k->last);
+  store_le(page + VFU_DB_RE_ST_COUNT, 8, k->count);
+  store_le(page + VFU_DB_RE_ST_HEAD, 8, k->head);
+  store_le(page + VFU_DB_RE_ST_REGRESS, 8, k->regress);
+  store_le(page + VFU_DB_RE_ST_SEQ_GAPS, 8, k->gaps);
+  store_le(page + VFU_DB_RE_ST_SEQ_OOO, 8, k->ooo);
+  store_le(page + VFU_DB_RE_ST_LAST_SEQ, 8, k->last_seq);
+  for (unsigned i = 0; i < VFU_DB_RE_MAX_REGIONS; i++) {
     const struct region* r = &t->regions[i];
-    uint8_t* p = page + VFU_DB_T_REGION_TABLE + i * VFU_DB_T_REGION_STRIDE;
-    store_le(p + VFU_DB_T_RG_MODEL, 4, r->model);
-    store_le(p + VFU_DB_T_RG_FLAGS, 4, r->flags);
-    store_le(p + VFU_DB_T_RG_BASE, 8, r->base);
-    store_le(p + VFU_DB_T_RG_SIZE, 8, r->size);
-    store_le(p + VFU_DB_T_RG_WIDTH, 4, r->width);
-    store_le(p + VFU_DB_T_RG_STRIDE, 4, r->stride);
-    store_le(p + VFU_DB_T_RG_WRITES, 8, r->writes);
-    store_le(p + VFU_DB_T_RG_BAD, 8, r->bad);
-    store_le(p + VFU_DB_T_RG_GAPS, 8, r->gaps);
-    store_le(p + VFU_DB_T_RG_OOO, 8, r->ooo);
+    uint8_t* p = page + VFU_DB_RE_REGION_TABLE + i * VFU_DB_RE_REGION_STRIDE;
+    store_le(p + VFU_DB_RE_RG_MODEL, 4, r->model);
+    store_le(p + VFU_DB_RE_RG_FLAGS, 4, r->flags);
+    store_le(p + VFU_DB_RE_RG_BASE, 8, r->base);
+    store_le(p + VFU_DB_RE_RG_SIZE, 8, r->size);
+    store_le(p + VFU_DB_RE_RG_WIDTH, 4, r->width);
+    store_le(p + VFU_DB_RE_RG_STRIDE, 4, r->stride);
+    store_le(p + VFU_DB_RE_RG_WRITES, 8, r->writes);
+    store_le(p + VFU_DB_RE_RG_BAD, 8, r->bad);
+    store_le(p + VFU_DB_RE_RG_GAPS, 8, r->gaps);
+    store_le(p + VFU_DB_RE_RG_OOO, 8, r->ooo);
   }
 }
 
-static void ctrl_write(struct target* t, uint64_t off, size_t count,
+static void ctrl_write(struct ringee* t, uint64_t off, size_t count,
                        const char* buf) {
   uint64_t v = load_le(buf, count);
-  if (off == VFU_DB_T_CTRL) {
+  if (off == VFU_DB_RE_CTRL) {
     if (v & 1u)
-      target_reset_state(t);
+      ringee_reset_state(t);
     return;
   }
-  if (off == VFU_DB_T_STATE_REGION) {
+  if (off == VFU_DB_RE_STATE_REGION) {
     t->state_region = (uint32_t)v;
     return;
   }
-  if (off == VFU_DB_T_STATE_KEY) {
+  if (off == VFU_DB_RE_STATE_KEY) {
     t->state_key = (uint32_t)v;
     return;
   }
-  if (off < VFU_DB_T_REGION_TABLE)
+  if (off < VFU_DB_RE_REGION_TABLE)
     return;
-  uint64_t rel = off - VFU_DB_T_REGION_TABLE;
-  unsigned ri = (unsigned)(rel / VFU_DB_T_REGION_STRIDE);
-  unsigned field = (unsigned)(rel % VFU_DB_T_REGION_STRIDE);
-  if (ri >= VFU_DB_T_MAX_REGIONS)
+  uint64_t rel = off - VFU_DB_RE_REGION_TABLE;
+  unsigned ri = (unsigned)(rel / VFU_DB_RE_REGION_STRIDE);
+  unsigned field = (unsigned)(rel % VFU_DB_RE_REGION_STRIDE);
+  if (ri >= VFU_DB_RE_MAX_REGIONS)
     return;
   struct region* r = &t->regions[ri];
   switch (field) {
-    case VFU_DB_T_RG_MODEL:
+    case VFU_DB_RE_RG_MODEL:
       r->model = (uint32_t)v;
       region_reconfigure(r);
       region_log(ri, r);
       break;
-    case VFU_DB_T_RG_FLAGS:
+    case VFU_DB_RE_RG_FLAGS:
       r->flags = (uint32_t)v;
       break;
-    case VFU_DB_T_RG_BASE:
+    case VFU_DB_RE_RG_BASE:
       r->base = v;
       break;
-    case VFU_DB_T_RG_SIZE:
+    case VFU_DB_RE_RG_SIZE:
       r->size = v;
       break;
-    case VFU_DB_T_RG_WIDTH:
+    case VFU_DB_RE_RG_WIDTH:
       r->width = (uint32_t)v;
       break;
-    case VFU_DB_T_RG_STRIDE:
+    case VFU_DB_RE_RG_STRIDE:
       r->stride = (uint32_t)v;
       break;
     default:
@@ -382,13 +382,13 @@ static void ctrl_write(struct target* t, uint64_t off, size_t count,
   }
 }
 
-static ssize_t target_bar0(vfu_ctx_t* ctx, char* buf, size_t count,
+static ssize_t ringee_bar0(vfu_ctx_t* ctx, char* buf, size_t count,
                            loff_t offset, bool is_write) {
-  struct target* t = &tgt;
+  struct ringee* t = &ree;
   uint64_t off = (uint64_t)offset;
   (void)ctx;
 
-  if (offset < 0 || off + count > VFU_DB_T_BAR_SIZE) {
+  if (offset < 0 || off + count > VFU_DB_RE_BAR_SIZE) {
     errno = EINVAL;
     return -1;
   }
@@ -402,16 +402,16 @@ static ssize_t target_bar0(vfu_ctx_t* ctx, char* buf, size_t count,
     }
     return (ssize_t)count;
   }
-  if (off < VFU_DB_T_WINDOW_BASE) {
+  if (off < VFU_DB_RE_WINDOW_BASE) {
     if (is_write) {
       errno = EPERM;
       return -1;
     }
     /* The log is an array of 32-byte entries starting at the page base. */
-    memcpy(buf, (const uint8_t*)t->log + (off - VFU_DB_T_LOG_BASE), count);
+    memcpy(buf, (const uint8_t*)t->log + (off - VFU_DB_RE_LOG_BASE), count);
     return (ssize_t)count;
   }
-  for (unsigned i = 0; i < VFU_DB_T_MAX_REGIONS; i++) {
+  for (unsigned i = 0; i < VFU_DB_RE_MAX_REGIONS; i++) {
     struct region* r = &t->regions[i];
     if (r->model == VFU_DB_MODEL_OFF || off < r->base ||
         off >= r->base + r->size)
@@ -453,7 +453,7 @@ static int parse_region(const char* spec) {
   int rc = -1;
   if (n >= 6) {
     unsigned long ri = strtoul(tok[0], NULL, 0);
-    struct region* r = ri < VFU_DB_T_MAX_REGIONS ? &tgt.regions[ri] : NULL;
+    struct region* r = ri < VFU_DB_RE_MAX_REGIONS ? &ree.regions[ri] : NULL;
     uint32_t model = VFU_DB_MODEL_OFF;
     if (!strcmp(tok[1], "index"))
       model = VFU_DB_MODEL_INDEX;
@@ -480,7 +480,7 @@ static int parse_region(const char* spec) {
 
 /* Default overlays: an NVMe-like index region, an ionic-like keyed region and
  * an event region, each one page. */
-static void target_defaults(void) {
+static void ringee_defaults(void) {
   parse_region("0:index:0x2000:0x1000:4:4:seq");
   parse_region("1:keyed:0x3000:0x1000:8:8:seq");
   parse_region("2:event:0x4000:0x1000:4:4:seq");
@@ -864,12 +864,12 @@ static void on_signal(int sig) {
 
 static void usage(const char* argv0) {
   fprintf(stderr,
-          "usage: %s --role target|ringer --socket PATH [options]\n"
+          "usage: %s --role ringee|ringer --socket PATH [options]\n"
           "  --region N:model:base:size:width:stride[:seq]\n"
-          "          configure a target overlay (model: index|keyed|event);\n"
-          "          without any --region the target gets three defaults\n"
-          "  --no-defaults   target starts with no regions configured\n"
-          "  --trace N       target logs the first N writes after each reset\n"
+          "          configure a ringee overlay (model: index|keyed|event);\n"
+          "          without any --region the ringee gets three defaults\n"
+          "  --no-defaults   ringee starts with no regions configured\n"
+          "  --trace N       ringee logs the first N writes after each reset\n"
           "  -v              debug logging from libvfio-user\n",
           argv0);
 }
@@ -922,14 +922,14 @@ int main(int argc, char** argv) {
     }
   }
   if (!role || !socket_path ||
-      (strcmp(role, "target") != 0 && strcmp(role, "ringer") != 0)) {
+      (strcmp(role, "ringee") != 0 && strcmp(role, "ringer") != 0)) {
     usage(argv[0]);
     return 2;
   }
-  const bool is_target = strcmp(role, "target") == 0;
-  role_name = is_target ? "vfu-doorbell-target" : "vfu-doorbell-ringer";
-  if (is_target && !have_region && !no_defaults)
-    target_defaults();
+  const bool is_ringee = strcmp(role, "ringee") == 0;
+  role_name = is_ringee ? "vfu-doorbell-ringee" : "vfu-doorbell-ringer";
+  if (is_ringee && !have_region && !no_defaults)
+    ringee_defaults();
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
@@ -947,13 +947,13 @@ int main(int argc, char** argv) {
     return 1;
   }
   vfu_pci_set_id(ctx, VFU_DB_PCI_VENDOR,
-                 is_target ? VFU_DB_PCI_DEV_TARGET : VFU_DB_PCI_DEV_RINGER,
+                 is_ringee ? VFU_DB_PCI_DEV_RINGEE : VFU_DB_PCI_DEV_RINGER,
                  VFU_DB_PCI_VENDOR, 0);
   /* Base class 0xff: a device that fits no defined class. */
   vfu_pci_set_class(ctx, 0xff, 0, 0);
   if (vfu_setup_region(ctx, VFU_PCI_DEV_BAR0_REGION_IDX,
-                       is_target ? VFU_DB_T_BAR_SIZE : VFU_DB_R_BAR_SIZE,
-                       is_target ? target_bar0 : ringer_bar0,
+                       is_ringee ? VFU_DB_RE_BAR_SIZE : VFU_DB_R_BAR_SIZE,
+                       is_ringee ? ringee_bar0 : ringer_bar0,
                        VFU_REGION_FLAG_RW | VFU_REGION_FLAG_MEM, NULL, 0, -1,
                        0) < 0) {
     perror("vfu_setup_region");
@@ -971,7 +971,7 @@ int main(int argc, char** argv) {
 
   pthread_t worker;
   bool have_worker = false;
-  if (!is_target) {
+  if (!is_ringee) {
     rng.ctx = ctx;
     pthread_mutex_init(&rng.job_lock, NULL);
     pthread_cond_init(&rng.job_cv, NULL);
@@ -1016,8 +1016,8 @@ int main(int argc, char** argv) {
       if (err == ENOTCONN) {
         fprintf(stderr, "%s: client disconnected\n", role_name);
         attached = false;
-        if (is_target)
-          target_reset_state(&tgt);
+        if (is_ringee)
+          ringee_reset_state(&ree);
       } else if (err != EAGAIN && err != EWOULDBLOCK && err != EBUSY &&
                  err != EINTR) {
         errno = err;

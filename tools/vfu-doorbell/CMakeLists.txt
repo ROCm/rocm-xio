@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# vfu-doorbell: a vfio-user doorbell target and ringer, plus the guest-side
+# vfu-doorbell: a vfio-user doorbell ringee and ringer, plus the guest-side
 # tool that drives them. This is a standalone project so that nothing in the
 # main rocm-xio build depends on libvfio-user:
 #

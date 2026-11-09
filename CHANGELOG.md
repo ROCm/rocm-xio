@@ -4,7 +4,7 @@
 
 ### Added
 
-- `tools/vfu-doorbell`: a vfio-user doorbell test rig. A target device whose
+- `tools/vfu-doorbell`: a vfio-user doorbell test rig. A ringee device whose
   BAR carries configurable doorbell overlays (index, keyed, event) with readable
   per-key counters, a ringer device that writes programmed patterns to any guest
   physical address through `vfu_mmio_write`, and a guest tool that configures
