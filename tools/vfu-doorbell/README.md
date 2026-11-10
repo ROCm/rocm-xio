@@ -212,7 +212,8 @@ protocol message, which is very noisy.
 ## Ringing a QEMU built-in device
 
 QEMU's own devices can be the ringee and QEMU's trace the check. Start the
-stack with them and the trace on, then ring them:
+stack with them and the trace on (qemu-minimal's settings add the devices but
+leave the trace off, since it logs every MMIO write), then ring them:
 
 ```bash
 # stack started with VM_QEMU_ARGS="--pci-testdev --nvme 1 \

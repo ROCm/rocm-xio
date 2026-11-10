@@ -1510,12 +1510,12 @@ static int cmd_ring(int argc, char** argv) {
   if (npos != want || (!region_form && !raw && !named)) {
     fprintf(
       stderr,
-      "ring <region> <count> [--ringer R] [options]\n"
-      "ring --raw <offset> <count> [--ringer R] [--ringee E] [options]\n"
-      "ring --ringee <qemu-pci-testdev|qemu-nvme> [--sq N|free|--cq N|free] "
-      "<count> "
-      "[--ringer R] [options]\n"
-      "ring --preset <name>\n");
+      "ring <region> <count> [options]\n"
+      "ring --raw <offset> <count> [options]\n"
+      "ring --ringee <dev> [--sq N|free|--cq N|free|--raw <offset>] <count> "
+      "[options]\n"
+      "ring --preset <name>\n"
+      "(xio-doorbell help lists the options)\n");
     return 2;
   }
   uint32_t count = (uint32_t)strtoul(rest[want - 1], NULL, 0);
@@ -1555,40 +1555,60 @@ static int cmd_ring(int argc, char** argv) {
   return ring_external(cpu, force, &t, have_raw, where, count, &o);
 }
 
-static void usage(void) {
-  fprintf(
-    stderr,
+static void usage(FILE* out) {
+  fputs(
     "usage: xio-doorbell <command> [args]\n"
-    "  info                      show devices and configured regions\n"
-    "  reset                     reset ringee counters, state and log\n"
-    "  config <r> <index|keyed|event> <base> <size> <width> <stride>"
-    " [seq] [match=V]\n"
-    "  dump [r]                  show region counters\n"
-    "  log [n]                   show the last n logged writes\n"
-    "  ring <r> <count> [opts]   ring a ringee region, judged by its counters\n"
-    "  ring --raw <off> <count> [opts]\n"
-    "                            ring an explicit offset into the ringee's "
-    "BAR0\n"
-    "  ring --ringee <qemu-pci-testdev|qemu-nvme|bdf> [--sq N|free|--cq N|free|"
-    "--raw <off>]"
-    " <count>\n"
-    "                            ring a QEMU device or any PCI device, no "
+    "\n"
+    "commands:\n"
+    "  info                        devices and configured regions\n"
+    "  reset                       reset the ringee's counters, state and log\n"
+    "  dump [region]               region counters\n"
+    "  log [n]                     the last n logged writes\n"
+    "  config <region> <model> <base> <size> <width> <stride> [seq] "
+    "[match=V]\n"
+    "                              set a region; model: index|keyed|event\n"
+    "  config <region> match=V     change only a match region's match value\n"
+    "  presets                     list the presets and their explicit "
+    "commands\n"
+    "  selftest                    run the built-in scenarios\n"
+    "  ring                        ring a doorbell, see below\n"
+    "  help                        this text\n"
+    "\n"
+    "ring forms:\n"
+    "  ring <region> <count>       a ringee region, judged by its counters\n"
+    "  ring --raw <offset> <count> an offset into the ringee's BAR0\n"
+    "  ring --ringee <dev> <count> a QEMU device or any PCI device, no "
     "counters\n"
-    "  ring --preset <name>      a whole run; takes no other argument\n"
-    "  presets                   list the presets and their explicit commands\n"
-    "  --ringer vfu-doorbell|cpu picks who writes (default vfu-doorbell)\n"
-    "  selftest                  run the built-in scenarios\n"
-    "options: --size W --nslots N --qids Q --qid0 Q --ring R --step S\n"
-    "         --value V --pattern monotonic|repeat|random --seq --no-seq\n"
-    "         --delay-ns N --stride B --shm --inline --posted\n"
-    "         --poll-mmio (poll STATUS over MMIO; can deadlock)\n"
-    "         --timeout-ms N\n");
+    "  ring --preset <name>        a whole run; takes no other argument\n"
+    "\n"
+    "ring options:\n"
+    "  --ringer vfu-doorbell|cpu   who writes (default vfu-doorbell)\n"
+    "  --ringee <dev>              what is rung (default vfu-doorbell): "
+    "vfu-doorbell,\n"
+    "                              qemu-pci-testdev, qemu-nvme or a PCI BDF\n"
+    "  --raw <offset>              BAR0 offset to ring; needed for a BDF\n"
+    "  --sq N|free, --cq N|free    qemu-nvme: a queue's SQ tail or CQ head\n"
+    "                              (free: lowest queue the driver does not "
+    "own)\n"
+    "  --force                     ring an NVMe queue the guest driver owns\n"
+    "\n"
+    "write options (not with --preset):\n"
+    "  --size W  --nslots N  --qids Q  --qid0 Q  --ring R  --step S\n"
+    "  --value V  --pattern monotonic|repeat|random  --seq  --no-seq\n"
+    "  --delay-ns N  --stride B  --timeout-ms N  --shm  --inline  --posted\n"
+    "  --poll-mmio                 poll STATUS over MMIO (can deadlock)\n",
+    out);
 }
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    usage();
+    usage(stderr);
     return 2;
+  }
+  if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help") ||
+      !strcmp(argv[1], "-h")) {
+    usage(stdout);
+    return 0;
   }
   const char* cmd = argv[1];
   if (!strcmp(cmd, "presets"))
@@ -1613,6 +1633,6 @@ int main(int argc, char** argv) {
     return cmd_ring(argc - 2, argv + 2);
   if (!strcmp(cmd, "selftest"))
     return cmd_selftest();
-  usage();
+  usage(stderr);
   return 2;
 }
