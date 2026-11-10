@@ -46,8 +46,18 @@ With the `seq` flag the writer puts a per-key sequence number above the index
 sequence numbers it never saw (`seq_gaps`, lost writes) and ones that arrived
 late (`seq_ooo`). It also counts an index that went backwards (`regress`).
 
-Three overlays are configured by default: region 0 `index` at `0x2000`,
-region 1 `keyed` at `0x3000`, region 2 `event` at `0x4000`, each one page. Use
+A region can also carry a `match` value (`config ... match=0xfa`, or
+`:match=0xfa` on the server's `--region`). Then only a write whose whole value
+equals it is a doorbell, as with a device that rings on one datamatch value,
+such as QEMU's pci-testdev. Any other value changes no state and is counted in
+`nomatch` (and still logged), not in `writes` or `bad`. A match is for `event`
+regions only, not with `seq`, and it must fit what the writers produce: 16 bits,
+or 8 bits for width 1. `ring` on a match region sends the match value by
+default; pass `--value` to send something else.
+
+Four regions are configured by default: region 0 `index` at `0x2000`, region 1
+`keyed` at `0x3000`, region 2 `event` at `0x4000` (each one page), and region 3,
+a testdev-like `event` region at `0x5000` with width 1 and `match=0xfa`. Use
 `--region N:model:base:size:width:stride[:seq]` or `--no-defaults`, or
 reconfigure from the guest with `xio-doorbell config`. The full register map
 is in `vfu-doorbell.h`.
@@ -92,11 +102,13 @@ In the guest, copy `xio-doorbell` over and run:
 
 ```bash
 sudo xio-doorbell info                 # devices and configured regions
+sudo xio-doorbell presets              # whole runs, with their explicit commands
 sudo xio-doorbell selftest             # built-in scenarios, PASS/FAIL
 
 # 1000 writes over 4 NVMe-like slots, once from the CPU, once via the ringer
-sudo xio-doorbell cpu-ring 0 1000 --nslots 4
-sudo xio-doorbell ring     0 1000 --nslots 4
+sudo xio-doorbell ring --ringer cpu 0 1000 --nslots 4
+sudo xio-doorbell reset                # state is not cleared between runs
+sudo xio-doorbell ring 0 1000 --nslots 4
 
 # the ionic collision: two queue ids rung through one shared register
 sudo xio-doorbell ring 1 1000 --qids 2
@@ -105,12 +117,72 @@ sudo xio-doorbell dump                 # per-region counters
 sudo xio-doorbell log 16               # the last 16 writes, in arrival order
 ```
 
-`ring` and `cpu-ring` print what was sent and what the ringee saw. For a
-synchronous delivery path expect `arrived` to equal the count, with zero
-`seq_gaps`, `seq_ooo` and `regress`. A delivery path that coalesces writes, as
-a polled doorbell page does, shows up as fewer arrivals or sequence gaps; an
-index overlay tolerates that because each value covers the earlier ones, an
-event overlay does not.
+`ring` prints what was sent and what the ringee saw. For a synchronous delivery
+path expect `arrived` to equal the count, with zero `seq_gaps`, `seq_ooo` and
+`regress`. A delivery path that coalesces writes, as a polled doorbell page
+does, shows up as fewer arrivals or sequence gaps; an index overlay tolerates
+that because each value covers the earlier ones, an event overlay does not.
+`ring` does not clear the ringee's per-key state, so run `reset` between runs
+that should be compared; a second run otherwise continues the first's sequence
+numbers and indexes and reports out-of-order writes.
+
+## The ring command
+
+`ring` has two independent choices. `--ringer` is who writes: `vfu-doorbell`
+(the ringer device, the default) or `cpu` (the guest CPU stores through the
+mapped BAR). `--ringee` is what is rung: `vfu-doorbell` (our ringee, the
+default), `qemu-pci-testdev`, `qemu-nvme`, or the BDF of any other PCI device.
+The target is then one of:
+
+```
+ring <region> <count>                       one of the ringee's own regions
+ring --raw <offset> <count>                 an explicit offset into BAR0
+ring --ringee qemu-pci-testdev <count>      a named device's own doorbell
+ring --ringee qemu-nvme --sq N <count>      an NVMe queue's doorbell (or --cq)
+ring --ringee <bdf> --raw <offset> <count>  any PCI device
+```
+
+Only the region form is judged by the ringee's counters. A region is a window
+in the ringee's BAR0 with a model and layout; the tool reads the region's
+configuration back from the ringee and builds the writes to match. The other
+forms have no counters for the target, so QEMU devices are checked with QEMU's
+trace (below) and a `--raw` write into the ringee with `dump` and `log`.
+Fault injection against the ringee, such as a wrong size or stride, belongs on
+`ring <region>` with the option overrides, which also reports the `bad` delta.
+
+The named QEMU devices know where their doorbell is. testdev has one, at BAR0
+offset 0, 1 byte, value 0xFA. NVMe has one per queue, so `--ringee qemu-nvme`
+needs `--sq N` (the SQ tail, at BAR0 + 0x1000 + 8N, 4 bytes), `--cq N` (the CQ
+head, 4 bytes after it) or `--raw`; there is no default. `N` can be `free`, the
+lowest queue id the guest's driver does not own (the driver has ids 0 to
+`queue_count - 1` from sysfs, the admin queue included), and the tool prints the
+id it chose. A queue the driver owns is refused unless `--force` is given.
+Everything a named device fills in can also be typed: `--raw`, `--size`,
+`--value`, `--pattern`.
+
+Regions are the ringee's, set by the server (`--region`, or the defaults) and
+by `config` from the guest. `config <r> <model> <base> <size> <width> <stride>
+[seq] [match=V]` sets a whole region and resets its counters;
+`config <r> match=V` changes only a match region's match value, validated at
+once, with no reset.
+
+### Presets
+
+A preset is a whole run: the ringer, the ringee, the ringee's region when it is
+ours, and the write pattern. `ring --preset <name>` takes no other argument and
+rejects any it is given. A preset never changes the ringee's configuration. Its
+region is one of the static ones, and it checks the region's full configuration
+(model, layout, `seq`, match value) and refuses to run if it differs. It resets
+the ringee's counters first. A preset aimed at the ringee also judges the
+result, printing `PASS` or `FAIL`. `presets` lists each one with the explicit
+command that does the same:
+
+```
+testdev-ringer       testdev-like region 3, the match value, ringer
+    ring --ringer vfu-doorbell --ringee vfu-doorbell 3 100
+testdev-qemu-ringer  QEMU pci-testdev doorbell, ringer
+    ring --ringer vfu-doorbell --ringee qemu-pci-testdev --raw 0x0 10 ...
+```
 
 Options: `--size`, `--nslots`, `--qids`, `--qid0`, `--ring`, `--step`,
 `--value`, `--pattern monotonic|repeat|random`, `--seq`/`--no-seq`,
@@ -136,6 +208,29 @@ logged:
 reset (region, offset, size, value). Add it to the ringee's `command:` in the
 compose file. `-v` turns on libvfio-user's own debug logging, one line per
 protocol message, which is very noisy.
+
+## Ringing a QEMU built-in device
+
+QEMU's own devices can be the ringee and QEMU's trace the check. Start the
+stack with them and the trace on, then ring them:
+
+```bash
+# stack started with VM_QEMU_ARGS="--pci-testdev --nvme 1 \
+#   --nvme-trace memory_region_ops_write"
+sudo xio-doorbell ring --ringee qemu-pci-testdev 1
+sudo xio-doorbell ring --ringee qemu-nvme --sq free 3
+sudo xio-doorbell ring --ringee 0000:00:03.0 --raw 0x10f0 1 --size 4 --value 2
+docker logs vfu-doorbell-vm-qemu-1 2>&1 | grep -E "pci-testdev|'nvme'"
+```
+
+Each write that reaches the device is one `memory_region_ops_write` line with
+the address, value, size and region name. `cpu -1` means the write did not come
+from a vCPU, which is what a ringer write looks like. Use a queue that does not
+exist (`--sq free`) so the guest's own queues are not disturbed.
+
+A CPU store that matches a registered ioeventfd (testdev BAR0 offset 0, value
+0xFA) is completed by KVM and never traced. The ringer's write to the same
+address is traced, because it is delivered by software dispatch.
 
 ## Completion, and a hazard the rig reproduces
 

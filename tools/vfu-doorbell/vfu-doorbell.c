@@ -93,6 +93,8 @@ struct region {
   uint64_t bad;
   uint64_t gaps;
   uint64_t ooo;
+  uint64_t match;
+  uint64_t nomatch;
   struct key_state* keys;
   size_t nkeys;
 };
@@ -128,10 +130,13 @@ static const char* model_str(uint32_t m) {
 
 static void region_log(unsigned ri, const struct region* r) {
   fprintf(stderr,
-          "%s: region %u: %s base=0x%llx size=0x%llx width=%u stride=%u%s\n",
+          "%s: region %u: %s base=0x%llx size=0x%llx width=%u stride=%u%s",
           role_name, ri, model_str(r->model), (unsigned long long)r->base,
           (unsigned long long)r->size, r->width, r->stride,
           (r->flags & VFU_DB_FLAG_SEQ) ? " seq" : "");
+  if (r->flags & VFU_DB_FLAG_MATCH)
+    fprintf(stderr, " match=0x%llx", (unsigned long long)r->match);
+  fputc('\n', stderr);
 }
 
 static void region_free(struct region* r) {
@@ -147,7 +152,7 @@ static void region_reconfigure(struct region* r) {
   size_t nkeys;
 
   region_free(r);
-  r->writes = r->bad = r->gaps = r->ooo = 0;
+  r->writes = r->bad = r->gaps = r->ooo = r->nomatch = 0;
   if (r->model == VFU_DB_MODEL_OFF)
     return;
   bool ok = r->model <= VFU_DB_MODEL_EVENT;
@@ -156,6 +161,10 @@ static void region_reconfigure(struct region* r) {
   ok = ok && r->base >= VFU_DB_RE_WINDOW_BASE && (r->base % 4) == 0;
   ok = ok && r->size >= r->stride && r->base + r->size <= VFU_DB_RE_BAR_SIZE;
   ok = ok && (r->model != VFU_DB_MODEL_KEYED || r->width == 8);
+  if (r->flags & VFU_DB_FLAG_MATCH) {
+    ok = ok && r->model == VFU_DB_MODEL_EVENT && !(r->flags & VFU_DB_FLAG_SEQ);
+    ok = ok && r->match <= (r->width == 1 ? 0xffu : 0xffffu);
+  }
   if (!ok) {
     fprintf(stderr, "%s: rejecting invalid region configuration\n", role_name);
     r->model = VFU_DB_MODEL_OFF;
@@ -246,6 +255,13 @@ static void region_write(struct ringee* t, unsigned ri, uint64_t off,
     log_write(t, ri, off, value, count);
     return;
   }
+  if ((r->flags & VFU_DB_FLAG_MATCH) && value != r->match) {
+    /* Not a doorbell: no state changes, but it is logged so the guest can
+     * see what was sent. */
+    r->nomatch++;
+    log_write(t, ri, off, value, count);
+    return;
+  }
   idx = (uint32_t)(value & (count == 1 ? 0xffu : 0xffffu));
   if (r->model == VFU_DB_MODEL_KEYED) {
     ring = (uint32_t)((value >> 16) & 7u);
@@ -329,6 +345,8 @@ static void render_ctrl(const struct ringee* t, uint8_t* page) {
     store_le(p + VFU_DB_RE_RG_BAD, 8, r->bad);
     store_le(p + VFU_DB_RE_RG_GAPS, 8, r->gaps);
     store_le(p + VFU_DB_RE_RG_OOO, 8, r->ooo);
+    store_le(p + VFU_DB_RE_RG_MATCH, 8, r->match);
+    store_le(p + VFU_DB_RE_RG_NOMATCH, 8, r->nomatch);
   }
 }
 
@@ -360,7 +378,9 @@ static void ctrl_write(struct ringee* t, uint64_t off, size_t count,
     case VFU_DB_RE_RG_MODEL:
       r->model = (uint32_t)v;
       region_reconfigure(r);
-      region_log(ri, r);
+      /* Writing OFF first is how a guest starts a reconfiguration. */
+      if (v != VFU_DB_MODEL_OFF)
+        region_log(ri, r);
       break;
     case VFU_DB_RE_RG_FLAGS:
       r->flags = (uint32_t)v;
@@ -376,6 +396,21 @@ static void ctrl_write(struct ringee* t, uint64_t off, size_t count,
       break;
     case VFU_DB_RE_RG_STRIDE:
       r->stride = (uint32_t)v;
+      break;
+    case VFU_DB_RE_RG_MATCH:
+      /* On a live match region the new value takes effect at once, with no
+       * reset, so it must fit now. While a region is being configured (it is
+       * OFF, or has no match flag yet) it is only stored and the model write
+       * validates it. */
+      if (r->model != VFU_DB_MODEL_OFF && (r->flags & VFU_DB_FLAG_MATCH) &&
+          v > (r->width == 1 ? 0xffu : 0xffffu)) {
+        fprintf(stderr,
+                "%s: region %u: match 0x%llx does not fit width %u, "
+                "ignored\n",
+                role_name, ri, (unsigned long long)v, r->width);
+        break;
+      }
+      r->match = v;
       break;
     default:
       break;
@@ -439,7 +474,7 @@ static ssize_t ringee_bar0(vfu_ctx_t* ctx, char* buf, size_t count,
   return (ssize_t)count;
 }
 
-/* Parse "N:model:base:size:width:stride[:seq]". */
+/* Parse "N:model:base:size:width:stride[:seq][:match=V]". */
 static int parse_region(const char* spec) {
   char* copy = strdup(spec);
   char* save = NULL;
@@ -466,7 +501,16 @@ static int parse_region(const char* spec) {
       r->size = strtoull(tok[3], NULL, 0);
       r->width = (uint32_t)strtoul(tok[4], NULL, 0);
       r->stride = (uint32_t)strtoul(tok[5], NULL, 0);
-      r->flags = (n >= 7 && !strcmp(tok[6], "seq")) ? VFU_DB_FLAG_SEQ : 0;
+      r->flags = 0;
+      r->match = 0;
+      for (int i = 6; i < n; i++) {
+        if (!strcmp(tok[i], "seq")) {
+          r->flags |= VFU_DB_FLAG_SEQ;
+        } else if (!strncmp(tok[i], "match=", 6)) {
+          r->flags |= VFU_DB_FLAG_MATCH;
+          r->match = strtoull(tok[i] + 6, NULL, 0);
+        }
+      }
       r->model = model;
       region_reconfigure(r);
       rc = r->model == VFU_DB_MODEL_OFF ? -1 : 0;
@@ -478,12 +522,14 @@ static int parse_region(const char* spec) {
   return rc;
 }
 
-/* Default overlays: an NVMe-like index region, an ionic-like keyed region and
- * an event region, each one page. */
+/* Default overlays: an NVMe-like index region, an ionic-like keyed region, an
+ * event region, and a testdev-like event region with a match value. */
 static void ringee_defaults(void) {
   parse_region("0:index:0x2000:0x1000:4:4:seq");
   parse_region("1:keyed:0x3000:0x1000:8:8:seq");
   parse_region("2:event:0x4000:0x1000:4:4:seq");
+  /* A QEMU pci-testdev-like doorbell: one byte, rings only on 0xfa. */
+  parse_region("3:event:0x5000:0x100:1:1:match=0xfa");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -865,9 +911,9 @@ static void on_signal(int sig) {
 static void usage(const char* argv0) {
   fprintf(stderr,
           "usage: %s --role ringee|ringer --socket PATH [options]\n"
-          "  --region N:model:base:size:width:stride[:seq]\n"
+          "  --region N:model:base:size:width:stride[:seq][:match=V]\n"
           "          configure a ringee overlay (model: index|keyed|event);\n"
-          "          without any --region the ringee gets three defaults\n"
+          "          without any --region the ringee gets four defaults\n"
           "  --no-defaults   ringee starts with no regions configured\n"
           "  --trace N       ringee logs the first N writes after each reset\n"
           "  -v              debug logging from libvfio-user\n",

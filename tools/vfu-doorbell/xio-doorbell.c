@@ -55,6 +55,40 @@ static bool read_hex_file(const char* path, unsigned* out) {
   return ok;
 }
 
+/* Map BAR0 of the PCI device `name` (a sysfs name, "0000:00:05.0"). */
+static bool open_dev(const char* name, struct dev* d) {
+  char path[512];
+  snprintf(d->bdf, sizeof(d->bdf), "%s", name);
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource", name);
+  FILE* f = fopen(path, "r");
+  unsigned long long start = 0;
+  if (f) {
+    if (fscanf(f, "%llx", &start) != 1)
+      start = 0;
+    fclose(f);
+  }
+  d->gpa = start;
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0", name);
+  int fd = open(path, O_RDWR | O_SYNC);
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0) {
+    perror(path);
+    if (fd >= 0)
+      close(fd);
+    return false;
+  }
+  d->size = (size_t)st.st_size;
+  void* m = mmap(NULL, d->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (m == MAP_FAILED) {
+    perror("mmap resource0");
+    return false;
+  }
+  d->bar = m;
+  d->present = true;
+  return true;
+}
+
 static bool find_device(unsigned vendor, unsigned device, struct dev* d) {
   DIR* dir = opendir("/sys/bus/pci/devices");
   struct dirent* e;
@@ -72,35 +106,8 @@ static bool find_device(unsigned vendor, unsigned device, struct dev* d) {
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/device", e->d_name);
     if (!read_hex_file(path, &dv) || dv != device)
       continue;
-    snprintf(d->bdf, sizeof(d->bdf), "%s", e->d_name);
-    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource", e->d_name);
-    FILE* f = fopen(path, "r");
-    unsigned long long start = 0;
-    if (f) {
-      if (fscanf(f, "%llx", &start) != 1)
-        start = 0;
-      fclose(f);
-    }
-    d->gpa = start;
-    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0",
-             e->d_name);
-    int fd = open(path, O_RDWR | O_SYNC);
-    struct stat st;
-    if (fd < 0 || fstat(fd, &st) != 0) {
-      perror(path);
-      if (fd >= 0)
-        close(fd);
+    if (!open_dev(e->d_name, d))
       continue;
-    }
-    d->size = (size_t)st.st_size;
-    void* m = mmap(NULL, d->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (m == MAP_FAILED) {
-      perror("mmap resource0");
-      continue;
-    }
-    d->bar = m;
-    d->present = true;
     closedir(dir);
     return true;
   }
@@ -219,6 +226,8 @@ struct region_cfg {
   uint64_t bad;
   uint64_t gaps;
   uint64_t ooo;
+  uint64_t match;
+  uint64_t nomatch;
 };
 
 struct key_state {
@@ -243,11 +252,17 @@ static void t_region(unsigned r, struct region_cfg* c) {
   c->bad = rd64(&ringee, p + VFU_DB_RE_RG_BAD);
   c->gaps = rd64(&ringee, p + VFU_DB_RE_RG_GAPS);
   c->ooo = rd64(&ringee, p + VFU_DB_RE_RG_OOO);
+  c->match = rd64(&ringee, p + VFU_DB_RE_RG_MATCH);
+  c->nomatch = rd64(&ringee, p + VFU_DB_RE_RG_NOMATCH);
 }
 
 static void t_config(unsigned r, unsigned model, unsigned flags, uint64_t base,
-                     uint64_t size, unsigned width, unsigned stride) {
+                     uint64_t size, unsigned width, unsigned stride,
+                     uint64_t match) {
   uint64_t p = VFU_DB_RE_REGION_TABLE + (uint64_t)r * VFU_DB_RE_REGION_STRIDE;
+  /* Off first, so the other fields are only stored while it is being set up. */
+  wr32(&ringee, p + VFU_DB_RE_RG_MODEL, VFU_DB_MODEL_OFF);
+  wr64(&ringee, p + VFU_DB_RE_RG_MATCH, match);
   wr32(&ringee, p + VFU_DB_RE_RG_FLAGS, flags);
   wr64(&ringee, p + VFU_DB_RE_RG_BASE, base);
   wr64(&ringee, p + VFU_DB_RE_RG_SIZE, size);
@@ -303,6 +318,10 @@ struct opts {
   uint64_t stride;
   unsigned timeout_ms;
   bool poll_mmio; /* poll STATUS over MMIO: can deadlock, see README.md */
+  /* ring --raw/--preset: another device. gpa_base replaces the ringee's BAR0
+   * address, and dst is the device the CPU path stores into. */
+  uint64_t gpa_base;
+  const struct dev* dst;
 };
 
 static void opts_for_region(const struct region_cfg* c, struct opts* o) {
@@ -315,6 +334,11 @@ static void opts_for_region(const struct region_cfg* c, struct opts* o) {
   o->seq = (c->flags & VFU_DB_FLAG_SEQ) != 0;
   o->keyed = c->model == VFU_DB_MODEL_KEYED;
   o->timeout_ms = 10000;
+  if (c->flags & VFU_DB_FLAG_MATCH) {
+    /* Send the value the region rings on; --value overrides it. */
+    o->value = c->match;
+    o->pattern = VFU_DB_PAT_REPEAT;
+  }
 }
 
 static bool parse_opts(int argc, char** argv, struct opts* o) {
@@ -412,7 +436,8 @@ static void cpu_ring(const struct region_cfg* c, uint32_t count,
     uint32_t seq = o->seq ? seqs[key]++ : 0;
     uint64_t v = vfu_db_pack(o->size, o->keyed, idx, o->ring, o->qid0 + qi, seq,
                              o->seq);
-    wrw(&ringee, c->base + (uint64_t)slot * o->stride, o->size, v);
+    wrw(o->dst ? o->dst : &ringee, c->base + (uint64_t)slot * o->stride,
+        o->size, v);
     if (o->delay_ns) {
       struct timespec ts = {.tv_sec = o->delay_ns / 1000000000u,
                             .tv_nsec = o->delay_ns % 1000000000u};
@@ -482,7 +507,8 @@ static struct ring_result ringer_run(const struct region_cfg* c, uint32_t count,
     flags |= VFU_DB_RF_INLINE;
   if (o->posted)
     flags |= VFU_DB_RF_POSTED;
-  wr64(&ringer, VFU_DB_R_GPA, ringee.gpa + c->base);
+  wr64(&ringer, VFU_DB_R_GPA,
+       (o->gpa_base ? o->gpa_base : ringee.gpa) + c->base);
   wr64(&ringer, VFU_DB_R_VALUE, o->value);
   wr64(&ringer, VFU_DB_R_STEP, (uint64_t)o->step);
   wr64(&ringer, VFU_DB_R_STRIDE, o->stride);
@@ -571,6 +597,9 @@ static void print_region(unsigned r, const struct region_cfg* c) {
          (c->flags & VFU_DB_FLAG_SEQ) ? " seq" : "",
          (unsigned long long)c->writes, (unsigned long long)c->bad,
          (unsigned long long)c->gaps, (unsigned long long)c->ooo);
+  if (c->flags & VFU_DB_FLAG_MATCH)
+    printf("          match=0x%llx nomatch=%llu\n",
+           (unsigned long long)c->match, (unsigned long long)c->nomatch);
 }
 
 static int cmd_info(void) {
@@ -650,9 +679,34 @@ static int cmd_dump(int argc, char** argv) {
 static int cmd_config(int argc, char** argv) {
   if (!need_ringee())
     return 1;
+  if (argc == 2 && !strncmp(argv[1], "match=", 6)) {
+    /* Only the match value of a live match region; no reset. */
+    unsigned r = (unsigned)strtoul(argv[0], NULL, 0);
+    uint64_t v = strtoull(argv[1] + 6, NULL, 0);
+    struct region_cfg c;
+    t_region(r, &c);
+    if (c.model == VFU_DB_MODEL_OFF || !(c.flags & VFU_DB_FLAG_MATCH)) {
+      fprintf(stderr, "region %u is not a match region\n", r);
+      return 1;
+    }
+    wr64(&ringee,
+         VFU_DB_RE_REGION_TABLE + (uint64_t)r * VFU_DB_RE_REGION_STRIDE +
+           VFU_DB_RE_RG_MATCH,
+         v);
+    t_region(r, &c);
+    print_region(r, &c);
+    if (c.match != v) {
+      fprintf(stderr, "the ringee rejected match 0x%llx\n",
+              (unsigned long long)v);
+      return 1;
+    }
+    return 0;
+  }
   if (argc < 6) {
     fprintf(stderr, "config <r> <index|keyed|event> <base> <size> <width> "
-                    "<stride> [seq]\n");
+                    "<stride> [seq] [match=V]\n"
+                    "config <r> match=V      change only a match region's "
+                    "match value\n");
     return 2;
   }
   unsigned r = (unsigned)strtoul(argv[0], NULL, 0);
@@ -660,67 +714,26 @@ static int cmd_config(int argc, char** argv) {
                    : !strcmp(argv[1], "keyed") ? VFU_DB_MODEL_KEYED
                    : !strcmp(argv[1], "event") ? VFU_DB_MODEL_EVENT
                                                : VFU_DB_MODEL_OFF;
-  unsigned flags = (argc > 6 && !strcmp(argv[6], "seq")) ? VFU_DB_FLAG_SEQ : 0;
+  unsigned flags = 0;
+  uint64_t match = 0;
+  for (int i = 6; i < argc; i++) {
+    if (!strcmp(argv[i], "seq")) {
+      flags |= VFU_DB_FLAG_SEQ;
+    } else if (!strncmp(argv[i], "match=", 6)) {
+      flags |= VFU_DB_FLAG_MATCH;
+      match = strtoull(argv[i] + 6, NULL, 0);
+    } else {
+      fprintf(stderr, "unknown config option %s\n", argv[i]);
+      return 2;
+    }
+  }
   t_config(r, model, flags, strtoull(argv[2], NULL, 0),
            strtoull(argv[3], NULL, 0), (unsigned)strtoul(argv[4], NULL, 0),
-           (unsigned)strtoul(argv[5], NULL, 0));
+           (unsigned)strtoul(argv[5], NULL, 0), match);
   struct region_cfg c;
   t_region(r, &c);
   print_region(r, &c);
   return c.model == VFU_DB_MODEL_OFF ? 1 : 0;
-}
-
-/* Shared by cpu-ring and ring: run, wait, and print a verdict. */
-static int do_ring(bool via_ringer, int argc, char** argv) {
-  if (!need_ringee() || (via_ringer && !need_ringer()))
-    return 1;
-  if (argc < 2) {
-    fprintf(stderr, "%s <region> <count> [options]\n",
-            via_ringer ? "ring" : "cpu-ring");
-    return 2;
-  }
-  unsigned r = (unsigned)strtoul(argv[0], NULL, 0);
-  uint32_t count = (uint32_t)strtoul(argv[1], NULL, 0);
-  struct region_cfg before;
-  struct region_cfg after;
-  struct opts o;
-  t_region(r, &before);
-  if (before.model == VFU_DB_MODEL_OFF) {
-    fprintf(stderr, "region %u is not configured\n", r);
-    return 1;
-  }
-  opts_for_region(&before, &o);
-  if (!parse_opts(argc - 2, argv + 2, &o))
-    return 2;
-  uint64_t t0 = now_ns();
-  struct ring_result res = {.ok = true};
-  if (via_ringer)
-    res = ringer_run(&before, count, &o);
-  else
-    cpu_ring(&before, count, &o);
-  uint64_t dt = now_ns() - t0;
-  t_region(r, &after);
-  uint64_t regress;
-  uint64_t keycount;
-  sum_keys(r, &after, &o, &regress, &keycount);
-  uint64_t arrived = after.writes - before.writes;
-  printf("path=%s count=%u elapsed=%.3f ms\n", via_ringer ? "ringer" : "cpu",
-         count, (double)dt / 1e6);
-  if (via_ringer)
-    printf(
-      "ringer: status=%u sent=%llu errors=%llu errno=%u max_lat=%.1f us%s\n",
-      res.status, (unsigned long long)res.sent, (unsigned long long)res.errors,
-      res.err_no, (double)res.max_lat_ns / 1e3,
-      res.timed_out ? "  TIMEOUT (possible deadlock)" : "");
-  printf("ringee: arrived=%llu bad=%llu seq_gaps=%llu seq_ooo=%llu "
-         "regress=%llu\n",
-         (unsigned long long)arrived,
-         (unsigned long long)(after.bad - before.bad),
-         (unsigned long long)(after.gaps - before.gaps),
-         (unsigned long long)(after.ooo - before.ooo),
-         (unsigned long long)regress);
-  (void)keycount;
-  return res.ok ? 0 : 1;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -741,6 +754,7 @@ struct delta {
   uint64_t gaps;
   uint64_t ooo;
   uint64_t regress;
+  uint64_t nomatch;
   bool ran;
 };
 
@@ -758,6 +772,9 @@ static struct delta scenario(bool via_ringer, unsigned r, uint32_t count,
   if (keyed_two) {
     o.nslots = 1;
     o.qids = 2;
+  }
+  if (extra && !strcmp(extra, "nomatch")) {
+    o.value = 0xfb; /* not the region's match value */
   }
   if (extra && !strcmp(extra, "regress")) {
     o.step = -1;
@@ -778,6 +795,7 @@ static struct delta scenario(bool via_ringer, unsigned r, uint32_t count,
   d.bad = after.bad - before.bad;
   d.gaps = after.gaps - before.gaps;
   d.ooo = after.ooo - before.ooo;
+  d.nomatch = after.nomatch - before.nomatch;
   return d;
 }
 
@@ -802,9 +820,11 @@ static int cmd_selftest(void) {
   /* The default overlays are re-applied by resetting regions to the table the
    * server started with; reconfigure explicitly so the test is self-contained
    * even against a --no-defaults ringee. */
-  t_config(0, VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4);
-  t_config(1, VFU_DB_MODEL_KEYED, VFU_DB_FLAG_SEQ, 0x3000, 0x1000, 8, 8);
-  t_config(2, VFU_DB_MODEL_EVENT, VFU_DB_FLAG_SEQ, 0x4000, 0x1000, 4, 4);
+  t_config(0, VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0);
+  t_config(1, VFU_DB_MODEL_KEYED, VFU_DB_FLAG_SEQ, 0x3000, 0x1000, 8, 8, 0);
+  t_config(2, VFU_DB_MODEL_EVENT, VFU_DB_FLAG_SEQ, 0x4000, 0x1000, 4, 4, 0);
+  /* A testdev-like doorbell: one byte, rings only on 0xfa. */
+  t_config(3, VFU_DB_MODEL_EVENT, VFU_DB_FLAG_MATCH, 0x5000, 0x100, 1, 1, 0xfa);
 
   struct delta d = scenario(false, 0, n, NULL, false);
   expect_clean("cpu    index  1000 writes over 4 slots", &d, n);
@@ -815,6 +835,12 @@ static int cmd_selftest(void) {
   d = scenario(false, 0, 100, "regress", false);
   check("cpu    index  a backwards index is detected",
         d.ran && d.arrived == 100 && d.regress > 0);
+  d = scenario(false, 3, 100, NULL, false);
+  check("cpu    match  writes of the match value all ring",
+        d.ran && d.arrived == 100 && d.nomatch == 0 && d.bad == 0);
+  d = scenario(false, 3, 100, "nomatch", false);
+  check("cpu    match  other values ring nothing and are counted",
+        d.ran && d.arrived == 0 && d.nomatch == 100 && d.bad == 0);
 
   if (ringer.present) {
     d = scenario(true, 0, n, NULL, false);
@@ -826,11 +852,707 @@ static int cmd_selftest(void) {
     d = scenario(true, 0, 100, "regress", false);
     check("ringer index  a backwards index is detected",
           d.ran && d.arrived == 100 && d.regress > 0);
+    d = scenario(true, 3, 100, NULL, false);
+    check("ringer match  writes of the match value all ring",
+          d.ran && d.arrived == 100 && d.nomatch == 0 && d.bad == 0);
+    d = scenario(true, 3, 100, "nomatch", false);
+    check("ringer match  other values ring nothing and are counted",
+          d.ran && d.arrived == 0 && d.nomatch == 100 && d.bad == 0);
   } else {
     printf("SKIP  ringer tests: no ringer device\n");
   }
   printf("%s: %d failure(s)\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* ring: who writes (--ringer), what is rung (--ringee), and presets       */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * A ringee is the thing being rung:
+ *
+ *   vfu-doorbell                 our ringee device (the default)
+ *   qemu-pci-testdev             QEMU's pci-testdev. Doorbell at BAR0 offset 0,
+ *                                1 byte, rings only on 0xFA (an ioeventfd
+ *                                datamatch).
+ *   qemu-nvme                    QEMU's NVMe. It has a doorbell per queue, so
+ *                                the doorbell is chosen with --sq N|free,
+ *                                --cq N|free or --raw: SQ tail or CQ head at
+ *                                BAR0+0x1000 with stride 8 per queue (CAP.DSTRD
+ *                                0). `free` is the lowest queue id the guest's
+ *                                driver does not own.
+ *   <bdf>                        any other PCI device; needs --raw
+ *
+ * A device with one doorbell (qemu-pci-testdev) is rung with `ring --ringee X
+ * <count>`. Everything a named device fills in can also be typed: --raw
+ * <offset> is an offset into the device's BAR0, with --size, --value and
+ * --pattern.
+ */
+struct target {
+  struct dev store;
+  struct dev* dev;
+  bool ours; /* the vfu-doorbell ringee */
+  bool nvme;
+  bool has_base; /* the device's own doorbell offset */
+  uint64_t base;
+  unsigned size; /* 0: no default */
+  bool has_value;
+  uint64_t value;
+  bool has_pattern;
+  uint32_t pattern;
+};
+
+/* The number of queues the guest's NVMe driver has for this controller: the
+ * admin queue and the I/O queues, so it owns ids 0 to count - 1. */
+static bool nvme_queue_count(const char* bdf, unsigned* count) {
+  DIR* dir = opendir("/sys/class/nvme");
+  struct dirent* e;
+  bool found = false;
+  if (!dir)
+    return false;
+  while ((e = readdir(dir)) != NULL) {
+    char path[512];
+    char addr[64] = "";
+    if (e->d_name[0] == '.')
+      continue;
+    snprintf(path, sizeof(path), "/sys/class/nvme/%s/address", e->d_name);
+    FILE* f = fopen(path, "r");
+    if (!f)
+      continue;
+    if (fscanf(f, "%63s", addr) != 1)
+      addr[0] = '\0';
+    fclose(f);
+    if (strcmp(addr, bdf))
+      continue;
+    snprintf(path, sizeof(path), "/sys/class/nvme/%s/queue_count", e->d_name);
+    f = fopen(path, "r");
+    if (f) {
+      if (fscanf(f, "%u", count) == 1)
+        found = true;
+      fclose(f);
+    }
+  }
+  closedir(dir);
+  return found;
+}
+
+static bool queue_in_use(const char* bdf, unsigned qid) {
+  unsigned count;
+  return nvme_queue_count(bdf, &count) && qid < count;
+}
+
+/* With no driver bound there are no live queues, so the lowest is 1. */
+static unsigned nvme_free_queue(const char* bdf) {
+  unsigned count;
+  return nvme_queue_count(bdf, &count) ? count : 1;
+}
+
+/* BAR0 offset of a queue's doorbell: --sq/--cq take a number or `free`. */
+static bool nvme_doorbell(const struct target* t, bool cq, const char* val,
+                          uint64_t* off) {
+  unsigned qid;
+  if (!strcmp(val, "free")) {
+    qid = nvme_free_queue(t->dev->bdf);
+    printf("nvme: the first queue the driver does not own is %u\n", qid);
+  } else if (val[0] >= '0' && val[0] <= '9') {
+    qid = (unsigned)strtoul(val, NULL, 0);
+  } else {
+    fprintf(stderr, "--%s takes a queue number or free, not '%s'\n",
+            cq ? "cq" : "sq", val);
+    return false;
+  }
+  *off = 0x1000u + 8u * qid + (cq ? 4u : 0u);
+  return true;
+}
+
+static bool resolve_ringee(const char* spec, struct target* t) {
+  memset(t, 0, sizeof(*t));
+  if (!strcmp(spec, "vfu-doorbell")) {
+    if (!need_ringee())
+      return false;
+    t->dev = &ringee;
+    t->ours = true;
+    return true;
+  }
+  if (!strcmp(spec, "qemu-pci-testdev")) {
+    if (!find_device(0x1b36, 0x0005, &t->store)) {
+      fprintf(stderr, "no QEMU pci-testdev (1b36:0005) in this guest\n");
+      return false;
+    }
+    t->dev = &t->store;
+    t->has_base = true;
+    t->base = 0;
+    t->size = 1;
+    t->has_value = true;
+    t->value = 0xfa;
+    t->has_pattern = true;
+    t->pattern = VFU_DB_PAT_REPEAT;
+    return true;
+  }
+  if (!strcmp(spec, "qemu-nvme")) {
+    if (!find_device(0x1b36, 0x0010, &t->store)) {
+      fprintf(stderr, "no QEMU NVMe controller (1b36:0010) in this guest\n");
+      return false;
+    }
+    t->dev = &t->store;
+    t->nvme = true;
+    t->size = 4;
+    return true;
+  }
+  if (!strncmp(spec, "qemu-", 5)) {
+    fprintf(stderr, "unknown ringee '%s' (qemu-pci-testdev, qemu-nvme)\n",
+            spec);
+    return false;
+  }
+  if (!open_dev(spec, &t->store))
+    return false;
+  t->dev = &t->store;
+  return true;
+}
+
+/* The write pattern a preset fixes. Zero or unset fields keep the defaults. */
+struct pattern {
+  uint32_t size;
+  uint32_t nslots;
+  uint32_t qids;
+  int64_t step;
+  bool has_value;
+  uint64_t value;
+  bool has_pattern;
+  uint32_t pattern;
+};
+
+static void apply_pattern(const struct pattern* p, struct opts* o) {
+  if (p->size)
+    o->size = p->size;
+  if (p->nslots)
+    o->nslots = p->nslots;
+  if (p->qids)
+    o->qids = p->qids;
+  if (p->step)
+    o->step = p->step;
+  if (p->has_value)
+    o->value = p->value;
+  if (p->has_pattern)
+    o->pattern = p->pattern;
+}
+
+enum { EXP_NONE = 0, EXP_ARRIVE_ALL, EXP_ALL_IGNORED };
+
+/* Run against one of the ringee's own regions and judge it by the counters. */
+static int run_region(bool cpu, unsigned r, uint32_t count, struct opts* o,
+                      const struct region_cfg* before, unsigned expect,
+                      const char* name) {
+  struct region_cfg after;
+  uint64_t t0 = now_ns();
+  struct ring_result res = {.ok = true};
+  if (cpu)
+    cpu_ring(before, count, o);
+  else
+    res = ringer_run(before, count, o);
+  uint64_t dt = now_ns() - t0;
+  t_region(r, &after);
+  uint64_t regress;
+  uint64_t keycount;
+  sum_keys(r, &after, o, &regress, &keycount);
+  uint64_t arrived = after.writes - before->writes;
+  uint64_t bad = after.bad - before->bad;
+  uint64_t gaps = after.gaps - before->gaps;
+  uint64_t ooo = after.ooo - before->ooo;
+  uint64_t ignored = after.nomatch - before->nomatch;
+  printf("path=%s count=%u elapsed=%.3f ms\n", cpu ? "cpu" : "ringer", count,
+         (double)dt / 1e6);
+  if (!cpu)
+    printf(
+      "ringer: status=%u sent=%llu errors=%llu errno=%u max_lat=%.1f us%s\n",
+      res.status, (unsigned long long)res.sent, (unsigned long long)res.errors,
+      res.err_no, (double)res.max_lat_ns / 1e3,
+      res.timed_out ? "  TIMEOUT (possible deadlock)" : "");
+  printf("ringee: arrived=%llu bad=%llu seq_gaps=%llu seq_ooo=%llu "
+         "regress=%llu\n",
+         (unsigned long long)arrived, (unsigned long long)bad,
+         (unsigned long long)gaps, (unsigned long long)ooo,
+         (unsigned long long)regress);
+  if (before->flags & VFU_DB_FLAG_MATCH)
+    printf("ringee: ignored=%llu (value != match 0x%llx)\n",
+           (unsigned long long)ignored, (unsigned long long)before->match);
+  (void)keycount;
+  if (expect == EXP_NONE)
+    return res.ok ? 0 : 1;
+  bool ok = res.ok && bad == 0;
+  if (expect == EXP_ARRIVE_ALL)
+    ok = ok && arrived == count && gaps == 0 && ooo == 0 && regress == 0 &&
+         ignored == 0;
+  else
+    ok = ok && arrived == 0 && ignored == count;
+  printf("%s  %s\n", ok ? "PASS" : "FAIL", name);
+  return ok ? 0 : 1;
+}
+
+/* ring <region> ... */
+static int ring_region(bool cpu, unsigned r, uint32_t count, int nopt,
+                       char** opt) {
+  struct region_cfg before;
+  struct opts o;
+
+  if (!need_ringee() || (!cpu && !need_ringer()))
+    return 1;
+  t_region(r, &before);
+  if (before.model == VFU_DB_MODEL_OFF) {
+    fprintf(stderr, "region %u is not configured\n", r);
+    return 1;
+  }
+  opts_for_region(&before, &o);
+  if (!parse_opts(nopt, opt, &o))
+    return 2;
+  return run_region(cpu, r, count, &o, &before, EXP_NONE, NULL);
+}
+
+/* A write to some device's BAR0. There are no per-region counters for it, so
+ * what arrived is judged from the device's own side. */
+static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
+                         uint64_t raw, uint32_t count, struct opts* o) {
+  struct region_cfg c = {.model = VFU_DB_MODEL_INDEX, .width = 4};
+
+  if (have_raw) {
+    c.base = raw;
+  } else if (t->has_base) {
+    c.base = t->base;
+  } else {
+    fprintf(stderr, "this ringee has no known doorbell: pass --raw <offset>\n");
+    return 2;
+  }
+  if (c.base + o->size > t->dev->size) {
+    fprintf(stderr, "offset 0x%llx is outside the ringee's BAR0 (0x%zx)\n",
+            (unsigned long long)c.base, t->dev->size);
+    return 2;
+  }
+  if (t->nvme && !force && c.base >= 0x1000 &&
+      queue_in_use(t->dev->bdf, (unsigned)((c.base - 0x1000) / 8))) {
+    fprintf(stderr,
+            "NVMe queue %u exists in the guest's driver; ringing it can "
+            "corrupt a live queue. Pick another or pass --force.\n",
+            (unsigned)((c.base - 0x1000) / 8));
+    return 1;
+  }
+  if (!cpu && !need_ringer())
+    return 1;
+  o->gpa_base = t->dev->gpa;
+  o->dst = t->dev;
+  o->stride = o->stride ? o->stride : o->size;
+  printf("ringee: %s BAR0+0x%llx gpa=0x%llx size=%u x%u\n", t->dev->bdf,
+         (unsigned long long)c.base, (unsigned long long)(o->gpa_base + c.base),
+         o->size, count);
+
+  uint64_t t0 = now_ns();
+  struct ring_result res = {.ok = true};
+  if (cpu)
+    cpu_ring(&c, count, o);
+  else
+    res = ringer_run(&c, count, o);
+  printf("path=%s count=%u elapsed=%.3f ms\n", cpu ? "cpu" : "ringer", count,
+         (double)(now_ns() - t0) / 1e6);
+  if (!cpu)
+    printf("ringer: status=%u sent=%llu errors=%llu errno=%u%s\n", res.status,
+           (unsigned long long)res.sent, (unsigned long long)res.errors,
+           res.err_no, res.timed_out ? "  TIMEOUT" : "");
+  if (t->ours)
+    printf("no region is judged for a --raw write: read the ringee with dump "
+           "and log\n");
+  else
+    printf("no ringee counters for this device: check its own trace\n");
+  return res.ok ? 0 : 1;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Presets                                                                 */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * A preset is a whole run: the ringer, the ringee, the ringee's region (when it
+ * is the vfu-doorbell ringee) and the write pattern. It writes nothing to the
+ * ringee's configuration. Its region is one of the ringee's static ones, and
+ * the preset checks that the region is what it expects and refuses to run
+ * otherwise. `ring --preset <name>` takes no other argument; `presets` lists
+ * each preset with the explicit command that does the same.
+ */
+struct preset {
+  const char* name;
+  const char* desc;
+  bool cpu;              /* the ringer: the CPU, else the vfu-doorbell ringer */
+  const char* ringee;    /* as for --ringee */
+  int region;            /* the ringee's region, or -1 */
+  uint64_t raw;          /* BAR0 offset, when there is no region */
+  struct region_cfg cfg; /* what the region must be */
+  uint32_t count;
+  struct pattern pat;
+  unsigned expect;
+  const char* qsel; /* an NVMe doorbell instead of raw: "sq=free", "cq=3" */
+};
+
+#define RG(m, f, b, sz, w, st, mt)                                             \
+  {.model = (m),                                                               \
+   .flags = (f),                                                               \
+   .base = (b),                                                                \
+   .size = (sz),                                                               \
+   .width = (w),                                                               \
+   .stride = (st),                                                             \
+   .match = (mt)}
+
+static const struct preset presets[] = {
+  {"index-ringer",
+   "index region 0, 1000 writes over 4 slots, ringer",
+   false,
+   "vfu-doorbell",
+   0,
+   0,
+   RG(VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0),
+   1000,
+   {.nslots = 4},
+   EXP_ARRIVE_ALL,
+   NULL},
+  {"index-cpu",
+   "index region 0, 1000 writes over 4 slots, CPU",
+   true,
+   "vfu-doorbell",
+   0,
+   0,
+   RG(VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0),
+   1000,
+   {.nslots = 4},
+   EXP_ARRIVE_ALL,
+   NULL},
+  {"keyed-ringer",
+   "keyed region 1, two queue ids on one register, ringer",
+   false,
+   "vfu-doorbell",
+   1,
+   0,
+   RG(VFU_DB_MODEL_KEYED, VFU_DB_FLAG_SEQ, 0x3000, 0x1000, 8, 8, 0),
+   1000,
+   {.nslots = 1, .qids = 2},
+   EXP_ARRIVE_ALL,
+   NULL},
+  {"event-ringer",
+   "event region 2, 1000 writes over 4 slots, ringer",
+   false,
+   "vfu-doorbell",
+   2,
+   0,
+   RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_SEQ, 0x4000, 0x1000, 4, 4, 0),
+   1000,
+   {.nslots = 4},
+   EXP_ARRIVE_ALL,
+   NULL},
+  {"testdev-ringer",
+   "testdev-like region 3, the match value, ringer",
+   false,
+   "vfu-doorbell",
+   3,
+   0,
+   RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_MATCH, 0x5000, 0x100, 1, 1, 0xfa),
+   100,
+   {0},
+   EXP_ARRIVE_ALL,
+   NULL},
+  {"testdev-miss-ringer",
+   "testdev-like region 3, a value that is not the match, ringer",
+   false,
+   "vfu-doorbell",
+   3,
+   0,
+   RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_MATCH, 0x5000, 0x100, 1, 1, 0xfa),
+   100,
+   {.has_value = true, .value = 0xfb},
+   EXP_ALL_IGNORED,
+   NULL},
+  {"testdev-qemu-ringer",
+   "QEMU pci-testdev doorbell, ringer",
+   false,
+   "qemu-pci-testdev",
+   -1,
+   0,
+   {0},
+   10,
+   {.size = 1,
+    .has_value = true,
+    .value = 0xfa,
+    .has_pattern = true,
+    .pattern = VFU_DB_PAT_REPEAT},
+   EXP_NONE,
+   NULL},
+  {"testdev-qemu-cpu",
+   "QEMU pci-testdev doorbell, CPU",
+   true,
+   "qemu-pci-testdev",
+   -1,
+   0,
+   {0},
+   10,
+   {.size = 1,
+    .has_value = true,
+    .value = 0xfa,
+    .has_pattern = true,
+    .pattern = VFU_DB_PAT_REPEAT},
+   EXP_NONE,
+   NULL},
+  {"nvme-qemu-ringer",
+   "QEMU NVMe tail doorbell of a queue the driver does not own, ringer",
+   false,
+   "qemu-nvme",
+   -1,
+   0,
+   {0},
+   3,
+   {.size = 4},
+   EXP_NONE,
+   "sq=free"},
+};
+
+static const char* pattern_name(uint32_t p) {
+  return p == VFU_DB_PAT_REPEAT   ? "repeat"
+         : p == VFU_DB_PAT_RANDOM ? "random"
+                                  : "monotonic";
+}
+
+/* The explicit command line that does what a preset does. */
+static void preset_cmdline(const struct preset* p, char* out, size_t n) {
+  size_t k = (size_t)snprintf(out, n, "ring --ringer %s --ringee %s ",
+                              p->cpu ? "cpu" : "vfu-doorbell", p->ringee);
+  if (p->region >= 0)
+    k += (size_t)snprintf(out + k, n - k, "%d %u", p->region, p->count);
+  else if (p->qsel)
+    k += (size_t)snprintf(out + k, n - k, "--%.2s %s %u", p->qsel, p->qsel + 3,
+                          p->count);
+  else
+    k += (size_t)snprintf(out + k, n - k, "--raw 0x%llx %u",
+                          (unsigned long long)p->raw, p->count);
+  if (p->region < 0 && p->pat.size)
+    k += (size_t)snprintf(out + k, n - k, " --size %u", p->pat.size);
+  if (p->pat.nslots)
+    k += (size_t)snprintf(out + k, n - k, " --nslots %u", p->pat.nslots);
+  if (p->pat.qids)
+    k += (size_t)snprintf(out + k, n - k, " --qids %u", p->pat.qids);
+  if (p->pat.step)
+    k += (size_t)snprintf(out + k, n - k, " --step %lld",
+                          (long long)p->pat.step);
+  if (p->pat.has_value)
+    k += (size_t)snprintf(out + k, n - k, " --value 0x%llx",
+                          (unsigned long long)p->pat.value);
+  if (p->pat.has_pattern)
+    snprintf(out + k, n - k, " --pattern %s", pattern_name(p->pat.pattern));
+}
+
+static int cmd_presets(void) {
+  for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); i++) {
+    char cmd[256];
+    preset_cmdline(&presets[i], cmd, sizeof(cmd));
+    printf("%-20s %s\n    %s\n", presets[i].name, presets[i].desc, cmd);
+  }
+  return 0;
+}
+
+static void describe_region(char* out, size_t n, const struct region_cfg* c) {
+  size_t k = (size_t)snprintf(out, n,
+                              "%s base=0x%llx size=0x%llx width=%u "
+                              "stride=%u%s",
+                              model_name(c->model), (unsigned long long)c->base,
+                              (unsigned long long)c->size, c->width, c->stride,
+                              (c->flags & VFU_DB_FLAG_SEQ) ? " seq" : "");
+  if (c->flags & VFU_DB_FLAG_MATCH)
+    snprintf(out + k, n - k, " match=0x%llx", (unsigned long long)c->match);
+}
+
+static int run_preset(const struct preset* p) {
+  char cmd[256];
+  struct opts o;
+
+  preset_cmdline(p, cmd, sizeof(cmd));
+  printf("preset %s: %s\nequivalent: %s\n", p->name, p->desc, cmd);
+
+  if (p->region >= 0) {
+    struct region_cfg got;
+    char want[160];
+    char have[160];
+    const uint32_t mask = VFU_DB_FLAG_SEQ | VFU_DB_FLAG_MATCH;
+    if (!need_ringee() || (!p->cpu && !need_ringer()))
+      return 1;
+    t_region((unsigned)p->region, &got);
+    bool same = got.model == p->cfg.model &&
+                (got.flags & mask) == p->cfg.flags && got.base == p->cfg.base &&
+                got.size == p->cfg.size && got.width == p->cfg.width &&
+                got.stride == p->cfg.stride &&
+                (!(p->cfg.flags & VFU_DB_FLAG_MATCH) ||
+                 got.match == p->cfg.match);
+    if (!same) {
+      describe_region(want, sizeof(want), &p->cfg);
+      describe_region(have, sizeof(have), &got);
+      fprintf(stderr,
+              "region %d is not what this preset needs\n  needs: %s\n  is:    "
+              "%s\n",
+              p->region, want, have);
+      return 1;
+    }
+    wr32(&ringee, VFU_DB_RE_CTRL, 1); /* counters and per-key state to zero */
+    t_region((unsigned)p->region, &got);
+    opts_for_region(&got, &o);
+    apply_pattern(&p->pat, &o);
+    return run_region(p->cpu, (unsigned)p->region, p->count, &o, &got,
+                      p->expect, p->name);
+  }
+
+  struct target t;
+  if (!resolve_ringee(p->ringee, &t))
+    return 1;
+  struct region_cfg c0 = {.model = VFU_DB_MODEL_INDEX, .width = 4};
+  opts_for_region(&c0, &o);
+  apply_pattern(&p->pat, &o);
+  uint64_t raw = p->raw;
+  if (p->qsel && !nvme_doorbell(&t, p->qsel[0] == 'c', p->qsel + 3, &raw))
+    return 1;
+  return ring_external(p->cpu, false, &t, true, raw, p->count, &o);
+}
+
+/*
+ * ring: ring a doorbell and say what arrived.
+ *
+ *   ring <region> <count>                  one of the ringee's own regions
+ *   ring --raw <offset> <count>            an explicit BAR0 offset
+ *   ring --ringee <dev> [--raw <off>] <count>   a QEMU device or any PCI device
+ *   ring --preset <name>                   a whole run, nothing else accepted
+ *
+ * --ringer vfu-doorbell|cpu picks who writes (default vfu-doorbell);
+ * --ringee picks what is rung (default vfu-doorbell). --force lets a write
+ * reach an NVMe queue the guest's driver owns.
+ */
+static int cmd_ring(int argc, char** argv) {
+  const char* raw = NULL;
+  const char* ringer_arg = NULL;
+  const char* ringee_arg = NULL;
+  const char* preset = NULL;
+  const char* sq_arg = NULL;
+  const char* cq_arg = NULL;
+  bool force = false;
+  int n = 0;
+  char* rest[64];
+
+  for (int i = 0; i < argc && n < 63; i++) {
+    const char* a = argv[i];
+    if (!strcmp(a, "--force")) {
+      force = true;
+    } else if (!strcmp(a, "--raw") || !strcmp(a, "--ringer") ||
+               !strcmp(a, "--ringee") || !strcmp(a, "--preset") ||
+               !strcmp(a, "--sq") || !strcmp(a, "--cq")) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "%s needs a value\n", a);
+        return 2;
+      }
+      const char* v = argv[++i];
+      if (!strcmp(a, "--raw"))
+        raw = v;
+      else if (!strcmp(a, "--ringer"))
+        ringer_arg = v;
+      else if (!strcmp(a, "--ringee"))
+        ringee_arg = v;
+      else if (!strcmp(a, "--sq"))
+        sq_arg = v;
+      else if (!strcmp(a, "--cq"))
+        cq_arg = v;
+      else
+        preset = v;
+    } else {
+      rest[n++] = argv[i];
+    }
+  }
+
+  if (preset) {
+    if (n || raw || ringer_arg || ringee_arg || sq_arg || cq_arg || force) {
+      fprintf(stderr, "--preset takes no other argument; use `presets` to "
+                      "see what each one does\n");
+      return 2;
+    }
+    for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); i++)
+      if (!strcmp(presets[i].name, preset))
+        return run_preset(&presets[i]);
+    fprintf(stderr, "unknown preset '%s' (see `presets`)\n", preset);
+    return 2;
+  }
+
+  bool cpu = false;
+  if (ringer_arg) {
+    if (!strcmp(ringer_arg, "cpu")) {
+      cpu = true;
+    } else if (strcmp(ringer_arg, "vfu-doorbell")) {
+      fprintf(stderr, "unknown ringer '%s' (vfu-doorbell, cpu)\n", ringer_arg);
+      return 2;
+    }
+  }
+  const char* ringee_spec = ringee_arg ? ringee_arg : "vfu-doorbell";
+  if ((sq_arg && cq_arg) || ((sq_arg || cq_arg) && raw)) {
+    fprintf(stderr, "--sq, --cq and --raw are mutually exclusive\n");
+    return 2;
+  }
+  if ((sq_arg || cq_arg) && strcmp(ringee_spec, "qemu-nvme")) {
+    fprintf(stderr, "--sq and --cq need --ringee qemu-nvme\n");
+    return 2;
+  }
+  const bool ours = !strcmp(ringee_spec, "vfu-doorbell");
+  const bool named = !strncmp(ringee_spec, "qemu-", 5);
+
+  /* Leading non-option tokens are positional: <region> <count> for one of the
+   * ringee's regions, otherwise just <count>. */
+  int npos = 0;
+  while (npos < n && strncmp(rest[npos], "--", 2))
+    npos++;
+  const bool region_form = ours && !raw;
+  const int want = region_form ? 2 : 1;
+  if (npos != want || (!region_form && !raw && !named)) {
+    fprintf(
+      stderr,
+      "ring <region> <count> [--ringer R] [options]\n"
+      "ring --raw <offset> <count> [--ringer R] [--ringee E] [options]\n"
+      "ring --ringee <qemu-pci-testdev|qemu-nvme> [--sq N|free|--cq N|free] "
+      "<count> "
+      "[--ringer R] [options]\n"
+      "ring --preset <name>\n");
+    return 2;
+  }
+  uint32_t count = (uint32_t)strtoul(rest[want - 1], NULL, 0);
+  char** opt = rest + npos;
+  const int nopt = n - npos;
+  if (region_form)
+    return ring_region(cpu, (unsigned)strtoul(rest[0], NULL, 0), count, nopt,
+                       opt);
+
+  struct target t;
+  struct opts o;
+  struct region_cfg c0 = {.model = VFU_DB_MODEL_INDEX, .width = 4};
+  if (!resolve_ringee(ringee_spec, &t))
+    return 1;
+  opts_for_region(&c0, &o);
+  if (t.size)
+    o.size = t.size;
+  if (t.has_value)
+    o.value = t.value;
+  if (t.has_pattern)
+    o.pattern = t.pattern;
+  if (!parse_opts(nopt, opt, &o))
+    return 2;
+  bool have_raw = raw != NULL;
+  uint64_t where = raw ? strtoull(raw, NULL, 0) : 0;
+  if (t.nvme) {
+    if (sq_arg || cq_arg) {
+      if (!nvme_doorbell(&t, cq_arg != NULL, sq_arg ? sq_arg : cq_arg, &where))
+        return 2;
+      have_raw = true;
+    } else if (!raw) {
+      fprintf(stderr, "which doorbell? pass --sq N|free, --cq N|free or --raw "
+                      "<offset>\n");
+      return 2;
+    }
+  }
+  return ring_external(cpu, force, &t, have_raw, where, count, &o);
 }
 
 static void usage(void) {
@@ -840,11 +1562,21 @@ static void usage(void) {
     "  info                      show devices and configured regions\n"
     "  reset                     reset ringee counters, state and log\n"
     "  config <r> <index|keyed|event> <base> <size> <width> <stride>"
-    " [seq]\n"
+    " [seq] [match=V]\n"
     "  dump [r]                  show region counters\n"
     "  log [n]                   show the last n logged writes\n"
-    "  cpu-ring <r> <count> [opts]   ring from the CPU (baseline)\n"
-    "  ring <r> <count> [opts]       ring through the ringer device\n"
+    "  ring <r> <count> [opts]   ring a ringee region, judged by its counters\n"
+    "  ring --raw <off> <count> [opts]\n"
+    "                            ring an explicit offset into the ringee's "
+    "BAR0\n"
+    "  ring --ringee <qemu-pci-testdev|qemu-nvme|bdf> [--sq N|free|--cq N|free|"
+    "--raw <off>]"
+    " <count>\n"
+    "                            ring a QEMU device or any PCI device, no "
+    "counters\n"
+    "  ring --preset <name>      a whole run; takes no other argument\n"
+    "  presets                   list the presets and their explicit commands\n"
+    "  --ringer vfu-doorbell|cpu picks who writes (default vfu-doorbell)\n"
     "  selftest                  run the built-in scenarios\n"
     "options: --size W --nslots N --qids Q --qid0 Q --ring R --step S\n"
     "         --value V --pattern monotonic|repeat|random --seq --no-seq\n"
@@ -858,9 +1590,11 @@ int main(int argc, char** argv) {
     usage();
     return 2;
   }
+  const char* cmd = argv[1];
+  if (!strcmp(cmd, "presets"))
+    return cmd_presets(); /* needs no device, so no root */
   find_device(VFU_DB_PCI_VENDOR, VFU_DB_PCI_DEV_RINGEE, &ringee);
   find_device(VFU_DB_PCI_VENDOR, VFU_DB_PCI_DEV_RINGER, &ringer);
-  const char* cmd = argv[1];
   if (!strcmp(cmd, "info"))
     return cmd_info();
   if (!strcmp(cmd, "reset")) {
@@ -875,10 +1609,8 @@ int main(int argc, char** argv) {
     return cmd_dump(argc - 2, argv + 2);
   if (!strcmp(cmd, "log"))
     return cmd_log(argc - 2, argv + 2);
-  if (!strcmp(cmd, "cpu-ring"))
-    return do_ring(false, argc - 2, argv + 2);
   if (!strcmp(cmd, "ring"))
-    return do_ring(true, argc - 2, argv + 2);
+    return cmd_ring(argc - 2, argv + 2);
   if (!strcmp(cmd, "selftest"))
     return cmd_selftest();
   usage();

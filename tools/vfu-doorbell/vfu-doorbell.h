@@ -41,7 +41,7 @@
 #define VFU_DB_RE_WINDOW_BASE 0x2000u
 #define VFU_DB_RE_LOG_ENTRIES 128u
 #define VFU_DB_RE_MAGIC_VALUE 0x45524244u /* "DBRE" */
-#define VFU_DB_RE_VERSION_VALUE 1u
+#define VFU_DB_RE_VERSION_VALUE 2u
 
 /* Control page registers. u32 unless noted. */
 #define VFU_DB_RE_MAGIC 0x000u
@@ -66,17 +66,19 @@
 
 /* Region table: VFU_DB_RE_REGION_TABLE + region * VFU_DB_RE_REGION_STRIDE. */
 #define VFU_DB_RE_REGION_TABLE 0x100u
-#define VFU_DB_RE_REGION_STRIDE 0x40u
-#define VFU_DB_RE_RG_MODEL 0x00u  /* u32: VFU_DB_MODEL_*; write last */
-#define VFU_DB_RE_RG_FLAGS 0x04u  /* u32: VFU_DB_FLAG_* */
-#define VFU_DB_RE_RG_BASE 0x08u   /* u64: BAR0 offset of the window */
-#define VFU_DB_RE_RG_SIZE 0x10u   /* u64: window size in bytes */
-#define VFU_DB_RE_RG_WIDTH 0x18u  /* u32: slot width: 1, 2, 4 or 8 */
-#define VFU_DB_RE_RG_STRIDE 0x1cu /* u32: bytes between slot starts */
-#define VFU_DB_RE_RG_WRITES 0x20u /* u64, read-only */
-#define VFU_DB_RE_RG_BAD 0x28u    /* u64, read-only */
-#define VFU_DB_RE_RG_GAPS 0x30u   /* u64, read-only: sum over keys */
-#define VFU_DB_RE_RG_OOO 0x38u    /* u64, read-only: sum over keys */
+#define VFU_DB_RE_REGION_STRIDE 0x80u
+#define VFU_DB_RE_RG_MODEL 0x00u   /* u32: VFU_DB_MODEL_*; write last */
+#define VFU_DB_RE_RG_FLAGS 0x04u   /* u32: VFU_DB_FLAG_* */
+#define VFU_DB_RE_RG_BASE 0x08u    /* u64: BAR0 offset of the window */
+#define VFU_DB_RE_RG_SIZE 0x10u    /* u64: window size in bytes */
+#define VFU_DB_RE_RG_WIDTH 0x18u   /* u32: slot width: 1, 2, 4 or 8 */
+#define VFU_DB_RE_RG_STRIDE 0x1cu  /* u32: bytes between slot starts */
+#define VFU_DB_RE_RG_WRITES 0x20u  /* u64, read-only */
+#define VFU_DB_RE_RG_BAD 0x28u     /* u64, read-only */
+#define VFU_DB_RE_RG_GAPS 0x30u    /* u64, read-only: sum over keys */
+#define VFU_DB_RE_RG_OOO 0x38u     /* u64, read-only: sum over keys */
+#define VFU_DB_RE_RG_MATCH 0x40u   /* u64: value to match (FLAG_MATCH) */
+#define VFU_DB_RE_RG_NOMATCH 0x48u /* u64, read-only: writes ignored */
 
 #define VFU_DB_RE_LOG_BASE 0x1000u
 
@@ -101,6 +103,13 @@
  * index so the ringee can count lost and reordered writes. Width 4: bits
  * [31:16]. Width 8: bits [63:48]. Not available for widths 1 and 2. */
 #define VFU_DB_FLAG_SEQ (1u << 0)
+
+/* Region flag: only a write whose whole value equals RG_MATCH is a doorbell.
+ * Any other value changes no state and counts in RG_NOMATCH, as a device that
+ * rings on one datamatch value does (QEMU pci-testdev). EVENT regions only, and
+ * not with SEQ, which would change the value. The writers produce 16-bit
+ * values (8-bit for width 1), so the match must fit. */
+#define VFU_DB_FLAG_MATCH (1u << 1)
 
 #define VFU_DB_KEYED_KEYS_PER_SLOT 2048u /* 256 queue ids * 8 rings */
 
