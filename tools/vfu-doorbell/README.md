@@ -25,8 +25,9 @@ bursts, several writers on one register, repeated or backwards values, mixed
 sizes. It does not model a real GPU's hardware, only the two kinds of writer:
 
 * **Trap-style**: one message per store, as an emulated GPU delivers it
-  (`--shm` off, the default, uses `vfu_mmio_write`).
-* **Memory-style**: a plain store into DMA-mapped guest memory (`--shm`), which
+  (the default; the ringer option `shm` is off and it uses `vfu_mmio_write`).
+* **Memory-style**: a plain store into DMA-mapped guest memory (the ringer
+  option `shm`), which
   reaches RAM only. Use it to model a real GPU writing a memory-backed
   doorbell that something later polls.
 
@@ -53,7 +54,7 @@ such as QEMU's pci-testdev. Any other value changes no state and is counted in
 `nomatch` (and still logged), not in `writes` or `bad`. A match is for `event`
 regions only, not with `seq`, and it must fit what the writers produce: 16 bits,
 or 8 bits for width 1. `ring` on a match region sends the match value by
-default; pass `--value` to send something else.
+default; pass `--write value=...` to send something else.
 
 Four regions are configured by default: region 0 `index` at `0x2000`, region 1
 `keyed` at `0x3000`, region 2 `event` at `0x4000` (each one page), and region 3,
@@ -106,12 +107,15 @@ sudo xio-doorbell presets              # whole runs, with their explicit command
 sudo xio-doorbell selftest             # built-in scenarios, PASS/FAIL
 
 # 1000 writes over 4 NVMe-like slots, once from the CPU, once via the ringer
-sudo xio-doorbell ring --ringer cpu 0 1000 --nslots 4
+sudo xio-doorbell ring --ringer cpu --ringee vfu-doorbell,region=0 \
+    --count 1000 --write nslots=4
 sudo xio-doorbell reset                # state is not cleared between runs
-sudo xio-doorbell ring 0 1000 --nslots 4
+sudo xio-doorbell ring --ringee vfu-doorbell,region=0 --count 1000 \
+    --write nslots=4
 
 # the ionic collision: two queue ids rung through one shared register
-sudo xio-doorbell ring 1 1000 --qids 2
+sudo xio-doorbell ring --ringee vfu-doorbell,region=1 --count 1000 \
+    --write qids=2
 
 sudo xio-doorbell dump                 # per-region counters
 sudo xio-doorbell log 16               # the last 16 writes, in arrival order
@@ -128,37 +132,50 @@ numbers and indexes and reports out-of-order writes.
 
 ## The ring command
 
-`ring` has two independent choices. `--ringer` is who writes: `vfu-doorbell`
-(the ringer device, the default) or `cpu` (the guest CPU stores through the
-mapped BAR). `--ringee` is what is rung: `vfu-doorbell` (our ringee, the
-default), `qemu-pci-testdev`, `qemu-nvme`, or the BDF of any other PCI device.
-The target is then one of:
+`ring` takes a few independent choices, all optional, each a comma-separated
+list of options that only it understands. `--ringee` is what is rung and where
+in it: `vfu-doorbell` (our ringee), `qemu-pci-testdev`, `qemu-nvme`, or the BDF
+of any other PCI device. `--ringer` says who writes: `vfu-doorbell` (the ringer
+device) or `cpu` (the guest CPU stores through the mapped BAR). `--write` shapes
+the writes, and `--count` is how many. An option the named ringer or ringee does
+not take is an error that lists what it does take. Naming a ringee without
+saying where, as in `--ringee vfu-doorbell`, is an error too. With no flags at
+all, `ring` is the same as:
 
 ```
-ring <region> <count>                       one of the ringee's own regions
-ring --raw <offset> <count>                 an explicit offset into BAR0
-ring --ringee qemu-pci-testdev <count>      a named device's own doorbell
-ring --ringee qemu-nvme --sq N <count>      an NVMe queue's doorbell (or --cq)
-ring --ringee <bdf> --raw <offset> <count>  any PCI device
+ring --ringee vfu-doorbell,region=0 --ringer vfu-doorbell --count 1
 ```
 
-Only the region form is judged by the ringee's counters. A region is a window
+The following forms show the other targets:
+
+```
+ring --ringee vfu-doorbell,region=0 --count 1000     one of the ringee's regions
+ring --ringee vfu-doorbell,offset=0x2000 --count 1   an offset into its BAR0
+ring --ringee qemu-pci-testdev --count 10            a named device's doorbell
+ring --ringee qemu-nvme,sq=free --count 3            an NVMe queue's doorbell
+ring --ringee 0000:00:03.0,offset=0x10f0 --count 1   any PCI device
+ring --ringer cpu ...                                the CPU writes instead
+ring --ringer vfu-doorbell,poll-mmio ...             a ringer option
+ring --preset index-ringer                           a whole run
+```
+
+Only the `region` form is judged by the ringee's counters. A region is a window
 in the ringee's BAR0 with a model and layout; the tool reads the region's
 configuration back from the ringee and builds the writes to match. The other
 forms have no counters for the target, so QEMU devices are checked with QEMU's
-trace (below) and a `--raw` write into the ringee with `dump` and `log`.
-Fault injection against the ringee, such as a wrong size or stride, belongs on
-`ring <region>` with the option overrides, which also reports the `bad` delta.
+trace (below) and an `offset` write into the ringee with `dump` and `log`. Fault
+injection against the ringee, such as a wrong size or stride, belongs on
+`region=` with `--write` overrides, which also reports the `bad` delta.
 
 The named QEMU devices know where their doorbell is. testdev has one, at BAR0
-offset 0, 1 byte, value 0xFA. NVMe has one per queue, so `--ringee qemu-nvme`
-needs `--sq N` (the SQ tail, at BAR0 + 0x1000 + 8N, 4 bytes), `--cq N` (the CQ
-head, 4 bytes after it) or `--raw`; there is no default. `N` can be `free`, the
+offset 0, 1 byte, value 0xFA. NVMe has one per queue, so `qemu-nvme` needs one
+of `sq=N` (the SQ tail, at BAR0 + 0x1000 + 8N, 4 bytes), `cq=N` (the CQ head, 4
+bytes after it) or `offset=X`; there is no default. `N` can be `free`, the
 lowest queue id the guest's driver does not own (the driver has ids 0 to
 `queue_count - 1` from sysfs, the admin queue included), and the tool prints the
-id it chose. A queue the driver owns is refused unless `--force` is given.
-Everything a named device fills in can also be typed: `--raw`, `--size`,
-`--value`, `--pattern`.
+id it chose. A queue the driver owns is refused unless the option `force` is
+given. Everything a named device fills in can also be typed with `offset=` and
+the `--write` keys `size`, `value` and `pattern`.
 
 Regions are the ringee's, set by the server (`--region`, or the defaults) and
 by `config` from the guest. `config <r> <model> <base> <size> <width> <stride>
@@ -179,14 +196,18 @@ command that does the same:
 
 ```
 testdev-ringer       testdev-like region 3, the match value, ringer
-    ring --ringer vfu-doorbell --ringee vfu-doorbell 3 100
+    ring --ringer vfu-doorbell --ringee vfu-doorbell,region=3 --count 100
 testdev-qemu-ringer  QEMU pci-testdev doorbell, ringer
-    ring --ringer vfu-doorbell --ringee qemu-pci-testdev --raw 0x0 10 ...
+    ring --ringer vfu-doorbell --ringee qemu-pci-testdev --count 10 ...
 ```
 
-Options: `--size`, `--nslots`, `--qids`, `--qid0`, `--ring`, `--step`,
-`--value`, `--pattern monotonic|repeat|random`, `--seq`/`--no-seq`,
-`--delay-ns`, `--stride`, `--shm`, `--inline`, `--poll-mmio`, `--timeout-ms`.
+`--write` keys, not allowed with `--preset`: `size`, `value`, `step`, `pattern`
+(`monotonic`, `repeat` or `random`), `nslots`, `stride`, `seq` (or `seq=0|1`)
+and `delay-ns`. For a region they override what its config implies, so a wrong
+`size` sends malformed writes on purpose. `qids`, `qid0` and `ring` apply to
+keyed regions only and are an error elsewhere. The ringer takes `inline`,
+`poll-mmio`, `shm` and `timeout-ms=N`, and `qemu-nvme` takes `sq`, `cq`,
+`offset` and `force`. `xio-doorbell help` lists them all with one line each.
 
 ## Server logs
 
@@ -218,16 +239,17 @@ leave the trace off, since it logs every MMIO write), then ring them:
 ```bash
 # stack started with VM_QEMU_ARGS="--pci-testdev --nvme 1 \
 #   --nvme-trace memory_region_ops_write"
-sudo xio-doorbell ring --ringee qemu-pci-testdev 1
-sudo xio-doorbell ring --ringee qemu-nvme --sq free 3
-sudo xio-doorbell ring --ringee 0000:00:03.0 --raw 0x10f0 1 --size 4 --value 2
+sudo xio-doorbell ring --ringee qemu-pci-testdev --count 1
+sudo xio-doorbell ring --ringee qemu-nvme,sq=free --count 3
+sudo xio-doorbell ring --ringee 0000:00:03.0,offset=0x10f0 --count 1 \
+    --write size=4,value=2
 docker logs vfu-doorbell-vm-qemu-1 2>&1 | grep -E "pci-testdev|'nvme'"
 ```
 
 Each write that reaches the device is one `memory_region_ops_write` line with
 the address, value, size and region name. `cpu -1` means the write did not come
 from a vCPU, which is what a ringer write looks like. Use a queue that does not
-exist (`--sq free`) so the guest's own queues are not disturbed.
+exist (`sq=free`) so the guest's own queues are not disturbed.
 
 A CPU store that matches a registered ioeventfd (testdev BAR0 offset 0, value
 0xFA) is completed by KVM and never traced. The ringer's write to the same
@@ -245,26 +267,29 @@ issues a doorbell write from its own thread has the same structure.
 
 The tool therefore does not poll the ringer over MMIO. The ringer stores a
 cookie into a guest RAM page when the job ends, which is a DMA-mapped store with
-no protocol message, and the guest polls that page. Pass `--poll-mmio` to poll
-the STATUS register instead and reproduce the hazard:
+no protocol message, and the guest polls that page. Pass `--ringer
+vfu-doorbell,poll-mmio` to poll the STATUS register instead and reproduce the
+hazard:
 
 ```bash
-sudo xio-doorbell ring 0 200 --poll-mmio --timeout-ms 40000
+sudo xio-doorbell ring --ringer vfu-doorbell,poll-mmio,timeout-ms=40000 \
+    --ringee vfu-doorbell,region=0 --count 200
 ```
 
-`--inline` performs the writes from inside the ringer's BAR callback instead of
-its worker thread, the other way to hit the same restriction.
+The ringer option `inline` performs the writes from inside the ringer's BAR
+callback instead of its worker thread, the other way to hit the same
+restriction.
 
 ## Observed behaviour
 
 Against the fork QEMU `4cb9698` and libvfio-user `3719c3a`, `selftest` passes
 all eight scenarios (CPU and ringer, index, keyed with two queue ids on one
-register, event, and backwards-index detection). `ring 0 200 --poll-mmio`
-stalls: 196 of 200 writes fail with `EPROTO` after tens of seconds and the
-ringer logs "not a command req" for nearly every message. libvfio-user prints
-its one-time "without the twin_socket feature" warning on the first
-server-initiated write because QEMU's client does not negotiate the second
-socket.
+register, event, and backwards-index detection). `ring --ringer
+vfu-doorbell,poll-mmio --ringee vfu-doorbell,region=0 --count 200` stalls: 196
+of 200 writes fail with `EPROTO` after tens of seconds and the ringer logs "not
+a command req" for nearly every message. libvfio-user prints its one-time
+"without the twin_socket feature" warning on the first server-initiated write
+because QEMU's client does not negotiate the second socket.
 
 ## Notes
 

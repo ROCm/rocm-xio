@@ -11,6 +11,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -314,7 +315,6 @@ struct opts {
   uint32_t delay_ns;
   uint32_t mode;
   bool inline_mode;
-  bool posted;
   uint64_t stride;
   unsigned timeout_ms;
   bool poll_mmio; /* poll STATUS over MMIO: can deadlock, see README.md */
@@ -339,65 +339,6 @@ static void opts_for_region(const struct region_cfg* c, struct opts* o) {
     o->value = c->match;
     o->pattern = VFU_DB_PAT_REPEAT;
   }
-}
-
-static bool parse_opts(int argc, char** argv, struct opts* o) {
-  for (int i = 0; i < argc; i++) {
-    const char* a = argv[i];
-    const char* v = (i + 1 < argc) ? argv[i + 1] : NULL;
-    if (!strcmp(a, "--seq")) {
-      o->seq = true;
-    } else if (!strcmp(a, "--no-seq")) {
-      o->seq = false;
-    } else if (!strcmp(a, "--inline")) {
-      o->inline_mode = true;
-    } else if (!strcmp(a, "--posted")) {
-      o->posted = true;
-    } else if (!strcmp(a, "--shm")) {
-      o->mode = VFU_DB_MODE_SHM;
-    } else if (!strcmp(a, "--poll-mmio")) {
-      o->poll_mmio = true;
-    } else if (!v) {
-      fprintf(stderr, "option %s needs a value\n", a);
-      return false;
-    } else if (!strcmp(a, "--size")) {
-      o->size = (unsigned)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--nslots")) {
-      o->nslots = (uint32_t)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--qids")) {
-      o->qids = (uint32_t)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--qid0")) {
-      o->qid0 = (uint32_t)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--ring")) {
-      o->ring = (uint32_t)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--step")) {
-      o->step = strtoll(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--value")) {
-      o->value = strtoull(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--delay-ns")) {
-      o->delay_ns = (uint32_t)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--stride")) {
-      o->stride = strtoull(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--timeout-ms")) {
-      o->timeout_ms = (unsigned)strtoul(v, NULL, 0), i++;
-    } else if (!strcmp(a, "--pattern")) {
-      if (!strcmp(v, "monotonic"))
-        o->pattern = VFU_DB_PAT_MONOTONIC;
-      else if (!strcmp(v, "repeat"))
-        o->pattern = VFU_DB_PAT_REPEAT;
-      else if (!strcmp(v, "random"))
-        o->pattern = VFU_DB_PAT_RANDOM;
-      else {
-        fprintf(stderr, "unknown pattern %s\n", v);
-        return false;
-      }
-      i++;
-    } else {
-      fprintf(stderr, "unknown option %s\n", a);
-      return false;
-    }
-  }
-  return true;
 }
 
 /* The CPU path: the same sequence of values the ringer would write, stored by
@@ -505,8 +446,6 @@ static struct ring_result ringer_run(const struct region_cfg* c, uint32_t count,
     flags |= VFU_DB_RF_KEYED;
   if (o->inline_mode)
     flags |= VFU_DB_RF_INLINE;
-  if (o->posted)
-    flags |= VFU_DB_RF_POSTED;
   wr64(&ringer, VFU_DB_R_GPA,
        (o->gpa_base ? o->gpa_base : ringee.gpa) + c->base);
   wr64(&ringer, VFU_DB_R_VALUE, o->value);
@@ -865,30 +804,259 @@ static int cmd_selftest(void) {
   return failures ? 1 : 0;
 }
 
+/*
+ * --ringer, --ringee and --write values are comma-separated options. The first
+ * two start with a name, `name,k1=v1,k2`; --write is only options. The options
+ * belong to what they follow: only the named ringer or ringee (or --write)
+ * accepts them, and any other is an error that lists what it does take.
+ */
+#define SPEC_MAX_OPTS 16
+
+struct spec_opt {
+  char* key;
+  char* val; /* NULL for a bare key */
+};
+
+struct spec {
+  char buf[256];
+  const char* name;
+  struct spec_opt opt[SPEC_MAX_OPTS];
+  int n;
+};
+
+static bool parse_spec(const char* arg, const char* label, bool named,
+                       struct spec* sp) {
+  char* save = NULL;
+  char* t;
+  snprintf(sp->buf, sizeof(sp->buf), "%s", arg);
+  sp->n = 0;
+  if (named) {
+    sp->name = strtok_r(sp->buf, ",", &save);
+    if (!sp->name) {
+      fprintf(stderr, "empty %s\n", label);
+      return false;
+    }
+    t = strtok_r(NULL, ",", &save);
+  } else {
+    sp->name = label;
+    t = strtok_r(sp->buf, ",", &save);
+  }
+  for (; t; t = strtok_r(NULL, ",", &save)) {
+    if (sp->n >= SPEC_MAX_OPTS) {
+      fprintf(stderr, "%s: too many options\n", sp->name);
+      return false;
+    }
+    char* eq = strchr(t, '=');
+    if (eq)
+      *eq++ = '\0';
+    sp->opt[sp->n].key = t;
+    sp->opt[sp->n].val = eq;
+    sp->n++;
+  }
+  return true;
+}
+
+/* `allowed` lists the keys the spec takes, "" for none. `role` is "ringer" or
+ * "ringee", or "" when the spec's name is itself the label (--write). */
+static bool spec_allow(const struct spec* sp, const char* role,
+                       const char* allowed) {
+  for (int i = 0; i < sp->n; i++) {
+    const char* k = sp->opt[i].key;
+    size_t kl = strlen(k);
+    bool ok = false;
+    for (const char* p = allowed; *p;) {
+      size_t len = strcspn(p, ",");
+      if (len == kl && !strncmp(p, k, kl))
+        ok = true;
+      p += len + (p[len] == ',');
+    }
+    if (!ok) {
+      if (*allowed)
+        fprintf(stderr, "%s%s%s has no option '%s' (it takes %s)\n", role,
+                *role ? " " : "", sp->name, k, allowed);
+      else
+        fprintf(stderr, "%s%s%s takes no options, not '%s'\n", role,
+                *role ? " " : "", sp->name, k);
+      return false;
+    }
+  }
+  return true;
+}
+
+static const struct spec_opt* spec_find(const struct spec* sp,
+                                        const char* key) {
+  for (int i = 0; i < sp->n; i++)
+    if (!strcmp(sp->opt[i].key, key))
+      return &sp->opt[i];
+  return NULL;
+}
+
+/* A key that takes a value: NULL when absent. False if it has no value. */
+static bool spec_value(const struct spec* sp, const char* key,
+                       const char** val) {
+  const struct spec_opt* o = spec_find(sp, key);
+  *val = o ? o->val : NULL;
+  if (o && !o->val) {
+    fprintf(stderr, "%s: option %s needs a value (%s=...)\n", sp->name, key,
+            key);
+    return false;
+  }
+  return true;
+}
+
+/* A key that is a flag. False if it was given a value. */
+static bool spec_flag(const struct spec* sp, const char* key, bool* on) {
+  const struct spec_opt* o = spec_find(sp, key);
+  *on = o != NULL;
+  if (o && o->val) {
+    fprintf(stderr, "%s: option %s takes no value\n", sp->name, key);
+    return false;
+  }
+  return true;
+}
+
+static bool num_u64(const char* what, const char* v, uint64_t* out) {
+  char* end = NULL;
+  *out = strtoull(v, &end, 0);
+  if (!*v || *end) {
+    fprintf(stderr, "%s: '%s' is not a number\n", what, v);
+    return false;
+  }
+  return true;
+}
+
+/* An optional numeric key: *have says whether it was given. */
+static bool spec_u64(const struct spec* sp, const char* key, uint64_t* out,
+                     bool* have) {
+  const char* v;
+  *have = false;
+  if (!spec_value(sp, key, &v))
+    return false;
+  if (!v)
+    return true;
+  *have = true;
+  return num_u64(key, v, out);
+}
+
+/* The --write options: what each write looks like and how they are spread. The
+ * defaults, already in `o`, come from the region or the named device. */
+static bool apply_write(const struct spec* sp, bool keyed, struct opts* o) {
+  bool have;
+  uint64_t u;
+  const char* v;
+
+  if (!spec_allow(sp, "",
+                  "size,value,step,pattern,nslots,stride,seq,delay-ns,"
+                  "qids,qid0,ring"))
+    return false;
+  if (!keyed && (spec_find(sp, "qids") || spec_find(sp, "qid0") ||
+                 spec_find(sp, "ring"))) {
+    fprintf(stderr, "--write: qids, qid0 and ring apply only to a keyed "
+                    "region\n");
+    return false;
+  }
+  if (!spec_u64(sp, "size", &u, &have))
+    return false;
+  if (have) {
+    if (u != 1 && u != 2 && u != 4 && u != 8) {
+      fprintf(stderr, "--write: size must be 1, 2, 4 or 8\n");
+      return false;
+    }
+    o->size = (unsigned)u;
+  }
+  if (!spec_u64(sp, "value", &u, &have))
+    return false;
+  if (have)
+    o->value = u;
+  if (!spec_value(sp, "step", &v))
+    return false;
+  if (v) {
+    char* end = NULL;
+    o->step = strtoll(v, &end, 0);
+    if (!*v || *end) {
+      fprintf(stderr, "step: '%s' is not a number\n", v);
+      return false;
+    }
+  }
+  if (!spec_value(sp, "pattern", &v))
+    return false;
+  if (v) {
+    if (!strcmp(v, "monotonic")) {
+      o->pattern = VFU_DB_PAT_MONOTONIC;
+    } else if (!strcmp(v, "repeat")) {
+      o->pattern = VFU_DB_PAT_REPEAT;
+    } else if (!strcmp(v, "random")) {
+      o->pattern = VFU_DB_PAT_RANDOM;
+    } else {
+      fprintf(stderr,
+              "--write: pattern is monotonic, repeat or random, not "
+              "'%s'\n",
+              v);
+      return false;
+    }
+  }
+  if (!spec_u64(sp, "nslots", &u, &have))
+    return false;
+  if (have)
+    o->nslots = (uint32_t)u;
+  if (!spec_u64(sp, "stride", &u, &have))
+    return false;
+  if (have)
+    o->stride = u;
+  if (!spec_u64(sp, "delay-ns", &u, &have))
+    return false;
+  if (have)
+    o->delay_ns = (uint32_t)u;
+  if (!spec_u64(sp, "qids", &u, &have))
+    return false;
+  if (have)
+    o->qids = (uint32_t)u;
+  if (!spec_u64(sp, "qid0", &u, &have))
+    return false;
+  if (have)
+    o->qid0 = (uint32_t)u;
+  if (!spec_u64(sp, "ring", &u, &have))
+    return false;
+  if (have)
+    o->ring = (uint32_t)u;
+  /* seq is a flag, or seq=0 / seq=1 */
+  const struct spec_opt* so = spec_find(sp, "seq");
+  if (so) {
+    if (!so->val) {
+      o->seq = true;
+    } else {
+      if (!num_u64("seq", so->val, &u))
+        return false;
+      o->seq = u != 0;
+    }
+  }
+  return true;
+}
+
 /* ---------------------------------------------------------------------- */
 /* ring: who writes (--ringer), what is rung (--ringee), and presets       */
 /* ---------------------------------------------------------------------- */
 
+/* clang-format off */
 /*
  * A ringee is the thing being rung:
  *
- *   vfu-doorbell                 our ringee device (the default)
- *   qemu-pci-testdev             QEMU's pci-testdev. Doorbell at BAR0 offset 0,
- *                                1 byte, rings only on 0xFA (an ioeventfd
- *                                datamatch).
- *   qemu-nvme                    QEMU's NVMe. It has a doorbell per queue, so
- *                                the doorbell is chosen with --sq N|free,
- *                                --cq N|free or --raw: SQ tail or CQ head at
- *                                BAR0+0x1000 with stride 8 per queue (CAP.DSTRD
- *                                0). `free` is the lowest queue id the guest's
- *                                driver does not own.
- *   <bdf>                        any other PCI device; needs --raw
+ *   vfu-doorbell        our ringee device (the default)
+ *   qemu-pci-testdev    QEMU's pci-testdev. Doorbell at BAR0 offset 0, 1 byte,
+ *                       rings only on 0xFA (an ioeventfd datamatch).
+ *   qemu-nvme           QEMU's NVMe. It has a doorbell per queue, chosen with
+ *                       the options sq=N|free or cq=N|free (or with --raw): SQ
+ *                       tail or CQ head at BAR0+0x1000 with stride 8 per queue
+ *                       (CAP.DSTRD 0). `free` is the lowest queue id the guest's
+ *                       driver does not own. force allows one it owns.
+ *   <bdf>               any other PCI device; needs --raw
  *
  * A device with one doorbell (qemu-pci-testdev) is rung with `ring --ringee X
  * <count>`. Everything a named device fills in can also be typed: --raw
  * <offset> is an offset into the device's BAR0, with --size, --value and
  * --pattern.
  */
+/* clang-format on */
 struct target {
   struct dev store;
   struct dev* dev;
@@ -948,7 +1116,7 @@ static unsigned nvme_free_queue(const char* bdf) {
   return nvme_queue_count(bdf, &count) ? count : 1;
 }
 
-/* BAR0 offset of a queue's doorbell: --sq/--cq take a number or `free`. */
+/* BAR0 offset of a queue's doorbell: sq and cq take a number or `free`. */
 static bool nvme_doorbell(const struct target* t, bool cq, const char* val,
                           uint64_t* off) {
   unsigned qid;
@@ -958,7 +1126,9 @@ static bool nvme_doorbell(const struct target* t, bool cq, const char* val,
   } else if (val[0] >= '0' && val[0] <= '9') {
     qid = (unsigned)strtoul(val, NULL, 0);
   } else {
-    fprintf(stderr, "--%s takes a queue number or free, not '%s'\n",
+    fprintf(stderr,
+            "ringee qemu-nvme: %s takes a queue number or free, not "
+            "'%s'\n",
             cq ? "cq" : "sq", val);
     return false;
   }
@@ -1038,6 +1208,23 @@ static void apply_pattern(const struct pattern* p, struct opts* o) {
     o->pattern = p->pattern;
 }
 
+/* The options only the vfu-doorbell ringer takes: how it writes, not what. */
+struct ringer_opts {
+  bool inline_mode;
+  bool poll_mmio;
+  bool shm;
+  unsigned timeout_ms; /* 0: the default */
+};
+
+static void apply_ringer_opts(const struct ringer_opts* rp, struct opts* o) {
+  o->inline_mode = rp->inline_mode;
+  o->poll_mmio = rp->poll_mmio;
+  if (rp->shm)
+    o->mode = VFU_DB_MODE_SHM;
+  if (rp->timeout_ms)
+    o->timeout_ms = rp->timeout_ms;
+}
+
 enum { EXP_NONE = 0, EXP_ARRIVE_ALL, EXP_ALL_IGNORED };
 
 /* Run against one of the ringee's own regions and judge it by the counters. */
@@ -1091,8 +1278,8 @@ static int run_region(bool cpu, unsigned r, uint32_t count, struct opts* o,
 }
 
 /* ring <region> ... */
-static int ring_region(bool cpu, unsigned r, uint32_t count, int nopt,
-                       char** opt) {
+static int ring_region(bool cpu, const struct ringer_opts* rp, unsigned r,
+                       uint32_t count, const struct spec* wr) {
   struct region_cfg before;
   struct opts o;
 
@@ -1104,8 +1291,9 @@ static int ring_region(bool cpu, unsigned r, uint32_t count, int nopt,
     return 1;
   }
   opts_for_region(&before, &o);
-  if (!parse_opts(nopt, opt, &o))
+  if (!apply_write(wr, before.model == VFU_DB_MODEL_KEYED, &o))
     return 2;
+  apply_ringer_opts(rp, &o);
   return run_region(cpu, r, count, &o, &before, EXP_NONE, NULL);
 }
 
@@ -1120,7 +1308,7 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
   } else if (t->has_base) {
     c.base = t->base;
   } else {
-    fprintf(stderr, "this ringee has no known doorbell: pass --raw <offset>\n");
+    fprintf(stderr, "this ringee has no known doorbell: give offset=X\n");
     return 2;
   }
   if (c.base + o->size > t->dev->size) {
@@ -1132,7 +1320,7 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
       queue_in_use(t->dev->bdf, (unsigned)((c.base - 0x1000) / 8))) {
     fprintf(stderr,
             "NVMe queue %u exists in the guest's driver; ringing it can "
-            "corrupt a live queue. Pick another or pass --force.\n",
+            "corrupt a live queue. Pick another or add ,force to the ringee.\n",
             (unsigned)((c.base - 0x1000) / 8));
     return 1;
   }
@@ -1158,7 +1346,7 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
            (unsigned long long)res.sent, (unsigned long long)res.errors,
            res.err_no, res.timed_out ? "  TIMEOUT" : "");
   if (t->ours)
-    printf("no region is judged for a --raw write: read the ringee with dump "
+    printf("no region is judged for an offset write: read the ringee with dump "
            "and log\n");
   else
     printf("no ringee counters for this device: check its own trace\n");
@@ -1183,12 +1371,11 @@ struct preset {
   bool cpu;              /* the ringer: the CPU, else the vfu-doorbell ringer */
   const char* ringee;    /* as for --ringee */
   int region;            /* the ringee's region, or -1 */
-  uint64_t raw;          /* BAR0 offset, when there is no region */
   struct region_cfg cfg; /* what the region must be */
   uint32_t count;
   struct pattern pat;
   unsigned expect;
-  const char* qsel; /* an NVMe doorbell instead of raw: "sq=free", "cq=3" */
+  const char* qsel; /* an NVMe doorbell: "sq=free", "cq=3" */
 };
 
 #define RG(m, f, b, sz, w, st, mt)                                             \
@@ -1206,7 +1393,6 @@ static const struct preset presets[] = {
    false,
    "vfu-doorbell",
    0,
-   0,
    RG(VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0),
    1000,
    {.nslots = 4},
@@ -1216,7 +1402,6 @@ static const struct preset presets[] = {
    "index region 0, 1000 writes over 4 slots, CPU",
    true,
    "vfu-doorbell",
-   0,
    0,
    RG(VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0),
    1000,
@@ -1228,7 +1413,6 @@ static const struct preset presets[] = {
    false,
    "vfu-doorbell",
    1,
-   0,
    RG(VFU_DB_MODEL_KEYED, VFU_DB_FLAG_SEQ, 0x3000, 0x1000, 8, 8, 0),
    1000,
    {.nslots = 1, .qids = 2},
@@ -1239,7 +1423,6 @@ static const struct preset presets[] = {
    false,
    "vfu-doorbell",
    2,
-   0,
    RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_SEQ, 0x4000, 0x1000, 4, 4, 0),
    1000,
    {.nslots = 4},
@@ -1250,7 +1433,6 @@ static const struct preset presets[] = {
    false,
    "vfu-doorbell",
    3,
-   0,
    RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_MATCH, 0x5000, 0x100, 1, 1, 0xfa),
    100,
    {0},
@@ -1261,7 +1443,6 @@ static const struct preset presets[] = {
    false,
    "vfu-doorbell",
    3,
-   0,
    RG(VFU_DB_MODEL_EVENT, VFU_DB_FLAG_MATCH, 0x5000, 0x100, 1, 1, 0xfa),
    100,
    {.has_value = true, .value = 0xfb},
@@ -1272,7 +1453,6 @@ static const struct preset presets[] = {
    false,
    "qemu-pci-testdev",
    -1,
-   0,
    {0},
    10,
    {.size = 1,
@@ -1287,7 +1467,6 @@ static const struct preset presets[] = {
    true,
    "qemu-pci-testdev",
    -1,
-   0,
    {0},
    10,
    {.size = 1,
@@ -1302,7 +1481,6 @@ static const struct preset presets[] = {
    false,
    "qemu-nvme",
    -1,
-   0,
    {0},
    3,
    {.size = 4},
@@ -1316,32 +1494,44 @@ static const char* pattern_name(uint32_t p) {
                                   : "monotonic";
 }
 
+static size_t wadd(char* w, size_t m, size_t n, const char* fmt, ...) {
+  va_list ap;
+  int k;
+  va_start(ap, fmt);
+  k = vsnprintf(w + m, n - m, fmt, ap);
+  va_end(ap);
+  return m + (size_t)k;
+}
+
 /* The explicit command line that does what a preset does. */
 static void preset_cmdline(const struct preset* p, char* out, size_t n) {
-  size_t k = (size_t)snprintf(out, n, "ring --ringer %s --ringee %s ",
+  char w[160];
+  size_t m = 0;
+  size_t k = (size_t)snprintf(out, n, "ring --ringer %s --ringee %s",
                               p->cpu ? "cpu" : "vfu-doorbell", p->ringee);
   if (p->region >= 0)
-    k += (size_t)snprintf(out + k, n - k, "%d %u", p->region, p->count);
+    k += (size_t)snprintf(out + k, n - k, ",region=%d", p->region);
   else if (p->qsel)
-    k += (size_t)snprintf(out + k, n - k, "--%.2s %s %u", p->qsel, p->qsel + 3,
-                          p->count);
-  else
-    k += (size_t)snprintf(out + k, n - k, "--raw 0x%llx %u",
-                          (unsigned long long)p->raw, p->count);
+    k += (size_t)snprintf(out + k, n - k, ",%s", p->qsel);
+  k += (size_t)snprintf(out + k, n - k, " --count %u", p->count);
+  w[0] = '\0';
   if (p->region < 0 && p->pat.size)
-    k += (size_t)snprintf(out + k, n - k, " --size %u", p->pat.size);
+    m = wadd(w, m, sizeof(w), "%ssize=%u", m ? "," : "", p->pat.size);
   if (p->pat.nslots)
-    k += (size_t)snprintf(out + k, n - k, " --nslots %u", p->pat.nslots);
+    m = wadd(w, m, sizeof(w), "%snslots=%u", m ? "," : "", p->pat.nslots);
   if (p->pat.qids)
-    k += (size_t)snprintf(out + k, n - k, " --qids %u", p->pat.qids);
+    m = wadd(w, m, sizeof(w), "%sqids=%u", m ? "," : "", p->pat.qids);
   if (p->pat.step)
-    k += (size_t)snprintf(out + k, n - k, " --step %lld",
-                          (long long)p->pat.step);
+    m = wadd(w, m, sizeof(w), "%sstep=%lld", m ? "," : "",
+             (long long)p->pat.step);
   if (p->pat.has_value)
-    k += (size_t)snprintf(out + k, n - k, " --value 0x%llx",
-                          (unsigned long long)p->pat.value);
+    m = wadd(w, m, sizeof(w), "%svalue=0x%llx", m ? "," : "",
+             (unsigned long long)p->pat.value);
   if (p->pat.has_pattern)
-    snprintf(out + k, n - k, " --pattern %s", pattern_name(p->pat.pattern));
+    m = wadd(w, m, sizeof(w), "%spattern=%s", m ? "," : "",
+             pattern_name(p->pat.pattern));
+  if (m)
+    snprintf(out + k, n - k, " --write %s", w);
 }
 
 static int cmd_presets(void) {
@@ -1408,66 +1598,90 @@ static int run_preset(const struct preset* p) {
   struct region_cfg c0 = {.model = VFU_DB_MODEL_INDEX, .width = 4};
   opts_for_region(&c0, &o);
   apply_pattern(&p->pat, &o);
-  uint64_t raw = p->raw;
-  if (p->qsel && !nvme_doorbell(&t, p->qsel[0] == 'c', p->qsel + 3, &raw))
+  uint64_t where = 0;
+  if (p->qsel && !nvme_doorbell(&t, p->qsel[0] == 'c', p->qsel + 3, &where))
     return 1;
-  return ring_external(p->cpu, false, &t, true, raw, p->count, &o);
+  return ring_external(p->cpu, false, &t, p->qsel != NULL, where, p->count, &o);
 }
 
+static bool ringer_spec(const char* arg, bool* cpu, struct ringer_opts* rp) {
+  struct spec sp;
+  const char* v;
+  if (!parse_spec(arg, "ringer", true, &sp))
+    return false;
+  if (!strcmp(sp.name, "cpu")) {
+    *cpu = true;
+    return spec_allow(&sp, "ringer", "");
+  }
+  if (strcmp(sp.name, "vfu-doorbell")) {
+    fprintf(stderr, "unknown ringer '%s' (vfu-doorbell, cpu)\n", sp.name);
+    return false;
+  }
+  if (!spec_allow(&sp, "ringer", "inline,poll-mmio,shm,timeout-ms") ||
+      !spec_flag(&sp, "inline", &rp->inline_mode) ||
+      !spec_flag(&sp, "poll-mmio", &rp->poll_mmio) ||
+      !spec_flag(&sp, "shm", &rp->shm) || !spec_value(&sp, "timeout-ms", &v))
+    return false;
+  if (v) {
+    uint64_t ms;
+    if (!num_u64("timeout-ms", v, &ms))
+      return false;
+    rp->timeout_ms = (unsigned)ms;
+  }
+  return true;
+}
+
+static int ring_usage(void) {
+  fprintf(stderr,
+          "ring [--ringee D[,opts]] [--ringer R[,opts]] [--count N] [--write "
+          "k=v,...]\n"
+          "ring --preset <name>\n"
+          "(xio-doorbell help lists the options)\n");
+  return 2;
+}
+
+/* clang-format off */
 /*
  * ring: ring a doorbell and say what arrived.
  *
- *   ring <region> <count>                  one of the ringee's own regions
- *   ring --raw <offset> <count>            an explicit BAR0 offset
- *   ring --ringee <dev> [--raw <off>] <count>   a QEMU device or any PCI device
- *   ring --preset <name>                   a whole run, nothing else accepted
+ *   ring --ringee vfu-doorbell,region=0 --count 1000 --write nslots=4
+ *   ring --ringee qemu-nvme,sq=free --count 3
+ *   ring --ringee <bdf>,offset=0x10f0 --count 1 --write size=4,value=9
+ *   ring --preset <name>                          a whole run, nothing else
  *
- * --ringer vfu-doorbell|cpu picks who writes (default vfu-doorbell);
- * --ringee picks what is rung (default vfu-doorbell). --force lets a write
- * reach an NVMe queue the guest's driver owns.
+ * --ringee picks what is rung and where in it (default vfu-doorbell,region=0);
+ * --ringer picks who writes (vfu-doorbell, the default, or cpu); --write shapes the
+ * writes. Each takes comma-separated options that only it understands.
  */
+/* clang-format on */
 static int cmd_ring(int argc, char** argv) {
-  const char* raw = NULL;
   const char* ringer_arg = NULL;
   const char* ringee_arg = NULL;
+  const char* write_arg = NULL;
+  const char* count_arg = NULL;
   const char* preset = NULL;
-  const char* sq_arg = NULL;
-  const char* cq_arg = NULL;
-  bool force = false;
-  int n = 0;
-  char* rest[64];
 
-  for (int i = 0; i < argc && n < 63; i++) {
+  for (int i = 0; i < argc; i++) {
     const char* a = argv[i];
-    if (!strcmp(a, "--force")) {
-      force = true;
-    } else if (!strcmp(a, "--raw") || !strcmp(a, "--ringer") ||
-               !strcmp(a, "--ringee") || !strcmp(a, "--preset") ||
-               !strcmp(a, "--sq") || !strcmp(a, "--cq")) {
-      if (i + 1 >= argc) {
-        fprintf(stderr, "%s needs a value\n", a);
-        return 2;
-      }
-      const char* v = argv[++i];
-      if (!strcmp(a, "--raw"))
-        raw = v;
-      else if (!strcmp(a, "--ringer"))
-        ringer_arg = v;
-      else if (!strcmp(a, "--ringee"))
-        ringee_arg = v;
-      else if (!strcmp(a, "--sq"))
-        sq_arg = v;
-      else if (!strcmp(a, "--cq"))
-        cq_arg = v;
-      else
-        preset = v;
-    } else {
-      rest[n++] = argv[i];
+    const char** dst = !strcmp(a, "--ringer")   ? &ringer_arg
+                       : !strcmp(a, "--ringee") ? &ringee_arg
+                       : !strcmp(a, "--write")  ? &write_arg
+                       : !strcmp(a, "--count")  ? &count_arg
+                       : !strcmp(a, "--preset") ? &preset
+                                                : NULL;
+    if (!dst) {
+      fprintf(stderr, "unexpected argument '%s'\n", a);
+      return ring_usage();
     }
+    if (i + 1 >= argc) {
+      fprintf(stderr, "%s needs a value\n", a);
+      return 2;
+    }
+    *dst = argv[++i];
   }
 
   if (preset) {
-    if (n || raw || ringer_arg || ringee_arg || sq_arg || cq_arg || force) {
+    if (ringer_arg || ringee_arg || write_arg || count_arg) {
       fprintf(stderr, "--preset takes no other argument; use `presets` to "
                       "see what each one does\n");
       return 2;
@@ -1479,56 +1693,77 @@ static int cmd_ring(int argc, char** argv) {
     return 2;
   }
 
+  uint64_t count = 1;
+  if (count_arg && !num_u64("--count", count_arg, &count))
+    return 2;
+
   bool cpu = false;
-  if (ringer_arg) {
-    if (!strcmp(ringer_arg, "cpu")) {
-      cpu = true;
-    } else if (strcmp(ringer_arg, "vfu-doorbell")) {
-      fprintf(stderr, "unknown ringer '%s' (vfu-doorbell, cpu)\n", ringer_arg);
+  struct ringer_opts rp = {0};
+  if (ringer_arg && !ringer_spec(ringer_arg, &cpu, &rp))
+    return 2;
+
+  struct spec rs;
+  if (!parse_spec(ringee_arg ? ringee_arg : "vfu-doorbell,region=0", "ringee",
+                  true, &rs))
+    return 2;
+  const char* name = rs.name;
+  const bool ours = !strcmp(name, "vfu-doorbell");
+  const bool is_testdev = !strcmp(name, "qemu-pci-testdev");
+  const bool is_nvme = !strcmp(name, "qemu-nvme");
+  if (!strncmp(name, "qemu-", 5) && !is_testdev && !is_nvme) {
+    fprintf(stderr, "unknown ringee '%s' (qemu-pci-testdev, qemu-nvme)\n",
+            name);
+    return 2;
+  }
+  if (!spec_allow(&rs, "ringee",
+                  ours      ? "region,offset"
+                  : is_nvme ? "sq,cq,force,offset"
+                            : "offset"))
+    return 2;
+  const char *region_s, *sq, *cq, *offset_s;
+  bool force;
+  if (!spec_value(&rs, "region", &region_s) || !spec_value(&rs, "sq", &sq) ||
+      !spec_value(&rs, "cq", &cq) || !spec_value(&rs, "offset", &offset_s) ||
+      !spec_flag(&rs, "force", &force))
+    return 2;
+  const int chosen = !!region_s + !!sq + !!cq + !!offset_s;
+  if (chosen > 1) {
+    fprintf(stderr, "ringee %s: give only one of %s\n", name,
+            ours      ? "region and offset"
+            : is_nvme ? "sq, cq and offset"
+                      : "offset");
+    return 2;
+  }
+  if (!chosen && !is_testdev) {
+    if (ours)
+      fprintf(stderr, "ringee vfu-doorbell needs region=N or offset=X\n");
+    else if (is_nvme)
+      fprintf(stderr, "which doorbell? give the ringee sq=N|free, cq=N|free "
+                      "or offset=X\n");
+    else
+      fprintf(stderr, "ringee %s needs offset=X\n", name);
+    return 2;
+  }
+
+  struct spec ws;
+  if (!parse_spec(write_arg ? write_arg : "", "--write", false, &ws))
+    return 2;
+
+  if (region_s) {
+    uint64_t r;
+    if (!num_u64("region", region_s, &r))
+      return 2;
+    if (r >= VFU_DB_RE_MAX_REGIONS) {
+      fprintf(stderr, "region must be below %u\n", VFU_DB_RE_MAX_REGIONS);
       return 2;
     }
+    return ring_region(cpu, &rp, (unsigned)r, (uint32_t)count, &ws);
   }
-  const char* ringee_spec = ringee_arg ? ringee_arg : "vfu-doorbell";
-  if ((sq_arg && cq_arg) || ((sq_arg || cq_arg) && raw)) {
-    fprintf(stderr, "--sq, --cq and --raw are mutually exclusive\n");
-    return 2;
-  }
-  if ((sq_arg || cq_arg) && strcmp(ringee_spec, "qemu-nvme")) {
-    fprintf(stderr, "--sq and --cq need --ringee qemu-nvme\n");
-    return 2;
-  }
-  const bool ours = !strcmp(ringee_spec, "vfu-doorbell");
-  const bool named = !strncmp(ringee_spec, "qemu-", 5);
-
-  /* Leading non-option tokens are positional: <region> <count> for one of the
-   * ringee's regions, otherwise just <count>. */
-  int npos = 0;
-  while (npos < n && strncmp(rest[npos], "--", 2))
-    npos++;
-  const bool region_form = ours && !raw;
-  const int want = region_form ? 2 : 1;
-  if (npos != want || (!region_form && !raw && !named)) {
-    fprintf(
-      stderr,
-      "ring <region> <count> [options]\n"
-      "ring --raw <offset> <count> [options]\n"
-      "ring --ringee <dev> [--sq N|free|--cq N|free|--raw <offset>] <count> "
-      "[options]\n"
-      "ring --preset <name>\n"
-      "(xio-doorbell help lists the options)\n");
-    return 2;
-  }
-  uint32_t count = (uint32_t)strtoul(rest[want - 1], NULL, 0);
-  char** opt = rest + npos;
-  const int nopt = n - npos;
-  if (region_form)
-    return ring_region(cpu, (unsigned)strtoul(rest[0], NULL, 0), count, nopt,
-                       opt);
 
   struct target t;
   struct opts o;
   struct region_cfg c0 = {.model = VFU_DB_MODEL_INDEX, .width = 4};
-  if (!resolve_ringee(ringee_spec, &t))
+  if (!resolve_ringee(name, &t))
     return 1;
   opts_for_region(&c0, &o);
   if (t.size)
@@ -1537,68 +1772,93 @@ static int cmd_ring(int argc, char** argv) {
     o.value = t.value;
   if (t.has_pattern)
     o.pattern = t.pattern;
-  if (!parse_opts(nopt, opt, &o))
+  if (!apply_write(&ws, false, &o))
     return 2;
-  bool have_raw = raw != NULL;
-  uint64_t where = raw ? strtoull(raw, NULL, 0) : 0;
-  if (t.nvme) {
-    if (sq_arg || cq_arg) {
-      if (!nvme_doorbell(&t, cq_arg != NULL, sq_arg ? sq_arg : cq_arg, &where))
-        return 2;
-      have_raw = true;
-    } else if (!raw) {
-      fprintf(stderr, "which doorbell? pass --sq N|free, --cq N|free or --raw "
-                      "<offset>\n");
+  apply_ringer_opts(&rp, &o);
+  bool have_raw = false;
+  uint64_t where = 0;
+  if (offset_s) {
+    if (!num_u64("offset", offset_s, &where))
       return 2;
-    }
+    have_raw = true;
+  } else if (sq || cq) {
+    if (!nvme_doorbell(&t, cq != NULL, sq ? sq : cq, &where))
+      return 2;
+    have_raw = true;
   }
-  return ring_external(cpu, force, &t, have_raw, where, count, &o);
+  return ring_external(cpu, force, &t, have_raw, where, (uint32_t)count, &o);
 }
 
+/* clang-format off */
 static void usage(FILE* out) {
   fputs(
     "usage: xio-doorbell <command> [args]\n"
     "\n"
-    "commands:\n"
-    "  info                        devices and configured regions\n"
-    "  reset                       reset the ringee's counters, state and log\n"
-    "  dump [region]               region counters\n"
-    "  log [n]                     the last n logged writes\n"
-    "  config <region> <model> <base> <size> <width> <stride> [seq] "
-    "[match=V]\n"
-    "                              set a region; model: index|keyed|event\n"
-    "  config <region> match=V     change only a match region's match value\n"
-    "  presets                     list the presets and their explicit "
-    "commands\n"
-    "  selftest                    run the built-in scenarios\n"
-    "  ring                        ring a doorbell, see below\n"
-    "  help                        this text\n"
+    "  info                      show the devices and the configured regions\n"
+    "  reset                     reset the ringee's counters, per-key state and write log\n"
+    "  dump [region]             show region counters\n"
+    "  log [n]                   show the last n logged writes, in arrival order\n"
+    "  config <region> <model> <base> <size> <width> <stride> [seq] [match=V]\n"
+    "                            set a region; model is index, keyed or event\n"
+    "  config <region> match=V   change only a match region's match value, with no reset\n"
+    "  presets                   list the presets, each with the explicit ring command that does the same\n"
+    "  selftest                  run the built-in scenarios\n"
+    "  ring                      ring a doorbell and report what arrived (two forms, below)\n"
+    "  help                      this text\n"
     "\n"
-    "ring forms:\n"
-    "  ring <region> <count>       a ringee region, judged by its counters\n"
-    "  ring --raw <offset> <count> an offset into the ringee's BAR0\n"
-    "  ring --ringee <dev> <count> a QEMU device or any PCI device, no "
-    "counters\n"
-    "  ring --preset <name>        a whole run; takes no other argument\n"
+    "ring [--ringee D[,opts]] [--ringer R[,opts]] [--count N] [--write k=v,...]\n"
     "\n"
-    "ring options:\n"
-    "  --ringer vfu-doorbell|cpu   who writes (default vfu-doorbell)\n"
-    "  --ringee <dev>              what is rung (default vfu-doorbell): "
-    "vfu-doorbell,\n"
-    "                              qemu-pci-testdev, qemu-nvme or a PCI BDF\n"
-    "  --raw <offset>              BAR0 offset to ring; needed for a BDF\n"
-    "  --sq N|free, --cq N|free    qemu-nvme: a queue's SQ tail or CQ head\n"
-    "                              (free: lowest queue the driver does not "
-    "own)\n"
-    "  --force                     ring an NVMe queue the guest driver owns\n"
+    "  Every flag is optional. With none, this is what runs:\n"
+    "      ring --ringee vfu-doorbell,region=0 --ringer vfu-doorbell --count 1\n"
     "\n"
-    "write options (not with --preset):\n"
-    "  --size W  --nslots N  --qids Q  --qid0 Q  --ring R  --step S\n"
-    "  --value V  --pattern monotonic|repeat|random  --seq  --no-seq\n"
-    "  --delay-ns N  --stride B  --timeout-ms N  --shm  --inline  --posted\n"
-    "  --poll-mmio                 poll STATUS over MMIO (can deadlock)\n",
+    "  Options after a comma belong to the thing they follow; one it does not take is an error.\n"
+    "\n"
+    "  --ringee D[,opts]         [default: --ringee vfu-doorbell,region=0]  What is rung, and where in it. One of:\n"
+    "      vfu-doorbell,(region=N | offset=X)\n"
+    "      qemu-pci-testdev[,offset=X]\n"
+    "      qemu-nvme,(sq=Q | cq=Q | offset=X)[,force]\n"
+    "      BDF,offset=X                            any other PCI device, for example 0000:00:03.0\n"
+    "    In these forms [ ] is optional and ( | ) is exactly one of the choices. What each option means:\n"
+    "      region=N              one of our ringee's regions; its counters judge the writes (only this form is judged)\n"
+    "      offset=X              an offset into the device's BAR0  [qemu-pci-testdev default: offset=0, its one doorbell]\n"
+    "      sq=Q                  a queue's SQ tail doorbell; Q is a queue number, or free for the lowest queue the driver does not own\n"
+    "      cq=Q                  a queue's CQ head doorbell; Q is as for sq\n"
+    "      force                 also allow a queue the guest driver owns\n"
+    "\n"
+    "  --ringer R[,opts]         [default: --ringer vfu-doorbell]  Who writes. One of:\n"
+    "      vfu-doorbell[,inline][,poll-mmio][,shm][,timeout-ms=N]     the ringer device, writing with vfu_mmio_write\n"
+    "      cpu                                                        the guest CPU stores through the mapped BAR\n"
+    "    What each option means:\n"
+    "      inline                write from the ringer's BAR callback (can deadlock)\n"
+    "      poll-mmio             poll the ringer's STATUS register over MMIO (can deadlock)\n"
+    "      shm                   write through DMA-mapped guest memory\n"
+    "      timeout-ms=N          how long to wait for the ringer to finish  [default: timeout-ms=10000]\n"
+    "\n"
+    "  --count N                 [default: --count 1]  How many writes\n"
+    "\n"
+    "  --write k=v,...           [default: none]  Shape the writes. Every key is optional. Defaults come from the region or the\n"
+    "                            named device; for a region these override what its config implies, so a wrong size\n"
+    "                            sends malformed writes on purpose.\n"
+    "      size=W                bytes per write: 1, 2, 4 or 8\n"
+    "      value=V               the first value\n"
+    "      step=S                added to the value on each write to a slot\n"
+    "      pattern=P             monotonic (adds step), repeat or random\n"
+    "      nslots=N              slots cycled through\n"
+    "      stride=B              bytes between slots\n"
+    "      seq[=0|1]             put a per-slot sequence number above the index\n"
+    "      delay-ns=N            pause after each write\n"
+    "      qids=Q                queue ids cycled through; only for a keyed region, an error otherwise\n"
+    "      qid0=Q                the first queue id; keyed region only\n"
+    "      ring=R                the ring; keyed region only\n"
+    "\n"
+    "ring --preset <name>\n"
+    "\n"
+    "  Run a whole named run: its ringer, ringee, region, writes and expected result. <name> is required and\n"
+    "  nothing else may be given with it.\n"
+    "  `presets` lists them, each with the explicit ring command that does the same.\n",
     out);
 }
+/* clang-format on */
 
 int main(int argc, char** argv) {
   if (argc < 2) {
