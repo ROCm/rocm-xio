@@ -42,8 +42,11 @@ public:
    * @param provider "mlx5", "bnxt", "ionic" or "ernic" (must be compiled in).
    * @param device RDMA device name such as "mlx5_0"; empty picks the first.
    * @param gpu HIP device index the QP's doorbell/queues are mapped for.
+   * @param deviceQueues Put the send and completion queues in GPU memory (mlx5,
+   * through DevX) instead of host memory.
    */
-  Endpoint(const std::string& provider, const std::string& device, int gpu);
+  Endpoint(const std::string& provider, const std::string& device, int gpu,
+           bool deviceQueues = false);
   ~Endpoint();
   Endpoint(const Endpoint&) = delete;
   Endpoint& operator=(const Endpoint&) = delete;

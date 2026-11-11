@@ -27,7 +27,7 @@ void check(hipError_t err, const char* what) {
 } // namespace
 
 Endpoint::Endpoint(const std::string& provider, const std::string& device,
-                   int gpu) {
+                   int gpu, bool deviceQueues) {
   Provider prov = provider_from_string(provider.c_str());
   if (prov == Provider::UNKNOWN)
     throw std::runtime_error("unknown RDMA provider: " + provider);
@@ -41,6 +41,8 @@ Endpoint::Endpoint(const std::string& provider, const std::string& device,
   cfg.provider = prov;
   cfg.gpu_device_id = gpu;
   cfg.loopback = false;
+  cfg.queue_mem = deviceQueues ? QueueMemMode::DEVICE_VRAM
+                               : QueueMemMode::HOST_COHERENT;
   if (!device_.empty())
     cfg.hca_list = device_.c_str();
 
