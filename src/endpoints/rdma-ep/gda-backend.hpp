@@ -156,9 +156,10 @@ public:
    * @brief Register a data buffer as an MR and update QueuePair keys.
    * @param buf Buffer base pointer.
    * @param size Buffer size in bytes.
+   * @param device True for GPU memory (registered through dmabuf).
    * @return 0 on success, -1 on failure.
    */
-  int register_data_buffer(void* buf, size_t size);
+  int register_data_buffer(void* buf, size_t size, bool device = false);
 
   /**
    * @brief Connect the QP to a remote peer in non-loopback mode.

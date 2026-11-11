@@ -236,6 +236,13 @@ struct ibv_mr* IBVWrapper::reg_mr(struct ibv_pd* pd, void* addr, size_t length,
     return funcs_.reg_mr_iova2(pd, addr, length, (uintptr_t)addr, access);
 }
 
+struct ibv_mr* IBVWrapper::reg_dmabuf_fd(struct ibv_pd* pd, void* addr,
+                                         size_t length, int fd, int access) {
+  if (!funcs_.reg_dmabuf_mr)
+    return nullptr;
+  return funcs_.reg_dmabuf_mr(pd, 0, length, (uint64_t)addr, fd, access);
+}
+
 struct ibv_mr* IBVWrapper::reg_mr_host(struct ibv_pd* pd, void* addr,
                                        size_t length, int access) {
   int is_access_const = __builtin_constant_p(
