@@ -139,6 +139,18 @@ public:
   struct ibv_mr* reg_mr(struct ibv_pd* pd, void* addr, size_t length,
                         int access);
   /**
+   * @brief Register a range exported as a dmabuf fd; the MR keeps its own
+   *        reference, so the caller may close @p fd.
+   * @param pd Protection domain for the MR.
+   * @param addr Base address of the range (used as the IOVA).
+   * @param length Range size in bytes.
+   * @param fd dmabuf file descriptor for the range.
+   * @param access Verbs access flags.
+   * @return Registered memory region, or nullptr on failure.
+   */
+  struct ibv_mr* reg_dmabuf_fd(struct ibv_pd* pd, void* addr, size_t length,
+                               int fd, int access);
+  /**
    * @brief Register host memory with stable IOVA semantics.
    * @param pd Protection domain for the MR.
    * @param addr Buffer base address.
