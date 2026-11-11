@@ -74,8 +74,8 @@ QueuePair::QueuePair(struct ibv_pd* pd, Provider provider)
       op_rdma_write_ = 0x08;     // MLX5_OPCODE_RDMA_WRITE
       op_rdma_write_imm_ = 0x09; // MLX5_OPCODE_RDMA_WRITE_IMM
       op_rdma_read_ = 0x10;      // MLX5_OPCODE_RDMA_READ
-      op_atomic_fa_ = 0x13;      // MLX5_OPCODE_ATOMIC_FA
-      op_atomic_cs_ = 0x12;      // MLX5_OPCODE_ATOMIC_CS
+      op_atomic_fa_ = 0x12;      // MLX5_OPCODE_ATOMIC_FA
+      op_atomic_cs_ = 0x11;      // MLX5_OPCODE_ATOMIC_CS
       nonfetching_atomic_lkey_ = normalize_qp_key(provider,
                                                   mr_nonfetching_atomic_->lkey);
       fetching_atomic_lkey_ = normalize_qp_key(provider,
