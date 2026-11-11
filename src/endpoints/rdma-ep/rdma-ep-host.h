@@ -86,6 +86,60 @@ public:
    */
   std::vector<uint64_t> deviceContext();
 
+  /**
+   * @name CPU posting (Endpoint built with deviceQueues = true, mlx5)
+   * One poster per QP: do not mix with kernels posting on the same endpoint.
+   * @{
+   */
+
+  /**
+   * @brief Write an RDMA WRITE into the send queue without ringing.
+   * @param remoteAddr Destination in the peer's registered buffer.
+   * @param local Source in this endpoint's registered buffer.
+   * @param bytes Number of bytes.
+   * @param signaled Request a completion.
+   * @return The work request's slot index.
+   */
+  uint64_t hostPostWrite(uint64_t remoteAddr, const void* local, size_t bytes,
+                         bool signaled = true);
+
+  /** @brief Ring the doorbell for everything posted (record, flush, doorbell).
+   */
+  void hostRing();
+
+  /** @brief Flush the CPU's queue writes to the device (HDP) without ringing.
+   */
+  void hostFlush();
+
+  /**
+   * @brief Values that would ring the doorbell for everything posted.
+   * @param dbrecBe Doorbell record value, big-endian.
+   * @param doorbellVal Doorbell (control header) value.
+   */
+  void hostStaged(uint32_t* dbrecBe, uint64_t* doorbellVal) const;
+
+  /**
+   * @brief Addresses a DMA engine needs to ring the doorbell.
+   * @param dbrec SQ doorbell record.
+   * @param gpuDoorbell GPU alias of the doorbell register.
+   * @param cpuDoorbell CPU alias of the doorbell register.
+   */
+  void hostAddresses(uint64_t* dbrec, uint64_t* gpuDoorbell,
+                     uint64_t* cpuDoorbell) const;
+
+  /**
+   * @brief Consume completions; throws on an error completion.
+   * @param max Most completions to consume.
+   * @return The number consumed.
+   */
+  unsigned hostPoll(unsigned max);
+
+  /** @brief Work requests posted but not yet completed.
+   * @return The count.
+   */
+  uint64_t hostOutstanding() const;
+  /** @} */
+
 private:
   std::unique_ptr<Backend> backend_;
   std::string device_; /**< Kept alive: the backend keeps a pointer to it. */
