@@ -182,6 +182,29 @@ int initQueue(int srcDeviceId, int dstDeviceId);
 int initHostQueue(int srcDeviceId, int dstDeviceId);
 
 /**
+ * @brief Ensure a GPU pair has at least @p numChannels host-initiated SDMA
+ *        queues (idempotent; never removes any).
+ *
+ * Channels are independent ordered queues, indexed 0 to
+ * getHostChannelCount() - 1.
+ *
+ * @param srcDeviceId Source HIP device ID.
+ * @param dstDeviceId Destination HIP device ID.
+ * @param numChannels Minimum number of host channels; must be positive.
+ * @return 0 on success, negative error code on failure.
+ */
+int initHostQueue(int srcDeviceId, int dstDeviceId, int numChannels);
+
+/**
+ * @brief Number of host-initiated SDMA channels for a GPU pair.
+ *
+ * @param srcDeviceId Source HIP device ID.
+ * @param dstDeviceId Destination HIP device ID.
+ * @return The channel count, or 0 if no host queue exists for the pair.
+ */
+int getHostChannelCount(int srcDeviceId, int dstDeviceId);
+
+/**
  * @brief Destroy an SDMA queue.
  *
  * Releases the ring buffer, device handle memory, and

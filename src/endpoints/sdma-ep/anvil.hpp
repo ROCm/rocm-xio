@@ -91,6 +91,11 @@ public:
                                                   int dstDeviceId,
                                                   int channelIdx = 0);
 
+  /**
+   * @brief Number of host-initiated channels for a GPU pair (0 if none).
+   */
+  int getHostChannelCount(int srcDeviceId, int dstDeviceId) const;
+
 private:
   /**
    * @brief Return the KFD topology node ID for a HIP-visible device.

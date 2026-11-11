@@ -437,6 +437,20 @@ setup API:
 See the :doc:`api` page for full function signatures and cleanup
 semantics.
 
+Host-initiated channels
+^^^^^^^^^^^^^^^^^^^^^^^
+
+A GPU pair can have several independent host-initiated queues (channels), so
+a packet waiting on a flag in one does not hold back the others.
+
+.. code-block:: cpp
+
+   sdma_ep::initHostQueue(0, 1, 4); // at least 4 channels
+   auto handle = sdma_ep::getHostHandle(0, 1, 3);
+
+Python: ``create_host_queue(src, dst, num_channels=1)`` and
+``get_host_channel_count(src, dst)``.
+
 Device-side operations (Kernel API)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
