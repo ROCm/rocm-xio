@@ -19,6 +19,7 @@ __all__ = [
     'shutdown',
     'create_queue',
     'create_host_queue',
+    'get_host_channel_count',
     'get_queue_device_ctx',
     'put',
     'put_signal',
