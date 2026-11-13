@@ -580,6 +580,12 @@ static uint64_t xorshift64(uint64_t* s) {
   return *s = x;
 }
 
+static const char* mode_name(uint32_t mode) {
+  return mode == VFU_DB_MODE_SHM   ? "shm"
+         : mode == VFU_DB_MODE_SGL ? "sgl"
+                                   : "mmio";
+}
+
 /* One write. When the caller already holds lib_lock (the INLINE path) pass
  * locked = true. */
 static int do_write(struct ringer* g, const struct job* j, uint64_t gpa,
@@ -606,8 +612,28 @@ static int do_write(struct ringer* g, const struct job* j, uint64_t gpa,
       if (errno == 0)
         errno = ENOENT;
     }
+  } else if (j->mode == VFU_DB_MODE_SGL) {
+    /* Needs the address in the DMA table: QEMU must announce it (x-peer-mmio
+     * for another device's BAR), else vfu_addr_to_sgl fails with ENOENT.
+     * VFU_SGL_DIRECT_ACCESS goes direct to guest RAM, and for a region with no
+     * fd, such as a BAR, it falls back to a DMA_WRITE message. */
+    dma_sg_t* sg = alloca(dma_sg_size());
+    rc = vfu_addr_to_sgl(g->ctx, (vfu_dma_addr_t)gpa, j->size, sg, 1,
+                         PROT_WRITE) == 1
+           ? 0
+           : -1;
+    if (rc == 0)
+      rc = vfu_sgl_write(g->ctx, sg, 1, bytes, VFU_SGL_DIRECT_ACCESS);
+    if (rc != 0 && errno == 0)
+      errno = ENOENT;
   } else {
+#ifdef HAVE_VFU_MMIO_WRITE
     rc = vfu_mmio_write(g->ctx, gpa, bytes, j->size);
+#else
+    /* Built against a libvfio-user without the fork's vfu_mmio_write. */
+    rc = -1;
+    errno = ENOSYS;
+#endif
   }
   int saved = errno;
   if (!locked)
@@ -662,8 +688,8 @@ static void run_job(struct ringer* g, const struct job* j) {
   fprintf(stderr,
           "%s: job: gpa=0x%llx count=%u size=%u nslots=%u%s mode=%s%s%s\n",
           role_name, (unsigned long long)j->gpa, j->count, j->size, nslots,
-          keyed ? " keyed" : "", j->mode == VFU_DB_MODE_SHM ? "shm" : "mmio",
-          seq_en ? " seq" : "", locked ? " inline" : "");
+          keyed ? " keyed" : "", mode_name(j->mode), seq_en ? " seq" : "",
+          locked ? " inline" : "");
   const uint64_t start = now_ns();
   for (uint32_t i = 0; i < j->count && !stop_requested; i++) {
     uint32_t slot = i % nslots;
@@ -688,7 +714,11 @@ static void run_job(struct ringer* g, const struct job* j) {
     if (rc == 0) {
       sent++;
     } else {
-      errors++;
+      if (errors++ == 0)
+        fprintf(stderr, "%s: first write failure: gpa=0x%llx mode=%s: %s\n",
+                role_name,
+                (unsigned long long)(j->gpa + (uint64_t)slot * j->stride),
+                mode_name(j->mode), strerror(errno));
       atomic_store(&g->last_errno, (uint32_t)errno);
     }
     atomic_store(&g->sent, sent);
@@ -1028,6 +1058,12 @@ int main(int argc, char** argv) {
     have_worker = true;
   }
 
+#ifndef HAVE_VFU_MMIO_WRITE
+  fprintf(stderr,
+          "%s: built without vfu_mmio_write: the mmio write path is "
+          "unavailable, use sgl\n",
+          role_name);
+#endif
   fprintf(stderr, "%s: serving on %s\n", role_name, socket_path);
   bool attached = false;
   while (!stop_requested) {

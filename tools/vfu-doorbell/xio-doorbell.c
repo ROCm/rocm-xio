@@ -43,6 +43,23 @@ static uint64_t now_ns(void) {
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* What a ringer errno usually means, appended to the job result. */
+static const char* errno_hint(uint32_t err) {
+  switch (err) {
+    case ENOSYS:
+      return "  (this ringer was built without vfu_mmio_write: use --ringer "
+             "vfu-doorbell,mode=sgl)";
+    case ENOENT:
+      return "  (the address is not in the ringer's DMA table: QEMU must "
+             "announce another device's BAR, x-peer-mmio=on)";
+    case ENODEV:
+      return "  (QEMU could not deliver the write: is Bus Master Enable set "
+             "on the ringer?)";
+    default:
+      return "";
+  }
+}
+
 /* ---------------------------------------------------------------------- */
 /* Device discovery and register access                                    */
 /* ---------------------------------------------------------------------- */
@@ -1212,15 +1229,14 @@ static void apply_pattern(const struct pattern* p, struct opts* o) {
 struct ringer_opts {
   bool inline_mode;
   bool poll_mmio;
-  bool shm;
+  uint32_t mode;       /* VFU_DB_MODE_*: how the ringer delivers a write */
   unsigned timeout_ms; /* 0: the default */
 };
 
 static void apply_ringer_opts(const struct ringer_opts* rp, struct opts* o) {
   o->inline_mode = rp->inline_mode;
   o->poll_mmio = rp->poll_mmio;
-  if (rp->shm)
-    o->mode = VFU_DB_MODE_SHM;
+  o->mode = rp->mode;
   if (rp->timeout_ms)
     o->timeout_ms = rp->timeout_ms;
 }
@@ -1252,10 +1268,11 @@ static int run_region(bool cpu, unsigned r, uint32_t count, struct opts* o,
          (double)dt / 1e6);
   if (!cpu)
     printf(
-      "ringer: status=%u sent=%llu errors=%llu errno=%u max_lat=%.1f us%s\n",
+      "ringer: status=%u sent=%llu errors=%llu errno=%u max_lat=%.1f us%s%s\n",
       res.status, (unsigned long long)res.sent, (unsigned long long)res.errors,
       res.err_no, (double)res.max_lat_ns / 1e3,
-      res.timed_out ? "  TIMEOUT (possible deadlock)" : "");
+      res.timed_out ? "  TIMEOUT (possible deadlock)" : "",
+      errno_hint(res.err_no));
   printf("ringee: arrived=%llu bad=%llu seq_gaps=%llu seq_ooo=%llu "
          "regress=%llu\n",
          (unsigned long long)arrived, (unsigned long long)bad,
@@ -1342,9 +1359,10 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
   printf("path=%s count=%u elapsed=%.3f ms\n", cpu ? "cpu" : "ringer", count,
          (double)(now_ns() - t0) / 1e6);
   if (!cpu)
-    printf("ringer: status=%u sent=%llu errors=%llu errno=%u%s\n", res.status,
+    printf("ringer: status=%u sent=%llu errors=%llu errno=%u%s%s\n", res.status,
            (unsigned long long)res.sent, (unsigned long long)res.errors,
-           res.err_no, res.timed_out ? "  TIMEOUT" : "");
+           res.err_no, res.timed_out ? "  TIMEOUT" : "",
+           errno_hint(res.err_no));
   if (t->ours)
     printf("no region is judged for an offset write: read the ringee with dump "
            "and log\n");
@@ -1376,6 +1394,7 @@ struct preset {
   struct pattern pat;
   unsigned expect;
   const char* qsel; /* an NVMe doorbell: "sq=free", "cq=3" */
+  uint32_t mode;    /* VFU_DB_MODE_*: how the ringer writes (not for cpu) */
 };
 
 #define RG(m, f, b, sz, w, st, mt)                                             \
@@ -1397,7 +1416,8 @@ static const struct preset presets[] = {
    1000,
    {.nslots = 4},
    EXP_ARRIVE_ALL,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"index-cpu",
    "index region 0, 1000 writes over 4 slots, CPU",
    true,
@@ -1407,7 +1427,8 @@ static const struct preset presets[] = {
    1000,
    {.nslots = 4},
    EXP_ARRIVE_ALL,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"keyed-ringer",
    "keyed region 1, two queue ids on one register, ringer",
    false,
@@ -1417,7 +1438,8 @@ static const struct preset presets[] = {
    1000,
    {.nslots = 1, .qids = 2},
    EXP_ARRIVE_ALL,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"event-ringer",
    "event region 2, 1000 writes over 4 slots, ringer",
    false,
@@ -1427,7 +1449,8 @@ static const struct preset presets[] = {
    1000,
    {.nslots = 4},
    EXP_ARRIVE_ALL,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"testdev-ringer",
    "testdev-like region 3, the match value, ringer",
    false,
@@ -1437,7 +1460,8 @@ static const struct preset presets[] = {
    100,
    {0},
    EXP_ARRIVE_ALL,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"testdev-miss-ringer",
    "testdev-like region 3, a value that is not the match, ringer",
    false,
@@ -1447,7 +1471,8 @@ static const struct preset presets[] = {
    100,
    {.has_value = true, .value = 0xfb},
    EXP_ALL_IGNORED,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"testdev-qemu-ringer",
    "QEMU pci-testdev doorbell, ringer",
    false,
@@ -1461,7 +1486,8 @@ static const struct preset presets[] = {
     .has_pattern = true,
     .pattern = VFU_DB_PAT_REPEAT},
    EXP_NONE,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"testdev-qemu-cpu",
    "QEMU pci-testdev doorbell, CPU",
    true,
@@ -1475,7 +1501,8 @@ static const struct preset presets[] = {
     .has_pattern = true,
     .pattern = VFU_DB_PAT_REPEAT},
    EXP_NONE,
-   NULL},
+   NULL,
+   VFU_DB_MODE_MMIO},
   {"nvme-qemu-ringer",
    "QEMU NVMe tail doorbell of a queue the driver does not own, ringer",
    false,
@@ -1485,13 +1512,59 @@ static const struct preset presets[] = {
    3,
    {.size = 4},
    EXP_NONE,
-   "sq=free"},
+   "sq=free",
+   VFU_DB_MODE_MMIO},
+  {"index-sgl-ringer",
+   "index region 0, 1000 writes over 4 slots, ringer writing with sgl",
+   false,
+   "vfu-doorbell",
+   0,
+   RG(VFU_DB_MODEL_INDEX, VFU_DB_FLAG_SEQ, 0x2000, 0x1000, 4, 4, 0),
+   1000,
+   {.nslots = 4},
+   EXP_ARRIVE_ALL,
+   NULL,
+   VFU_DB_MODE_SGL},
+  {"testdev-qemu-sgl-ringer",
+   "QEMU pci-testdev doorbell, ringer writing with sgl",
+   false,
+   "qemu-pci-testdev",
+   -1,
+   {0},
+   10,
+   {.size = 1,
+    .has_value = true,
+    .value = 0xfa,
+    .has_pattern = true,
+    .pattern = VFU_DB_PAT_REPEAT},
+   EXP_NONE,
+   NULL,
+   VFU_DB_MODE_SGL},
+  {"nvme-qemu-sgl-ringer",
+   "QEMU NVMe tail doorbell of a queue the driver does not own, ringer writing "
+   "with sgl",
+   false,
+   "qemu-nvme",
+   -1,
+   {0},
+   3,
+   {.size = 4},
+   EXP_NONE,
+   "sq=free",
+   VFU_DB_MODE_SGL},
 };
 
 static const char* pattern_name(uint32_t p) {
   return p == VFU_DB_PAT_REPEAT   ? "repeat"
          : p == VFU_DB_PAT_RANDOM ? "random"
                                   : "monotonic";
+}
+
+/* The ringer option that selects a mode; nothing for the default, mmio. */
+static const char* mode_opt(uint32_t mode) {
+  return mode == VFU_DB_MODE_SGL   ? ",mode=sgl"
+         : mode == VFU_DB_MODE_SHM ? ",mode=shm"
+                                   : "";
 }
 
 static size_t wadd(char* w, size_t m, size_t n, const char* fmt, ...) {
@@ -1507,8 +1580,9 @@ static size_t wadd(char* w, size_t m, size_t n, const char* fmt, ...) {
 static void preset_cmdline(const struct preset* p, char* out, size_t n) {
   char w[160];
   size_t m = 0;
-  size_t k = (size_t)snprintf(out, n, "ring --ringer %s --ringee %s",
-                              p->cpu ? "cpu" : "vfu-doorbell", p->ringee);
+  size_t k = (size_t)snprintf(out, n, "ring --ringer %s%s --ringee %s",
+                              p->cpu ? "cpu" : "vfu-doorbell",
+                              mode_opt(p->mode), p->ringee);
   if (p->region >= 0)
     k += (size_t)snprintf(out + k, n - k, ",region=%d", p->region);
   else if (p->qsel)
@@ -1588,6 +1662,7 @@ static int run_preset(const struct preset* p) {
     t_region((unsigned)p->region, &got);
     opts_for_region(&got, &o);
     apply_pattern(&p->pat, &o);
+    o.mode = p->mode;
     return run_region(p->cpu, (unsigned)p->region, p->count, &o, &got,
                       p->expect, p->name);
   }
@@ -1598,6 +1673,7 @@ static int run_preset(const struct preset* p) {
   struct region_cfg c0 = {.model = VFU_DB_MODEL_INDEX, .width = 4};
   opts_for_region(&c0, &o);
   apply_pattern(&p->pat, &o);
+  o.mode = p->mode;
   uint64_t where = 0;
   if (p->qsel && !nvme_doorbell(&t, p->qsel[0] == 'c', p->qsel + 3, &where))
     return 1;
@@ -1617,11 +1693,24 @@ static bool ringer_spec(const char* arg, bool* cpu, struct ringer_opts* rp) {
     fprintf(stderr, "unknown ringer '%s' (vfu-doorbell, cpu)\n", sp.name);
     return false;
   }
-  if (!spec_allow(&sp, "ringer", "inline,poll-mmio,shm,timeout-ms") ||
+  const char* mode;
+  if (!spec_allow(&sp, "ringer", "inline,poll-mmio,mode,timeout-ms") ||
       !spec_flag(&sp, "inline", &rp->inline_mode) ||
       !spec_flag(&sp, "poll-mmio", &rp->poll_mmio) ||
-      !spec_flag(&sp, "shm", &rp->shm) || !spec_value(&sp, "timeout-ms", &v))
+      !spec_value(&sp, "mode", &mode) || !spec_value(&sp, "timeout-ms", &v))
     return false;
+  if (mode) {
+    if (!strcmp(mode, "mmio"))
+      rp->mode = VFU_DB_MODE_MMIO;
+    else if (!strcmp(mode, "sgl"))
+      rp->mode = VFU_DB_MODE_SGL;
+    else if (!strcmp(mode, "shm"))
+      rp->mode = VFU_DB_MODE_SHM;
+    else {
+      fprintf(stderr, "ringer: mode=%s is not mmio, sgl or shm\n", mode);
+      return false;
+    }
+  }
   if (v) {
     uint64_t ms;
     if (!num_u64("timeout-ms", v, &ms))
@@ -1826,12 +1915,18 @@ static void usage(FILE* out) {
     "      force                 also allow a queue the guest driver owns\n"
     "\n"
     "  --ringer R[,opts]         [default: --ringer vfu-doorbell]  Who writes. One of:\n"
-    "      vfu-doorbell[,inline][,poll-mmio][,shm][,timeout-ms=N]     the ringer device, writing with vfu_mmio_write\n"
+    "      vfu-doorbell[,inline][,poll-mmio][,mode=M][,timeout-ms=N]  the ringer device\n"
     "      cpu                                                        the guest CPU stores through the mapped BAR\n"
     "    What each option means:\n"
     "      inline                write from the ringer's BAR callback (can deadlock)\n"
     "      poll-mmio             poll the ringer's STATUS register over MMIO (can deadlock)\n"
-    "      shm                   write through DMA-mapped guest memory\n"
+    "      mode=M                how the ringer delivers a write  [default: mode=mmio]. M is one of:\n"
+    "                              mmio  vfu_mmio_write: a DMA_WRITE to any address, no DMA table needed\n"
+    "                                    (not in a ringer built against upstream libvfio-user)\n"
+    "                              sgl   vfu_addr_to_sgl + vfu_sgl_write: the address must be in the ringer's DMA table,\n"
+    "                                    that is RAM, or another device's BAR when QEMU runs the ringer with x-peer-mmio=on;\n"
+    "                                    otherwise the write fails with ENOENT\n"
+    "                              shm   a store into DMA-mapped guest memory; reaches RAM only\n"
     "      timeout-ms=N          how long to wait for the ringer to finish  [default: timeout-ms=10000]\n"
     "\n"
     "  --count N                 [default: --count 1]  How many writes\n"

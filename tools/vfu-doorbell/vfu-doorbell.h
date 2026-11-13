@@ -183,6 +183,10 @@ struct vfu_db_log_entry {
 #define VFU_DB_MODE_SHM                                                        \
   1u /* store into DMA-mapped guest memory: reaches                            \
         RAM only (the memory-style writer) */
+#define VFU_DB_MODE_SGL                                                        \
+  2u /* vfu_addr_to_sgl + vfu_sgl_write: reaches what QEMU has                 \
+        announced in a DMA_MAP (RAM, and another device's BAR when the         \
+        ringer has x-peer-mmio=on); anything else fails with ENOENT */
 
 #define VFU_DB_ST_IDLE 0u
 #define VFU_DB_ST_RUNNING 1u

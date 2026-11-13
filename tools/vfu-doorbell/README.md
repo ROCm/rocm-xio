@@ -24,10 +24,20 @@ semantics, how a doorbell interaction behaves under different write patterns:
 bursts, several writers on one register, repeated or backwards values, mixed
 sizes. It does not model a real GPU's hardware, only the two kinds of writer:
 
-* **Trap-style**: one message per store, as an emulated GPU delivers it
-  (the default; the ringer option `shm` is off and it uses `vfu_mmio_write`).
-* **Memory-style**: a plain store into DMA-mapped guest memory (the ringer
-  option `shm`), which
+The ringer option `mode=` chooses how the ringer delivers a write:
+
+* **`mmio`** (the default): one `vfu_mmio_write` message per store, to any
+  address, as an emulated GPU delivers it. Only the sbates130272 libvfio-user
+  fork has `vfu_mmio_write`; against upstream this mode is not built.
+* **`sgl`**: the ordinary libvfio-user write, `vfu_addr_to_sgl` then
+  `vfu_sgl_write`. It reaches only an address that QEMU has announced to the
+  ringer in a `DMA_MAP`: guest RAM, and another device's BAR when QEMU runs the
+  ringer with `x-peer-mmio=on`. Anything else fails with `ENOENT`, so the same
+  `ring` command shows what the announcement changes. With `x-peer-mmio` the
+  write is a `DMA_WRITE` message that QEMU turns into an MMIO write on the
+  target, so it is trap-style delivery without `vfu_mmio_write`. The ringer's
+  PCI Bus Master Enable must be set, as for any DMA.
+* **`shm`**: memory-style, a plain store into DMA-mapped guest memory, which
   reaches RAM only. Use it to model a real GPU writing a memory-backed
   doorbell that something later polls.
 
@@ -65,8 +75,11 @@ is in `vfu-doorbell.h`.
 
 ## Build
 
-The servers need the sbates130272 libvfio-user fork (it provides
-`vfu_mmio_write`). The simplest build uses the fork's container image:
+The servers build against libvfio-user. Upstream is enough: CMake looks for
+`vfu_mmio_write`, which only the sbates130272 fork has, and without it the
+ringer's default `mmio` write path is compiled out (a job on it fails with
+`ENOSYS`) and `mode=sgl` is the one to use. The simplest build uses a
+libvfio-user container image:
 
 ```bash
 ./build-in-container.sh     # binaries in /tmp/vfu-doorbell/bin
@@ -206,8 +219,9 @@ testdev-qemu-ringer  QEMU pci-testdev doorbell, ringer
 and `delay-ns`. For a region they override what its config implies, so a wrong
 `size` sends malformed writes on purpose. `qids`, `qid0` and `ring` apply to
 keyed regions only and are an error elsewhere. The ringer takes `inline`,
-`poll-mmio`, `shm` and `timeout-ms=N`, and `qemu-nvme` takes `sq`, `cq`,
-`offset` and `force`. `xio-doorbell help` lists them all with one line each.
+`poll-mmio`, `mode=mmio|sgl|shm` and `timeout-ms=N`, and `qemu-nvme` takes `sq`,
+`cq`, `offset` and `force`. `xio-doorbell help` lists them all with one line
+each.
 
 ## Server logs
 
