@@ -18,11 +18,12 @@ There is no guest kernel driver. Run `xio-doorbell` as root; it maps
 ## What it tests, and what it does not
 
 The write itself is not special: a doorbell is a write to a register. The rig
-tests the delivery chain (`vfu_mmio_write` into QEMU's `vfio_user_dma_write`,
-into the ringee's BAR callback) and, because the ringee models the register
-semantics, how a doorbell interaction behaves under different write patterns:
-bursts, several writers on one register, repeated or backwards values, mixed
-sizes. It does not model a real GPU's hardware, only the two kinds of writer:
+tests the delivery chain (the ringer's DMA write, which QEMU performs as an MMIO
+write on the target, into the ringee's BAR callback) and, because the ringee
+models the register semantics, how a doorbell interaction behaves under
+different write patterns: bursts, several writers on one register, repeated or
+backwards values, mixed sizes. It does not model a real GPU's hardware, only the
+kinds of writer below:
 
 The ringer option `mode=` chooses how the ringer delivers a write:
 
@@ -108,9 +109,21 @@ qemu-tool run-vm ... --vfio-userdev /run/vfu/ringee.sock,/run/vfu/ringer.sock
 
 qemu-minimal carries this rig as the named stack `vfu-doorbell-vm`, with a
 settings file, an Ansible playbook that installs `xio-doorbell`, and tests; it
-is the supported way to run it. The QEMU must be the fork build whose
-`vfio_user_dma_write` dispatches to MMIO, and the servers must be built against
-the matching libvfio-user fork.
+is the supported way to run it.
+
+Every mode needs PCI Bus Master Enable on the ringer, because QEMU only lets a
+device DMA to another device's registers once it is set. Nothing in the guest
+sets it, and a ringer write fails with `ENODEV` while it is clear. The stack's
+Ansible playbook sets it (`setpci -d 1de0:0002 COMMAND=0x4:0x4`); do the same by
+hand otherwise.
+
+`x-peer-mmio` is a property of QEMU's `vfio-user-pci` device (off by default):
+with it on, QEMU announces the other PCI devices' BARs to that server, so
+`vfu_addr_to_sgl` can name them. `qemu-tool run-vm` cannot set a device
+property, so the stack's QEMU image has to turn it on, for example with
+`-global vfio-user-pci.x-peer-mmio=on`. Without it, `mode=sgl` against a device
+BAR fails with `ENOENT`. QEMU's own devices (pci-testdev, NVMe) and the ringee
+are all reached the same way.
 
 In the guest, copy `xio-doorbell` over and run:
 
@@ -301,6 +314,14 @@ callback instead of its worker thread, the other way to hit the same
 restriction.
 
 ## Observed behaviour
+
+Against stock QEMU 11.1.3 with the `x-peer-mmio` patch (on) and the ringer's Bus
+Master Enable set, the three testdev presets (`testdev-qemu-cpu`,
+`testdev-qemu-ringer` and `testdev-qemu-sgl-ringer`) count 10 of 10 writes, with
+the devices behind PCIe root ports, and a write of the wrong value leaves the
+counter at 0. With the property off, `mode=sgl` against a BAR fails with
+`ENOENT`. `mode=shm` against a BAR fails with `EFAULT`: the address is
+announced, but a BAR has no file descriptor to map.
 
 Against the fork QEMU `4cb9698` and libvfio-user `3719c3a`, `selftest` passes
 all eight scenarios (CPU and ringer, index, keyed with two queue ids on one
