@@ -180,8 +180,13 @@ trace (below) and an `offset` write into the ringee with `dump` and `log`. Fault
 injection against the ringee, such as a wrong size or stride, belongs on
 `region=` with `--write` overrides, which also reports the `bad` delta.
 
-The named QEMU devices know where their doorbell is. testdev has one, at BAR0
-offset 0, 1 byte, value 0xFA. NVMe has one per queue, so `qemu-nvme` needs one
+The named QEMU devices know where their doorbell is. testdev's is its test 0,
+at BAR0 offset 0x800, 1 byte, value 0xFA. The tool selects that test first
+(offset 0 is the select register, not a doorbell), rings it, and reads the
+testdev's own counter back, so `ring` prints `testdev: counter=N of M written`
+and a preset judges it with `PASS` or `FAIL`. Test 0 has no ioeventfd, so a CPU
+store is counted too, which makes the counter a check that every write reached
+QEMU's handler. NVMe has one per queue, so `qemu-nvme` needs one
 of `sq=N` (the SQ tail, at BAR0 + 0x1000 + 8N, 4 bytes), `cq=N` (the CQ head, 4
 bytes after it) or `offset=X`; there is no default. `N` can be `free`, the
 lowest queue id the guest's driver does not own (the driver has ids 0 to
@@ -247,8 +252,9 @@ protocol message, which is very noisy.
 ## Ringing a QEMU built-in device
 
 QEMU's own devices can be the ringee and QEMU's trace the check. Start the
-stack with them and the trace on (qemu-minimal's settings add the devices but
-leave the trace off, since it logs every MMIO write), then ring them:
+stack with them (the testdev's counter needs no trace; the trace is the
+second check, and qemu-minimal's settings leave it off, since it logs every MMIO
+write), then ring them:
 
 ```bash
 # stack started with VM_QEMU_ARGS="--pci-testdev --nvme 1 \

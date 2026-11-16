@@ -1059,8 +1059,9 @@ static bool apply_write(const struct spec* sp, bool keyed, struct opts* o) {
  * A ringee is the thing being rung:
  *
  *   vfu-doorbell        our ringee device (the default)
- *   qemu-pci-testdev    QEMU's pci-testdev. Doorbell at BAR0 offset 0, 1 byte,
- *                       rings only on 0xFA (an ioeventfd datamatch).
+ *   qemu-pci-testdev    QEMU's pci-testdev. Its test 0 counts a 1 byte write of
+ *                       0xFA to BAR0 offset 0x800; that counter judges the run.
+ *                       (Offset 0 is the test select register, not a doorbell.)
  *   qemu-nvme           QEMU's NVMe. It has a doorbell per queue, chosen with
  *                       the options sq=N|free or cq=N|free (or with --raw): SQ
  *                       tail or CQ head at BAR0+0x1000 with stride 8 per queue
@@ -1079,6 +1080,7 @@ struct target {
   struct dev* dev;
   bool ours; /* the vfu-doorbell ringee */
   bool nvme;
+  bool testdev; /* QEMU pci-testdev: its counter judges the writes */
   bool has_base; /* the device's own doorbell offset */
   uint64_t base;
   unsigned size; /* 0: no default */
@@ -1087,6 +1089,31 @@ struct target {
   bool has_pattern;
   uint32_t pattern;
 };
+
+/*
+ * QEMU's pci-testdev. BAR0 starts with a header that a test is selected
+ * through: a byte write of N at offset 0 selects test N and zeroes its counter.
+ * Test 0, "mmio-no-eventfd", counts every write of the byte 0xfa to offset
+ * 0x800. It has no ioeventfd, so KVM cannot absorb a CPU write and every write
+ * reaches QEMU's handler, which is what the counter then proves. The ioeventfd
+ * tests (1 and 2) are not used: they only show KVM absorbing CPU stores, not
+ * the delivery path this rig tests. The counter is the little-endian u32 at
+ * header offset 12; the read handler returns one byte per access, so it is read
+ * a byte at a time. Offset 0 itself is the select register, not a doorbell.
+ */
+#define TESTDEV_DOORBELL 0x800u
+#define TESTDEV_COUNT 12u
+
+static void testdev_select(const struct dev* d) {
+  mmio_write8(d->bar + 0, 0);
+}
+
+static uint32_t testdev_count(const struct dev* d) {
+  uint32_t v = 0;
+  for (unsigned i = 0; i < 4; i++)
+    v |= (uint32_t)mmio_read8(d->bar + TESTDEV_COUNT + i) << (8 * i);
+  return v;
+}
 
 /* The number of queues the guest's NVMe driver has for this controller: the
  * admin queue and the I/O queues, so it owns ids 0 to count - 1. */
@@ -1168,8 +1195,9 @@ static bool resolve_ringee(const char* spec, struct target* t) {
       return false;
     }
     t->dev = &t->store;
+    t->testdev = true;
     t->has_base = true;
-    t->base = 0;
+    t->base = TESTDEV_DOORBELL;
     t->size = 1;
     t->has_value = true;
     t->value = 0xfa;
@@ -1317,7 +1345,8 @@ static int ring_region(bool cpu, const struct ringer_opts* rp, unsigned r,
 /* A write to some device's BAR0. There are no per-region counters for it, so
  * what arrived is judged from the device's own side. */
 static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
-                         uint64_t raw, uint32_t count, struct opts* o) {
+                         uint64_t raw, uint32_t count, struct opts* o,
+                         unsigned expect) {
   struct region_cfg c = {.model = VFU_DB_MODEL_INDEX, .width = 4};
 
   if (have_raw) {
@@ -1350,6 +1379,11 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
          (unsigned long long)c.base, (unsigned long long)(o->gpa_base + c.base),
          o->size, count);
 
+  /* The testdev's own doorbell is judged by its counter; another offset is not. */
+  const bool judged = t->testdev && !have_raw;
+  if (judged)
+    testdev_select(t->dev); /* test 0, counter to zero */
+
   uint64_t t0 = now_ns();
   struct ring_result res = {.ok = true};
   if (cpu)
@@ -1363,7 +1397,17 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
            (unsigned long long)res.sent, (unsigned long long)res.errors,
            res.err_no, res.timed_out ? "  TIMEOUT" : "",
            errno_hint(res.err_no));
-  if (t->ours)
+  if (judged) {
+    uint32_t got = testdev_count(t->dev);
+    printf("testdev: counter=%u of %u written (test 0 at 0x%x)\n", got, count,
+           TESTDEV_DOORBELL);
+    if (expect == EXP_ARRIVE_ALL) {
+      bool pass = res.ok && got == count;
+      printf("%s: the testdev counted %u of %u writes\n", pass ? "PASS" : "FAIL",
+             got, count);
+      return pass ? 0 : 1;
+    }
+  } else if (t->ours)
     printf("no region is judged for an offset write: read the ringee with dump "
            "and log\n");
   else
@@ -1485,7 +1529,7 @@ static const struct preset presets[] = {
     .value = 0xfa,
     .has_pattern = true,
     .pattern = VFU_DB_PAT_REPEAT},
-   EXP_NONE,
+   EXP_ARRIVE_ALL,
    NULL,
    VFU_DB_MODE_MMIO},
   {"testdev-qemu-cpu",
@@ -1500,7 +1544,7 @@ static const struct preset presets[] = {
     .value = 0xfa,
     .has_pattern = true,
     .pattern = VFU_DB_PAT_REPEAT},
-   EXP_NONE,
+   EXP_ARRIVE_ALL,
    NULL,
    VFU_DB_MODE_MMIO},
   {"nvme-qemu-ringer",
@@ -1537,7 +1581,7 @@ static const struct preset presets[] = {
     .value = 0xfa,
     .has_pattern = true,
     .pattern = VFU_DB_PAT_REPEAT},
-   EXP_NONE,
+   EXP_ARRIVE_ALL,
    NULL,
    VFU_DB_MODE_SGL},
   {"nvme-qemu-sgl-ringer",
@@ -1677,7 +1721,8 @@ static int run_preset(const struct preset* p) {
   uint64_t where = 0;
   if (p->qsel && !nvme_doorbell(&t, p->qsel[0] == 'c', p->qsel + 3, &where))
     return 1;
-  return ring_external(p->cpu, false, &t, p->qsel != NULL, where, p->count, &o);
+  return ring_external(p->cpu, false, &t, p->qsel != NULL, where, p->count, &o,
+                       p->expect);
 }
 
 static bool ringer_spec(const char* arg, bool* cpu, struct ringer_opts* rp) {
@@ -1875,7 +1920,8 @@ static int cmd_ring(int argc, char** argv) {
       return 2;
     have_raw = true;
   }
-  return ring_external(cpu, force, &t, have_raw, where, (uint32_t)count, &o);
+  return ring_external(cpu, force, &t, have_raw, where, (uint32_t)count, &o,
+                       EXP_NONE);
 }
 
 /* clang-format off */
@@ -1909,7 +1955,7 @@ static void usage(FILE* out) {
     "      BDF,offset=X                            any other PCI device, for example 0000:00:03.0\n"
     "    In these forms [ ] is optional and ( | ) is exactly one of the choices. What each option means:\n"
     "      region=N              one of our ringee's regions; its counters judge the writes (only this form is judged)\n"
-    "      offset=X              an offset into the device's BAR0  [qemu-pci-testdev default: offset=0, its one doorbell]\n"
+    "      offset=X              an offset into the device's BAR0  [qemu-pci-testdev default: offset=0x800, its test 0 doorbell, judged by its counter]\n"
     "      sq=Q                  a queue's SQ tail doorbell; Q is a queue number, or free for the lowest queue the driver does not own\n"
     "      cq=Q                  a queue's CQ head doorbell; Q is as for sq\n"
     "      force                 also allow a queue the guest driver owns\n"
