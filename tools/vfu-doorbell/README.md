@@ -10,10 +10,11 @@ call chain an emulated GPU uses, and to read back exactly what arrived.
 |---|---|
 | `vfu-doorbell --role ringee` | A vfio-user PCI device whose BAR0 carries doorbell **overlays**: byte ranges with a semantic model, a slot width and a stride. It decodes every write and keeps per-key state the guest can read. It is the thing being rung. |
 | `vfu-doorbell --role ringer` | A vfio-user PCI device the guest programs to write a pattern of values to any guest physical address. It is the thing doing the ringing. |
-| `xio-doorbell` | A guest userspace tool. It maps both BARs through sysfs, configures the overlays, rings from the CPU or through the ringer, and checks the ringee's counters. |
+| `vfu-ring` | A guest userspace tool. It maps both BARs through sysfs, configures the overlays, rings from the CPU or through the ringer, and checks the ringee's counters. |
 
-There is no guest kernel driver. Run `xio-doorbell` as root; it maps
-`resource0` of each device and reads physical addresses with pagemap.
+`vfu-ring` needs no guest kernel driver by default. Run it as root; it maps
+`resource0` of each device and, in `--dma physical` mode, reads physical
+addresses with pagemap. The other `--dma` modes are below.
 
 ## What it tests, and what it does not
 
@@ -71,7 +72,7 @@ Four regions are configured by default: region 0 `index` at `0x2000`, region 1
 `keyed` at `0x3000`, region 2 `event` at `0x4000` (each one page), and region 3,
 a testdev-like `event` region at `0x5000` with width 1 and `match=0xfa`. Use
 `--region N:model:base:size:width:stride[:seq]` or `--no-defaults`, or
-reconfigure from the guest with `xio-doorbell config`. The full register map
+reconfigure from the guest with `vfu-ring config`. The full register map
 is in `vfu-doorbell.h`.
 
 ## Build
@@ -94,7 +95,7 @@ cmake -S tools/vfu-doorbell -B build-vfu-doorbell
 cmake --build build-vfu-doorbell
 ```
 
-`xio-doorbell` has no dependencies and also builds without libvfio-user.
+`vfu-ring` has no dependencies and also builds without libvfio-user.
 
 ## Run
 
@@ -108,7 +109,7 @@ qemu-tool run-vm ... --vfio-userdev /run/vfu/ringee.sock,/run/vfu/ringer.sock
 ```
 
 qemu-minimal carries this rig as the named stack `vfu-doorbell-vm`, with a
-settings file, an Ansible playbook that installs `xio-doorbell`, and tests; it
+settings file, an Ansible playbook that installs `vfu-ring`, and tests; it
 is the supported way to run it.
 
 Every mode needs PCI Bus Master Enable on the ringer, because QEMU only lets a
@@ -125,26 +126,26 @@ property, so the stack's QEMU image has to turn it on, for example with
 BAR fails with `ENOENT`. QEMU's own devices (pci-testdev, NVMe) and the ringee
 are all reached the same way.
 
-In the guest, copy `xio-doorbell` over and run:
+In the guest, copy `vfu-ring` and `vfu-driver-select` over and run:
 
 ```bash
-sudo xio-doorbell info                 # devices and configured regions
-sudo xio-doorbell presets              # whole runs, with their explicit commands
-sudo xio-doorbell selftest             # built-in scenarios, PASS/FAIL
+sudo vfu-ring info                 # devices and configured regions
+sudo vfu-ring presets              # whole runs, with their explicit commands
+sudo vfu-ring selftest             # built-in scenarios, PASS/FAIL
 
 # 1000 writes over 4 NVMe-like slots, once from the CPU, once via the ringer
-sudo xio-doorbell ring --ringer cpu --ringee vfu-doorbell,region=0 \
+sudo vfu-ring ring --ringer cpu --ringee vfu-doorbell,region=0 \
     --count 1000 --write nslots=4
-sudo xio-doorbell reset                # state is not cleared between runs
-sudo xio-doorbell ring --ringee vfu-doorbell,region=0 --count 1000 \
+sudo vfu-ring reset                # state is not cleared between runs
+sudo vfu-ring ring --ringee vfu-doorbell,region=0 --count 1000 \
     --write nslots=4
 
 # the ionic collision: two queue ids rung through one shared register
-sudo xio-doorbell ring --ringee vfu-doorbell,region=1 --count 1000 \
+sudo vfu-ring ring --ringee vfu-doorbell,region=1 --count 1000 \
     --write qids=2
 
-sudo xio-doorbell dump                 # per-region counters
-sudo xio-doorbell log 16               # the last 16 writes, in arrival order
+sudo vfu-ring dump                 # per-region counters
+sudo vfu-ring log 16               # the last 16 writes, in arrival order
 ```
 
 `ring` prints what was sent and what the ringee saw. For a synchronous delivery
@@ -155,6 +156,40 @@ that because each value covers the earlier ones, an event overlay does not.
 `ring` does not clear the ringee's per-key state, so run `reset` between runs
 that should be compared; a second run otherwise continues the first's sequence
 numbers and indexes and reports out-of-order writes.
+
+## Addresses: `--dma` and `vfu-driver-select`
+
+The ringer writes by DMA, so it has to be told bus addresses: where the
+completion word is, and where the target's BAR is. `--dma MODE` picks how
+`vfu-ring` finds them:
+
+| Mode       | Where the addresses come from                    | IOMMU        |
+|------------|--------------------------------------------------|--------------|
+| `physical` | `/proc/self/pagemap` and the BAR's sysfs address | none or pass-through |
+| `vfu-dma`  | the `vfu-dma` kernel module, from the DMA API    | any          |
+| `vfio`     | the tool maps memory and BARs through VFIO       | any          |
+
+With an IOMMU, `vfio` makes type-1 mappings. With none it uses VFIO's no-IOMMU
+mode, which has no mapping interface, so the addresses are physical. The
+default is `vfu-dma` if `/dev/vfu-dma` exists, else `physical`, and the mode
+used is printed.
+
+`vfu-ring` never loads a module or binds a driver. Only one driver can be
+bound to the ringer at a time, so `vfu-driver-select` (run in the guest as
+root) leaves it on the one a mode needs:
+
+```bash
+sudo vfu-driver-select status     # what the ringer is on
+sudo vfu-driver-select physical   # no driver; vfu-dma unloaded
+sudo vfu-driver-select vfu-dma    # vfu-dma loaded and bound
+sudo vfu-driver-select vfio       # vfio-pci bound, VFIO switches set
+```
+
+The `vfu-dma` module is built in the guest with DKMS (it needs the kernel
+headers for the running kernel); the stack's playbook does that with
+`--tags all,vfu-dma`. `vfio` mode sets the VFIO unsafe-interrupts switch (a
+guest IOMMU without interrupt remapping needs it) or, with no IOMMU, VFIO's
+no-IOMMU mode, which taints the kernel. Use it in a test VM only.
 
 ## The ring command
 
@@ -238,14 +273,14 @@ and `delay-ns`. For a region they override what its config implies, so a wrong
 `size` sends malformed writes on purpose. `qids`, `qid0` and `ring` apply to
 keyed regions only and are an error elsewhere. The ringer takes `inline`,
 `poll-mmio`, `mode=mmio|sgl|shm` and `timeout-ms=N`, and `qemu-nvme` takes `sq`,
-`cq`, `offset` and `force`. `xio-doorbell help` lists them all with one line
+`cq`, `offset` and `force`. `vfu-ring help` lists them all with one line
 each.
 
 ## Server logs
 
 Both servers log to stderr (`docker logs` for the containers). A successful
 write is not logged by default; the ringee counts it, and the guest reads the
-counters and the write log back with `xio-doorbell dump` and `log`. What is
+counters and the write log back with `vfu-ring dump` and `log`. What is
 logged:
 
 * At startup and attach: `serving on`, `client attached`, one `DMA map` line per
@@ -272,9 +307,9 @@ write), then ring them:
 ```bash
 # stack started with VM_QEMU_ARGS="--pci-testdev --nvme 1 \
 #   --nvme-trace memory_region_ops_write"
-sudo xio-doorbell ring --ringee qemu-pci-testdev --count 1
-sudo xio-doorbell ring --ringee qemu-nvme,sq=free --count 3
-sudo xio-doorbell ring --ringee 0000:00:03.0,offset=0x10f0 --count 1 \
+sudo vfu-ring ring --ringee qemu-pci-testdev --count 1
+sudo vfu-ring ring --ringee qemu-nvme,sq=free --count 3
+sudo vfu-ring ring --ringee 0000:00:03.0,offset=0x10f0 --count 1 \
     --write size=4,value=2
 docker logs vfu-doorbell-vm-qemu-1 2>&1 | grep -E "pci-testdev|'nvme'"
 ```
@@ -305,7 +340,7 @@ vfu-doorbell,poll-mmio` to poll the STATUS register instead and reproduce the
 hazard:
 
 ```bash
-sudo xio-doorbell ring --ringer vfu-doorbell,poll-mmio,timeout-ms=40000 \
+sudo vfu-ring ring --ringer vfu-doorbell,poll-mmio,timeout-ms=40000 \
     --ringee vfu-doorbell,region=0 --count 200
 ```
 
@@ -334,7 +369,7 @@ because QEMU's client does not negotiate the second socket.
 
 ## Notes
 
-* Guest MMIO accessors in `xio-doorbell` are inline assembly on purpose. KVM's
+* Guest MMIO accessors in `vfu-ring` are inline assembly on purpose. KVM's
   instruction emulator rejects SSE moves to an MMIO address and injects an
   invalid-opcode fault; an optimizing compiler will otherwise load two adjacent
   64-bit registers with `movq` into an XMM register.

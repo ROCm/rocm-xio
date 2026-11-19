@@ -2,12 +2,12 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * xio-doorbell: guest-side driver for the vfu-doorbell ringee and ringer.
+ * vfu-ring: guest-side driver for the vfu-doorbell ringee and ringer.
  *
- * It maps each device's BAR0 through sysfs, so it needs root and no kernel
- * driver. It can configure the ringee's doorbell overlays, ring them from the
- * CPU (the trapped, known-good path), ask the ringer to ring them through the
- * vfio-user server, and read back what the ringee saw.
+ * It maps each device's BAR0 through sysfs, so it needs root. It can configure
+ * the ringee's doorbell overlays, ring them from the CPU (the trapped,
+ * known-good path), ask the ringer to ring them through the vfio-user server,
+ * and read back what the ringee saw.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -20,18 +20,25 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <libgen.h>
+#include <linux/vfio.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "vfu-dma-uapi.h"
 #include "vfu-doorbell.h"
 
 struct dev {
   char bdf[288];
   volatile uint8_t* bar;
   size_t size;
-  uint64_t gpa; /* BAR0 guest physical address (no IOMMU assumed) */
+  uint64_t gpa; /* BAR0 physical address, as sysfs reports it */
   bool present;
+  /* The address the ringer must use for BAR0, from the address provider. */
+  uint64_t bus_base;
+  bool bus_ok;
 };
 
 static struct dev ringee;
@@ -53,8 +60,8 @@ static const char* errno_hint(uint32_t err) {
       return "  (the address is not in the ringer's DMA table: QEMU must "
              "announce another device's BAR, x-peer-mmio=on)";
     case ENODEV:
-      return "  (QEMU could not deliver the write: is Bus Master Enable set "
-             "on the ringer?)";
+      return "  (QEMU could not deliver the write: Bus Master Enable clear on "
+             "the ringer, or a vIOMMU translating it with nothing mapped)";
     default:
       return "";
   }
@@ -219,13 +226,13 @@ static void wrw(const struct dev* d, uint64_t off, unsigned width, uint64_t v) {
 
 static bool need_ringee(void) {
   if (!ringee.present)
-    fprintf(stderr, "xio-doorbell: no vfu-doorbell ringee device found\n");
+    fprintf(stderr, "vfu-ring: no vfu-doorbell ringee device found\n");
   return ringee.present;
 }
 
 static bool need_ringer(void) {
   if (!ringer.present)
-    fprintf(stderr, "xio-doorbell: no vfu-doorbell ringer device found\n");
+    fprintf(stderr, "vfu-ring: no vfu-doorbell ringer device found\n");
   return ringer.present;
 }
 
@@ -335,10 +342,9 @@ struct opts {
   uint64_t stride;
   unsigned timeout_ms;
   bool poll_mmio; /* poll STATUS over MMIO: can deadlock, see README.md */
-  /* ring --raw/--preset: another device. gpa_base replaces the ringee's BAR0
-   * address, and dst is the device the CPU path stores into. */
-  uint64_t gpa_base;
-  const struct dev* dst;
+  /* ring --raw/--preset: another device than the ringee: where the CPU path
+   * stores and whose BAR0 the ringer writes to. */
+  struct dev* dst;
 };
 
 static void opts_for_region(const struct region_cfg* c, struct opts* o) {
@@ -406,15 +412,32 @@ static void cpu_ring(const struct region_cfg* c, uint32_t count,
   free(seqs);
 }
 
-/* A pinned page the ringer stores its completion cookie into. Polling guest
- * RAM generates no MMIO, so the guest never touches the ringer's BAR while a
- * job runs. */
-static volatile uint64_t* done_word;
-static uint64_t done_gpa;
+/*
+ * Bus addresses.
+ *
+ * The ringer is a PCI device, and what it must be told to reach the completion
+ * word and a target's BAR is a bus address: the address the device puts on the
+ * bus, which a translating IOMMU maps to the real one. Where that address comes
+ * from is the address provider's business:
+ *
+ *   physical  the physical address, from pagemap and sysfs. Needs nothing, and
+ *             is right with no IOMMU or an identity domain, wrong under
+ *             translation.
+ *   vfu-dma   the vfu-dma kernel module, which obtains the address from the DMA
+ *             API for the ringer. Right with or without an IOMMU.
+ *   vfio      the ringer is taken by vfio-pci and the tool maps memory and BARs
+ *             for it. Right with an IOMMU; with none it uses VFIO's no-IOMMU
+ * mode and physical addresses.
+ */
+struct addr_provider {
+  const char* name;
+  /* A page the tool can poll and the bus address the ringer stores to. */
+  bool (*done_page)(volatile uint64_t** word, uint64_t* bus);
+  /* The bus address of BAR0 of @d, for the ringer. */
+  bool (*target_base)(struct dev* d, uint64_t* bus);
+};
 
-static bool ensure_done_page(void) {
-  if (done_word)
-    return true;
+static bool physical_done_page(volatile uint64_t** word, uint64_t* bus) {
   void* m = mmap(NULL, VFU_DB_PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE | MAP_LOCKED, -1,
                  0);
@@ -437,9 +460,354 @@ static bool ensure_done_page(void) {
     return false;
   }
   close(fd);
-  done_word = m;
-  done_gpa = (entry & ((1ull << 55) - 1)) * VFU_DB_PAGE;
+  *word = m;
+  *bus = (entry & ((1ull << 55) - 1)) * VFU_DB_PAGE;
   return true;
+}
+
+static bool physical_target_base(struct dev* d, uint64_t* bus) {
+  *bus = d->gpa;
+  return true;
+}
+
+static const struct addr_provider physical_provider = {"physical",
+                                                       physical_done_page,
+                                                       physical_target_base};
+
+static int vfu_dma_fd = -1;
+
+static bool driver_open(void) {
+  if (vfu_dma_fd >= 0)
+    return true;
+  vfu_dma_fd = open("/dev/vfu-dma", O_RDWR);
+  if (vfu_dma_fd < 0) {
+    perror("/dev/vfu-dma (run vfu-driver-select vfu-dma)");
+    return false;
+  }
+  struct vfu_dma_info info = {0};
+  if (ioctl(vfu_dma_fd, VFU_DMA_IOC_GET_INFO, &info) != 0 ||
+      info.version != VFU_DMA_VERSION) {
+    fprintf(stderr, "/dev/vfu-dma speaks version %u, this tool %u\n",
+            info.version, VFU_DMA_VERSION);
+    close(vfu_dma_fd);
+    vfu_dma_fd = -1;
+    return false;
+  }
+  printf("dma: vfu-dma, the ringer is %s\n",
+         !(info.flags & VFU_DMA_INFO_IOMMU)     ? "not behind an IOMMU"
+         : (info.flags & VFU_DMA_INFO_IDENTITY) ? "in an identity domain"
+                                                : "in a translated domain");
+  return true;
+}
+
+static bool driver_done_page(volatile uint64_t** word, uint64_t* bus) {
+  if (!driver_open())
+    return false;
+  struct vfu_dma_alloc a = {.size = VFU_DB_PAGE};
+  if (ioctl(vfu_dma_fd, VFU_DMA_IOC_ALLOC_PAGE, &a) != 0) {
+    perror("VFU_DMA_IOC_ALLOC_PAGE");
+    return false;
+  }
+  void* m = mmap(NULL, (size_t)a.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 vfu_dma_fd, (off_t)a.mmap_offset);
+  if (m == MAP_FAILED) {
+    perror("mmap /dev/vfu-dma");
+    return false;
+  }
+  *(volatile uint64_t*)m = 0;
+  *word = m;
+  *bus = a.dma_addr;
+  printf("dma: completion page at bus address 0x%llx\n",
+         (unsigned long long)a.dma_addr);
+  return true;
+}
+
+static bool driver_target_base(struct dev* d, uint64_t* bus) {
+  if (d->bus_ok) {
+    *bus = d->bus_base;
+    return true;
+  }
+  if (!driver_open())
+    return false;
+  unsigned dom, b, dev, fn;
+  if (sscanf(d->bdf, "%x:%x:%x.%x", &dom, &b, &dev, &fn) != 4) {
+    fprintf(stderr, "cannot parse the address of %s\n", d->bdf);
+    return false;
+  }
+  struct vfu_dma_peer p = {.bdf = VFU_DMA_BDF(dom, b, dev, fn), .bar = 0};
+  if (ioctl(vfu_dma_fd, VFU_DMA_IOC_MAP_PEER, &p) != 0) {
+    fprintf(stderr, "mapping BAR0 of %s for the ringer: %s%s\n", d->bdf,
+            strerror(errno),
+            errno == EOPNOTSUPP
+              ? " (the kernel's DMA API refused dma_map_resource)"
+              : "");
+    return false;
+  }
+  d->bus_base = p.dma_addr;
+  d->bus_ok = true;
+  *bus = p.dma_addr;
+  printf("dma: BAR0 of %s mapped for the ringer at bus address 0x%llx\n",
+         d->bdf, (unsigned long long)p.dma_addr);
+  return true;
+}
+
+static const struct addr_provider driver_provider = {"vfu-dma",
+                                                     driver_done_page,
+                                                     driver_target_base};
+
+/*
+ * The vfio provider: the ringer is taken by vfio-pci and the tool maps memory
+ * and BARs for it, as a userspace driver would.
+ *
+ *  - With an IOMMU (the ringer has an IOMMU group): the tool attaches the
+ * ringer to a type-1 container and maps the completion page and each target's
+ * BAR at IOVAs it chooses. Type-1 and not iommufd, because iommufd cannot map a
+ * BAR from a pointer.
+ *  - Without one: VFIO's no-IOMMU mode. It has no mapping interface, so the
+ *    addresses stay physical, but the ringer is taken through VFIO all the
+ * same.
+ *
+ * The ringer's registers stay reachable through the sysfs mapping the tool
+ * already holds. The tool does not bind or unbind drivers: vfu-driver-select
+ * vfio binds the ringer to vfio-pci, and the tool only checks that it is.
+ */
+struct vfio_state {
+  bool ready;
+  bool iommu; /* mappings are made; false: no-IOMMU mode, physical addresses */
+  int container;
+  int group;
+  int devfd;
+  uint64_t next_iova;
+};
+
+static struct vfio_state vfio = {.container = -1,
+                                 .group = -1,
+                                 .devfd = -1,
+                                 .next_iova = 0x40000000ull};
+
+static bool vfio_fail(const char* what) {
+  fprintf(stderr, "vfio: %s: %s", what, strerror(errno));
+  if (errno == EPERM)
+    fprintf(stderr, "\n  (VFIO refuses a device without interrupt remapping "
+                    "unless allow_unsafe_interrupts is Y for vfio_iommu_type1; "
+                    "or you are not root)");
+  fputc('\n', stderr);
+  return false;
+}
+
+static bool vfio_setup(void) {
+  if (vfio.ready)
+    return true;
+  if (!ringer.present) {
+    fprintf(stderr, "vfu-ring: no vfu-doorbell ringer device found\n");
+    return false;
+  }
+  char path[512], link[512];
+  const char* bdf = ringer.bdf;
+
+  /* Setup binds the ringer to vfio-pci and loads the modules; this tool only
+   * checks, and says what to run. */
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/driver", bdf);
+  ssize_t n = readlink(path, link, sizeof(link) - 1);
+  if (n > 0)
+    link[n] = '\0';
+  if (n <= 0 || strcmp(basename(link), "vfio-pci") != 0) {
+    fprintf(stderr,
+            "vfio: the ringer is bound to %s, not vfio-pci (run "
+            "vfu-driver-select vfio)\n",
+            n > 0 ? basename(link) : "no driver");
+    return false;
+  }
+
+  /* The group node tells the cases apart: noiommu-N in VFIO's no-IOMMU mode. */
+  snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/iommu_group", bdf);
+  n = readlink(path, link, sizeof(link) - 1);
+  if (n <= 0) {
+    fprintf(stderr,
+            "vfio: the ringer has no group although it is on vfio-pci\n");
+    return false;
+  }
+  link[n] = '\0';
+  char group_path[512], noiommu_path[512];
+  snprintf(group_path, sizeof(group_path), "/dev/vfio/%s", basename(link));
+  snprintf(noiommu_path, sizeof(noiommu_path), "/dev/vfio/noiommu-%s",
+           basename(link));
+  vfio.iommu = access(group_path, F_OK) == 0;
+  if (!vfio.iommu && access(noiommu_path, F_OK) != 0) {
+    fprintf(stderr, "vfio: no group node for the ringer (%s or %s)\n",
+            group_path, noiommu_path);
+    return false;
+  }
+  snprintf(path, sizeof(path), "%s", vfio.iommu ? group_path : noiommu_path);
+
+  if (vfio.iommu && access("/sys/module/vfio_iommu_type1", F_OK) != 0) {
+    fprintf(stderr, "vfio: vfio_iommu_type1 is not loaded (run "
+                    "vfu-driver-select vfio)\n");
+    return false;
+  }
+  if (!vfio.iommu) {
+    char on = 0;
+    FILE* f = fopen("/sys/module/vfio/parameters/enable_unsafe_noiommu_mode",
+                    "r");
+    if (f) {
+      on = (char)fgetc(f);
+      fclose(f);
+    }
+    if (on != 'Y') {
+      fprintf(stderr,
+              "vfio: the ringer is in a no-IOMMU group, and VFIO's no-IOMMU "
+              "mode is %s (run vfu-driver-select "
+              "vfio)\n",
+              f ? "off" : "not available");
+      return false;
+    }
+  }
+
+  vfio.container = open("/dev/vfio/vfio", O_RDWR);
+  if (vfio.container < 0)
+    return vfio_fail("open /dev/vfio/vfio");
+  vfio.group = open(path, O_RDWR);
+  if (vfio.group < 0)
+    return vfio_fail(path);
+  if (ioctl(vfio.group, VFIO_GROUP_SET_CONTAINER, &vfio.container) < 0)
+    return vfio_fail("VFIO_GROUP_SET_CONTAINER");
+  if (ioctl(vfio.container, VFIO_SET_IOMMU,
+            vfio.iommu ? VFIO_TYPE1v2_IOMMU : VFIO_NOIOMMU_IOMMU) < 0)
+    return vfio_fail("VFIO_SET_IOMMU (is vfio_iommu_type1 loaded?)");
+  vfio.devfd = ioctl(vfio.group, VFIO_GROUP_GET_DEVICE_FD, bdf);
+  if (vfio.devfd < 0)
+    return vfio_fail("VFIO_GROUP_GET_DEVICE_FD");
+
+  /* A device may DMA only with bus mastering on: through VFIO's config region.
+   */
+  struct vfio_region_info cfg = {.argsz = sizeof(cfg),
+                                 .index = VFIO_PCI_CONFIG_REGION_INDEX};
+  uint16_t cmd;
+  if (ioctl(vfio.devfd, VFIO_DEVICE_GET_REGION_INFO, &cfg) < 0 ||
+      pread(vfio.devfd, &cmd, 2, (off_t)cfg.offset + 4) != 2)
+    return vfio_fail("read the ringer's command register");
+  cmd |= 0x6; /* memory space, bus master */
+  if (pwrite(vfio.devfd, &cmd, 2, (off_t)cfg.offset + 4) != 2)
+    return vfio_fail("write the ringer's command register");
+
+  printf("dma: vfio, the ringer is on vfio-pci (%s)\n",
+         vfio.iommu ? "IOMMU: type-1 mappings"
+                    : "no IOMMU: VFIO no-IOMMU mode, physical addresses");
+  vfio.ready = true;
+  return true;
+}
+
+/* Map [va, va + len) for the ringer at a fresh IOVA. */
+static bool vfio_map(void* va, size_t len, uint64_t* iova) {
+  struct vfio_iommu_type1_dma_map m = {.argsz = sizeof(m),
+                                       .flags = VFIO_DMA_MAP_FLAG_READ |
+                                                VFIO_DMA_MAP_FLAG_WRITE,
+                                       .vaddr = (uintptr_t)va,
+                                       .iova = vfio.next_iova,
+                                       .size = len};
+  if (ioctl(vfio.container, VFIO_IOMMU_MAP_DMA, &m) < 0)
+    return vfio_fail("VFIO_IOMMU_MAP_DMA");
+  *iova = m.iova;
+  vfio.next_iova += (len + 0xfffu) & ~0xfffull; /* the next one starts after */
+  vfio.next_iova += 0x1000;
+  return true;
+}
+
+static bool vfio_done_page(volatile uint64_t** word, uint64_t* bus) {
+  if (!vfio_setup())
+    return false;
+  if (!vfio.iommu)
+    return physical_done_page(word, bus);
+  void* m = mmap(NULL, VFU_DB_PAGE, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+  if (m == MAP_FAILED) {
+    perror("mmap done page");
+    return false;
+  }
+  *(volatile uint64_t*)m = 0;
+  if (!vfio_map(m, VFU_DB_PAGE, bus))
+    return false;
+  *word = m;
+  printf("dma: completion page at bus address 0x%llx\n",
+         (unsigned long long)*bus);
+  return true;
+}
+
+static bool vfio_target_base(struct dev* d, uint64_t* bus) {
+  if (!vfio_setup())
+    return false;
+  if (!vfio.iommu)
+    return physical_target_base(d, bus);
+  if (!d->bus_ok) {
+    /* The tool's own sysfs mapping of the BAR is what is handed to VFIO. */
+    if (!vfio_map((void*)d->bar, d->size, &d->bus_base))
+      return false;
+    d->bus_ok = true;
+    printf("dma: BAR0 of %s mapped for the ringer at bus address 0x%llx\n",
+           d->bdf, (unsigned long long)d->bus_base);
+  }
+  *bus = d->bus_base;
+  return true;
+}
+
+static const struct addr_provider vfio_provider = {"vfio", vfio_done_page,
+                                                   vfio_target_base};
+
+/* Which provider this run uses: --dma, else the driver if it is there. */
+enum dma_mode { DMA_AUTO, DMA_PHYSICAL, DMA_DRIVER, DMA_VFIO };
+static enum dma_mode dma_mode = DMA_AUTO;
+static const struct addr_provider* provider;
+
+static const struct addr_provider* use_provider(void) {
+  if (provider)
+    return provider;
+  if (dma_mode == DMA_AUTO)
+    dma_mode = access("/dev/vfu-dma", F_OK) == 0 ? DMA_DRIVER : DMA_PHYSICAL;
+  provider = dma_mode == DMA_DRIVER ? &driver_provider
+             : dma_mode == DMA_VFIO ? &vfio_provider
+                                    : &physical_provider;
+  if (provider == &physical_provider)
+    printf("dma: physical addresses (no translating IOMMU assumed)\n");
+  return provider;
+}
+
+/* Take "--dma MODE" out of the arguments, wherever it is. */
+static bool parse_dma_option(int* argc, char** argv) {
+  for (int i = 1; i < *argc; i++) {
+    if (strcmp(argv[i], "--dma") != 0)
+      continue;
+    if (i + 1 >= *argc) {
+      fprintf(stderr, "--dma needs physical, vfu-dma or vfio\n");
+      return false;
+    }
+    if (!strcmp(argv[i + 1], "physical"))
+      dma_mode = DMA_PHYSICAL;
+    else if (!strcmp(argv[i + 1], "vfu-dma"))
+      dma_mode = DMA_DRIVER;
+    else if (!strcmp(argv[i + 1], "vfio"))
+      dma_mode = DMA_VFIO;
+    else {
+      fprintf(stderr, "--dma %s: use physical, vfu-dma or vfio\n", argv[i + 1]);
+      return false;
+    }
+    for (int j = i; j + 2 < *argc; j++)
+      argv[j] = argv[j + 2];
+    *argc -= 2;
+    i--;
+  }
+  return true;
+}
+
+/* A page the ringer stores its completion cookie into. Polling guest RAM
+ * generates no MMIO, so the guest never touches the ringer's BAR while a job
+ * runs. */
+static volatile uint64_t* done_word;
+static uint64_t done_bus;
+
+static bool ensure_done_page(void) {
+  if (done_word)
+    return true;
+  return use_provider()->done_page(&done_word, &done_bus);
 }
 
 struct ring_result {
@@ -463,8 +831,13 @@ static struct ring_result ringer_run(const struct region_cfg* c, uint32_t count,
     flags |= VFU_DB_RF_KEYED;
   if (o->inline_mode)
     flags |= VFU_DB_RF_INLINE;
-  wr64(&ringer, VFU_DB_R_GPA,
-       (o->gpa_base ? o->gpa_base : ringee.gpa) + c->base);
+  struct dev* target = o->dst ? o->dst : &ringee;
+  uint64_t target_bus;
+  if (!use_provider()->target_base(target, &target_bus)) {
+    res.status = VFU_DB_ST_ERROR;
+    return res;
+  }
+  wr64(&ringer, VFU_DB_R_GPA, target_bus + c->base);
   wr64(&ringer, VFU_DB_R_VALUE, o->value);
   wr64(&ringer, VFU_DB_R_STEP, (uint64_t)o->step);
   wr64(&ringer, VFU_DB_R_STRIDE, o->stride);
@@ -486,7 +859,7 @@ static struct ring_result ringer_run(const struct region_cfg* c, uint32_t count,
     }
     cookie = (now_ns() << 1) | 1;
     *done_word = 0;
-    wr64(&ringer, VFU_DB_R_DONE_GPA, done_gpa);
+    wr64(&ringer, VFU_DB_R_DONE_GPA, done_bus);
     wr64(&ringer, VFU_DB_R_DONE_VALUE, cookie);
   } else {
     wr64(&ringer, VFU_DB_R_DONE_GPA, 0);
@@ -1080,7 +1453,7 @@ struct target {
   struct dev* dev;
   bool ours; /* the vfu-doorbell ringee */
   bool nvme;
-  bool testdev; /* QEMU pci-testdev: its counter judges the writes */
+  bool testdev;  /* QEMU pci-testdev: its counter judges the writes */
   bool has_base; /* the device's own doorbell offset */
   uint64_t base;
   unsigned size; /* 0: no default */
@@ -1372,14 +1745,14 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
   }
   if (!cpu && !need_ringer())
     return 1;
-  o->gpa_base = t->dev->gpa;
   o->dst = t->dev;
   o->stride = o->stride ? o->stride : o->size;
   printf("ringee: %s BAR0+0x%llx gpa=0x%llx size=%u x%u\n", t->dev->bdf,
-         (unsigned long long)c.base, (unsigned long long)(o->gpa_base + c.base),
+         (unsigned long long)c.base, (unsigned long long)(t->dev->gpa + c.base),
          o->size, count);
 
-  /* The testdev's own doorbell is judged by its counter; another offset is not. */
+  /* The testdev's own doorbell is judged by its counter; another offset is not.
+   */
   const bool judged = t->testdev && !have_raw;
   if (judged)
     testdev_select(t->dev); /* test 0, counter to zero */
@@ -1403,8 +1776,8 @@ static int ring_external(bool cpu, bool force, struct target* t, bool have_raw,
            TESTDEV_DOORBELL);
     if (expect == EXP_ARRIVE_ALL) {
       bool pass = res.ok && got == count;
-      printf("%s: the testdev counted %u of %u writes\n", pass ? "PASS" : "FAIL",
-             got, count);
+      printf("%s: the testdev counted %u of %u writes\n",
+             pass ? "PASS" : "FAIL", got, count);
       return pass ? 0 : 1;
     }
   } else if (t->ours)
@@ -1442,13 +1815,10 @@ struct preset {
 };
 
 #define RG(m, f, b, sz, w, st, mt)                                             \
-  {.model = (m),                                                               \
-   .flags = (f),                                                               \
-   .base = (b),                                                                \
-   .size = (sz),                                                               \
-   .width = (w),                                                               \
-   .stride = (st),                                                             \
-   .match = (mt)}
+  {                                                                            \
+    .model = (m), .flags = (f), .base = (b), .size = (sz), .width = (w),       \
+    .stride = (st), .match = (mt)                                              \
+  }
 
 static const struct preset presets[] = {
   {"index-ringer",
@@ -1770,7 +2140,7 @@ static int ring_usage(void) {
           "ring [--ringee D[,opts]] [--ringer R[,opts]] [--count N] [--write "
           "k=v,...]\n"
           "ring --preset <name>\n"
-          "(xio-doorbell help lists the options)\n");
+          "(vfu-ring help lists the options)\n");
   return 2;
 }
 
@@ -1927,7 +2297,19 @@ static int cmd_ring(int argc, char** argv) {
 /* clang-format off */
 static void usage(FILE* out) {
   fputs(
-    "usage: xio-doorbell <command> [args]\n"
+    "usage: vfu-ring [--dma MODE] <command> [args]\n"
+    "\n"
+    "  --dma MODE                how the ringer is told where memory and other devices are, anywhere on the line:\n"
+    "      physical              physical addresses, from pagemap and sysfs. Needs nothing; right with no IOMMU or a pass-through\n"
+    "                            one, wrong under a translating IOMMU\n"
+    "      vfu-dma               bus addresses from the vfu-dma kernel module (/dev/vfu-dma), from the DMA API. Right with or\n"
+    "                            without an IOMMU\n"
+    "      vfio                  the ringer is taken by vfio-pci and the tool maps memory and BARs for it (type-1). With no IOMMU,\n"
+    "                            VFIO's no-IOMMU mode, with physical addresses\n"
+    "\n"
+    "                            The tool never loads a module or binds a driver. Run vfu-driver-select first: physical, vfu-dma or\n"
+    "                            vfio (vfu-driver-select status shows what works now)\n"
+    "    [default: vfu-dma if /dev/vfu-dma exists, else physical; the mode used is printed]\n"
     "\n"
     "  info                      show the devices and the configured regions\n"
     "  reset                     reset the ringee's counters, per-key state and write log\n"
@@ -2011,6 +2393,8 @@ int main(int argc, char** argv) {
     usage(stdout);
     return 0;
   }
+  if (!parse_dma_option(&argc, argv))
+    return 2;
   const char* cmd = argv[1];
   if (!strcmp(cmd, "presets"))
     return cmd_presets(); /* needs no device, so no root */

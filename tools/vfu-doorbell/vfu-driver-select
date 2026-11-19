@@ -1,0 +1,208 @@
+#!/bin/bash
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# vfu-driver-select: choose what controls the vfu-doorbell ringer in this guest.
+#
+# vfu-ring never loads a module or binds a driver; this does, so that what
+# the ringer is attached to is always a deliberate step. Only one driver can be
+# attached to the ringer at a time, so each mode leaves it in one state:
+#
+#   physical  the ringer has no driver, and bus mastering is turned on.
+#             vfu-ring --dma physical works with no
+#             IOMMU or a pass-through one.
+#   vfu-dma   the vfu-dma kernel module is loaded and bound to the ringer.
+#             vfu-ring --dma vfu-dma (the default once /dev/vfu-dma exists).
+#   vfio      the ringer is bound to vfio-pci, and the VFIO modules and kernel
+#             switches that needs are set. vfu-ring --dma vfio.
+#
+#   vfu-driver-select status
+#   vfu-driver-select physical | vfu-dma | vfio
+#
+# Run as root in the guest.
+
+set -euo pipefail
+
+VENDOR=0x1de0
+DEVICE=0x0002
+
+usage() {
+  cat >&2 <<'EOF'
+usage: vfu-driver-select status
+       vfu-driver-select physical | vfu-dma | vfio
+
+  status    show what the ringer is attached to
+  physical  detach the ringer from any driver and unload vfu-dma
+  vfu-dma   load vfu-dma and attach the ringer to it
+  vfio      load the VFIO modules, set the kernel switches VFIO needs, and attach
+            the ringer to vfio-pci
+EOF
+  exit 2
+}
+
+die() {
+  echo "vfu-driver-select: $*" >&2
+  exit 1
+}
+
+find_ringer() {
+  local d
+  for d in /sys/bus/pci/devices/*; do
+    if [ "$(cat "$d/vendor" 2>/dev/null)" = "$VENDOR" ] &&
+      [ "$(cat "$d/device" 2>/dev/null)" = "$DEVICE" ]; then
+      basename "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+[ $# -eq 1 ] || usage
+BDF=$(find_ringer) || die "no vfu-doorbell ringer (1de0:0002) in this guest"
+DEV=/sys/bus/pci/devices/$BDF
+
+current_driver() {
+  if [ -L "$DEV/driver" ]; then
+    basename "$(readlink "$DEV/driver")"
+  fi
+}
+
+module_loaded() {
+  [ -d "/sys/module/$1" ]
+}
+
+need_root() {
+  [ "$(id -u)" = 0 ] || die "run as root"
+}
+
+# Detach whatever the ringer is attached to, and clear a driver override.
+detach() {
+  if [ -n "$(current_driver)" ]; then
+    echo "$BDF" >"$DEV/driver/unbind"
+  fi
+  echo >"$DEV/driver_override"
+}
+
+# Attach the ringer to the driver called $1, which must be loaded.
+attach() {
+  echo "$1" >"$DEV/driver_override"
+  echo "$BDF" >/sys/bus/pci/drivers_probe
+  [ "$(current_driver)" = "$1" ] || die "the ringer did not bind to $1"
+}
+
+# The ringer's DMA needs PCI Bus Master Enable. vfu-dma and vfio-pci set it;
+# with no driver this does.
+bus_master() {
+  setpci -s "$BDF" COMMAND
+}
+
+enable_bus_master() {
+  setpci -s "$BDF" COMMAND=0x4:0x4 ||
+    die "cannot set bus mastering on $BDF (is setpci installed?)"
+}
+
+status() {
+  local drv group
+  drv=$(current_driver)
+  group=$(basename "$(readlink "$DEV/iommu_group" 2>/dev/null)" 2>/dev/null || true)
+  echo "ringer:        $BDF"
+  echo "driver:        ${drv:-none}"
+  echo "iommu group:   ${group:-none}"
+  if [ $((0x$(bus_master 2>/dev/null || echo 0) & 4)) -ne 0 ]; then
+    echo "bus master:    on"
+  else
+    echo "bus master:    off"
+  fi
+  for m in vfu_dma vfio_pci vfio_iommu_type1; do
+    if module_loaded "$m"; then
+      echo "module $m: loaded"
+    else
+      echo "module $m: not loaded"
+    fi
+  done
+  for p in /sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts \
+    /sys/module/vfio/parameters/enable_unsafe_noiommu_mode; do
+    [ -e "$p" ] && echo "$(basename "$(dirname "$(dirname "$p")")") $(basename "$p"): $(cat "$p")"
+  done
+}
+
+select_physical() {
+  detach
+  if module_loaded vfu_dma; then
+    modprobe -r vfu-dma
+  fi
+  # No driver is left to enable bus mastering, which the ringer's DMA needs, and
+  # unbinding the last driver cleared it.
+  enable_bus_master
+  echo "the ringer has no driver; use vfu-ring --dma physical"
+}
+
+select_vfu_dma() {
+  local i
+  detach
+  if ! module_loaded vfu_dma; then
+    # Loading it binds it to the ringer, which has no driver now.
+    modprobe vfu-dma 2>/dev/null ||
+      die "cannot load vfu-dma (is it installed? the playbook's vfu-dma tag builds it)"
+  else
+    echo "$BDF" >/sys/bus/pci/drivers_probe
+  fi
+  [ "$(current_driver)" = vfu-dma ] || die "the ringer did not bind to vfu-dma"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e /dev/vfu-dma ] && break
+    sleep 0.5
+  done
+  [ -e /dev/vfu-dma ] || die "/dev/vfu-dma did not appear"
+  echo "the ringer is on vfu-dma; use vfu-ring --dma vfu-dma"
+}
+
+select_vfio() {
+  local had_group=0 p
+  # With no IOMMU the ringer has no group until vfio-pci binds it, and VFIO can
+  # take it only in its no-IOMMU mode. Decide before binding.
+  if [ -e "$DEV/iommu_group" ] && [ "$(current_driver)" != vfio-pci ]; then
+    had_group=1
+  fi
+
+  modprobe vfio-pci 2>/dev/null || die "cannot load vfio-pci (is CONFIG_VFIO_PCI on?)"
+  modprobe vfio_iommu_type1 2>/dev/null || die "cannot load vfio_iommu_type1"
+
+  # The vIOMMU has no interrupt remapping, which VFIO refuses a device without
+  # unless told otherwise. Acceptable in a test VM.
+  p=/sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts
+  [ -e "$p" ] && echo 1 >"$p"
+
+  if [ "$had_group" = 0 ] && [ "$(current_driver)" != vfio-pci ]; then
+    p=/sys/module/vfio/parameters/enable_unsafe_noiommu_mode
+    [ -e "$p" ] || die "the ringer has no IOMMU group and this kernel has no VFIO no-IOMMU mode (CONFIG_VFIO_NOIOMMU)"
+    echo Y >"$p"
+  fi
+
+  if [ "$(current_driver)" != vfio-pci ]; then
+    detach
+    attach vfio-pci
+  fi
+  echo "the ringer is on vfio-pci; use vfu-ring --dma vfio"
+}
+
+case "$1" in
+status)
+  status
+  ;;
+physical)
+  need_root
+  select_physical
+  ;;
+vfu-dma)
+  need_root
+  select_vfu_dma
+  ;;
+vfio)
+  need_root
+  select_vfio
+  ;;
+*)
+  usage
+  ;;
+esac

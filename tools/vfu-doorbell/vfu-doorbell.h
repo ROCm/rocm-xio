@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * vfu-doorbell: register layout and value encoding shared by the vfio-user
- * "ringee" and "ringer" test devices and the guest-side xio-doorbell tool.
+ * "ringee" and "ringer" test devices and the guest-side vfu-ring tool.
  *
  * Both devices are plain PCI devices with a single BAR0 of little-endian
  * registers; there is no guest driver. The guest tool maps BAR0 through

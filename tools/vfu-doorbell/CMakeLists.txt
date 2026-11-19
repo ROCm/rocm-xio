@@ -27,8 +27,10 @@ find_path(VFIO_USER_INCLUDE_DIR libvfio-user.h
 find_library(VFIO_USER_LIBRARY NAMES vfio-user
              HINTS /usr/local/lib /usr/local/lib/x86_64-linux-gnu)
 
-add_executable(xio-doorbell xio-doorbell.c)
-target_compile_options(xio-doorbell PRIVATE -Wall -Wextra)
+add_executable(vfu-ring vfu-ring.c)
+# The ioctl definitions the tool shares with the vfu-dma kernel module.
+target_include_directories(vfu-ring PRIVATE ../../kernel/vfu-dma)
+target_compile_options(vfu-ring PRIVATE -Wall -Wextra)
 
 if(VFIO_USER_INCLUDE_DIR AND VFIO_USER_LIBRARY)
   add_executable(vfu-doorbell vfu-doorbell.c)
@@ -53,5 +55,5 @@ if(VFIO_USER_INCLUDE_DIR AND VFIO_USER_LIBRARY)
                    "write path is disabled, use sgl")
   endif()
 else()
-  message(STATUS "libvfio-user not found: building xio-doorbell only")
+  message(STATUS "libvfio-user not found: building vfu-ring only")
 endif()
