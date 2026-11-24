@@ -1,0 +1,87 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# Build the vfu-doorbell servers into a container image, and push it to ghcr.io
+# from branches. The image holds /opt/vfu/vfu-doorbell, built in and run in
+# the libvfio-user fork image, so a vfio-user test stack pulls it instead of
+# building the binary on the host. A pull request builds and smoke-tests the
+# image and pushes nothing.
+#
+# The image is ghcr.io/<owner>/rocm-xio-vfu-doorbell, tagged with the commit
+# and with the branch name (slashes made hyphens). The branch tag moves; the
+# commit tag does not. The package has to be public for a stack to pull it
+# without logging in: that is a setting of the package on GitHub, not of this
+# workflow.
+
+name: vfu-doorbell-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'tools/vfu-doorbell/**'
+      - 'kernel/vfu-dma/**'
+      - '.github/workflows/vfu-doorbell-image.yml'
+  pull_request:
+    paths:
+      - 'tools/vfu-doorbell/**'
+      - 'kernel/vfu-dma/**'
+      - '.github/workflows/vfu-doorbell-image.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: vfu-doorbell image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Check out code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Name the image
+      run: |
+        owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+        branch=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+        {
+          echo "IMAGE=ghcr.io/${owner}/rocm-xio-vfu-doorbell"
+          echo "BRANCH_TAG=${branch}"
+        } >> "${GITHUB_ENV}"
+
+    - name: Build the image
+      run: |
+        docker build \
+          -f tools/vfu-doorbell/Dockerfile \
+          --build-arg "REVISION=${GITHUB_SHA}" \
+          -t "${IMAGE}:${GITHUB_SHA}" .
+
+    # The binary has to start in the image it will run in, which is the case
+    # a build alone does not show: a missing shared library fails here.
+    - name: Smoke-test the image
+      run: |
+        out=$(docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+                /opt/vfu/vfu-doorbell --help 2>&1 || true)
+        echo "${out}"
+        echo "${out}" | grep -q -- '--role' \
+          || { echo "FAIL: vfu-doorbell did not print its usage"; exit 1; }
+        docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+          sh -c 'ldd /opt/vfu/vfu-doorbell | grep -q "not found" && exit 1; exit 0' \
+          || { echo "FAIL: a shared library is missing"; exit 1; }
+
+    - name: Push the image
+      if: github.event_name != 'pull_request'
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" \
+          | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+        docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:${BRANCH_TAG}"
+        docker push "${IMAGE}:${GITHUB_SHA}"
+        docker push "${IMAGE}:${BRANCH_TAG}"
+        echo "Pushed ${IMAGE}:${GITHUB_SHA} and ${IMAGE}:${BRANCH_TAG}" \
+          >> "${GITHUB_STEP_SUMMARY}"
