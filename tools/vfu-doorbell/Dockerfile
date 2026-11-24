@@ -14,10 +14,11 @@
 # with kernel/vfu-dma, which CMake looks for while configuring. Only the
 # server is built; vfu-ring is a guest tool and is built in the guest.
 
-# A libvfio-user with vfu_mmio_write(), which the ringer's default write path
-# needs. Against upstream libvfio-user the ringer builds without it and only
-# its "sgl" path works.
-ARG BASE=docker.io/sbates130272/batesste-ci-images-ubuntu-libvfio-user-vfu-mmio-write:vfu.146d3bb
+# The libvfio-user fork image the pinned QEMU is built against (vfu.3719c3a). It
+# has vfu_mmio_write(), which the ringer's default write path needs: against
+# upstream libvfio-user the ringer builds without it and only its "sgl" path
+# works. It is on Docker Hub, so this builds without any local image.
+ARG BASE=docker.io/sbates130272/batesste-ci-images-ubuntu-libvfio-user-sbates-fork:vfu.3719c3a
 
 FROM ${BASE} AS build
 COPY tools/vfu-doorbell /src/tools/vfu-doorbell
