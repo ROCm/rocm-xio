@@ -14,6 +14,15 @@ endif
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
+# Detect whether struct dma_buf_attach_ops names its callback invalidate_mappings
+# (newer kernels, e.g. 7.2) or move_notify (older kernels). Same signature; the
+# member was renamed. Detected from the headers, as for hctx_table above.
+DMABUF_INVALIDATE_MAPPINGS := $(shell grep -c "invalidate_mappings" \
+  $(KDIR)/include/linux/dma-buf.h 2>/dev/null)
+ifneq ($(DMABUF_INVALIDATE_MAPPINGS),0)
+ccflags-y += -DROCM_XIO_DMABUF_INVALIDATE_MAPPINGS
+endif
+
 # Ensure vmlinux symlink exists for BTF generation
 # BTF is available at /sys/kernel/btf/vmlinux at runtime
 VMLINUX := $(KDIR)/vmlinux

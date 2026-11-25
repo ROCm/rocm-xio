@@ -930,7 +930,13 @@ static void rocm_xio_move_notify(struct dma_buf_attachment* attach) {
 
 static const struct dma_buf_attach_ops rocm_xio_attach_ops = {
   .allow_peer2peer = true,
+/* Newer kernels renamed move_notify to invalidate_mappings (same signature);
+ * the Makefile detects which from the headers. */
+#ifdef ROCM_XIO_DMABUF_INVALIDATE_MAPPINGS
+  .invalidate_mappings = rocm_xio_move_notify,
+#else
   .move_notify = rocm_xio_move_notify,
+#endif
 };
 
 /*
