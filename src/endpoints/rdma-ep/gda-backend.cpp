@@ -81,6 +81,26 @@ int Backend::init() {
 #endif
   }
 
+  // On rocjitsu emulated GPU, hipMalloc (called by setup_gpu_qp) triggers
+  // amdgpu_vm_make_compute WARN_ON which corrupts the process heap.
+  // Detect emulated GPU via sysfs (emu_mode=1) without calling any HIP
+  // functions that could trigger the compute VM path.
+  // Skip GPU QP setup; the loopback path handles null gpu_qp gracefully.
+  {
+    int emu_mode = 0;
+    FILE* f = fopen("/sys/module/amdgpu/parameters/emu_mode", "r");
+    if (f) {
+      (void)fscanf(f, "%d", &emu_mode);
+      fclose(f);
+    }
+    if (emu_mode != 0) {
+      fprintf(stderr,
+              "rdma_ep: rocjitsu emulated GPU detected"
+              " (emu_mode=%d) — skipping GPU QP setup\n",
+              emu_mode);
+      return 0;
+    }
+  }
   setup_gpu_qp();
   return 0;
 }
@@ -492,16 +512,15 @@ void* Backend::pd_alloc_host_pinned(struct ibv_pd* pd, void* pd_context,
                                     uint64_t resource_type) {
   (void)pd;
   (void)pd_context;
-  (void)alignment;
   (void)resource_type;
+  // hipHostMalloc (any flags) triggers amdgpu_vm_make_compute on the rocjitsu
+  // emulated GPU which fires a kernel WARN_ON and corrupts the process heap.
+  // Use posix_memalign instead: the memory is guest memfd-backed and accessible
+  // to the ionic vfio-user RDMA device via QEMU's DMA path.
   void* host_ptr = nullptr;
-  hipError_t err = hipHostMalloc(&host_ptr, size,
-                                 hipHostMallocMapped | hipHostMallocCoherent);
-  if (err != hipSuccess) {
-    fprintf(stderr, "rdma_ep: hipHostMalloc failed: %s\n",
-            hipGetErrorString(err));
+  size_t align = (alignment > 0) ? alignment : 64;
+  if (posix_memalign(&host_ptr, align, size) != 0 || !host_ptr)
     return nullptr;
-  }
   memset(host_ptr, 0, size);
   return host_ptr;
 }
@@ -520,7 +539,7 @@ void Backend::pd_release_host(struct ibv_pd* pd, void* pd_context, void* ptr,
   (void)pd;
   (void)pd_context;
   (void)resource_type;
-  (void)hipHostFree(ptr);
+  free(ptr);
 }
 
 void Backend::create_parent_domain() {
@@ -711,6 +730,17 @@ void Backend::initialize_gpu_qp() {
 
 #undef XIO_CHECK_ZERO
 #undef XIO_CHECK_NNULL
+
+#if !defined(GDA_IONIC)
+// Stub for non-ionic builds: cpu-loopback.hip is not compiled without
+// GDA_IONIC so provide a no-op definition to satisfy the linker.
+int Backend::cpu_loopback_smoke_test(int /*iterations*/,
+                                     int /*transfer_size*/) {
+  fprintf(stderr, "rdma_ep: cpu_loopback_smoke_test: "
+                  "not available (GDA_IONIC not enabled)\n");
+  return -1;
+}
+#endif
 
 } // namespace rdma_ep
 } // namespace xio

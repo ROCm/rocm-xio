@@ -1,0 +1,145 @@
+---
+# All-in-one vfio-user VM: two rocjitsu GPUs + SPDK KV NVMe + QEMU LBA NVMe
+# + rocm-ernic RDMA NIC, all in a single QEMU guest.
+#
+# This allows testing all four endpoint types (nvme-ep LBA, nvme-ep KV,
+# rdma-ep ionic, sdma-ep P2P) inside one VM.  Two rocjitsu instances share
+# the vfu-sockets volume on separate socket paths:
+#   /run/vfu/rocjitsu0.sock  -- GPU 0 (device 0)
+#   /run/vfu/rocjitsu1.sock  -- GPU 1 (device 1, for SDMA P2P)
+#   /run/vfu/ernic.sock      -- ionic RDMA NIC (loopback mode)
+#   /run/vfu/nvme/cntrl      -- SPDK KV NVMe controller
+# QEMU also provides one emulated NVMe disk (--nvme 1) for LBA testing.
+#
+# Usage:
+#   cp env.example .env && $EDITOR .env
+#   docker compose up --detach
+
+services:
+  rocjitsu0:
+    image: "${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be set}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    command:
+      - rocjitsu
+      - --config
+      - "/usr/local/share/rocjitsu/configs/${ROCJITSU_CONFIG:-gfx1250_mi455x.json}"
+      - --vfio-socket
+      - /run/vfu/rocjitsu0.sock
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/rocjitsu0.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  rocjitsu1:
+    image: "${ROCJITSU_IMAGE:?ROCJITSU_IMAGE must be set}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    command:
+      - rocjitsu
+      - --config
+      - "/usr/local/share/rocjitsu/configs/${ROCJITSU_CONFIG:-gfx1250_mi455x.json}"
+      - --vfio-socket
+      - /run/vfu/rocjitsu1.sock
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/rocjitsu1.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  spdk-nvme:
+    image: "${SPDK_IMAGE:?SPDK_IMAGE must be set}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    environment:
+      NVME_NAMESPACES: "${NVME_NAMESPACES:-kv:mem}"
+      VFIO_USER_SOCKET_DIR: /run/vfu/nvme
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/nvme/cntrl"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  ernic:
+    image: "${ERNIC_IMAGE:?ERNIC_IMAGE must be set}"
+    volumes:
+      - vfu-sockets:/run/vfu
+    restart: on-failure
+    command:
+      - rocm-ernic
+      - --socket
+      - /run/vfu/ernic.sock
+      - --backend
+      - loopback
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/vfu/ernic.sock"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  qemu:
+    image: "${QEMU_IMAGE:?QEMU_IMAGE must be set to a pinned sbates-fork tag}"
+    depends_on:
+      rocjitsu0:
+        condition: service_healthy
+      rocjitsu1:
+        condition: service_healthy
+      spdk-nvme:
+        condition: service_healthy
+      ernic:
+        condition: service_healthy
+    volumes:
+      - vfu-sockets:/run/vfu:ro
+      - "${VM_IMAGES_DIR:?VM_IMAGES_DIR must be set}:${VM_IMAGES_DIR}"
+    devices:
+      - /dev/kvm
+    shm_size: "${VM_SHM_SIZE:-16g}"
+    ports:
+      - "${VM_SSH_PORT:-2222}:2222"
+    entrypoint:
+      - qemu-tool
+      - run-vm
+    command:
+      - --images
+      - "${VM_IMAGES_DIR}"
+      - --vm-name
+      - "${VM_NAME:-batesste-ci-vm}"
+      - --vcpus
+      - "${VM_VCPUS:-4}"
+      - --vmem
+      - "${VM_VMEM:-8192}"
+      - --ssh-port
+      - "2222"
+      - --kvm
+      # GPU 0: primary GPU for nvme-ep and rdma-ep
+      - --vfio-userdev
+      - /run/vfu/rocjitsu0.sock
+      # GPU 1: second GPU for sdma-ep P2P
+      - --vfio-userdev
+      - /run/vfu/rocjitsu1.sock
+      # SPDK KV NVMe controller (vfio-user)
+      - --vfio-userdev
+      - /run/vfu/nvme/cntrl
+      # rocm-ernic RDMA NIC (vfio-user, loopback mode)
+      - --vfio-userdev
+      - /run/vfu/ernic.sock
+      # pci-mmio-bridge: relays GPU doorbell writes to device BAR0
+      - --pci-mmio-bridge
+      # One QEMU-emulated NVMe disk for LBA testing
+      - --nvme
+      - "${VM_NVME_COUNT:-1}"
+
+volumes:
+  vfu-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
