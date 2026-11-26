@@ -4,6 +4,7 @@
 #include <string>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -71,6 +72,53 @@ void register_rdma_ep(nb::module_& m) {
         e.connect(infoFromDict(remote));
       },
       "remote"_a, "Bring the QP to RTS against the peer's local_info().")
+    .def(
+      "host_post_write",
+      [](Endpoint& e, uint64_t remoteAddr, uintptr_t local, size_t bytes,
+         bool signaled) {
+        return e.hostPostWrite(remoteAddr, reinterpret_cast<const void*>(local),
+                               bytes, signaled);
+      },
+      "remote_addr"_a, "local"_a, "nbytes"_a, "signaled"_a = true,
+      "CPU-post an RDMA WRITE into the GPU-memory send queue, dormant until "
+      "host_ring(). Returns the slot index.")
+    .def("host_flush", &Endpoint::hostFlush,
+         "Drain the CPU's writes into the GPU-memory queues to the device (HDP "
+         "flush); call after posting and before arming a DMA engine to ring.")
+    .def("host_ring", &Endpoint::hostRing,
+         "Make everything posted visible to the NIC: doorbell record, HDP "
+         "flush, doorbell.")
+    .def(
+      "host_staged",
+      [](const Endpoint& e) {
+        uint32_t rec = 0;
+        uint64_t val = 0;
+        e.hostStaged(&rec, &val);
+        return std::make_pair(rec, val);
+      },
+      "(doorbell record big-endian, control header) that would ring "
+      "everything posted so far.")
+    .def(
+      "host_addresses",
+      [](const Endpoint& e) {
+        uint64_t a = 0, g = 0, c = 0;
+        e.hostAddresses(&a, &g, &c);
+        nb::dict d;
+        d["dbrec"] = a;
+        d["gpu_doorbell"] = g;
+        d["cpu_doorbell"] = c;
+        return d;
+      },
+      "Addresses a DMA engine needs to ring the doorbell.")
+    .def(
+      "host_poll",
+      [](Endpoint& e, unsigned maxCompletions) {
+        nb::gil_scoped_release release;
+        return e.hostPoll(maxCompletions);
+      },
+      "max"_a = 1, "Consume up to max completions (error completion raises).")
+    .def("host_outstanding", &Endpoint::hostOutstanding,
+         "Work requests posted but not yet completed.")
     .def(
       "device_context",
       [](Endpoint& e) {

@@ -162,6 +162,27 @@ public:
    */
   int register_data_buffer(void* buf, size_t size, bool device = false);
 
+#if defined(GDA_MLX5)
+  // CPU posting on the DevX queues; one poster per QP (not with GPU kernels)
+  /** Post an RDMA WRITE without ringing. @return slot index or -1. */
+  int64_t devx_host_post_write(uint64_t raddr, uint64_t laddr, uint32_t bytes,
+                               bool signaled);
+  /** Write the doorbell record, flush (HDP) and ring the doorbell. */
+  int devx_host_ring();
+  /** Flush the CPU's queue writes to the device (HDP) without ringing. */
+  int devx_host_flush();
+  /** Values that would ring the doorbell (big-endian record, control). */
+  void devx_host_staged(uint32_t* dbrec_be, uint64_t* doorbell_val) const;
+  /** Doorbell record, GPU alias and CPU alias of the doorbell register. */
+  void devx_host_addresses(uint64_t* dbrec, uint64_t* gpu_doorbell,
+                           uint64_t* cpu_doorbell) const;
+  /** Consume up to @p max completions. @return count, or -1 on an error CQE
+   * (syndrome in @p err). */
+  int devx_host_poll(uint32_t max, uint32_t* err);
+  /** Slots posted but not yet completed. */
+  uint64_t devx_host_outstanding() const;
+#endif
+
   /**
    * @brief Connect the QP to a remote peer in non-loopback mode.
    * @param remote Remote peer connection information.
@@ -255,6 +276,7 @@ private:
   Mlx5DevxState* devx_{nullptr};
   bool devx_queues_{false};
   int mlx5_devx_create_queues();
+  int64_t mlx5_devx_host_post(const uint8_t* wqe);
   int mlx5_devx_connect(const DestInfo& remote);
   uint32_t mlx5_devx_qpn() const;
   void mlx5_devx_initialize_gpu_qp();

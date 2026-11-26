@@ -148,3 +148,13 @@ xio_add_script_test(
 )
 set_tests_properties(rdma-ep-batch-4-queues-2 PROPERTIES
   FIXTURES_REQUIRED RDMA_HW)
+
+if(GDA_MLX5)
+  xio_add_test(
+    NAME test-rdma-host-posting
+    SOURCE test-rdma-host-posting.hip
+    LABELS hardware rdma
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/src/endpoints/rdma-ep
+    GPU
+  )
+endif()
