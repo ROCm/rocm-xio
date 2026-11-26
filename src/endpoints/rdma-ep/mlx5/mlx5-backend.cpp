@@ -81,6 +81,46 @@ int Backend::mlx5_dv_dl_init() {
   return 0;
 }
 
+void mlx5_hsa_gpu_agent_and_cpu_pool(hsa_agent_t* gpu_agent,
+                                     hsa_amd_memory_pool_t* cpu_pool) {
+  hsa_iterate_agents(
+    [](hsa_agent_t agent, void* data) -> hsa_status_t {
+      hsa_device_type_t dt;
+      if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dt) ==
+            HSA_STATUS_SUCCESS &&
+          dt == HSA_DEVICE_TYPE_GPU) {
+        *static_cast<hsa_agent_t*>(data) = agent;
+        return HSA_STATUS_INFO_BREAK;
+      }
+      return HSA_STATUS_SUCCESS;
+    },
+    gpu_agent);
+
+  hsa_iterate_agents(
+    [](hsa_agent_t agent, void* data) -> hsa_status_t {
+      hsa_device_type_t dt;
+      if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dt) ==
+            HSA_STATUS_SUCCESS &&
+          dt == HSA_DEVICE_TYPE_CPU) {
+        hsa_amd_agent_iterate_memory_pools(
+          agent,
+          [](hsa_amd_memory_pool_t pool, void* d) -> hsa_status_t {
+            hsa_amd_segment_t seg;
+            hsa_amd_memory_pool_get_info(pool, HSA_AMD_MEMORY_POOL_INFO_SEGMENT,
+                                         &seg);
+            if (seg == HSA_AMD_SEGMENT_GLOBAL) {
+              *static_cast<hsa_amd_memory_pool_t*>(d) = pool;
+            }
+            return HSA_STATUS_SUCCESS;
+          },
+          data);
+        return HSA_STATUS_INFO_BREAK;
+      }
+      return HSA_STATUS_SUCCESS;
+    },
+    cpu_pool);
+}
+
 void Backend::mlx5_initialize_gpu_qp() {
   if (!host_qp_ || !qp_ || !cq_)
     return;
@@ -192,43 +232,7 @@ void Backend::mlx5_initialize_gpu_qp() {
 
   hsa_agent_t gpu_agent = {0};
   hsa_amd_memory_pool_t cpu_pool = {0};
-
-  hsa_iterate_agents(
-    [](hsa_agent_t agent, void* data) -> hsa_status_t {
-      hsa_device_type_t dt;
-      if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dt) ==
-            HSA_STATUS_SUCCESS &&
-          dt == HSA_DEVICE_TYPE_GPU) {
-        *static_cast<hsa_agent_t*>(data) = agent;
-        return HSA_STATUS_INFO_BREAK;
-      }
-      return HSA_STATUS_SUCCESS;
-    },
-    &gpu_agent);
-
-  hsa_iterate_agents(
-    [](hsa_agent_t agent, void* data) -> hsa_status_t {
-      hsa_device_type_t dt;
-      if (hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &dt) ==
-            HSA_STATUS_SUCCESS &&
-          dt == HSA_DEVICE_TYPE_CPU) {
-        hsa_amd_agent_iterate_memory_pools(
-          agent,
-          [](hsa_amd_memory_pool_t pool, void* d) -> hsa_status_t {
-            hsa_amd_segment_t seg;
-            hsa_amd_memory_pool_get_info(pool, HSA_AMD_MEMORY_POOL_INFO_SEGMENT,
-                                         &seg);
-            if (seg == HSA_AMD_SEGMENT_GLOBAL) {
-              *static_cast<hsa_amd_memory_pool_t*>(d) = pool;
-            }
-            return HSA_STATUS_SUCCESS;
-          },
-          data);
-        return HSA_STATUS_INFO_BREAK;
-      }
-      return HSA_STATUS_SUCCESS;
-    },
-    &cpu_pool);
+  mlx5_hsa_gpu_agent_and_cpu_pool(&gpu_agent, &cpu_pool);
 
   void* gpu_bf_ptr = nullptr;
   size_t bf_lock_size = dv_qp.bf.size * 2;

@@ -31,10 +31,23 @@ extern "C" {
 #include <infiniband/mlx5dv.h>
 }
 
+#include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
+
 #include "endian.hpp"
 
 namespace xio {
 namespace rdma_ep {
+
+/**
+ * @internal
+ * @brief Find the first GPU agent and the CPU's global memory pool, the pair
+ *        used to lock NIC doorbell pages for GPU access.
+ * @param gpu_agent Output GPU agent.
+ * @param cpu_pool Output CPU memory pool.
+ */
+void mlx5_hsa_gpu_agent_and_cpu_pool(hsa_agent_t* gpu_agent,
+                                     hsa_amd_memory_pool_t* cpu_pool);
 
 union gda_mlx5_wqe_segment {
   mlx5_wqe_ctrl_seg ctrl;

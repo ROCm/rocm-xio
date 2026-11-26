@@ -305,6 +305,8 @@ list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
 # Filter out vendor backend files (they are added conditionally based on GDA_* options)
 list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
   "${ENDPOINTS_DIR}/rdma-ep/(bnxt|mlx5|ionic|rocm-ernic)/.*-backend\\.cpp")
+list(FILTER ENDPOINT_SOURCES EXCLUDE REGEX
+  "${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-devx\\.cpp")
 list(APPEND LIB_SOURCES ${ENDPOINT_SOURCES})
 
 # Add new GDA shared infrastructure (C++ sources, not HIP)
@@ -335,9 +337,11 @@ endif()
 if(GDA_MLX5)
   list(APPEND LIB_SOURCES
     ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-backend.cpp
+    ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-devx.cpp
   )
   set_source_files_properties(
     ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-backend.cpp
+    ${ENDPOINTS_DIR}/rdma-ep/mlx5/mlx5-devx.cpp
     PROPERTIES LANGUAGE HIP
   )
 endif()
