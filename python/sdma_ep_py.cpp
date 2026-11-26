@@ -40,16 +40,25 @@ void register_sdma_ep(nb::module_& m) {
 
   m.def(
     "create_host_queue",
-    [](int srcDevice, int dstDevice) {
+    [](int srcDevice, int dstDevice, int numChannels) {
       // Use idempotent init for Python path
-      int rc = sdma_ep::initHostQueue(srcDevice, dstDevice);
+      int rc = sdma_ep::initHostQueue(srcDevice, dstDevice, numChannels);
       if (rc != 0) {
         throw std::runtime_error("initHostQueue failed");
       }
-      return 0; // Always channel 0 for Python
+      return sdma_ep::getHostChannelCount(srcDevice, dstDevice) - 1;
+    },
+    "src_device"_a, "dst_device"_a, "num_channels"_a = 1,
+    "Create host-initiated SDMA queues (idempotent); returns the highest "
+    "channel index");
+
+  m.def(
+    "get_host_channel_count",
+    [](int srcDevice, int dstDevice) {
+      return sdma_ep::getHostChannelCount(srcDevice, dstDevice);
     },
     "src_device"_a, "dst_device"_a,
-    "Create host-initiated SDMA queue (idempotent)");
+    "Number of host-initiated SDMA channels for the pair (0 if none)");
 
   m.def(
     "get_queue_device_ctx",

@@ -1025,8 +1025,10 @@ freeQueue
 genPciMmioBridgeCmd
 pciMmioBridge
 getEndpointName
+getHostHandle
 getIterations
 initEndpoint
+initHostQueue
 isValidEndpoint
 listAvailableEndpoints
 loadKernelModule
